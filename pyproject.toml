@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chulkharness"
+version = "0.1.0"
+description = "A lightweight Python agent harness with explicit state, tools, memory, skills, and traces."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+openai = [
+  "openai>=1.0",
+]
+
+[project.scripts]
+chulk = "agent.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["agent/tests"]
+pythonpath = ["."]
