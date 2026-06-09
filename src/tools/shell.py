@@ -5,7 +5,7 @@ This tool is dangerous and must enforce safety in Python before real use.
 
 from typing import Any
 
-from agent.tool_registry import ToolResult
+from src.tools.registry import ToolResult
 
 
 def run_shell_command(arguments: dict[str, Any]) -> ToolResult:

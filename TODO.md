@@ -31,37 +31,43 @@ Core principles:
 Proposed file structure:
 
 ```text
-agent/
+src/
   main.py
-  agent.py
-  llm_client.py
-  memory.py
-  tool_registry.py
-  skill_registry.py
-  shell_tool.py
-  prompts.py
-  logger.py
   config.py
-  store.sqlite
+  core/
+    agent.py
+    prompts.py
+  llm/
+    client.py
+  memory/
+    store.py
+  tools/
+    registry.py
+    shell.py
   skills/
-    shell/
-      SKILL.md
-    memory/
-      SKILL.md
-    files/
-      SKILL.md
+    registry.py
+  tracing/
+    logger.py
+  store.sqlite
   tests/
+skills/
+  shell/
+    SKILL.md
+  memory/
+    SKILL.md
+  files/
+    SKILL.md
 ```
 
 Module responsibilities:
 
-- [ ] `agent/main.py`
+- [ ] `src/main.py`
   - [ ] Provide the CLI entrypoint.
   - [ ] Read user input from the terminal.
   - [ ] Create the agent, registries, memory store, logger, and LLM client.
   - [ ] Run the conversation loop until the user exits.
 
-- [ ] `agent/agent.py`
+- [ ] `src/core/agent.py`
   - [ ] Implement the core agent loop.
   - [ ] Build prompts from system instructions, messages, memories, skills, and tools.
   - [ ] Ask the model for either a direct answer or a tool call.
@@ -69,66 +75,66 @@ Module responsibilities:
   - [ ] Feed observations back into the model.
   - [ ] Track per-turn state and stop conditions.
 
-- [ ] `agent/llm_client.py`
+- [ ] `src/llm/client.py`
   - [ ] Wrap the model provider API.
   - [ ] Support OpenAI first.
   - [ ] Hide provider-specific request and response details from the agent loop.
   - [ ] Provide text completion and structured JSON completion helpers.
   - [ ] Handle retries, timeouts, rate limits, and provider errors.
 
-- [ ] `agent/memory.py`
+- [ ] `src/memory/`
   - [ ] Manage short-term conversation history.
   - [ ] Manage long-term SQLite memory.
   - [ ] Save, search, list, delete, and summarize memories.
   - [ ] Keep memory retrieval separate from skill loading.
 
-- [ ] `agent/tool_registry.py`
+- [ ] `src/tools/registry.py`
   - [ ] Define the `Tool` dataclass.
   - [ ] Register callable tools.
   - [ ] List tool schemas for the model.
   - [ ] Validate and execute tool calls by name.
   - [ ] Convert tool outputs into observations.
 
-- [ ] `agent/skill_registry.py`
+- [ ] `src/skills/registry.py`
   - [ ] Define the `Skill` dataclass.
   - [ ] Load skill metadata at startup.
   - [ ] Select relevant skills for a user request.
   - [ ] Lazy-load full `SKILL.md` files only when needed.
   - [ ] Return skill instructions for prompt injection.
 
-- [ ] `agent/shell_tool.py`
+- [ ] `src/tools/shell.py`
   - [ ] Implement safe-ish command execution.
   - [ ] Run commands with timeout.
   - [ ] Capture stdout, stderr, and exit code.
   - [ ] Apply basic destructive-command blocking.
   - [ ] Log every executed command.
 
-- [ ] `agent/prompts.py`
+- [ ] `src/core/prompts.py`
   - [ ] Store prompt templates.
   - [ ] Keep base system prompts, tool prompts, memory prompts, skill prompts, and repair prompts separate.
   - [ ] Make prompt composition readable and testable.
 
-- [ ] `agent/logger.py`
+- [ ] `src/tracing/logger.py`
   - [ ] Write structured logs and traces.
   - [ ] Create one trace file per session.
   - [ ] Record user messages, selected memories, selected skills, model responses, tool calls, observations, and errors.
 
-- [ ] `agent/config.py`
+- [ ] `src/config.py`
   - [ ] Centralize model name, API settings, paths, limits, timeouts, and safety options.
   - [ ] Read environment variables.
   - [ ] Provide sensible defaults for local development.
 
-- [ ] `agent/store.sqlite`
+- [ ] `src/store.sqlite`
   - [ ] Store long-term memories.
   - [ ] Optionally store conversations, traces, and tool-call history later.
   - [ ] Treat as local development data, not source code.
 
-- [ ] `agent/skills/`
+- [ ] `skills/`
   - [ ] Store domain-specific procedural instructions.
   - [ ] Keep each skill in its own folder.
   - [ ] Start with `shell`, `memory`, and `files`.
 
-- [ ] `agent/tests/`
+- [ ] `src/tests/`
   - [ ] Store unit tests and integration tests.
   - [ ] Mock the LLM client for deterministic agent-loop tests.
 
@@ -195,30 +201,31 @@ Stop conditions:
 
 Build a small provider wrapper before adding agent complexity.
 
-- [ ] Create `LLMClient` in `agent/llm_client.py`.
-- [ ] Add a `complete(messages: list[dict]) -> str` method.
-- [ ] Add a `complete_json(messages: list[dict]) -> dict` method.
-- [ ] Support OpenAI first.
-- [ ] Read `OPENAI_API_KEY` from the environment.
-- [ ] Read the default model from `config.py`.
-- [ ] Keep provider-specific code inside `llm_client.py`.
-- [ ] Keep the rest of the agent provider-agnostic.
-- [ ] Add a provider interface that can support other backends later.
-- [ ] Support normal text responses.
+- [x] Create `LLMClient` in `src/llm/client.py`.
+- [x] Add a `complete(messages: list[dict]) -> str` method.
+- [x] Add a `complete_json(messages: list[dict]) -> dict` method.
+- [x] Support OpenAI first.
+- [x] Read `OPENAI_API_KEY` from the environment.
+- [x] Read the default model from `config.py`.
+- [x] Keep provider-specific code inside `llm_client.py`.
+- [x] Keep the rest of the agent provider-agnostic.
+- [x] Add a provider interface that can support other backends later.
+- [x] Support normal text responses.
 - [ ] Support structured JSON responses for tool calls.
-- [ ] Add request timeout handling.
-- [ ] Add retry handling for transient failures.
-- [ ] Add clear errors for missing API keys.
+- [x] Add request timeout handling.
+- [x] Add retry handling for transient failures.
+- [x] Add clear errors for missing API keys.
 - [ ] Add clear errors for invalid model names.
 - [ ] Add rate-limit handling.
 - [ ] Log request metadata without logging secrets.
 - [ ] Log model name, latency, and token usage if available.
-- [ ] Add tests with a mocked client.
+- [x] Add tests with a mocked client.
 
 Future provider support:
 
 - [ ] Add a minimal local/mock provider for tests.
 - [ ] Add support for local LLMs later.
+- [x] Add DeepSeek as an additional hosted provider.
 - [ ] Add support for additional hosted providers later.
 - [ ] Keep response normalization in one place.
 
@@ -308,7 +315,7 @@ The shell tool is dangerous. It should be treated as a local development feature
 
 Requirements:
 
-- [ ] Implement shell execution in `agent/shell_tool.py`.
+- [ ] Implement shell execution in `src/tools/shell.py`.
 - [ ] Use `subprocess.run` or `asyncio.create_subprocess_shell`.
 - [ ] Run every command with a timeout.
 - [ ] Capture stdout.
@@ -466,7 +473,7 @@ Skill dataclass:
 Skill registry:
 
 - [ ] Create `SkillRegistry`.
-- [ ] Scan `agent/skills/` at startup.
+- [ ] Scan `skills/` at startup.
 - [ ] Load only skill metadata at startup.
 - [ ] Do not load every full `SKILL.md` into context.
 - [ ] Read each skill description from front matter or a short metadata file.
@@ -525,7 +532,7 @@ Example skills:
 
 ## 9. Prompting Strategy
 
-Prompt templates should live in `agent/prompts.py`.
+Prompt templates should live in `src/core/prompts.py`.
 
 Prompt types:
 
@@ -660,7 +667,7 @@ The project should be easy to debug. A trace should explain exactly what the age
 
 Logging tasks:
 
-- [ ] Create `agent/logger.py`.
+- [ ] Create `src/tracing/logger.py`.
 - [ ] Create a `TraceLogger`.
 - [ ] Create a trace file per session.
 - [ ] Use JSONL for trace events.
@@ -828,24 +835,24 @@ Agent loop tests:
 Goal: chat with the model from a CLI with short-term history.
 
 - [x] Create project package structure.
-- [ ] Add `config.py`.
-- [ ] Add `main.py` CLI loop.
-- [ ] Add `LLMClient`.
-- [ ] Support OpenAI text responses.
-- [ ] Add short-term conversation history.
-- [ ] Build base system prompt.
-- [ ] Send user messages to the model.
-- [ ] Print final answers.
-- [ ] Add clean exit command.
-- [ ] Add basic error handling.
-- [ ] Add tests with mocked LLM client.
+- [x] Add `config.py`.
+- [x] Add `main.py` CLI loop.
+- [x] Add `LLMClient`.
+- [x] Support OpenAI text responses.
+- [x] Add short-term conversation history.
+- [x] Build base system prompt.
+- [x] Send user messages to the model.
+- [x] Print final answers.
+- [x] Add clean exit command.
+- [x] Add basic error handling.
+- [x] Add tests with mocked LLM client.
 
 Done when:
 
-- [ ] I can start the CLI.
-- [ ] I can send a message.
-- [ ] The model can respond.
-- [ ] Recent conversation history affects later responses.
+- [x] I can start the CLI.
+- [x] I can send a message.
+- [x] The model can respond.
+- [x] Recent conversation history affects later responses.
 
 ### Phase 2: Tools
 
@@ -1023,12 +1030,12 @@ The project is successful when:
 
 ## Immediate Next Actions
 
-- [x] Create the `agent/` package.
-- [ ] Create `agent/main.py`.
-- [ ] Create `agent/config.py`.
-- [ ] Create `agent/llm_client.py`.
-- [ ] Build the simplest possible CLI chat loop.
-- [ ] Add a mocked LLM test before wiring real API calls.
-- [ ] Add real OpenAI support.
-- [ ] Add short-term message history.
-- [ ] Confirm Phase 1 works before adding tools.
+- [x] Create the `src/` package.
+- [x] Create `src/main.py`.
+- [x] Create `src/config.py`.
+- [x] Create `src/llm/client.py`.
+- [x] Build the simplest possible CLI chat loop.
+- [x] Add a mocked LLM test before wiring real API calls.
+- [x] Add real OpenAI support.
+- [x] Add short-term message history.
+- [x] Confirm Phase 1 works before adding tools.

@@ -32,46 +32,48 @@ Shell access and file-writing tools require strong permission checks. ChulkHarne
 ## Planned Structure
 
 ```text
-agent/
+src/
   main.py
-  agent.py
-  llm_client.py
-  memory.py
-  tool_registry.py
-  skill_registry.py
-  shell_tool.py
-  prompts.py
-  logger.py
   config.py
+  core/
+    agent.py
+    prompts.py
+  llm/
+    client.py
+  memory/
+    store.py
+  tools/
+    registry.py
+    shell.py
   skills/
-    shell/
-      SKILL.md
-    memory/
-      SKILL.md
-    files/
-      SKILL.md
+    registry.py
+  tracing/
+    logger.py
   tests/
+skills/
+  shell/
+    SKILL.md
+  memory/
+    SKILL.md
+  files/
+    SKILL.md
 ```
 
 ## Local Setup
 
-Create and activate a virtual environment:
+Create and activate the Conda environment:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+conda env create -f environment.yml
+conda activate chulk
 ```
 
-Upgrade packaging tools:
+That installs ChulkHarness in editable mode with development and OpenAI dependencies.
+
+If the environment already exists, update it with:
 
 ```bash
-python -m pip install --upgrade pip
-```
-
-Install the project in editable mode with development dependencies:
-
-```bash
-pip install -e ".[dev]"
+conda env update -f environment.yml --prune
 ```
 
 Create your local environment file:
@@ -80,16 +82,69 @@ Create your local environment file:
 cp .env.example .env
 ```
 
+Set `OPENAI_API_KEY` in `.env` before running chat against OpenAI.
+
+Choose the LLM provider in `.env`:
+
+```bash
+# OpenAI
+CHULK_LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_key
+CHULK_MODEL=gpt-4.1-mini
+
+# DeepSeek
+CHULK_LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your_deepseek_key
+CHULK_MODEL=deepseek-v4-flash
+```
+
 Run the current CLI:
 
 ```bash
-python -m agent.main
+python -m src.main
+```
+
+Send a single message and exit:
+
+```bash
+python -m src.main --once "Hello"
+```
+
+Inspect local configuration:
+
+```bash
+python -m src.main --show-config
 ```
 
 Run tests:
 
 ```bash
-pytest
+python -m pytest
+```
+
+### Alternative: venv
+
+Conda is the recommended setup for this project. If you prefer `venv`, install the same extras manually:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e ".[dev,openai]"
+```
+
+## Common Commands
+
+Run the interactive CLI:
+
+```bash
+python -m src.main
+```
+
+Run a one-shot message:
+
+```bash
+python -m src.main --once "Hello"
 ```
 
 ## Environment
@@ -100,8 +155,14 @@ Planned environment variables:
 
 ```bash
 OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+CHULK_LLM_PROVIDER=openai
 CHULK_MODEL=
 CHULK_PROJECT_ROOT=
+CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
+CHULK_HISTORY_LIMIT=20
+CHULK_LLM_TIMEOUT_SECONDS=60
+CHULK_LLM_MAX_RETRIES=2
 ```
 
 ## Development Roadmap

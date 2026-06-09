@@ -15,12 +15,12 @@ dev = [
   "pytest>=8.0",
 ]
 openai = [
-  "openai>=1.0",
+  "openai>=1.109.0",
 ]
 
 [project.scripts]
-chulk = "agent.main:main"
+chulk = "src.main:main"
 
 [tool.pytest.ini_options]
-testpaths = ["agent/tests"]
+testpaths = ["src/tests"]
 pythonpath = ["."]

@@ -1,5 +1,7 @@
 """Short-term and long-term memory primitives."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -20,13 +22,31 @@ class Memory:
 class ConversationMemory:
     """In-memory short-term conversation state."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_messages: int = 20) -> None:
+        if max_messages < 1:
+            raise ValueError("max_messages must be greater than zero")
+        self.max_messages = max_messages
         self.messages: list[dict[str, str]] = []
 
     def add(self, role: str, content: str) -> None:
+        if role not in {"system", "user", "assistant", "tool", "observation"}:
+            raise ValueError(f"Unsupported message role: {role}")
         self.messages.append({"role": role, "content": content})
+        self.trim_to_limit()
 
-    def recent(self, limit: int = 20) -> list[dict[str, str]]:
+    def add_user_message(self, content: str) -> None:
+        self.add("user", content)
+
+    def add_assistant_message(self, content: str) -> None:
+        self.add("assistant", content)
+
+    def trim_to_limit(self) -> None:
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages :]
+
+    def recent(self, limit: int | None = None) -> list[dict[str, str]]:
+        if limit is None:
+            limit = self.max_messages
         return self.messages[-limit:]
 
 

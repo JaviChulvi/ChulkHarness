@@ -16,6 +16,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.conda/
 venv/
 env/
 ENV/
@@ -35,7 +36,7 @@ coverage.xml
 # Local databases and runtime state
 *.sqlite
 *.sqlite3
-agent/store.sqlite
+src/store.sqlite
 logs/
 traces/
 
