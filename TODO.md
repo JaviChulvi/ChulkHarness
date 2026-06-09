@@ -162,40 +162,40 @@ User message
 
 Core loop tasks:
 
-- [ ] Create an `Agent` class.
-- [ ] Add a `run_turn(user_message: str) -> str` method.
-- [ ] Add a `conversation_id` for each session.
-- [ ] Read user input from the CLI.
-- [ ] Store each user message in short-term memory.
-- [ ] Build the base system prompt.
-- [ ] Add recent conversation history to the prompt.
+- [x] Create an `Agent` class.
+- [x] Add a `run_turn(user_message: str) -> str` method.
+- [x] Add a `conversation_id` for each session.
+- [x] Read user input from the CLI.
+- [x] Store each user message in short-term memory.
+- [x] Build the base system prompt.
+- [x] Add recent conversation history to the prompt.
 - [ ] Retrieve relevant long-term memories for the user request.
 - [ ] Inject only relevant memories into the prompt.
 - [ ] Select relevant skills for the user request.
 - [ ] Lazy-load selected full `SKILL.md` files.
 - [ ] Inject only selected skill instructions into the prompt.
-- [ ] Show available tool names, descriptions, and argument schemas to the model.
-- [ ] Ask the model for a structured response.
-- [ ] Parse the model response.
-- [ ] Detect `final_answer` responses.
-- [ ] Detect `tool_call` responses.
-- [ ] Validate requested tool names.
-- [ ] Validate requested tool arguments.
-- [ ] Execute the requested tool through `ToolRegistry`.
-- [ ] Convert tool output into an observation message.
-- [ ] Add the observation to the next model prompt.
-- [ ] Continue until the model returns `final_answer`.
-- [ ] Add a maximum number of tool-call iterations per user turn.
-- [ ] Return a helpful error if the max iteration limit is reached.
+- [x] Show available tool names, descriptions, and argument schemas to the model.
+- [x] Ask the model for a structured response.
+- [x] Parse the model response.
+- [x] Detect `final_answer` responses.
+- [x] Detect `tool_call` responses.
+- [x] Validate requested tool names.
+- [x] Validate requested tool arguments.
+- [x] Execute the requested tool through `ToolRegistry`.
+- [x] Convert tool output into an observation message.
+- [x] Add the observation to the next model prompt.
+- [x] Continue until the model returns `final_answer`.
+- [x] Add a maximum number of tool-call iterations per user turn.
+- [x] Return a helpful error if the max iteration limit is reached.
 - [ ] Log every step of the loop.
 
 Stop conditions:
 
-- [ ] Stop when the model returns a valid `final_answer`.
-- [ ] Stop when the tool-call iteration limit is reached.
+- [x] Stop when the model returns a valid `final_answer`.
+- [x] Stop when the tool-call iteration limit is reached.
 - [ ] Stop when a tool returns a fatal safety error.
 - [ ] Stop when repeated JSON parsing failures exceed a repair limit.
-- [ ] Stop when the user exits the CLI.
+- [x] Stop when the user exits the CLI.
 
 ## 4. LLM Client
 
@@ -233,81 +233,92 @@ Future provider support:
 
 Tools are callable actions. They do things. The model may request a tool call, but Python validates and executes it.
 
+Next big implementation milestone:
+
+- [x] Build the model action parser for `final_answer` and `tool_call`.
+- [x] Wire `ToolRegistry` into `Agent`.
+- [x] Show available tools in the prompt.
+- [x] Add a safe calculator tool first.
+- [x] Run requested tools by name.
+- [x] Feed tool observations back into the model.
+- [x] Enforce a max tool-call iteration limit.
+- [x] Add tests for direct answers, calculator calls, invalid JSON, unknown tools, and max-iteration handling.
+
 Tool dataclass:
 
-- [ ] Create a `Tool` dataclass.
-- [ ] Include `name`.
-- [ ] Include `description`.
-- [ ] Include `args_schema`.
-- [ ] Include `callable`.
-- [ ] Include `requires_confirmation`.
-- [ ] Include `timeout_seconds`.
-- [ ] Include optional `metadata`.
+- [x] Create a `Tool` dataclass.
+- [x] Include `name`.
+- [x] Include `description`.
+- [x] Include `args_schema`.
+- [x] Include `callable`.
+- [x] Include `requires_confirmation`.
+- [x] Include `timeout_seconds`.
+- [x] Include optional `metadata`.
 
 Tool registry:
 
-- [ ] Create `ToolRegistry`.
-- [ ] Add `register(tool: Tool)`.
-- [ ] Add `get(name: str) -> Tool`.
-- [ ] Add `list_tools() -> list[Tool]`.
-- [ ] Add `tool_descriptions_for_prompt() -> str`.
-- [ ] Add `run(name: str, arguments: dict) -> ToolResult`.
-- [ ] Prevent duplicate tool names.
-- [ ] Return clear errors for unknown tools.
-- [ ] Validate tool arguments before execution.
-- [ ] Convert tool return values into observations.
-- [ ] Catch exceptions from tools.
-- [ ] Return safe error messages to the model.
-- [ ] Log every tool call and result.
+- [x] Create `ToolRegistry`.
+- [x] Add `register(tool: Tool)`.
+- [x] Add `get(name: str) -> Tool`.
+- [x] Add `list_tools() -> list[Tool]`.
+- [x] Add `tool_descriptions_for_prompt() -> str`.
+- [x] Add `run(name: str, arguments: dict) -> ToolResult`.
+- [x] Prevent duplicate tool names.
+- [x] Return clear errors for unknown tools.
+- [x] Validate tool arguments before execution.
+- [x] Convert tool return values into observations.
+- [x] Catch exceptions from tools.
+- [x] Return safe error messages to the model.
+- [x] Log every tool call and result.
 
 Tool result structure:
 
-- [ ] Create a `ToolResult` dataclass.
-- [ ] Include `tool_name`.
-- [ ] Include `success`.
-- [ ] Include `observation`.
-- [ ] Include optional `stdout`.
-- [ ] Include optional `stderr`.
-- [ ] Include optional `exit_code`.
-- [ ] Include optional `error`.
-- [ ] Include optional `metadata`.
+- [x] Create a `ToolResult` dataclass.
+- [x] Include `tool_name`.
+- [x] Include `success`.
+- [x] Include `observation`.
+- [x] Include optional `stdout`.
+- [x] Include optional `stderr`.
+- [x] Include optional `exit_code`.
+- [x] Include optional `error`.
+- [x] Include optional `metadata`.
 
 Example tools:
 
-- [ ] `calculator`
-  - [ ] Evaluate simple arithmetic.
-  - [ ] Avoid unrestricted `eval`.
-  - [ ] Support addition, subtraction, multiplication, division, powers, and parentheses.
-  - [ ] Return clear errors for invalid expressions.
+- [x] `calculator`
+  - [x] Evaluate simple arithmetic.
+  - [x] Avoid unrestricted `eval`.
+  - [x] Support addition, subtraction, multiplication, division, powers, and parentheses.
+  - [x] Return clear errors for invalid expressions.
 
-- [ ] `shell` / `run_cmd`
-  - [ ] Run shell commands with timeout and safety checks.
-  - [ ] Capture stdout, stderr, and exit code.
-  - [ ] Limit output size.
-  - [ ] Log every command.
+- [x] `shell` / `run_cmd`
+  - [x] Run shell commands with timeout and safety checks.
+  - [x] Capture stdout, stderr, and exit code.
+  - [x] Limit output size.
+  - [x] Log every command.
 
-- [ ] `read_file`
-  - [ ] Read a text file from the project directory.
-  - [ ] Block reads outside the allowed root.
-  - [ ] Limit max file size.
-  - [ ] Return helpful errors for missing files or binary files.
+- [x] `read_file`
+  - [x] Read a text file from the project directory.
+  - [x] Block reads outside the allowed root.
+  - [x] Limit max file size.
+  - [x] Return helpful errors for missing files or binary files.
 
-- [ ] `write_file`
-  - [ ] Write a text file inside the project directory.
-  - [ ] Block writes outside the allowed root.
-  - [ ] Require confirmation later for overwrites.
-  - [ ] Log previous path, new path, and byte count.
+- [x] `write_file`
+  - [x] Write a text file inside the project directory.
+  - [x] Block writes outside the allowed root.
+  - [x] Require an explicit overwrite flag for overwrites.
+  - [x] Log path and byte count.
 
-- [ ] `list_files`
-  - [ ] List files under the project directory.
-  - [ ] Support optional glob patterns.
-  - [ ] Hide ignored folders like `.git`, `.venv`, `__pycache__`, and large dependency directories.
+- [x] `list_files`
+  - [x] List files under the project directory.
+  - [x] Support optional glob patterns.
+  - [x] Hide ignored folders like `.git`, `.venv`, `__pycache__`, and large dependency directories.
 
-- [ ] `search_files`
-  - [ ] Search text files.
-  - [ ] Prefer `ripgrep` if available.
-  - [ ] Fall back to Python search if needed.
-  - [ ] Limit result count and output size.
+- [x] `search_files`
+  - [x] Search text files.
+  - [x] Prefer `ripgrep` if available.
+  - [x] Fall back to Python search if needed.
+  - [x] Limit result count and output size.
 
 ## 6. Shell/CMD Tool Safety
 
@@ -315,35 +326,35 @@ The shell tool is dangerous. It should be treated as a local development feature
 
 Requirements:
 
-- [ ] Implement shell execution in `src/tools/shell.py`.
-- [ ] Use `subprocess.run` or `asyncio.create_subprocess_shell`.
-- [ ] Run every command with a timeout.
-- [ ] Capture stdout.
-- [ ] Capture stderr.
-- [ ] Return exit code.
-- [ ] Use a configurable working directory.
-- [ ] Default the working directory to the project root.
-- [ ] Prevent commands from running in arbitrary directories unless explicitly allowed.
-- [ ] Prevent long-running commands from hanging the agent.
-- [ ] Kill timed-out processes.
-- [ ] Return a timeout observation to the model.
-- [ ] Limit stdout and stderr size.
-- [ ] Truncate large outputs with a clear marker.
-- [ ] Log every command executed.
-- [ ] Log working directory, timeout, exit code, stdout length, and stderr length.
+- [x] Implement shell execution in `src/tools/shell.py`.
+- [x] Use `subprocess.run` or `asyncio.create_subprocess_shell`.
+- [x] Run every command with a timeout.
+- [x] Capture stdout.
+- [x] Capture stderr.
+- [x] Return exit code.
+- [x] Use a configurable working directory.
+- [x] Default the working directory to the project root.
+- [x] Prevent commands from running in arbitrary directories unless explicitly allowed.
+- [x] Prevent long-running commands from hanging the agent.
+- [x] Kill timed-out processes.
+- [x] Return a timeout observation to the model.
+- [x] Limit stdout and stderr size.
+- [x] Truncate large outputs with a clear marker.
+- [x] Log every command executed.
+- [x] Log working directory, timeout, exit code, stdout length, and stderr length.
 
 Basic command blocking:
 
-- [ ] Block obviously destructive commands.
-- [ ] Block `rm -rf /`.
-- [ ] Block `rm -rf *`.
-- [ ] Block `mkfs`.
-- [ ] Block `dd`.
-- [ ] Block fork bombs.
-- [ ] Block shutdown/reboot commands.
-- [ ] Block commands that overwrite system paths.
-- [ ] Block writes outside the configured project directory where possible.
-- [ ] Add tests for blocked commands.
+- [x] Block obviously destructive commands.
+- [x] Block `rm -rf /`.
+- [x] Block `rm -rf *`.
+- [x] Block `mkfs`.
+- [x] Block `dd`.
+- [x] Block fork bombs.
+- [x] Block shutdown/reboot commands.
+- [x] Block commands that overwrite system paths.
+- [x] Block writes outside the configured project directory where possible.
+- [x] Add tests for blocked commands.
 
 Future permission model:
 
@@ -358,10 +369,10 @@ Future permission model:
 
 Safety notes:
 
-- [ ] Never hide destructive behavior behind a friendly tool name.
-- [ ] Never let the model bypass safety checks by changing wording.
-- [ ] Keep shell logs auditable.
-- [ ] Treat model-generated commands as untrusted input.
+- [x] Never hide destructive behavior behind a friendly tool name.
+- [x] Never let the model bypass safety checks by changing wording.
+- [x] Keep shell logs auditable.
+- [x] Treat model-generated commands as untrusted input.
 
 ## 7. Memory System
 
@@ -858,27 +869,28 @@ Done when:
 
 Goal: the model can request a tool call and receive the result.
 
-- [ ] Create `Tool` dataclass.
-- [ ] Create `ToolResult` dataclass.
-- [ ] Create `ToolRegistry`.
-- [ ] Register tools manually at startup.
-- [ ] Add calculator tool.
-- [ ] Add shell tool.
-- [ ] Add JSON action parser.
-- [ ] Add direct-answer JSON format.
-- [ ] Add tool-call JSON format.
-- [ ] Add tool-call loop.
-- [ ] Feed tool observations back to the model.
-- [ ] Add max tool-call iterations.
-- [ ] Add tool error handling.
-- [ ] Add tests for the registry, parser, and loop.
+- [x] Create `Tool` dataclass.
+- [x] Create `ToolResult` dataclass.
+- [x] Create `ToolRegistry`.
+- [x] Add JSON action parser.
+- [x] Add direct-answer JSON format.
+- [x] Add tool-call JSON format.
+- [x] Register tools manually at startup.
+- [x] Add calculator tool.
+- [x] Add tool-call loop.
+- [x] Feed tool observations back to the model.
+- [x] Add max tool-call iterations.
+- [x] Add tool error handling.
+- [x] Add tests for direct answers and calculator tool calls.
+- [x] Add tests for invalid JSON, unknown tools, and max-iteration handling.
+- [x] Add shell tool after the calculator loop is working safely.
 
 Done when:
 
-- [ ] The agent can answer directly.
-- [ ] The agent can call the calculator.
-- [ ] The agent can run safe shell commands.
-- [ ] The agent can use tool output in its final answer.
+- [x] The agent can answer directly.
+- [x] The agent can call the calculator.
+- [x] The agent can run safe shell commands.
+- [x] The agent can use tool output in its final answer.
 
 ### Phase 3: Memory
 

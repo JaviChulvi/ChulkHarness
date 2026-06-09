@@ -5,7 +5,7 @@ from src.main import main
 
 
 class FakeLLMClient:
-    def __init__(self, response: str = "mocked response") -> None:
+    def __init__(self, response: str = '{"type": "final_answer", "content": "mocked response"}') -> None:
         self.response = response
         self.requests: list[list[dict[str, str]]] = []
 
@@ -15,7 +15,7 @@ class FakeLLMClient:
 
 
 def fake_factory(_config):
-    return FakeLLMClient("hello from fake llm")
+    return FakeLLMClient('{"type": "final_answer", "content": "hello from fake llm"}')
 
 
 def test_main_prints_current_status(capsys):

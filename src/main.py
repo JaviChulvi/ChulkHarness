@@ -11,6 +11,7 @@ from src.config import Config, load_config
 from src.core import Agent
 from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
 from src.memory import ConversationMemory
+from src.tools import create_default_tool_registry
 
 
 EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit"}
@@ -73,6 +74,8 @@ def create_agent(
     return Agent(
         llm_client_factory(config),
         memory=ConversationMemory(max_messages=config.history_limit),
+        tool_registry=create_default_tool_registry(config.project_root, config.shell_timeout_seconds),
+        max_tool_calls_per_turn=config.max_tool_calls_per_turn,
     )
 
 

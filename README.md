@@ -25,9 +25,9 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository is at the initial implementation stage. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop and Phase 2 tool-call loop in place. The roadmap lives in [TODO.md](TODO.md).
 
-Shell access and file-writing tools require strong permission checks. ChulkHarness will include guardrails, timeouts, output limits, and audit logs, but untrusted command execution should still be sandboxed in real deployments.
+Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
 ## Planned Structure
 
@@ -146,6 +146,15 @@ Run a one-shot message:
 ```bash
 python -m src.main --once "Hello"
 ```
+
+Built-in tools currently registered at startup:
+
+- `calculator`
+- `run_cmd`
+- `read_file`
+- `write_file`
+- `list_files`
+- `search_files`
 
 ## Environment
 

@@ -40,6 +40,9 @@ class ConversationMemory:
     def add_assistant_message(self, content: str) -> None:
         self.add("assistant", content)
 
+    def add_observation(self, content: str) -> None:
+        self.add("observation", content)
+
     def trim_to_limit(self) -> None:
         if len(self.messages) > self.max_messages:
             self.messages = self.messages[-self.max_messages :]
