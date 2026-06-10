@@ -75,6 +75,33 @@ def test_main_runs_one_message_with_fake_llm(capsys):
     assert output.strip() == "hello from fake llm"
 
 
+def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    skill_dir = tmp_path / "skills" / "shell"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Shell Skill\n\nUse this skill when command execution is needed.\n",
+        encoding="utf-8",
+    )
+
+    class SkillAwareFakeLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            system_prompt = messages[0]["content"]
+            if "Skill: shell" in system_prompt and "# Shell Skill" in system_prompt:
+                return json.dumps({"type": "final_answer", "content": "shell skill loaded"})
+            return json.dumps({"type": "final_answer", "content": "missing skill"})
+
+    def factory(_config):
+        return SkillAwareFakeLLM()
+
+    exit_code = main(["--once", "run a shell command"], llm_client_factory=factory)
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert output.strip() == "shell skill loaded"
+
+
 def test_main_memory_persists_across_separate_agent_sessions(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
 

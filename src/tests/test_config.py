@@ -1,6 +1,6 @@
 """Tests for configuration loading."""
 
-from src.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_MODEL, load_config
+from src.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_MAX_SKILL_CONTENT_CHARS, DEFAULT_MAX_SKILLS_PER_TURN, DEFAULT_MODEL, load_config
 
 
 def test_load_config_uses_defaults(tmp_path):
@@ -12,6 +12,8 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.openai_api_key is None
     assert config.deepseek_api_key is None
     assert config.history_limit == 20
+    assert config.max_skills_per_turn == DEFAULT_MAX_SKILLS_PER_TURN
+    assert config.max_skill_content_chars == DEFAULT_MAX_SKILL_CONTENT_CHARS
 
 
 def test_load_config_reads_dotenv(tmp_path):
@@ -21,6 +23,8 @@ def test_load_config_reads_dotenv(tmp_path):
                 "OPENAI_API_KEY=dotenv-key",
                 "CHULK_MODEL=dotenv-model",
                 "CHULK_HISTORY_LIMIT=7",
+                "CHULK_MAX_SKILLS_PER_TURN=2",
+                "CHULK_MAX_SKILL_CONTENT_CHARS=800",
                 "DEEPSEEK_API_KEY=deepseek-key",
             ]
         ),
@@ -34,6 +38,8 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.deepseek_api_key == "deepseek-key"
     assert config.model == "dotenv-model"
     assert config.history_limit == 7
+    assert config.max_skills_per_turn == 2
+    assert config.max_skill_content_chars == 800
 
 
 def test_environment_overrides_dotenv(tmp_path):

@@ -5,6 +5,7 @@ import json
 from src.core import Agent
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
+from src.skills import SkillRegistry
 from src.tools import ToolRegistry, calculator_tool, shell_tool
 from src.tracing import JSONLTraceLogger
 
@@ -17,6 +18,24 @@ class RecordingLLMClient(LLMClient):
     def complete(self, messages: list[dict[str, str]]) -> str:
         self.requests.append(messages)
         return self.responses.pop(0)
+
+
+def create_test_skill_registry(tmp_path):
+    skills_dir = tmp_path / "skills"
+    for name, description in {
+        "shell": "Use this skill when the user request requires terminal inspection or command execution.",
+        "memory": "Use this skill when the user request involves saving or retrieving durable information.",
+        "files": "Use this skill when the user request requires reading, editing, or creating files.",
+    }.items():
+        skill_dir = skills_dir / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"# {name.title()} Skill\n\n{description}\n\nGuidelines:\n- Keep the work inspectable.\n",
+            encoding="utf-8",
+        )
+    registry = SkillRegistry(skills_dir)
+    registry.load_metadata()
+    return registry
 
 
 def test_agent_sends_user_message_and_stores_response():
@@ -166,6 +185,52 @@ def test_agent_extracts_explicit_memories_and_writes_memory_trace_events(tmp_pat
     assert "memory_search_started" in trace_text
     assert "memory_search_completed" in trace_text
     assert saved_memory.id in trace_text
+
+
+def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path):
+    skill_registry = create_test_skill_registry(tmp_path)
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "I can run that command."})])
+    agent = Agent(llm, skill_registry=skill_registry, trace_logger=trace_logger)
+
+    response = agent.run_turn("run a shell command to print hello")
+
+    system_prompt = llm.requests[0][0]["content"]
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+
+    assert response == "I can run that command."
+    assert agent.state.loaded_skill_names == ["shell"]
+    assert "Loaded skills are procedural instructions" in system_prompt
+    assert "Skill: shell" in system_prompt
+    assert "# Shell Skill" in system_prompt
+    assert "Skill: memory" not in system_prompt
+    assert skill_registry.get_skill("shell").loaded_content is not None
+    assert skill_registry.get_skill("memory").loaded_content is None
+    assert "skill_selection_completed" in trace_text
+    assert "shell" in trace_text
+
+
+def test_agent_selects_memory_and_file_skills_for_matching_requests(tmp_path):
+    skill_registry = create_test_skill_registry(tmp_path)
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "Memory skill selected."}),
+            json.dumps({"type": "final_answer", "content": "Files skill selected."}),
+        ]
+    )
+    agent = Agent(llm, skill_registry=skill_registry)
+
+    memory_response = agent.run_turn("please remember this durable project fact")
+    memory_prompt = llm.requests[0][0]["content"]
+    file_response = agent.run_turn("edit the README file")
+    file_prompt = llm.requests[1][0]["content"]
+
+    assert memory_response == "Memory skill selected."
+    assert "Skill: memory" in memory_prompt
+    assert agent.state.loaded_skill_names == ["files"]
+    assert file_response == "Files skill selected."
+    assert "Skill: files" in file_prompt
+    assert "Skill: shell" not in file_prompt
 
 
 def test_agent_can_run_safe_shell_tool(tmp_path):

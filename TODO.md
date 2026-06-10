@@ -13,7 +13,7 @@ It should provide clear building blocks for:
 - [x] Storing and retrieving long-term memory.
 - [ ] Deciding between direct answers and tool calls.
 - [ ] Representing, validating, executing, and observing tool calls.
-- [ ] Lazy-loading procedural skills without flooding the prompt.
+- [x] Lazy-loading procedural skills without flooding the prompt.
 - [ ] Logging and tracing every meaningful step.
 
 ChulkHarness favors transparent Python modules over a large framework surface. The aim is to make the agent loop, tool boundaries, memory injection, skill loading, and trace output easy to inspect and extend.
@@ -95,12 +95,12 @@ Module responsibilities:
   - [ ] Validate and execute tool calls by name.
   - [ ] Convert tool outputs into observations.
 
-- [ ] `src/skills/registry.py`
-  - [ ] Define the `Skill` dataclass.
-  - [ ] Load skill metadata at startup.
-  - [ ] Select relevant skills for a user request.
-  - [ ] Lazy-load full `SKILL.md` files only when needed.
-  - [ ] Return skill instructions for prompt injection.
+- [x] `src/skills/registry.py`
+  - [x] Define the `Skill` dataclass.
+  - [x] Load skill metadata at startup.
+  - [x] Select relevant skills for a user request.
+  - [x] Lazy-load full `SKILL.md` files only when needed.
+  - [x] Return skill instructions for prompt injection.
 
 - [ ] `src/tools/shell.py`
   - [ ] Implement safe-ish command execution.
@@ -129,10 +129,10 @@ Module responsibilities:
   - [ ] Optionally store conversations, traces, and tool-call history later.
   - [ ] Treat as local development data, not source code.
 
-- [ ] `skills/`
-  - [ ] Store domain-specific procedural instructions.
-  - [ ] Keep each skill in its own folder.
-  - [ ] Start with `shell`, `memory`, and `files`.
+- [x] `skills/`
+  - [x] Store domain-specific procedural instructions.
+  - [x] Keep each skill in its own folder.
+  - [x] Start with `shell`, `memory`, and `files`.
 
 - [ ] `src/tests/`
   - [ ] Store unit tests and integration tests.
@@ -171,9 +171,9 @@ Core loop tasks:
 - [x] Add recent conversation history to the prompt.
 - [x] Retrieve relevant long-term memories for the user request.
 - [x] Inject only relevant memories into the prompt.
-- [ ] Select relevant skills for the user request.
-- [ ] Lazy-load selected full `SKILL.md` files.
-- [ ] Inject only selected skill instructions into the prompt.
+- [x] Select relevant skills for the user request.
+- [x] Lazy-load selected full `SKILL.md` files.
+- [x] Inject only selected skill instructions into the prompt.
 - [x] Show available tool names, descriptions, and argument schemas to the model.
 - [x] Ask the model for a structured response.
 - [x] Parse the model response.
@@ -509,70 +509,70 @@ Skills are lazy-loaded procedural instructions. They are playbooks, not actions.
 
 Important distinction:
 
-- [ ] Tool = callable action that executes code or performs an operation.
-- [ ] Skill = instructions, workflow, or behavior guide that tells the agent how to approach a domain.
+- [x] Tool = callable action that executes code or performs an operation.
+- [x] Skill = instructions, workflow, or behavior guide that tells the agent how to approach a domain.
 - [x] Memory = durable facts, preferences, project context, and prior-work summaries that may shape a turn.
 
 Example:
 
-- [ ] A `read_file` tool reads a file.
-- [ ] A `file editing` skill tells the agent how to safely inspect, patch, test, and summarize file edits.
+- [x] A `read_file` tool reads a file.
+- [x] A `file editing` skill tells the agent how to safely inspect, patch, test, and summarize file edits.
 
 Skill dataclass:
 
-- [ ] Create a `Skill` dataclass.
-- [ ] Include `name`.
-- [ ] Include `description`.
-- [ ] Include `path`.
-- [ ] Include optional `metadata`.
-- [ ] Include optional `keywords`.
-- [ ] Include optional `loaded_content`.
+- [x] Create a `Skill` dataclass.
+- [x] Include `name`.
+- [x] Include `description`.
+- [x] Include `path`.
+- [x] Include optional `metadata`.
+- [x] Include optional `keywords`.
+- [x] Include optional `loaded_content`.
 
 Skill registry:
 
-- [ ] Create `SkillRegistry`.
-- [ ] Scan `skills/` at startup.
-- [ ] Load only skill metadata at startup.
-- [ ] Do not load every full `SKILL.md` into context.
-- [ ] Read each skill description from front matter or a short metadata file.
-- [ ] Select relevant skills based on the user request.
-- [ ] Load full `SKILL.md` only when needed.
-- [ ] Inject loaded skill instructions into the prompt.
-- [ ] Track which skills were loaded for the turn.
-- [ ] Log selected skills and why they were selected.
+- [x] Create `SkillRegistry`.
+- [x] Scan `skills/` at startup.
+- [x] Load only skill metadata at startup.
+- [x] Do not load every full `SKILL.md` into context.
+- [x] Read each skill description from front matter or a short metadata file.
+- [x] Select relevant skills based on the user request.
+- [x] Load full `SKILL.md` only when needed.
+- [x] Inject loaded skill instructions into the prompt.
+- [x] Track which skills were loaded for the turn.
+- [x] Log selected skills and why they were selected.
 
 Skill selection strategies:
 
-- [ ] Phase 1: keyword matching.
+- [x] Phase 1: keyword matching.
 - [ ] Phase 2: LLM classifier/router.
 - [ ] Phase 3: embedding similarity.
 - [ ] Phase 4: hybrid ranking.
 
 Skill prompt behavior:
 
-- [ ] Keep skill instructions separate from memory.
-- [ ] Keep skill instructions separate from tool schemas.
-- [ ] Include skill name and source path when injected.
-- [ ] Limit the number of loaded skills per turn.
-- [ ] Add a max character budget for skill content.
-- [ ] Prefer the most relevant skill over many weakly relevant skills.
+- [x] Keep skill instructions separate from memory.
+- [x] Keep skill instructions separate from tool schemas.
+- [x] Include skill name and source path when injected.
+- [x] Limit the number of loaded skills per turn.
+- [x] Add a max character budget for skill content.
+- [x] Prefer the most relevant skill over many weakly relevant skills.
 
 Example skills:
 
-- [ ] `shell`
-  - [ ] How to use shell safely.
-  - [ ] When to prefer read-only commands.
-  - [ ] How to inspect output before acting.
+- [x] `shell`
+  - [x] How to use shell safely.
+  - [x] When to prefer read-only commands.
+  - [x] How to inspect output before acting.
 
-- [ ] `memory`
-  - [ ] When to save durable facts.
-  - [ ] When to search memory.
-  - [ ] How to avoid storing sensitive or irrelevant content.
+- [x] `memory`
+  - [x] When to save durable facts.
+  - [x] When to search memory.
+  - [x] How to avoid storing sensitive or irrelevant content.
 
-- [ ] `files`
-  - [ ] How to inspect files before editing.
-  - [ ] How to make small patches.
-  - [ ] How to validate changes.
+- [x] `files`
+  - [x] How to inspect files before editing.
+  - [x] How to make small patches.
+  - [x] How to validate changes.
 
 - [ ] `web_research`
   - [ ] How to search, compare sources, and cite findings.
@@ -596,7 +596,7 @@ Prompt types:
 
 - [ ] Base system prompt.
 - [ ] Tool-use prompt.
-- [ ] Skill-loaded prompt.
+- [x] Skill-loaded prompt.
 - [x] Memory-injected prompt.
 - [ ] JSON tool-call prompt.
 - [ ] Reflection prompt.
@@ -607,15 +607,15 @@ Prompt rules:
 
 - [ ] Keep prompts readable.
 - [ ] Keep prompts versioned in code.
-- [ ] Keep skills separate from memory.
-- [ ] Keep tool schemas separate from skill instructions.
+- [x] Keep skills separate from memory.
+- [x] Keep tool schemas separate from skill instructions.
 - [x] Do not inject irrelevant memories.
-- [ ] Do not inject every skill.
-- [ ] Prefer structured outputs for tool calls.
-- [ ] Tell the model exactly which JSON formats are valid.
-- [ ] Tell the model when it may answer directly.
-- [ ] Tell the model when it should call a tool.
-- [ ] Tell the model to use observations rather than inventing tool results.
+- [x] Do not inject every skill.
+- [x] Prefer structured outputs for tool calls.
+- [x] Tell the model exactly which JSON formats are valid.
+- [x] Tell the model when it may answer directly.
+- [x] Tell the model when it should call a tool.
+- [x] Tell the model to use observations rather than inventing tool results.
 - [ ] Keep safety constraints visible in the prompt and enforced in Python.
 
 Prompt composition tasks:
@@ -623,7 +623,7 @@ Prompt composition tasks:
 - [ ] Create `build_system_prompt`.
 - [ ] Create `format_messages_for_prompt`.
 - [x] Create `format_memories_for_prompt`.
-- [ ] Create `format_skills_for_prompt`.
+- [x] Create `format_skills_for_prompt`.
 - [x] Create `format_tools_for_prompt`.
 - [ ] Create `format_observations_for_prompt`.
 - [ ] Add tests that snapshot prompt output for simple cases.
@@ -695,16 +695,16 @@ Create explicit state objects so the agent loop is inspectable.
 
 State fields:
 
-- [ ] Current conversation id.
+- [x] Current conversation id.
 - [ ] Current turn id.
-- [ ] Messages.
-- [ ] Loaded memories.
-- [ ] Loaded skills.
+- [x] Messages.
+- [x] Loaded memories.
+- [x] Loaded skills.
 - [ ] Available tools.
-- [ ] Tool calls.
-- [ ] Observations.
-- [ ] Errors.
-- [ ] Final answer.
+- [x] Tool calls.
+- [x] Observations.
+- [x] Errors.
+- [x] Final answer.
 - [ ] Token estimates if possible.
 - [ ] Start time and end time.
 - [ ] Model request count.
@@ -712,7 +712,7 @@ State fields:
 
 Implementation tasks:
 
-- [ ] Create `AgentState` dataclass.
+- [x] Create `AgentState` dataclass.
 - [ ] Create `TurnState` dataclass.
 - [ ] Create `ToolCallRecord` dataclass.
 - [ ] Create `ObservationRecord` dataclass.
@@ -726,20 +726,20 @@ The project should be easy to debug. A trace should explain exactly what the age
 
 Logging tasks:
 
-- [ ] Create `src/tracing/logger.py`.
-- [ ] Create a `TraceLogger`.
+- [x] Create `src/tracing/logger.py`.
+- [x] Create a `TraceLogger`.
 - [x] Create a trace file per session.
 - [x] Use JSONL for trace events.
 - [x] Log every user message.
 - [x] Log selected memories.
-- [ ] Log selected skills.
+- [x] Log selected skills.
 - [ ] Log available tools.
 - [ ] Log model prompts or prompt summaries.
 - [x] Log model responses.
-- [ ] Log parsed actions.
+- [x] Log parsed actions.
 - [x] Log tool calls.
 - [x] Log tool arguments.
-- [ ] Log tool outputs.
+- [x] Log tool outputs.
 - [x] Log tool errors.
 - [x] Log final answers.
 - [ ] Log timing information.
@@ -867,12 +867,12 @@ Memory tests:
 
 Skill tests:
 
-- [ ] Test skill metadata loading.
-- [ ] Test full skill lazy loading.
-- [ ] Test keyword skill selection.
-- [ ] Test missing skill file handling.
-- [ ] Test max skill limit.
-- [ ] Test prompt injection formatting.
+- [x] Test skill metadata loading.
+- [x] Test full skill lazy loading.
+- [x] Test keyword skill selection.
+- [x] Test missing skill file handling.
+- [x] Test max skill limit.
+- [x] Test prompt injection formatting.
 
 Parser tests:
 
@@ -890,7 +890,7 @@ Agent loop tests:
 - [x] Test tool error followed by model recovery.
 - [x] Test max tool-call limit.
 - [x] Test memory retrieval injection.
-- [ ] Test skill selection injection.
+- [x] Test skill selection injection.
 - [x] Test trace events are written.
 
 ## 15. Milestones
@@ -981,26 +981,26 @@ Done when:
 
 Goal: lazy-load procedural instructions based on the user request.
 
-- [ ] Create `Skill` dataclass.
-- [ ] Create `SkillRegistry`.
-- [ ] Create initial skill folder structure.
+- [x] Create `Skill` dataclass.
+- [x] Create `SkillRegistry`.
+- [x] Create initial skill folder structure.
 - [x] Write `shell/SKILL.md`.
 - [x] Write `memory/SKILL.md`.
 - [x] Write `files/SKILL.md`.
-- [ ] Load skill metadata at startup.
-- [ ] Implement keyword-based skill selection.
-- [ ] Lazy-load full `SKILL.md` content only when selected.
-- [ ] Inject selected skill instructions into the prompt.
-- [ ] Log selected skills.
-- [ ] Add skill tests.
+- [x] Load skill metadata at startup.
+- [x] Implement keyword-based skill selection.
+- [x] Lazy-load full `SKILL.md` content only when selected.
+- [x] Inject selected skill instructions into the prompt.
+- [x] Log selected skills.
+- [x] Add skill tests.
 
 Done when:
 
-- [ ] The agent does not load every skill by default.
-- [ ] A shell-related request loads the shell skill.
-- [ ] A memory-related request loads the memory skill.
-- [ ] A file-related request loads the files skill.
-- [ ] The trace shows which skills were loaded.
+- [x] The agent does not load every skill by default.
+- [x] A shell-related request loads the shell skill.
+- [x] A memory-related request loads the memory skill.
+- [x] A file-related request loads the files skill.
+- [x] The trace shows which skills were loaded.
 
 ### Phase 5: Reliability
 
@@ -1092,12 +1092,12 @@ The project is successful when:
 - [x] The agent can save long-term memories.
 - [x] The agent can search and retrieve long-term memories.
 - [x] The agent injects only relevant memories into prompts.
-- [ ] The agent can load relevant skills lazily.
-- [ ] The agent does not inject every skill into every prompt.
+- [x] The agent can load relevant skills lazily.
+- [x] The agent does not inject every skill into every prompt.
 - [ ] The agent can feed tool observations back into the model.
 - [ ] The agent stops after a configured number of tool-call iterations.
 - [ ] I can inspect logs to understand every major decision.
-- [ ] Trace files show user messages, selected memories, selected skills, tool calls, observations, errors, and final answers.
+- [x] Trace files show user messages, selected memories, selected skills, tool calls, observations, errors, and final answers.
 - [ ] The architecture is simple enough to inspect and maintain.
 - [x] The code is tested.
 - [ ] The safety limitations are documented clearly.
@@ -1118,7 +1118,7 @@ The project is successful when:
 - [x] Add SQLite memory schema and store API tests.
 - [x] Add memory tools and register them at startup.
 - [x] Inject retrieved memories into the agent prompt.
-- [ ] Start Phase 4: wire `SkillRegistry` into the agent loop.
-- [ ] Add keyword-based skill selection.
-- [ ] Lazy-load selected `SKILL.md` content into the prompt.
-- [ ] Add tests proving only relevant skills are loaded.
+- [x] Start Phase 4: wire `SkillRegistry` into the agent loop.
+- [x] Add keyword-based skill selection.
+- [x] Lazy-load selected `SKILL.md` content into the prompt.
+- [x] Add tests proving only relevant skills are loaded.

@@ -25,13 +25,15 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository has the Phase 1 chat loop, Phase 2 tool-call loop, and Phase 3 SQLite-backed long-term memory in place. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, and Phase 4 lazy-loaded skills in place. The roadmap lives in [TODO.md](TODO.md).
 
 The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
 
 Long-term memory is stored in the local SQLite database at `src/store.sqlite`, which is ignored by Git. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
 
 Memory search uses SQLite FTS when available, with a fallback keyword search and local vector reranking. Memories also track tags, source, confidence, importance, archive state, and access metadata. A human-readable `MEMORY.md` can be imported or exported through memory tools, but SQLite remains the runtime memory engine.
+
+Skills live in the root-level `skills/` directory. Chulk loads only skill metadata at startup, chooses relevant skills with deterministic keyword matching, and injects full `SKILL.md` instructions only for selected skills in the current turn. Skill instructions stay separate from memory and tool schemas.
 
 Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
@@ -198,19 +200,21 @@ CHULK_MODEL=
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_HISTORY_LIMIT=20
+CHULK_MAX_SKILLS_PER_TURN=3
+CHULK_MAX_SKILL_CONTENT_CHARS=4000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
 
 ## Development Roadmap
 
-The implementation is currently through Phase 3. The next major milestone is Phase 4:
+The implementation is currently through Phase 4. The next major milestone is Phase 5:
 
 - Phase 1: Minimal chat agent.
 - Phase 2: Tool registry and tool-call loop.
 - Phase 3: SQLite-backed memory.
 - Phase 4: Lazy-loaded skills.
-- Phase 5: Logging, tracing, tests, and reliability.
+- Phase 5: Logging, tracing, tests, and reliability hardening.
 - Phase 6: Planning, reflection, semantic memory, and multi-step behavior.
 
 See [TODO.md](TODO.md) for the full checklist.

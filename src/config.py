@@ -12,6 +12,8 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MAX_SKILLS_PER_TURN = 3
+DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
 SUPPORTED_LLM_PROVIDERS = {"openai", "deepseek"}
 
 
@@ -30,6 +32,8 @@ class Config:
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
+    max_skills_per_turn: int = DEFAULT_MAX_SKILLS_PER_TURN
+    max_skill_content_chars: int = DEFAULT_MAX_SKILL_CONTENT_CHARS
     shell_timeout_seconds: int = 10
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
@@ -103,6 +107,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
         history_limit=_env_int(env, "CHULK_HISTORY_LIMIT", 20),
         max_tool_calls_per_turn=_env_int(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", 5),
+        max_skills_per_turn=_env_int(env, "CHULK_MAX_SKILLS_PER_TURN", DEFAULT_MAX_SKILLS_PER_TURN),
+        max_skill_content_chars=_env_int(env, "CHULK_MAX_SKILL_CONTENT_CHARS", DEFAULT_MAX_SKILL_CONTENT_CHARS),
         shell_timeout_seconds=_env_int(env, "CHULK_SHELL_TIMEOUT_SECONDS", 10),
         llm_timeout_seconds=_env_float(env, "CHULK_LLM_TIMEOUT_SECONDS", 60.0),
         llm_max_retries=_env_int(env, "CHULK_LLM_MAX_RETRIES", 2),

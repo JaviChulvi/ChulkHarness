@@ -1,8 +1,10 @@
 """Prompt templates for the agent loop."""
 
 from src.memory import MemoryRecord
+from src.skills import SkillSelection
 
 MAX_MEMORY_PROMPT_CONTENT_CHARS = 500
+MAX_SKILL_PROMPT_CONTENT_CHARS = 4000
 
 BASE_SYSTEM_PROMPT = """You are ChulkHarness, a lightweight Python agent harness.
 
@@ -63,6 +65,36 @@ def format_memories_for_prompt(
     return "\n".join(sections)
 
 
+def format_skills_for_prompt(
+    selected_skills: list[SkillSelection],
+    *,
+    max_chars_per_skill: int = MAX_SKILL_PROMPT_CONTENT_CHARS,
+) -> str:
+    """Format selected skill instructions for prompt injection."""
+    if not selected_skills:
+        return "Loaded skills: none selected for this turn."
+
+    sections = [
+        "Loaded skills are procedural instructions for this turn.",
+        "They are not tools and they are not long-term memory.",
+        "Use them only when relevant to the user's request.",
+    ]
+    for selection in selected_skills:
+        skill = selection.skill
+        content = skill.loaded_content or ""
+        sections.extend(
+            [
+                f"Skill: {skill.name}",
+                f"Source: {skill.path}",
+                f"Description: {skill.description}",
+                f"Matched keywords: {', '.join(selection.matched_keywords) or 'none'}",
+                "Instructions:",
+                _truncate_skill_content(content, max_chars_per_skill),
+            ]
+        )
+    return "\n".join(sections)
+
+
 def _format_memory_line(memory: MemoryRecord) -> str:
     tag_text = ", ".join(memory.tags) if memory.tags else "untagged"
     return (
@@ -75,3 +107,9 @@ def _truncate_memory_content(content: str) -> str:
     if len(content) <= MAX_MEMORY_PROMPT_CONTENT_CHARS:
         return content
     return content[:MAX_MEMORY_PROMPT_CONTENT_CHARS].rstrip() + "..."
+
+
+def _truncate_skill_content(content: str, max_chars: int) -> str:
+    if len(content) <= max_chars:
+        return content
+    return content[:max_chars].rstrip() + "..."

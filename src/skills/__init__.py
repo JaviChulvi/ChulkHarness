@@ -1,5 +1,5 @@
 """Skill registry primitives."""
 
-from src.skills.registry import Skill, SkillRegistry
+from src.skills.registry import Skill, SkillRegistry, SkillSelection
 
-__all__ = ["Skill", "SkillRegistry"]
+__all__ = ["Skill", "SkillRegistry", "SkillSelection"]

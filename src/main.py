@@ -11,6 +11,7 @@ from src.config import Config, load_config
 from src.core import Agent, AgentState
 from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
 from src.memory import ConversationMemory, SQLiteMemoryStore
+from src.skills import SkillRegistry
 from src.tools import create_default_tool_registry
 from src.tracing import JSONLTraceLogger
 
@@ -56,6 +57,8 @@ def format_config(config: Config) -> str:
         "deepseek_base_url": config.deepseek_base_url,
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
+        "max_skills_per_turn": config.max_skills_per_turn,
+        "max_skill_content_chars": config.max_skill_content_chars,
         "shell_timeout_seconds": config.shell_timeout_seconds,
         "llm_timeout_seconds": config.llm_timeout_seconds,
         "llm_max_retries": config.llm_max_retries,
@@ -73,6 +76,12 @@ def create_agent(
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
     memory_store = SQLiteMemoryStore(config.store_path)
+    skill_registry = SkillRegistry(
+        config.skills_dir,
+        max_skills=config.max_skills_per_turn,
+        max_content_chars=config.max_skill_content_chars,
+    )
+    skill_registry.load_metadata()
     state = AgentState()
     trace_logger = JSONLTraceLogger(config.traces_dir, state.conversation_id)
     return Agent(
@@ -80,6 +89,7 @@ def create_agent(
         state=state,
         memory=ConversationMemory(max_messages=config.history_limit),
         memory_store=memory_store,
+        skill_registry=skill_registry,
         trace_logger=trace_logger,
         tool_registry=create_default_tool_registry(
             config.project_root,
@@ -87,6 +97,8 @@ def create_agent(
             memory_store=memory_store,
         ),
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+        max_skills_per_turn=config.max_skills_per_turn,
+        max_skill_content_chars=config.max_skill_content_chars,
     )
 
 

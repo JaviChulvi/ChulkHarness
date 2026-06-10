@@ -71,6 +71,8 @@ CHULK_MODEL=
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_HISTORY_LIMIT=20
+CHULK_MAX_SKILLS_PER_TURN=3
+CHULK_MAX_SKILL_CONTENT_CHARS=4000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
@@ -161,13 +163,13 @@ python -m compileall src
 
 ## Roadmap Notes
 
-Phase 1 through Phase 3 are implemented. Phase 4 is the next large milestone. Do not blur skills with memory:
+Phase 1 through Phase 4 are implemented. Phase 5 reliability hardening is the next large milestone. Do not blur skills with memory:
 
 - Phase 1: config, CLI, LLM client, short-term history, final answers.
 - Phase 2: tool dataclasses, registry, calculator, shell tool, tool-call loop.
 - Phase 3: SQLite long-term memory, memory tools, and relevant memory prompt injection.
-- Phase 4: lazy-loaded skills.
-- Phase 5: logging, traces, reliability.
+- Phase 4: lazy-loaded skills with keyword selection and prompt injection.
+- Phase 5: logging, traces, reliability hardening.
 - Phase 6: planning, reflection, semantic memory, multi-step behavior.
 
 If a requested change touches a later phase, implement only the smallest necessary bridge unless the user asks to move that phase forward.

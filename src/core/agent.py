@@ -11,9 +11,10 @@ from uuid import uuid4
 
 from src.core.actions import FinalAnswerAction, ToolCallAction
 from src.core.prompts import BASE_SYSTEM_PROMPT
-from src.core.prompts import JSON_ACTION_PROMPT, format_memories_for_prompt, format_tools_for_prompt
+from src.core.prompts import JSON_ACTION_PROMPT, format_memories_for_prompt, format_skills_for_prompt, format_tools_for_prompt
 from src.llm import LLMActionError, LLMClient
 from src.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
+from src.skills import SkillRegistry, SkillSelection
 from src.tools import ToolRegistry
 from src.tracing import JSONLTraceLogger
 
@@ -44,25 +45,36 @@ class Agent:
         state: AgentState | None = None,
         memory: ConversationMemory | None = None,
         memory_store: SQLiteMemoryStore | None = None,
+        skill_registry: SkillRegistry | None = None,
         tool_registry: ToolRegistry | None = None,
         trace_logger: JSONLTraceLogger | None = None,
         system_prompt: str = BASE_SYSTEM_PROMPT,
         max_tool_calls_per_turn: int = 5,
         max_json_repair_attempts: int = 2,
+        max_skills_per_turn: int = 3,
+        max_skill_content_chars: int = 4000,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
+        if max_skills_per_turn < 1:
+            raise ValueError("max_skills_per_turn must be greater than zero")
+        if max_skill_content_chars < 1:
+            raise ValueError("max_skill_content_chars must be greater than zero")
         self.llm_client = llm_client
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()
         self.memory_store = memory_store
+        self.skill_registry = skill_registry
         self.tool_registry = tool_registry or ToolRegistry()
         self.trace_logger = trace_logger
         self.system_prompt = system_prompt
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.max_json_repair_attempts = max_json_repair_attempts
+        self.max_skills_per_turn = max_skills_per_turn
+        self.max_skill_content_chars = max_skill_content_chars
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
+        self._selected_skills: list[SkillSelection] = []
 
     def run_turn(self, user_message: str) -> str:
         """Run one user turn and return the assistant response."""
@@ -72,6 +84,7 @@ class Agent:
 
         self._extract_long_term_memories(clean_message)
         self._select_long_term_memories(clean_message)
+        self._select_skills(clean_message)
         self.memory.add_user_message(clean_message)
         self._trace("user_message", {"content": clean_message})
         tool_calls_used = 0
@@ -143,6 +156,10 @@ class Agent:
                     profile_memories=self._profile_memories,
                     relevant_memories=self._relevant_memories,
                 ),
+                format_skills_for_prompt(
+                    self._selected_skills,
+                    max_chars_per_skill=self.max_skill_content_chars,
+                ),
                 JSON_ACTION_PROMPT,
                 format_tools_for_prompt(self.tool_registry.tool_descriptions_for_prompt()),
             ]
@@ -179,6 +196,36 @@ class Agent:
                 "profile_memory_ids": [memory.id for memory in profile],
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
+            },
+        )
+
+    def _select_skills(self, user_message: str) -> None:
+        """Select and lazy-load procedural skills that should shape this turn."""
+        self._selected_skills = []
+        self.state.loaded_skill_names = []
+
+        if self.skill_registry is None:
+            return
+
+        self._trace("skill_selection_started", {"query": user_message})
+        self._selected_skills = self.skill_registry.load_selected_skills(
+            user_message,
+            limit=self.max_skills_per_turn,
+        )
+        self.state.loaded_skill_names = [selection.skill.name for selection in self._selected_skills]
+        self._trace(
+            "skill_selection_completed",
+            {
+                "loaded_skill_names": self.state.loaded_skill_names,
+                "skills": [
+                    {
+                        "name": selection.skill.name,
+                        "path": str(selection.skill.path),
+                        "score": selection.score,
+                        "matched_keywords": selection.matched_keywords,
+                    }
+                    for selection in self._selected_skills
+                ],
             },
         )
 
