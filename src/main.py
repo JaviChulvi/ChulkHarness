@@ -8,13 +8,14 @@ from typing import Callable
 
 from src import __version__
 from src.config import Config, load_config
-from src.core import Agent
+from src.core import Agent, AgentState
 from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
-from src.memory import ConversationMemory
+from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.tools import create_default_tool_registry
+from src.tracing import JSONLTraceLogger
 
 
-EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit"}
+EXIT_COMMANDS = {"/exit", "/quit", "/q", "exit", "quit"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,13 +69,23 @@ def create_agent(
     config: Config,
     llm_client_factory: Callable[[Config], LLMClient] | None = None,
 ) -> Agent:
-    """Create the Phase 1 agent runtime."""
+    """Create the agent runtime."""
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
+    memory_store = SQLiteMemoryStore(config.store_path)
+    state = AgentState()
+    trace_logger = JSONLTraceLogger(config.traces_dir, state.conversation_id)
     return Agent(
         llm_client_factory(config),
+        state=state,
         memory=ConversationMemory(max_messages=config.history_limit),
-        tool_registry=create_default_tool_registry(config.project_root, config.shell_timeout_seconds),
+        memory_store=memory_store,
+        trace_logger=trace_logger,
+        tool_registry=create_default_tool_registry(
+            config.project_root,
+            config.shell_timeout_seconds,
+            memory_store=memory_store,
+        ),
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
     )
 
@@ -97,9 +108,9 @@ def run_chat_loop(
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
 ) -> int:
-    """Run the interactive Phase 1 chat loop."""
+    """Run the interactive chat loop."""
     output_func("ChulkHarness CLI")
-    output_func("Type /exit or /quit to end the session.")
+    output_func("Type /exit, /quit, or /q to end the session.")
 
     while True:
         try:

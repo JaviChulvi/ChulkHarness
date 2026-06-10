@@ -1,4 +1,4 @@
-"""Short-term and long-term memory primitives."""
+"""Short-term conversation memory primitives."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from uuid import uuid4
 
 @dataclass(frozen=True)
 class Memory:
-    """A durable memory record."""
+    """A simple memory value object used before persistence."""
 
     id: str
     content: str

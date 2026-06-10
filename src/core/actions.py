@@ -31,6 +31,34 @@ class ToolCallAction:
 
 AgentAction = FinalAnswerAction | ToolCallAction
 
+STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": ["final_answer", "tool_call"],
+            "description": "Whether the assistant is answering directly or requesting a tool call.",
+        },
+        "content": {
+            "type": ["string", "null"],
+            "description": "Final user-facing answer when type is final_answer; otherwise null.",
+        },
+        "tool_name": {
+            "type": ["string", "null"],
+            "description": "Tool name when type is tool_call; otherwise null.",
+        },
+        "arguments_json": {
+            "type": "string",
+            "description": (
+                "Tool arguments encoded as a JSON object string when type is tool_call; "
+                "use {} when type is final_answer."
+            ),
+        },
+    },
+    "required": ["type", "content", "tool_name", "arguments_json"],
+    "additionalProperties": False,
+}
+
 
 def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
     """Parse a model response into a final answer or tool call."""
@@ -45,11 +73,9 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
 
     if action_type == "tool_call":
         tool_name = payload.get("tool_name")
-        arguments = payload.get("arguments")
+        arguments = _coerce_tool_arguments(payload)
         if not isinstance(tool_name, str) or not tool_name.strip():
             raise ActionParseError("tool_call.tool_name must be a non-empty string")
-        if not isinstance(arguments, dict):
-            raise ActionParseError("tool_call.arguments must be an object")
         return ToolCallAction(type="tool_call", tool_name=tool_name, arguments=arguments)
 
     raise ActionParseError("model response type must be final_answer or tool_call")
@@ -74,3 +100,25 @@ def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ActionParseError("model response JSON must be an object")
     return payload
+
+
+def _coerce_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize provider-specific argument transports into a dict."""
+    if "arguments" in payload:
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, dict):
+            raise ActionParseError("tool_call.arguments must be an object")
+        return arguments
+
+    raw_arguments_json = payload.get("arguments_json", "{}")
+    if not isinstance(raw_arguments_json, str):
+        raise ActionParseError("tool_call.arguments_json must be a string")
+
+    try:
+        arguments = json.loads(raw_arguments_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise ActionParseError("tool_call.arguments_json must contain a JSON object") from exc
+
+    if not isinstance(arguments, dict):
+        raise ActionParseError("tool_call.arguments_json must contain a JSON object")
+    return arguments

@@ -3,6 +3,7 @@
 from pathlib import Path
 import sys
 
+from src.memory import SQLiteMemoryStore
 from src.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from src.tools.registry import ToolResult
@@ -165,3 +166,69 @@ def test_default_tool_registry_contains_builtins(tmp_path):
     names = {tool.name for tool in registry.list_tools()}
 
     assert {"calculator", "run_cmd", "read_file", "write_file", "list_files", "search_files"} <= names
+
+
+def test_default_tool_registry_contains_memory_tools_when_store_is_provided(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    registry = create_default_tool_registry(tmp_path, memory_store=memory_store)
+    names = {tool.name for tool in registry.list_tools()}
+
+    assert {
+        "save_memory",
+        "search_memory",
+        "list_memories",
+        "delete_memory",
+        "update_memory",
+        "summarize_memories",
+        "archive_memory",
+        "restore_memory",
+        "compact_memories",
+        "import_memories",
+        "export_memories",
+    } <= names
+
+
+def test_memory_tools_save_search_update_and_delete(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    registry = create_default_tool_registry(tmp_path, memory_store=memory_store)
+
+    save_result = registry.run(
+        "save_memory",
+        {
+            "content": "ChulkHarness should keep memory and skills separate.",
+            "tags": ["project", "memory"],
+            "importance": 7,
+        },
+    )
+    memory_id = save_result.metadata["memory_id"]
+    search_result = registry.run("search_memory", {"query": "skills separate"})
+    update_result = registry.run("update_memory", {"memory_id": memory_id, "tags": ["project", "preference"]})
+    list_result = registry.run("list_memories", {"limit": 5})
+    delete_result = registry.run("delete_memory", {"memory_id": memory_id})
+
+    assert save_result.success
+    assert "skills separate" in search_result.observation
+    assert update_result.success
+    assert "preference" in list_result.observation
+    assert delete_result.success
+
+
+def test_memory_tools_import_export_archive_restore_and_compact(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    registry = create_default_tool_registry(tmp_path, memory_store=memory_store)
+    markdown = tmp_path / "MEMORY.md"
+    markdown.write_text("- [project] ChulkHarness has importable Markdown memory.\n", encoding="utf-8")
+
+    import_result = registry.run("import_memories", {"path": "MEMORY.md"})
+    memory_id = import_result.metadata["memory_ids"][0]
+    archive_result = registry.run("archive_memory", {"memory_id": memory_id})
+    restore_result = registry.run("restore_memory", {"memory_id": memory_id})
+    compact_result = registry.run("compact_memories", {})
+    export_result = registry.run("export_memories", {"path": "memory-export.md"})
+
+    assert import_result.success
+    assert archive_result.success
+    assert restore_result.success
+    assert compact_result.success
+    assert export_result.success
+    assert (tmp_path / "memory-export.md").exists()

@@ -14,8 +14,8 @@ src/
   config.py          # Environment and runtime config
   core/              # Agent turn orchestration and prompts
   llm/               # Provider wrapper and LLM clients
-  memory/            # Short-term memory now, long-term memory later
-  tools/             # Tool primitives and implementations
+  memory/            # Short-term memory and SQLite long-term memory
+  tools/             # Tool primitives and implementations, including memory tools
   skills/            # Skill registry code
   tracing/           # Trace/log primitives
   tests/             # Pytest tests
@@ -29,13 +29,19 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Keep the harness small, readable, and modular.
 - Prefer explicit dataclasses, registries, and plain Python functions over hidden control flow.
 - Keep provider-specific logic inside `src/llm/`.
+- Ask the LLM layer for validated actions with `complete_action(...)`; the agent loop should not parse provider text directly.
+- Keep provider-specific structured-output transports normalized into the shared action dataclasses before orchestration.
 - Keep prompt text in `src/core/prompts.py`.
 - Keep skill playbooks in root-level `skills/`, outside the Python package.
 - Keep side-effecting tools behind registries and safety checks.
 - Do not mix skills, tools, and memory:
   - Tool: callable action.
-  - Skill: procedural instructions loaded into context.
-  - Memory: stored user/session/project facts.
+  - Skill: procedural instructions loaded into context from root-level `skills/`.
+  - Memory: stored user, project, preference, and prior-work facts in SQLite.
+- Treat memories tagged `persona`, `preference`, `style`, or `workflow` as profile context that can shape tone, level of detail, and task-solving style.
+- Do not store secrets in long-term memory.
+- SQLite is the runtime memory engine; `MEMORY.md` is only a human-readable import/export format.
+- Memory trace events should include selected memory ids so memory behavior can be debugged across sessions.
 - When marking TODO items complete, verify the corresponding code, tests, or command output first.
 
 ## Environment
@@ -70,6 +76,8 @@ CHULK_LLM_MAX_RETRIES=2
 ```
 
 Never commit real API keys, secrets, traces with secrets, or local SQLite state.
+
+The default memory database is `src/store.sqlite`; it is local runtime state and must stay ignored.
 
 ## Commands
 
@@ -153,11 +161,11 @@ python -m compileall src
 
 ## Roadmap Notes
 
-Phase 1 is the minimal chat agent. Phase 2 starts tool calling. Do not blur these phases accidentally:
+Phase 1 through Phase 3 are implemented. Phase 4 is the next large milestone. Do not blur skills with memory:
 
 - Phase 1: config, CLI, LLM client, short-term history, final answers.
 - Phase 2: tool dataclasses, registry, calculator, shell tool, tool-call loop.
-- Phase 3: SQLite long-term memory.
+- Phase 3: SQLite long-term memory, memory tools, and relevant memory prompt injection.
 - Phase 4: lazy-loaded skills.
 - Phase 5: logging, traces, reliability.
 - Phase 6: planning, reflection, semantic memory, multi-step behavior.

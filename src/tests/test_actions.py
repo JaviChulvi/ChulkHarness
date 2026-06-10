@@ -19,6 +19,21 @@ def test_parse_tool_call():
     assert action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
 
 
+def test_parse_tool_call_with_arguments_json_transport():
+    action = parse_model_response(
+        json.dumps(
+            {
+                "type": "tool_call",
+                "content": None,
+                "tool_name": "calculator",
+                "arguments_json": '{"expression":"1 + 1"}',
+            }
+        )
+    )
+
+    assert action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
+
+
 def test_parse_json_markdown_block():
     action = parse_model_response('```json\n{"type": "final_answer", "content": "hello"}\n```')
 

@@ -10,7 +10,7 @@ It should provide clear building blocks for:
 
 - [ ] Turning user messages into model prompts.
 - [ ] Preserving short-term conversation state.
-- [ ] Storing and retrieving long-term memory.
+- [x] Storing and retrieving long-term memory.
 - [ ] Deciding between direct answers and tool calls.
 - [ ] Representing, validating, executing, and observing tool calls.
 - [ ] Lazy-loading procedural skills without flooding the prompt.
@@ -82,11 +82,11 @@ Module responsibilities:
   - [ ] Provide text completion and structured JSON completion helpers.
   - [ ] Handle retries, timeouts, rate limits, and provider errors.
 
-- [ ] `src/memory/`
-  - [ ] Manage short-term conversation history.
-  - [ ] Manage long-term SQLite memory.
-  - [ ] Save, search, list, delete, and summarize memories.
-  - [ ] Keep memory retrieval separate from skill loading.
+- [x] `src/memory/`
+  - [x] Manage short-term conversation history.
+  - [x] Manage long-term SQLite memory.
+  - [x] Save, search, list, delete, and summarize memories.
+  - [x] Keep memory retrieval separate from skill loading.
 
 - [ ] `src/tools/registry.py`
   - [ ] Define the `Tool` dataclass.
@@ -114,9 +114,9 @@ Module responsibilities:
   - [ ] Keep base system prompts, tool prompts, memory prompts, skill prompts, and repair prompts separate.
   - [ ] Make prompt composition readable and testable.
 
-- [ ] `src/tracing/logger.py`
-  - [ ] Write structured logs and traces.
-  - [ ] Create one trace file per session.
+- [x] `src/tracing/logger.py`
+  - [x] Write structured logs and traces.
+  - [x] Create one trace file per session.
   - [ ] Record user messages, selected memories, selected skills, model responses, tool calls, observations, and errors.
 
 - [ ] `src/config.py`
@@ -169,8 +169,8 @@ Core loop tasks:
 - [x] Store each user message in short-term memory.
 - [x] Build the base system prompt.
 - [x] Add recent conversation history to the prompt.
-- [ ] Retrieve relevant long-term memories for the user request.
-- [ ] Inject only relevant memories into the prompt.
+- [x] Retrieve relevant long-term memories for the user request.
+- [x] Inject only relevant memories into the prompt.
 - [ ] Select relevant skills for the user request.
 - [ ] Lazy-load selected full `SKILL.md` files.
 - [ ] Inject only selected skill instructions into the prompt.
@@ -194,7 +194,7 @@ Stop conditions:
 - [x] Stop when the model returns a valid `final_answer`.
 - [x] Stop when the tool-call iteration limit is reached.
 - [ ] Stop when a tool returns a fatal safety error.
-- [ ] Stop when repeated JSON parsing failures exceed a repair limit.
+- [x] Stop when repeated JSON parsing failures exceed a repair limit.
 - [x] Stop when the user exits the CLI.
 
 ## 4. LLM Client
@@ -211,7 +211,12 @@ Build a small provider wrapper before adding agent complexity.
 - [x] Keep the rest of the agent provider-agnostic.
 - [x] Add a provider interface that can support other backends later.
 - [x] Support normal text responses.
-- [ ] Support structured JSON responses for tool calls.
+- [x] Support structured JSON responses for tool calls.
+- [x] Add `complete_action(...)` so the agent receives validated `AgentAction` objects instead of parsing provider text directly.
+- [x] Use OpenAI native Structured Outputs with a strict action schema.
+- [x] Use DeepSeek JSON Output mode with Chulk-side schema validation.
+- [x] Normalize provider-specific action envelopes into one internal `AgentAction` type.
+- [x] Keep malformed-action repair inside the LLM boundary as a fallback, not as normal agent-loop behavior.
 - [x] Add request timeout handling.
 - [x] Add retry handling for transient failures.
 - [x] Add clear errors for missing API keys.
@@ -227,7 +232,7 @@ Future provider support:
 - [ ] Add support for local LLMs later.
 - [x] Add DeepSeek as an additional hosted provider.
 - [ ] Add support for additional hosted providers later.
-- [ ] Keep response normalization in one place.
+- [x] Keep response normalization in one place.
 
 ## 5. Tool System
 
@@ -382,25 +387,25 @@ Memory should be split into short-term and long-term memory.
 
 Short-term memory is the current conversation context.
 
-- [ ] Store current conversation messages.
-- [ ] Track message role: `system`, `user`, `assistant`, `tool`, `observation`.
+- [x] Store current conversation messages.
+- [x] Track message role: `system`, `user`, `assistant`, `tool`, `observation`.
 - [ ] Track message timestamp.
-- [ ] Keep messages in order.
-- [ ] Limit context size.
+- [x] Keep messages in order.
+- [x] Limit context size.
 - [ ] Estimate token count if possible.
 - [ ] Drop or summarize older messages when the context grows too large.
 - [ ] Add conversation summarization later.
-- [ ] Keep short-term memory separate from long-term memory.
+- [x] Keep short-term memory separate from long-term memory.
 
 Short-term memory tasks:
 
-- [ ] Add `ConversationMemory`.
-- [ ] Add `add_user_message`.
-- [ ] Add `add_assistant_message`.
+- [x] Add `ConversationMemory`.
+- [x] Add `add_user_message`.
+- [x] Add `add_assistant_message`.
 - [ ] Add `add_tool_call`.
-- [ ] Add `add_observation`.
-- [ ] Add `get_recent_messages`.
-- [ ] Add `trim_to_limit`.
+- [x] Add `add_observation`.
+- [x] Add `get_recent_messages`.
+- [x] Add `trim_to_limit`.
 - [ ] Add `summarize_older_messages` later.
 
 ### Long-Term Memory
@@ -409,53 +414,94 @@ Long-term memory stores durable facts, notes, preferences, and summaries.
 
 Use SQLite initially because it is simple, inspectable, and local.
 
+Next big implementation milestone:
+
+- [x] Create `src/memory/sqlite_store.py`.
+- [x] Create a `SQLiteMemoryStore` class that owns connection setup and schema initialization.
+- [x] Store the database at `config.store_path`.
+- [x] Add a durable `MemoryRecord` dataclass separate from short-term conversation messages.
+- [x] Implement `save_memory`, `search_memory`, `list_memories`, `delete_memory`, and `summarize_memories`.
+- [x] Use simple keyword search first; defer embeddings and FTS until the base store is stable.
+- [x] Add memory tools: `save_memory`, `search_memory`, `list_memories`, `delete_memory`.
+- [x] Register memory tools in the default `ToolRegistry`.
+- [x] Retrieve relevant memories at the start of each agent turn.
+- [x] Inject only relevant memories into the model prompt.
+- [x] Track selected memory ids in `AgentState`.
+- [x] Add tests proving memory can be saved, searched, listed, deleted, and injected into an agent turn.
+
+Implementation order:
+
+- [x] Step 1: SQLite schema and store API.
+- [x] Step 2: Unit tests for save/search/list/delete/summarize.
+- [x] Step 3: Memory tools using the store API.
+- [x] Step 4: Default registry wiring for memory tools.
+- [x] Step 5: Agent retrieval and prompt injection.
+- [x] Step 6: Agent tests with mocked LLM showing retrieved memory in the prompt.
+- [x] Step 7: TODO/README update and validation.
+
 SQLite schema:
 
-- [ ] Create a `memories` table.
-- [ ] Include `id`.
-- [ ] Include `content`.
-- [ ] Include `created_at`.
-- [ ] Include `updated_at`.
-- [ ] Include `tags`.
-- [ ] Include `metadata`.
-- [ ] Include `importance`.
-- [ ] Include optional `embedding` later.
+- [x] Create a `memories` table.
+- [x] Include `id`.
+- [x] Include `content`.
+- [x] Include `created_at`.
+- [x] Include `updated_at`.
+- [x] Include `tags`.
+- [x] Include `metadata`.
+- [x] Include `importance`.
+- [x] Create indexed `memory_tags` table for profile/preference tag lookup.
+- [x] Include optional `embedding`.
+- [x] Include `source`.
+- [x] Include `confidence`.
+- [x] Include `archived_at`.
+- [x] Include access metadata: `access_count` and `last_accessed_at`.
 
 Long-term memory functions:
 
-- [ ] `save_memory(content: str, tags: list[str], metadata: dict) -> str`
-- [ ] `search_memory(query: str, limit: int = 5) -> list[Memory]`
-- [ ] `list_memories(limit: int = 50) -> list[Memory]`
-- [ ] `delete_memory(memory_id: str) -> bool`
-- [ ] `summarize_memories(query: str | None = None) -> str`
+- [x] `save_memory(content: str, tags: list[str], metadata: dict) -> str`
+- [x] `search_memory(query: str, limit: int = 5) -> list[Memory]`
+- [x] `list_memories(limit: int = 50) -> list[Memory]`
+- [x] `delete_memory(memory_id: str) -> bool`
+- [x] `summarize_memories(query: str | None = None) -> str`
 
 Search phases:
 
-- [ ] Phase 1: implement simple keyword search.
-- [ ] Phase 2: add full-text search with SQLite FTS.
-- [ ] Phase 3: add embedding-based semantic search.
-- [ ] Phase 4: add hybrid keyword plus embedding ranking.
+- [x] Phase 1: implement simple keyword search.
+- [x] Phase 2: add full-text search with SQLite FTS.
+- [x] Phase 3: add embedding-based vector search.
+- [x] Phase 4: add hybrid keyword plus embedding ranking.
 
 Future memory features:
 
-- [ ] Add memory importance scores.
-- [ ] Add memory update.
-- [ ] Add memory delete.
-- [ ] Add memory compaction.
-- [ ] Add automatic memory extraction from conversations.
-- [ ] Add duplicate-memory detection.
-- [ ] Add memory decay or archival.
-- [ ] Add memory source tracking.
-- [ ] Add memory confidence scores.
-- [ ] Add tests for all memory operations.
+- [x] Add memory importance scores.
+- [x] Add memory update.
+- [x] Add memory delete.
+- [x] Add memory compaction.
+- [x] Add automatic memory extraction from explicit user messages.
+- [x] Add duplicate-memory detection.
+- [x] Add memory decay or archival.
+- [x] Add memory source tracking.
+- [x] Add memory confidence scores.
+- [x] Add optional `MEMORY.md` import/export.
+- [x] Add tests for all memory operations.
 
 Memory injection rules:
 
-- [ ] Do not inject every memory into every prompt.
-- [ ] Inject only memories relevant to the current user request.
-- [ ] Keep injected memories short.
-- [ ] Include memory ids in traces.
-- [ ] Make it clear to the model that memories may be incomplete.
+- [x] Do not inject every memory into every prompt.
+- [x] Inject only memories relevant to the current user request.
+- [x] Keep injected memories short.
+- [x] Include memory ids in `AgentState`.
+- [x] Include memory ids in trace files.
+- [x] Make it clear to the model that memories may be incomplete.
+
+Persona and preference memory:
+
+- [x] Treat memories tagged `persona`, `preference`, `style`, or `workflow` as profile memories.
+- [x] Pull profile memories separately from task-relevant search results.
+- [x] Use profile memories to shape tone, level of detail, and task-solving style.
+- [x] Keep profile memories separate from skill instructions.
+- [x] Add conflict handling when two preference memories disagree.
+- [x] Add memory confidence or source metadata for user-profile facts.
 
 ## 8. Skill System
 
@@ -465,6 +511,7 @@ Important distinction:
 
 - [ ] Tool = callable action that executes code or performs an operation.
 - [ ] Skill = instructions, workflow, or behavior guide that tells the agent how to approach a domain.
+- [x] Memory = durable facts, preferences, project context, and prior-work summaries that may shape a turn.
 
 Example:
 
@@ -550,11 +597,11 @@ Prompt types:
 - [ ] Base system prompt.
 - [ ] Tool-use prompt.
 - [ ] Skill-loaded prompt.
-- [ ] Memory-injected prompt.
+- [x] Memory-injected prompt.
 - [ ] JSON tool-call prompt.
 - [ ] Reflection prompt.
 - [ ] Summarization prompt.
-- [ ] JSON repair prompt.
+- [x] JSON repair prompt.
 
 Prompt rules:
 
@@ -562,7 +609,7 @@ Prompt rules:
 - [ ] Keep prompts versioned in code.
 - [ ] Keep skills separate from memory.
 - [ ] Keep tool schemas separate from skill instructions.
-- [ ] Do not inject irrelevant memories.
+- [x] Do not inject irrelevant memories.
 - [ ] Do not inject every skill.
 - [ ] Prefer structured outputs for tool calls.
 - [ ] Tell the model exactly which JSON formats are valid.
@@ -575,9 +622,9 @@ Prompt composition tasks:
 
 - [ ] Create `build_system_prompt`.
 - [ ] Create `format_messages_for_prompt`.
-- [ ] Create `format_memories_for_prompt`.
+- [x] Create `format_memories_for_prompt`.
 - [ ] Create `format_skills_for_prompt`.
-- [ ] Create `format_tools_for_prompt`.
+- [x] Create `format_tools_for_prompt`.
 - [ ] Create `format_observations_for_prompt`.
 - [ ] Add tests that snapshot prompt output for simple cases.
 
@@ -608,31 +655,32 @@ Direct answer format:
 
 Parsing tasks:
 
-- [ ] Create `parse_model_response(raw: str) -> AgentAction`.
-- [ ] Parse JSON safely.
-- [ ] Reject non-object JSON.
-- [ ] Reject missing `type`.
-- [ ] Validate known action types.
-- [ ] Validate `final_answer.content`.
-- [ ] Validate `tool_call.tool_name`.
-- [ ] Validate `tool_call.arguments`.
-- [ ] Handle invalid JSON.
-- [ ] Ask the model to repair malformed JSON.
-- [ ] Limit JSON repair attempts.
+- [x] Create `parse_model_response(raw: str) -> AgentAction`.
+- [x] Parse JSON safely.
+- [x] Reject non-object JSON.
+- [x] Reject missing `type`.
+- [x] Validate known action types.
+- [x] Validate `final_answer.content`.
+- [x] Validate `tool_call.tool_name`.
+- [x] Validate `tool_call.arguments`.
+- [x] Support strict-provider `arguments_json` transport while normalizing to `arguments: dict`.
+- [x] Handle invalid JSON.
+- [x] Ask the model to repair malformed JSON.
+- [x] Limit JSON repair attempts.
 - [ ] Add helpful error observations for invalid tool calls.
-- [ ] Add tests for valid final answers.
-- [ ] Add tests for valid tool calls.
-- [ ] Add tests for malformed JSON.
-- [ ] Add tests for unknown tool names.
-- [ ] Add tests for invalid argument shapes.
+- [x] Add tests for valid final answers.
+- [x] Add tests for valid tool calls.
+- [x] Add tests for malformed JSON.
+- [x] Add tests for unknown tool names.
+- [x] Add tests for invalid argument shapes.
 
 Tool-call loop limits:
 
-- [ ] Set `MAX_TOOL_CALLS_PER_TURN`.
-- [ ] Stop after the limit is reached.
+- [x] Set `MAX_TOOL_CALLS_PER_TURN`.
+- [x] Stop after the limit is reached.
 - [ ] Tell the model the limit.
-- [ ] Return a final error message if the limit is exceeded.
-- [ ] Log every iteration.
+- [x] Return a final error message if the limit is exceeded.
+- [x] Log every iteration.
 
 Future formats:
 
@@ -680,32 +728,32 @@ Logging tasks:
 
 - [ ] Create `src/tracing/logger.py`.
 - [ ] Create a `TraceLogger`.
-- [ ] Create a trace file per session.
-- [ ] Use JSONL for trace events.
-- [ ] Log every user message.
-- [ ] Log selected memories.
+- [x] Create a trace file per session.
+- [x] Use JSONL for trace events.
+- [x] Log every user message.
+- [x] Log selected memories.
 - [ ] Log selected skills.
 - [ ] Log available tools.
 - [ ] Log model prompts or prompt summaries.
-- [ ] Log model responses.
+- [x] Log model responses.
 - [ ] Log parsed actions.
-- [ ] Log tool calls.
-- [ ] Log tool arguments.
+- [x] Log tool calls.
+- [x] Log tool arguments.
 - [ ] Log tool outputs.
-- [ ] Log tool errors.
-- [ ] Log final answers.
+- [x] Log tool errors.
+- [x] Log final answers.
 - [ ] Log timing information.
 - [ ] Log token usage if available.
 
 Trace event examples:
 
 - [ ] `session_started`
-- [ ] `user_message`
-- [ ] `memory_search_started`
-- [ ] `memory_search_completed`
+- [x] `user_message`
+- [x] `memory_search_started`
+- [x] `memory_search_completed`
 - [ ] `skill_selection_completed`
 - [ ] `model_request_started`
-- [ ] `model_response_received`
+- [x] `model_response`
 - [ ] `model_response_parsed`
 - [ ] `tool_call_started`
 - [ ] `tool_call_completed`
@@ -759,12 +807,12 @@ Operational safety:
 
 - [ ] Avoid hidden destructive behavior.
 - [ ] Make all side effects visible in logs.
-- [ ] Do not store secrets in traces.
+- [x] Do not store secrets in traces.
 - [ ] Redact environment variables from logs.
 - [ ] Redact API keys from errors.
 - [ ] Add max tool-call iterations.
 - [ ] Add max model retries.
-- [ ] Add max memory injection size.
+- [x] Add max memory injection size.
 - [ ] Add max skill injection size.
 - [ ] Add clear audit logs.
 
@@ -803,13 +851,19 @@ Shell tool tests:
 
 Memory tests:
 
-- [ ] Test memory database initialization.
-- [ ] Test `save_memory`.
-- [ ] Test `search_memory`.
-- [ ] Test `list_memories`.
-- [ ] Test `delete_memory`.
-- [ ] Test keyword search ranking.
-- [ ] Test empty search results.
+- [x] Test memory database initialization.
+- [x] Test `save_memory`.
+- [x] Test `search_memory`.
+- [x] Test `list_memories`.
+- [x] Test `delete_memory`.
+- [x] Test keyword/FTS search ranking.
+- [x] Test empty search results.
+- [x] Test source and confidence metadata.
+- [x] Test embedding/vector retrieval.
+- [x] Test duplicate detection and compaction.
+- [x] Test archive and restore behavior.
+- [x] Test Markdown import/export.
+- [x] Test explicit memory extraction.
 
 Skill tests:
 
@@ -824,20 +878,20 @@ Parser tests:
 
 - [ ] Test final-answer JSON parsing.
 - [ ] Test tool-call JSON parsing.
-- [ ] Test invalid JSON.
+- [x] Test invalid JSON.
 - [ ] Test missing fields.
 - [ ] Test unknown action type.
 - [ ] Test invalid arguments.
 
 Agent loop tests:
 
-- [ ] Test final-answer-only turn with mocked LLM.
-- [ ] Test one tool call followed by final answer.
-- [ ] Test tool error followed by model recovery.
-- [ ] Test max tool-call limit.
-- [ ] Test memory retrieval injection.
+- [x] Test final-answer-only turn with mocked LLM.
+- [x] Test one tool call followed by final answer.
+- [x] Test tool error followed by model recovery.
+- [x] Test max tool-call limit.
+- [x] Test memory retrieval injection.
 - [ ] Test skill selection injection.
-- [ ] Test trace events are written.
+- [x] Test trace events are written.
 
 ## 15. Milestones
 
@@ -896,25 +950,32 @@ Done when:
 
 Goal: durable local memory backed by SQLite.
 
-- [ ] Create SQLite store.
-- [ ] Create memory schema.
-- [ ] Implement `save_memory`.
-- [ ] Implement `search_memory`.
-- [ ] Implement `list_memories`.
-- [ ] Implement `delete_memory`.
-- [ ] Add simple keyword search.
-- [ ] Add manual memory tool or command.
-- [ ] Retrieve relevant memories during each turn.
-- [ ] Inject relevant memories into the prompt.
-- [ ] Log selected memories.
-- [ ] Add memory tests.
+- [x] Create `src/memory/sqlite_store.py`.
+- [x] Create SQLite store initialization.
+- [x] Create memory schema with `id`, `content`, `created_at`, `updated_at`, `tags`, `metadata`, and `importance`.
+- [x] Implement `save_memory`.
+- [x] Implement `search_memory`.
+- [x] Implement `list_memories`.
+- [x] Implement `delete_memory`.
+- [x] Implement `summarize_memories`.
+- [x] Add simple keyword search.
+- [x] Add memory tools for save/search/list/delete.
+- [x] Register memory tools at startup.
+- [x] Retrieve relevant memories during each turn.
+- [x] Inject relevant memories into the prompt.
+- [x] Track selected memory ids in `AgentState`.
+- [x] Add memory tests.
+- [x] Add agent tests proving memory retrieval affects the prompt.
 
 Done when:
 
-- [ ] I can save a memory.
-- [ ] I can search memories.
-- [ ] The agent can use relevant memories in later turns.
-- [ ] The trace shows which memories were injected.
+- [x] I can save a memory.
+- [x] I can search memories.
+- [x] I can list memories.
+- [x] I can delete memories.
+- [x] The agent exposes memory tools.
+- [x] The agent can use relevant memories in later turns.
+- [x] `AgentState.loaded_memory_ids` shows which memories were injected.
 
 ### Phase 4: Skills
 
@@ -923,9 +984,9 @@ Goal: lazy-load procedural instructions based on the user request.
 - [ ] Create `Skill` dataclass.
 - [ ] Create `SkillRegistry`.
 - [ ] Create initial skill folder structure.
-- [ ] Write `shell/SKILL.md`.
-- [ ] Write `memory/SKILL.md`.
-- [ ] Write `files/SKILL.md`.
+- [x] Write `shell/SKILL.md`.
+- [x] Write `memory/SKILL.md`.
+- [x] Write `files/SKILL.md`.
 - [ ] Load skill metadata at startup.
 - [ ] Implement keyword-based skill selection.
 - [ ] Lazy-load full `SKILL.md` content only when selected.
@@ -945,19 +1006,19 @@ Done when:
 
 Goal: make the harness easier to debug and harder to break.
 
-- [ ] Add structured trace logger.
-- [ ] Create trace file per session.
-- [ ] Log model responses.
-- [ ] Log parsed actions.
-- [ ] Log tool calls and observations.
-- [ ] Log errors.
-- [ ] Add retry handling to the LLM client.
-- [ ] Add timeout handling to the LLM client.
+- [x] Add structured trace logger.
+- [x] Create trace file per session.
+- [x] Log model responses.
+- [x] Log parsed actions.
+- [x] Log tool calls and observations.
+- [x] Log errors.
+- [x] Add retry handling to the LLM client.
+- [x] Add timeout handling to the LLM client.
 - [ ] Add safe output truncation.
-- [ ] Add JSON repair flow.
+- [x] Add JSON repair flow.
 - [ ] Add stronger validation for tool arguments.
-- [ ] Add test coverage for common failures.
-- [ ] Add README usage instructions later.
+- [x] Add test coverage for common failures.
+- [x] Add README usage instructions later.
 
 Done when:
 
@@ -975,8 +1036,9 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
 - [ ] Add reflection prompt.
 - [ ] Add post-tool reflection.
 - [ ] Add conversation summarization.
-- [ ] Add semantic memory with embeddings.
-- [ ] Add memory importance scoring.
+- [x] Add local embedding/vector memory search.
+- [x] Add memory importance scoring.
+- [ ] Add external semantic embedding provider integration.
 - [ ] Add multi-step task execution.
 - [ ] Add optional web/search tool.
 - [ ] Add skill router using an LLM classifier.
@@ -1027,9 +1089,9 @@ The project is successful when:
 - [ ] The agent can run safe shell commands.
 - [ ] The agent can capture stdout, stderr, and exit code from shell commands.
 - [ ] The agent blocks obviously dangerous shell commands.
-- [ ] The agent can save long-term memories.
-- [ ] The agent can search and retrieve long-term memories.
-- [ ] The agent injects only relevant memories into prompts.
+- [x] The agent can save long-term memories.
+- [x] The agent can search and retrieve long-term memories.
+- [x] The agent injects only relevant memories into prompts.
 - [ ] The agent can load relevant skills lazily.
 - [ ] The agent does not inject every skill into every prompt.
 - [ ] The agent can feed tool observations back into the model.
@@ -1037,7 +1099,7 @@ The project is successful when:
 - [ ] I can inspect logs to understand every major decision.
 - [ ] Trace files show user messages, selected memories, selected skills, tool calls, observations, errors, and final answers.
 - [ ] The architecture is simple enough to inspect and maintain.
-- [ ] The code is tested.
+- [x] The code is tested.
 - [ ] The safety limitations are documented clearly.
 
 ## Immediate Next Actions
@@ -1051,3 +1113,12 @@ The project is successful when:
 - [x] Add real OpenAI support.
 - [x] Add short-term message history.
 - [x] Confirm Phase 1 works before adding tools.
+- [x] Complete Phase 2 tool-call loop and built-in tools.
+- [x] Complete Phase 3 SQLite long-term memory.
+- [x] Add SQLite memory schema and store API tests.
+- [x] Add memory tools and register them at startup.
+- [x] Inject retrieved memories into the agent prompt.
+- [ ] Start Phase 4: wire `SkillRegistry` into the agent loop.
+- [ ] Add keyword-based skill selection.
+- [ ] Lazy-load selected `SKILL.md` content into the prompt.
+- [ ] Add tests proving only relevant skills are loaded.

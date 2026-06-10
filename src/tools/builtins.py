@@ -4,13 +4,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.memory import SQLiteMemoryStore
 from src.tools.calculator import calculator_tool
 from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from src.tools.memory import (
+    archive_memory_tool,
+    compact_memories_tool,
+    delete_memory_tool,
+    export_memories_tool,
+    import_memories_tool,
+    list_memories_tool,
+    restore_memory_tool,
+    save_memory_tool,
+    search_memory_tool,
+    summarize_memories_tool,
+    update_memory_tool,
+)
 from src.tools.registry import ToolRegistry
 from src.tools.shell import shell_tool
 
 
-def create_default_tool_registry(project_root: Path, shell_timeout_seconds: int = 10) -> ToolRegistry:
+def create_default_tool_registry(
+    project_root: Path,
+    shell_timeout_seconds: int = 10,
+    memory_store: SQLiteMemoryStore | None = None,
+) -> ToolRegistry:
     """Create the default tool registry for the agent runtime."""
     registry = ToolRegistry()
     registry.register(calculator_tool())
@@ -19,4 +37,16 @@ def create_default_tool_registry(project_root: Path, shell_timeout_seconds: int 
     registry.register(write_file_tool(project_root))
     registry.register(list_files_tool(project_root))
     registry.register(search_files_tool(project_root))
+    if memory_store is not None:
+        registry.register(save_memory_tool(memory_store))
+        registry.register(search_memory_tool(memory_store))
+        registry.register(list_memories_tool(memory_store))
+        registry.register(delete_memory_tool(memory_store))
+        registry.register(update_memory_tool(memory_store))
+        registry.register(summarize_memories_tool(memory_store))
+        registry.register(archive_memory_tool(memory_store))
+        registry.register(restore_memory_tool(memory_store))
+        registry.register(compact_memories_tool(memory_store))
+        registry.register(import_memories_tool(memory_store, project_root))
+        registry.register(export_memories_tool(memory_store, project_root))
     return registry

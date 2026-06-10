@@ -7,7 +7,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 ## Core Capabilities
 
 - Conversation state for short-running sessions.
-- Long-term memory backed by local storage.
+- SQLite-backed long-term memory for durable facts, preferences, and project context.
 - Dynamic tool registration and execution.
 - Built-in command/shell tooling with safety controls.
 - Lazy-loaded skills for domain-specific workflows.
@@ -25,7 +25,13 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository has the Phase 1 chat loop and Phase 2 tool-call loop in place. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop, Phase 2 tool-call loop, and Phase 3 SQLite-backed long-term memory in place. The roadmap lives in [TODO.md](TODO.md).
+
+The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
+
+Long-term memory is stored in the local SQLite database at `src/store.sqlite`, which is ignored by Git. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
+
+Memory search uses SQLite FTS when available, with a fallback keyword search and local vector reranking. Memories also track tags, source, confidence, importance, archive state, and access metadata. A human-readable `MEMORY.md` can be imported or exported through memory tools, but SQLite remains the runtime memory engine.
 
 Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
@@ -42,7 +48,12 @@ src/
     client.py
   memory/
     store.py
+    sqlite_store.py
   tools/
+    builtins.py
+    calculator.py
+    files.py
+    memory.py
     registry.py
     shell.py
   skills/
@@ -76,6 +87,12 @@ If the environment already exists, update it with:
 conda env update -f environment.yml --prune
 ```
 
+If the `chulk` command was installed before a package-layout change, refresh the editable install:
+
+```bash
+python -m pip install -e ".[dev,openai]"
+```
+
 Create your local environment file:
 
 ```bash
@@ -101,19 +118,19 @@ CHULK_MODEL=deepseek-v4-flash
 Run the current CLI:
 
 ```bash
-python -m src.main
+chulk
 ```
 
 Send a single message and exit:
 
 ```bash
-python -m src.main --once "Hello"
+chulk --once "Hello"
 ```
 
 Inspect local configuration:
 
 ```bash
-python -m src.main --show-config
+chulk --show-config
 ```
 
 Run tests:
@@ -138,13 +155,13 @@ pip install -e ".[dev,openai]"
 Run the interactive CLI:
 
 ```bash
-python -m src.main
+chulk
 ```
 
 Run a one-shot message:
 
 ```bash
-python -m src.main --once "Hello"
+chulk --once "Hello"
 ```
 
 Built-in tools currently registered at startup:
@@ -155,6 +172,17 @@ Built-in tools currently registered at startup:
 - `write_file`
 - `list_files`
 - `search_files`
+- `save_memory`
+- `search_memory`
+- `list_memories`
+- `delete_memory`
+- `update_memory`
+- `summarize_memories`
+- `archive_memory`
+- `restore_memory`
+- `compact_memories`
+- `import_memories`
+- `export_memories`
 
 ## Environment
 
@@ -176,7 +204,7 @@ CHULK_LLM_MAX_RETRIES=2
 
 ## Development Roadmap
 
-The implementation should grow in phases:
+The implementation is currently through Phase 3. The next major milestone is Phase 4:
 
 - Phase 1: Minimal chat agent.
 - Phase 2: Tool registry and tool-call loop.

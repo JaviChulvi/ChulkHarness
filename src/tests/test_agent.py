@@ -3,11 +3,13 @@
 import json
 
 from src.core import Agent
-from src.memory import ConversationMemory
+from src.llm import LLMClient
+from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.tools import ToolRegistry, calculator_tool, shell_tool
+from src.tracing import JSONLTraceLogger
 
 
-class RecordingLLMClient:
+class RecordingLLMClient(LLMClient):
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
         self.requests: list[list[dict[str, str]]] = []
@@ -82,8 +84,9 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
             json.dumps(
                 {
                     "type": "tool_call",
+                    "content": None,
                     "tool_name": "calculator",
-                    "arguments": {"expression": "(2 + 3) * 4"},
+                    "arguments_json": json.dumps({"expression": "(2 + 3) * 4"}),
                 }
             ),
             json.dumps({"type": "final_answer", "content": "The result is 20."}),
@@ -115,6 +118,56 @@ def test_agent_prompt_shows_available_tools():
     assert "calculator" in system_prompt
 
 
+def test_agent_injects_profile_and_relevant_long_term_memories(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    profile_id = memory_store.save_memory(
+        "Javier prefers exact file paths and direct implementation steps.",
+        tags=["persona", "preference"],
+        importance=9,
+    )
+    relevant_id = memory_store.save_memory(
+        "ChulkHarness long-term memory is backed by SQLite.",
+        tags=["project", "memory"],
+        importance=5,
+    )
+    unrelated_id = memory_store.save_memory("The shell skill explains safe command usage.", tags=["skill"], importance=10)
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "SQLite memory is configured."})])
+    agent = Agent(llm, memory_store=memory_store)
+
+    response = agent.run_turn("How does SQLite memory work in ChulkHarness?")
+
+    system_prompt = llm.requests[0][0]["content"]
+    assert response == "SQLite memory is configured."
+    assert profile_id in agent.state.loaded_memory_ids
+    assert relevant_id in agent.state.loaded_memory_ids
+    assert unrelated_id not in agent.state.loaded_memory_ids
+    assert "Persona and workflow preferences" in system_prompt
+    assert "Javier prefers exact file paths" in system_prompt
+    assert "Relevant contextual memories" in system_prompt
+    assert "SQLite" in system_prompt
+    assert "It is not a skill, a tool, or an instruction playbook" in system_prompt
+
+
+def test_agent_extracts_explicit_memories_and_writes_memory_trace_events(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "I will remember that."})])
+    agent = Agent(llm, memory_store=memory_store, trace_logger=trace_logger)
+
+    response = agent.run_turn("Please remember that ChulkHarness e2e memory uses SQLite.")
+
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+    saved_memory = memory_store.search_memory("e2e SQLite")[0]
+
+    assert response == "I will remember that."
+    assert agent.state.extracted_memory_ids == [saved_memory.id]
+    assert saved_memory.id in agent.state.loaded_memory_ids
+    assert "memory_extraction_completed" in trace_text
+    assert "memory_search_started" in trace_text
+    assert "memory_search_completed" in trace_text
+    assert saved_memory.id in trace_text
+
+
 def test_agent_can_run_safe_shell_tool(tmp_path):
     llm = RecordingLLMClient(
         [
@@ -132,13 +185,32 @@ def test_agent_can_run_safe_shell_tool(tmp_path):
     assert "stdout:\nhello" in agent.state.observations[0]["observation"]
 
 
-def test_agent_handles_invalid_model_json():
-    llm = RecordingLLMClient(["not json"])
+def test_agent_repairs_invalid_model_json():
+    llm = RecordingLLMClient(
+        [
+            "Claro, puedo ayudarte.",
+            json.dumps({"type": "final_answer", "content": "Claro, puedo ayudarte."}),
+        ]
+    )
     agent = Agent(llm)
 
     response = agent.run_turn("hello")
 
+    assert response == "Claro, puedo ayudarte."
+    assert agent.state.json_repair_attempts == 1
+    assert "JSON repair attempt" in agent.state.errors[0]
+    assert llm.requests[1][-1]["role"] == "user"
+    assert "could not be parsed" in llm.requests[1][-1]["content"]
+
+
+def test_agent_fails_after_json_repair_limit():
+    llm = RecordingLLMClient(["not json", "still not json"])
+    agent = Agent(llm, max_json_repair_attempts=1)
+
+    response = agent.run_turn("hello")
+
     assert "not valid action JSON" in response
+    assert agent.state.json_repair_attempts == 1
     assert agent.state.errors
 
 

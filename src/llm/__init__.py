@@ -2,6 +2,8 @@
 
 from src.llm.client import (
     DeepSeekChatCompletionsClient,
+    LLMActionError,
+    LLMActionResult,
     LLMClient,
     LLMConfigurationError,
     LLMError,
@@ -11,6 +13,8 @@ from src.llm.client import (
 
 __all__ = [
     "DeepSeekChatCompletionsClient",
+    "LLMActionError",
+    "LLMActionResult",
     "LLMClient",
     "LLMConfigurationError",
     "LLMError",
