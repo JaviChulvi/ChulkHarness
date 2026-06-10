@@ -64,6 +64,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "llm_provider: deepseek" in output
     assert "model: test-model" in output
     assert "deepseek_api_key: set" in output
+    assert "trace_max_prompt_chars: 50000" in output
 
 
 def test_main_runs_one_message_with_fake_llm(capsys):
@@ -100,6 +101,31 @@ def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_p
 
     assert exit_code == 0
     assert output.strip() == "shell skill loaded"
+
+
+def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_TRACE_MAX_PROMPT_CHARS", "100000")
+    skill_dir = tmp_path / "skills" / "shell"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Shell Skill\n\nUse this skill when command execution is needed.\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["--once", "run a shell command"], llm_client_factory=fake_factory)
+
+    output = capsys.readouterr().out
+    trace_file = next((tmp_path / "traces").glob("*.jsonl"))
+    events = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+    request_payload = next(event["payload"] for event in events if event["type"] == "model_request_started")
+
+    assert exit_code == 0
+    assert output.strip() == "hello from fake llm"
+    assert request_payload["truncated"] is False
+    assert request_payload["messages"][0]["role"] == "system"
+    assert "Skill: shell" in request_payload["messages"][0]["content"]
+    assert request_payload["messages"][-1]["content"] == "run a shell command"
 
 
 def test_main_memory_persists_across_separate_agent_sessions(monkeypatch, tmp_path, capsys):

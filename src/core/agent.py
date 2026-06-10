@@ -53,6 +53,7 @@ class Agent:
         max_json_repair_attempts: int = 2,
         max_skills_per_turn: int = 3,
         max_skill_content_chars: int = 4000,
+        trace_max_prompt_chars: int = 50000,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -60,6 +61,8 @@ class Agent:
             raise ValueError("max_skills_per_turn must be greater than zero")
         if max_skill_content_chars < 1:
             raise ValueError("max_skill_content_chars must be greater than zero")
+        if trace_max_prompt_chars < 1:
+            raise ValueError("trace_max_prompt_chars must be greater than zero")
         self.llm_client = llm_client
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()
@@ -72,6 +75,7 @@ class Agent:
         self.max_json_repair_attempts = max_json_repair_attempts
         self.max_skills_per_turn = max_skills_per_turn
         self.max_skill_content_chars = max_skill_content_chars
+        self.trace_max_prompt_chars = trace_max_prompt_chars
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -88,11 +92,25 @@ class Agent:
         self.memory.add_user_message(clean_message)
         self._trace("user_message", {"content": clean_message})
         tool_calls_used = 0
+        model_request_count = 0
 
         while True:
+            messages = self._build_messages()
+            model_request_count += 1
+            self._trace(
+                "model_request_started",
+                _format_model_request_trace(
+                    messages,
+                    max_prompt_chars=self.trace_max_prompt_chars,
+                    request_index=model_request_count,
+                    loaded_memory_ids=self.state.loaded_memory_ids,
+                    loaded_skill_names=self.state.loaded_skill_names,
+                    available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
+                ),
+            )
             try:
                 action_result = self.llm_client.complete_action(
-                    self._build_messages(),
+                    messages,
                     max_repair_attempts=self.max_json_repair_attempts,
                 )
             except LLMActionError as exc:
@@ -246,3 +264,47 @@ def _format_action_trace(action: FinalAnswerAction | ToolCallAction) -> dict:
     if isinstance(action, FinalAnswerAction):
         return {"type": action.type}
     return {"type": action.type, "tool_name": action.tool_name, "arguments": action.arguments}
+
+
+def _format_model_request_trace(
+    messages: list[dict[str, str]],
+    *,
+    max_prompt_chars: int,
+    request_index: int,
+    loaded_memory_ids: list[str],
+    loaded_skill_names: list[str],
+    available_tool_names: list[str],
+) -> dict:
+    prompt_char_count = sum(len(str(message.get("content", ""))) for message in messages)
+    remaining_chars = max_prompt_chars
+    traced_messages = []
+    returned_char_count = 0
+
+    for message in messages:
+        content = str(message.get("content", ""))
+        content_char_count = len(content)
+        returned_content = content[:remaining_chars] if remaining_chars > 0 else ""
+        remaining_chars = max(0, remaining_chars - len(returned_content))
+        returned_char_count += len(returned_content)
+        traced_messages.append(
+            {
+                "role": str(message.get("role", "")),
+                "content": returned_content,
+                "content_char_count": content_char_count,
+                "returned_content_char_count": len(returned_content),
+                "truncated": len(returned_content) < content_char_count,
+            }
+        )
+
+    return {
+        "request_index": request_index,
+        "messages": traced_messages,
+        "message_count": len(messages),
+        "prompt_char_count": prompt_char_count,
+        "returned_prompt_char_count": returned_char_count,
+        "max_prompt_chars": max_prompt_chars,
+        "truncated": returned_char_count < prompt_char_count,
+        "loaded_memory_ids": loaded_memory_ids,
+        "loaded_skill_names": loaded_skill_names,
+        "available_tool_names": available_tool_names,
+    }

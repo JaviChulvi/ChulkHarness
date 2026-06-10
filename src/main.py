@@ -62,6 +62,7 @@ def format_config(config: Config) -> str:
         "shell_timeout_seconds": config.shell_timeout_seconds,
         "llm_timeout_seconds": config.llm_timeout_seconds,
         "llm_max_retries": config.llm_max_retries,
+        "trace_max_prompt_chars": config.trace_max_prompt_chars,
     }
     lines = ["ChulkHarness configuration:"]
     lines.extend(f"  {key}: {value}" for key, value in values.items())
@@ -99,6 +100,7 @@ def create_agent(
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         max_skills_per_turn=config.max_skills_per_turn,
         max_skill_content_chars=config.max_skill_content_chars,
+        trace_max_prompt_chars=config.trace_max_prompt_chars,
     )
 
 

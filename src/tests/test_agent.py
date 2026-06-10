@@ -210,6 +210,61 @@ def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path)
     assert "shell" in trace_text
 
 
+def test_agent_traces_full_model_request_with_redaction(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
+    agent = Agent(
+        llm,
+        trace_logger=trace_logger,
+        system_prompt="System prompt includes OPENAI_API_KEY=sk-testsecret123456 and normal instructions.",
+        trace_max_prompt_chars=10000,
+    )
+
+    response = agent.run_turn("hello")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    request_event = next(event for event in events if event["type"] == "model_request_started")
+    payload = request_event["payload"]
+    system_content = payload["messages"][0]["content"]
+
+    assert response == "ok"
+    assert payload["message_count"] == 2
+    assert payload["truncated"] is False
+    assert payload["prompt_char_count"] == payload["returned_prompt_char_count"]
+    assert "normal instructions" in system_content
+    assert "sk-testsecret123456" not in system_content
+    assert "OPENAI_API_KEY= [redacted]" in system_content
+    assert payload["messages"][-1] == {
+        "role": "user",
+        "content": "hello",
+        "content_char_count": 5,
+        "returned_content_char_count": 5,
+        "truncated": False,
+    }
+
+
+def test_agent_truncates_large_model_request_trace(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
+    agent = Agent(
+        llm,
+        trace_logger=trace_logger,
+        system_prompt="x" * 200,
+        trace_max_prompt_chars=40,
+    )
+
+    agent.run_turn("hello")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    payload = next(event["payload"] for event in events if event["type"] == "model_request_started")
+
+    assert payload["truncated"] is True
+    assert payload["returned_prompt_char_count"] == 40
+    assert payload["prompt_char_count"] > 40
+    assert payload["messages"][0]["truncated"] is True
+    assert len(payload["messages"][0]["content"]) == 40
+
+
 def test_agent_selects_memory_and_file_skills_for_matching_requests(tmp_path):
     skill_registry = create_test_skill_registry(tmp_path)
     llm = RecordingLLMClient(

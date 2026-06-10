@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -43,6 +44,8 @@ def _redact(value: Any) -> Any:
         return {key: _redact_secret(key, item) for key, item in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
 
 
@@ -51,3 +54,14 @@ def _redact_secret(key: str, value: Any) -> Any:
     if any(marker in lowered for marker in {"api_key", "token", "secret", "password"}):
         return "[redacted]"
     return _redact(value)
+
+
+def _redact_text(text: str) -> str:
+    """Redact obvious secret values inside free-form trace text."""
+    redacted = re.sub(
+        r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|token|secret|password)[a-z0-9_-]*)\s*([:=])\s*['\"]?[^'\"\s]+",
+        lambda match: f"{match.group(1)}{match.group(2)} [redacted]",
+        text,
+    )
+    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[redacted]", redacted)
+    return redacted

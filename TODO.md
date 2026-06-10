@@ -734,7 +734,7 @@ Logging tasks:
 - [x] Log selected memories.
 - [x] Log selected skills.
 - [ ] Log available tools.
-- [ ] Log model prompts or prompt summaries.
+- [x] Log full model prompts with redaction and a size cap.
 - [x] Log model responses.
 - [x] Log parsed actions.
 - [x] Log tool calls.
@@ -752,7 +752,7 @@ Trace event examples:
 - [x] `memory_search_started`
 - [x] `memory_search_completed`
 - [ ] `skill_selection_completed`
-- [ ] `model_request_started`
+- [x] `model_request_started`
 - [x] `model_response`
 - [ ] `model_response_parsed`
 - [ ] `tool_call_started`
@@ -763,10 +763,10 @@ Trace event examples:
 
 Debugging goals:
 
-- [ ] Make it possible to replay a session mentally from the trace.
+- [x] Make it possible to replay a session mentally from the trace.
 - [ ] Make it obvious why a tool was called.
 - [ ] Make it obvious which memories were injected.
-- [ ] Make it obvious which skills were loaded.
+- [x] Make it obvious which skills were loaded.
 - [ ] Make failures visible without exposing secrets.
 
 ## 13. Safety and Permissions
@@ -1015,6 +1015,7 @@ Goal: make the harness easier to debug and harder to break.
 - [x] Add retry handling to the LLM client.
 - [x] Add timeout handling to the LLM client.
 - [ ] Add safe output truncation.
+- [x] Add full prompt tracing with redaction and `CHULK_TRACE_MAX_PROMPT_CHARS`.
 - [x] Add JSON repair flow.
 - [ ] Add stronger validation for tool arguments.
 - [x] Add test coverage for common failures.

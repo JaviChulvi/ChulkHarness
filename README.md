@@ -35,6 +35,8 @@ Memory search uses SQLite FTS when available, with a fallback keyword search and
 
 Skills live in the root-level `skills/` directory. Chulk loads only skill metadata at startup, chooses relevant skills with deterministic keyword matching, and injects full `SKILL.md` instructions only for selected skills in the current turn. Skill instructions stay separate from memory and tool schemas.
 
+Traces are stored as JSONL files in `traces/`. Each model request logs the full message list sent to the provider by default, with obvious secrets redacted and a configurable prompt character cap.
+
 Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
 ## Planned Structure
@@ -202,6 +204,7 @@ CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_HISTORY_LIMIT=20
 CHULK_MAX_SKILLS_PER_TURN=3
 CHULK_MAX_SKILL_CONTENT_CHARS=4000
+CHULK_TRACE_MAX_PROMPT_CHARS=50000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```

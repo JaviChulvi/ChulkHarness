@@ -14,6 +14,7 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MAX_SKILLS_PER_TURN = 3
 DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
+DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
 SUPPORTED_LLM_PROVIDERS = {"openai", "deepseek"}
 
 
@@ -37,6 +38,7 @@ class Config:
     shell_timeout_seconds: int = 10
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
+    trace_max_prompt_chars: int = DEFAULT_TRACE_MAX_PROMPT_CHARS
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
@@ -112,4 +114,5 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         shell_timeout_seconds=_env_int(env, "CHULK_SHELL_TIMEOUT_SECONDS", 10),
         llm_timeout_seconds=_env_float(env, "CHULK_LLM_TIMEOUT_SECONDS", 60.0),
         llm_max_retries=_env_int(env, "CHULK_LLM_MAX_RETRIES", 2),
+        trace_max_prompt_chars=_env_int(env, "CHULK_TRACE_MAX_PROMPT_CHARS", DEFAULT_TRACE_MAX_PROMPT_CHARS),
     )
