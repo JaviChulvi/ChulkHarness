@@ -135,6 +135,8 @@ Shell and file tools are high-risk. Enforce safety in Python, not only in prompt
 - Block obviously destructive shell commands.
 - Use command timeouts.
 - Capture stdout, stderr, and exit code.
+- Validate model-generated tool arguments against the tool schema before execution.
+- Return field-level validation observations for invalid tool calls so the model can recover.
 - Send large tool outputs back as bounded head/tail previews and preserve full truncated text in trace artifacts.
 - Treat trace artifacts as raw sensitive runtime output.
 - Restrict file reads/writes to the configured project root.

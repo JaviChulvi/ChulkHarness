@@ -11,6 +11,38 @@ from typing import Any
 class ToolValidationError(ValueError):
     """Raised when tool arguments do not match the declared schema."""
 
+    def __init__(self, tool_name: str, issues: list["ToolValidationIssue"], args_schema: dict[str, Any]) -> None:
+        self.tool_name = tool_name
+        self.issues = issues
+        self.args_schema = args_schema
+        super().__init__(_format_validation_summary(tool_name, issues))
+
+
+@dataclass(frozen=True)
+class ToolValidationIssue:
+    """One validation problem for model-provided tool arguments."""
+
+    path: str
+    message: str
+    expected: str | None = None
+    actual: str | None = None
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "path": self.path,
+            "message": self.message,
+            "expected": self.expected,
+            "actual": self.actual,
+        }
+
+    def to_prompt_line(self) -> str:
+        detail = f"{self.path}: {self.message}"
+        if self.expected:
+            detail += f" Expected: {self.expected}."
+        if self.actual:
+            detail += f" Got: {self.actual}."
+        return detail
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -93,11 +125,17 @@ class ToolRegistry:
         try:
             tool = self.get(name)
         except KeyError as exc:
+            available_tools = sorted(self._tools)
             result = ToolResult(
                 tool_name=name,
                 success=False,
-                observation=f"Unknown tool: {name}",
-                error=str(exc),
+                observation=_format_unknown_tool_observation(name, available_tools),
+                error="unknown_tool",
+                metadata={
+                    "requested_tool_name": name,
+                    "available_tools": available_tools,
+                    "exception": str(exc),
+                },
             )
             self._log_call(name, arguments, result)
             return result
@@ -108,37 +146,49 @@ class ToolRegistry:
             if not isinstance(result, ToolResult):
                 result = ToolResult(tool_name=tool.name, success=True, observation=str(result))
         except ToolValidationError as exc:
-            result = ToolResult(tool_name=tool.name, success=False, observation=str(exc), error="invalid_arguments")
+            result = ToolResult(
+                tool_name=tool.name,
+                success=False,
+                observation=_format_invalid_arguments_observation(tool, exc.issues),
+                error="invalid_arguments",
+                metadata={
+                    "validation_errors": [issue.to_dict() for issue in exc.issues],
+                    "args_schema": tool.args_schema,
+                },
+            )
         except Exception as exc:
-            result = ToolResult(tool_name=tool.name, success=False, observation="Tool execution failed.", error=str(exc))
+            result = ToolResult(
+                tool_name=tool.name,
+                success=False,
+                observation=(
+                    f"Tool execution failed for {tool.name}: {exc}. "
+                    "Retry only if corrected arguments or a safer alternative would change the outcome."
+                ),
+                error=str(exc),
+                metadata={"exception_type": type(exc).__name__},
+            )
 
         self._log_call(name, arguments, result)
         return result
 
     def _validate_arguments(self, tool: Tool, arguments: dict[str, Any]) -> None:
-        if not isinstance(arguments, dict):
-            raise ToolValidationError("Tool arguments must be an object")
-
         schema = tool.args_schema or {}
-        required = schema.get("required", [])
-        properties = schema.get("properties", {})
-        additional_allowed = schema.get("additionalProperties", True)
+        issues: list[ToolValidationIssue] = []
 
-        for field_name in required:
-            if field_name not in arguments:
-                raise ToolValidationError(f"Missing required argument: {field_name}")
+        if not isinstance(arguments, dict):
+            issues.append(
+                ToolValidationIssue(
+                    path="$",
+                    message="tool arguments must be a JSON object",
+                    expected="object",
+                    actual=_json_type_name(arguments),
+                )
+            )
+        else:
+            _validate_object("$", arguments, schema, issues)
 
-        if not additional_allowed:
-            unknown = sorted(set(arguments) - set(properties))
-            if unknown:
-                raise ToolValidationError(f"Unknown arguments: {', '.join(unknown)}")
-
-        for field_name, value in arguments.items():
-            if field_name not in properties:
-                continue
-            expected = properties[field_name].get("type")
-            if expected and not _matches_json_type(value, expected):
-                raise ToolValidationError(f"Argument {field_name} must be {expected}")
+        if issues:
+            raise ToolValidationError(tool.name, issues, schema)
 
     def _log_call(self, name: str, arguments: dict[str, Any], result: ToolResult) -> None:
         self.call_log.append(
@@ -173,3 +223,182 @@ def _matches_single_json_type(value: Any, expected: str) -> bool:
     if expected == "null":
         return value is None
     return True
+
+
+def _validate_object(path: str, value: dict[str, Any], schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
+    expected = schema.get("type")
+    if expected and not _matches_json_type(value, expected):
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="value has the wrong type",
+                expected=_format_expected_type(expected),
+                actual=_json_type_name(value),
+            )
+        )
+        return
+
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    additional_allowed = schema.get("additionalProperties", True)
+
+    for field_name in required:
+        if field_name not in value:
+            issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Missing required argument"))
+
+    if not additional_allowed:
+        for field_name in sorted(set(value) - set(properties)):
+            issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Unknown argument"))
+
+    for field_name, item in value.items():
+        field_schema = properties.get(field_name)
+        if field_schema is None:
+            continue
+        _validate_value(_child_path(path, field_name), item, field_schema, issues)
+
+
+def _validate_value(path: str, value: Any, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
+    expected = schema.get("type")
+    if expected and not _matches_json_type(value, expected):
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="value has the wrong type",
+                expected=_format_expected_type(expected),
+                actual=_json_type_name(value),
+            )
+        )
+        return
+
+    if "enum" in schema and value not in schema["enum"]:
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="value is not one of the allowed options",
+                expected=", ".join(str(item) for item in schema["enum"]),
+                actual=repr(value),
+            )
+        )
+
+    if isinstance(value, str):
+        _validate_string(path, value, schema, issues)
+    elif isinstance(value, int | float) and not isinstance(value, bool):
+        _validate_number(path, value, schema, issues)
+    elif isinstance(value, list):
+        _validate_array(path, value, schema, issues)
+    elif isinstance(value, dict):
+        _validate_object(path, value, schema, issues)
+
+
+def _validate_string(path: str, value: str, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
+    min_length = schema.get("minLength")
+    max_length = schema.get("maxLength")
+    if isinstance(min_length, int) and len(value) < min_length:
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="string is too short",
+                expected=f"at least {min_length} characters",
+                actual=f"{len(value)} characters",
+            )
+        )
+    if isinstance(max_length, int) and len(value) > max_length:
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="string is too long",
+                expected=f"at most {max_length} characters",
+                actual=f"{len(value)} characters",
+            )
+        )
+
+
+def _validate_number(path: str, value: int | float, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
+    minimum = schema.get("minimum")
+    maximum = schema.get("maximum")
+    if isinstance(minimum, int | float) and value < minimum:
+        issues.append(
+            ToolValidationIssue(path=path, message="number is too small", expected=f">= {minimum}", actual=str(value))
+        )
+    if isinstance(maximum, int | float) and value > maximum:
+        issues.append(
+            ToolValidationIssue(path=path, message="number is too large", expected=f"<= {maximum}", actual=str(value))
+        )
+
+
+def _validate_array(path: str, value: list[Any], schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
+    min_items = schema.get("minItems")
+    max_items = schema.get("maxItems")
+    if isinstance(min_items, int) and len(value) < min_items:
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="array has too few items",
+                expected=f"at least {min_items} items",
+                actual=f"{len(value)} items",
+            )
+        )
+    if isinstance(max_items, int) and len(value) > max_items:
+        issues.append(
+            ToolValidationIssue(
+                path=path,
+                message="array has too many items",
+                expected=f"at most {max_items} items",
+                actual=f"{len(value)} items",
+            )
+        )
+    item_schema = schema.get("items")
+    if isinstance(item_schema, dict):
+        for index, item in enumerate(value):
+            _validate_value(f"{path}[{index}]", item, item_schema, issues)
+
+
+def _child_path(parent: str, child: str) -> str:
+    return child if parent == "$" else f"{parent}.{child}"
+
+
+def _json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _format_expected_type(expected: str | list[str]) -> str:
+    if isinstance(expected, list):
+        return " or ".join(expected)
+    return expected
+
+
+def _format_validation_summary(tool_name: str, issues: list[ToolValidationIssue]) -> str:
+    issue_text = "; ".join(issue.to_prompt_line() for issue in issues)
+    return f"Invalid arguments for tool {tool_name}: {issue_text}"
+
+
+def _format_invalid_arguments_observation(tool: Tool, issues: list[ToolValidationIssue]) -> str:
+    lines = [
+        f"Tool call failed before execution because arguments for {tool.name} were invalid.",
+        "Validation errors:",
+    ]
+    lines.extend(f"- {issue.to_prompt_line()}" for issue in issues)
+    lines.append("Retry with arguments_json that matches this tool schema, or answer directly if no tool is needed.")
+    return "\n".join(lines)
+
+
+def _format_unknown_tool_observation(name: str, available_tools: list[str]) -> str:
+    available = ", ".join(available_tools) if available_tools else "none"
+    return (
+        f"Unknown tool: {name}. Tool call failed before execution because {name} is not a registered tool. "
+        f"Available tools: {available}. Retry with one of the available tool names, or answer directly if no tool is needed."
+    )

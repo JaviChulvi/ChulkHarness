@@ -47,6 +47,58 @@ def test_registry_validates_required_arguments():
     assert not result.success
     assert result.error == "invalid_arguments"
     assert "Missing required argument" in result.observation
+    assert result.metadata["validation_errors"] == [
+        {
+            "path": "expression",
+            "message": "Missing required argument",
+            "expected": None,
+            "actual": None,
+        }
+    ]
+
+
+def test_registry_reports_multiple_argument_validation_errors():
+    calls = []
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="profile",
+            description="Validate profile arguments.",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "age": {"type": "integer", "minimum": 1, "maximum": 120},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 3,
+                    },
+                },
+                "required": ["age"],
+                "additionalProperties": False,
+            },
+            callable=lambda arguments: calls.append(arguments) or ToolResult("profile", True, "ok"),
+        )
+    )
+
+    result = registry.run("profile", {"age": 0, "tags": ["ok", ""], "extra": True})
+
+    assert not result.success
+    assert result.error == "invalid_arguments"
+    assert calls == []
+    assert "age: number is too small" in result.observation
+    assert "tags[1]: string is too short" in result.observation
+    assert "extra: Unknown argument" in result.observation
+    assert result.metadata["validation_errors"] == [
+        {"path": "extra", "message": "Unknown argument", "expected": None, "actual": None},
+        {"path": "age", "message": "number is too small", "expected": ">= 1", "actual": "0"},
+        {
+            "path": "tags[1]",
+            "message": "string is too short",
+            "expected": "at least 1 characters",
+            "actual": "0 characters",
+        },
+    ]
 
 
 def test_registry_catches_tool_exceptions():
@@ -66,8 +118,10 @@ def test_registry_catches_tool_exceptions():
     result = registry.run("broken", {})
 
     assert not result.success
-    assert result.observation == "Tool execution failed."
+    assert "Tool execution failed" in result.observation
+    assert "boom" in result.observation
     assert result.error == "boom"
+    assert result.metadata["exception_type"] == "RuntimeError"
 
 
 def test_preview_text_preserves_head_and_tail_when_truncated():
@@ -91,6 +145,8 @@ def test_registry_returns_safe_unknown_tool_error():
 
     assert not result.success
     assert "Unknown tool" in result.observation
+    assert result.error == "unknown_tool"
+    assert result.metadata["available_tools"] == []
 
 
 def test_calculator_evaluates_arithmetic():

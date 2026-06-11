@@ -130,13 +130,15 @@ def test_agent_prompt_shows_available_tools():
     llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
     registry = ToolRegistry()
     registry.register(calculator_tool())
-    agent = Agent(llm, tool_registry=registry)
+    agent = Agent(llm, tool_registry=registry, max_tool_calls_per_turn=4)
 
     agent.run_turn("hello")
 
     system_prompt = llm.requests[0][0]["content"]
     assert "Available tools" in system_prompt
     assert "calculator" in system_prompt
+    assert "Tool-call limit" in system_prompt
+    assert "at most 4 tool calls" in system_prompt
 
 
 def test_agent_injects_profile_and_relevant_long_term_memories(tmp_path):
@@ -307,6 +309,33 @@ def test_agent_can_run_safe_shell_tool(tmp_path):
     assert "stdout:\nhello" in agent.state.observations[0]["observation"]
 
 
+def test_agent_traces_tool_call_lifecycle(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "calculator", "arguments": {"expression": "1 + 1"}}),
+            json.dumps({"type": "final_answer", "content": "The result is 2."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    response = agent.run_turn("what is 1 + 1?")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    completed_payload = next(event["payload"] for event in events if event["type"] == "tool_call_completed")
+
+    assert response == "The result is 2."
+    assert "tool_call_started" in event_types
+    assert "tool_call_completed" in event_types
+    assert "model_response_parsed" in event_types
+    assert completed_payload["tool_name"] == "calculator"
+    assert completed_payload["iteration"] == 1
+    assert completed_payload["success"] is True
+
+
 def test_agent_truncates_tool_output_but_preserves_full_artifact(tmp_path):
     full_stdout = "HEAD-" + ("middle-" * 200) + "IMPORTANT_TAIL"
 
@@ -455,6 +484,35 @@ def test_agent_feeds_unknown_tool_observation_back_to_model():
 
     assert response == "I could not use that tool."
     assert "Unknown tool" in agent.state.observations[0]["observation"]
+
+
+def test_agent_feeds_invalid_tool_arguments_back_to_model(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "calculator", "arguments": {"expression": 123}}),
+            json.dumps({"type": "final_answer", "content": "I corrected the tool arguments issue."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    response = agent.run_turn("calculate this")
+
+    observation = agent.state.observations[0]["observation"]
+    output_metadata = agent.state.observations[0]["output_metadata"]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    failed_payload = next(event["payload"] for event in events if event["type"] == "tool_call_failed")
+
+    assert response == "I corrected the tool arguments issue."
+    assert "failed before execution" in observation
+    assert "expression: value has the wrong type" in observation
+    assert "Expected: string" in observation
+    assert output_metadata["success"] is False
+    assert failed_payload["error"] == "invalid_arguments"
+    assert failed_payload["metadata"]["validation_errors"][0]["path"] == "expression"
+    assert any(message["role"] == "observation" and "value has the wrong type" in message["content"] for message in llm.requests[1])
 
 
 def test_agent_enforces_tool_call_limit():

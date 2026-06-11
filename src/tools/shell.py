@@ -32,8 +32,18 @@ def shell_tool(project_root: Path, timeout_seconds: int = 10) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Command to run from the project root."},
-                "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
+                "command": {
+                    "type": "string",
+                    "description": "Command to run from the project root.",
+                    "minLength": 1,
+                    "maxLength": 4000,
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Optional timeout in seconds.",
+                    "minimum": 1,
+                    "maximum": timeout_seconds,
+                },
             },
             "required": ["command"],
             "additionalProperties": False,

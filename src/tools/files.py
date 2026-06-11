@@ -20,7 +20,13 @@ def read_file_tool(project_root: Path) -> Tool:
         description="Read a UTF-8 text file inside the project directory.",
         args_schema={
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "File path relative to the project root."}},
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the project root.",
+                    "minLength": 1,
+                }
+            },
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -35,8 +41,16 @@ def write_file_tool(project_root: Path) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path relative to the project root."},
-                "content": {"type": "string", "description": "Text content to write."},
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the project root.",
+                    "minLength": 1,
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text content to write.",
+                    "maxLength": MAX_TEXT_FILE_BYTES,
+                },
                 "overwrite": {"type": "boolean", "description": "Set true to overwrite an existing file."},
             },
             "required": ["path", "content"],
@@ -53,10 +67,23 @@ def list_files_tool(project_root: Path) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory path relative to the project root."},
-                "pattern": {"type": "string", "description": "Glob pattern, for example *.py."},
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to the project root.",
+                    "minLength": 1,
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern, for example *.py.",
+                    "minLength": 1,
+                },
                 "recursive": {"type": "boolean", "description": "Whether to search recursively."},
-                "max_results": {"type": "integer", "description": "Maximum number of files to return."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of files to return.",
+                    "minimum": 1,
+                    "maximum": 500,
+                },
             },
             "required": [],
             "additionalProperties": False,
@@ -72,10 +99,27 @@ def search_files_tool(project_root: Path) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Text to search for."},
-                "path": {"type": "string", "description": "Directory path relative to the project root."},
-                "pattern": {"type": "string", "description": "Glob pattern, for example *.py."},
-                "max_results": {"type": "integer", "description": "Maximum number of matches to return."},
+                "query": {
+                    "type": "string",
+                    "description": "Text to search for.",
+                    "minLength": 1,
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to the project root.",
+                    "minLength": 1,
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern, for example *.py.",
+                    "minLength": 1,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return.",
+                    "minimum": 1,
+                    "maximum": 500,
+                },
             },
             "required": ["query"],
             "additionalProperties": False,

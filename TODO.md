@@ -667,7 +667,7 @@ Parsing tasks:
 - [x] Handle invalid JSON.
 - [x] Ask the model to repair malformed JSON.
 - [x] Limit JSON repair attempts.
-- [ ] Add helpful error observations for invalid tool calls.
+- [x] Add helpful error observations for invalid tool calls.
 - [x] Add tests for valid final answers.
 - [x] Add tests for valid tool calls.
 - [x] Add tests for malformed JSON.
@@ -678,7 +678,7 @@ Tool-call loop limits:
 
 - [x] Set `MAX_TOOL_CALLS_PER_TURN`.
 - [x] Stop after the limit is reached.
-- [ ] Tell the model the limit.
+- [x] Tell the model the limit.
 - [x] Return a final error message if the limit is exceeded.
 - [x] Log every iteration.
 
@@ -751,14 +751,14 @@ Trace event examples:
 - [x] `user_message`
 - [x] `memory_search_started`
 - [x] `memory_search_completed`
-- [ ] `skill_selection_completed`
+- [x] `skill_selection_completed`
 - [x] `model_request_started`
 - [x] `model_response`
-- [ ] `model_response_parsed`
-- [ ] `tool_call_started`
-- [ ] `tool_call_completed`
-- [ ] `tool_call_failed`
-- [ ] `final_answer`
+- [x] `model_response_parsed`
+- [x] `tool_call_started`
+- [x] `tool_call_completed`
+- [x] `tool_call_failed`
+- [x] `final_answer`
 - [ ] `session_finished`
 
 Debugging goals:
@@ -1021,13 +1021,13 @@ Goal: make the harness easier to debug and harder to break.
   - [x] Tell the model to inspect artifacts when the omitted middle may matter.
 - [x] Add full prompt tracing with redaction and `CHULK_TRACE_MAX_PROMPT_CHARS`.
 - [x] Add JSON repair flow.
-- [ ] Add stronger validation for tool arguments.
+- [x] Add stronger validation for tool arguments.
 - [x] Add test coverage for common failures.
 - [x] Add README usage instructions later.
 
 Done when:
 
-- [ ] Failed tool calls are understandable.
+- [x] Failed tool calls are understandable.
 - [x] Invalid model JSON is handled gracefully.
 - [x] A trace file can explain a full turn.
 - [x] Tests cover the main agent loop.

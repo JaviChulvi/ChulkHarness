@@ -49,6 +49,8 @@ def calculator_tool() -> Tool:
                 "expression": {
                     "type": "string",
                     "description": "Arithmetic expression to evaluate, for example: (2 + 3) * 4",
+                    "minLength": 1,
+                    "maxLength": 200,
                 }
             },
             "required": ["expression"],

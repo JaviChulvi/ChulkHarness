@@ -35,6 +35,15 @@ Do not include Markdown fences, comments, or prose outside the JSON object.
 """
 
 
+def format_tool_call_rules(max_tool_calls_per_turn: int) -> str:
+    """Format per-turn tool-call limits and recovery guidance."""
+    return (
+        f"Tool-call limit: you may request at most {max_tool_calls_per_turn} tool calls for this user turn. "
+        "If a tool observation reports invalid arguments, retry only when you can correct the arguments from the schema. "
+        "If a tool is unavailable or still failing, explain the limitation instead of repeatedly calling it."
+    )
+
+
 def format_tools_for_prompt(tool_descriptions: str) -> str:
     """Format available tools for prompt injection."""
     if not tool_descriptions:

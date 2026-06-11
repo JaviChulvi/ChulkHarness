@@ -11,7 +11,13 @@ from uuid import uuid4
 
 from src.core.actions import FinalAnswerAction, ToolCallAction
 from src.core.prompts import BASE_SYSTEM_PROMPT
-from src.core.prompts import JSON_ACTION_PROMPT, format_memories_for_prompt, format_skills_for_prompt, format_tools_for_prompt
+from src.core.prompts import (
+    JSON_ACTION_PROMPT,
+    format_memories_for_prompt,
+    format_skills_for_prompt,
+    format_tool_call_rules,
+    format_tools_for_prompt,
+)
 from src.llm import LLMActionError, LLMClient
 from src.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from src.skills import SkillRegistry, SkillSelection
@@ -143,6 +149,7 @@ class Agent:
                 },
             )
             self._trace("parsed_action", _format_action_trace(action))
+            self._trace("model_response_parsed", _format_action_trace(action))
 
             if isinstance(action, FinalAnswerAction):
                 self.memory.add_assistant_message(action.content)
@@ -157,6 +164,13 @@ class Agent:
                         f"Tool call limit reached ({self.max_tool_calls_per_turn}) before a final answer."
                     )
                 tool_calls_used += 1
+                tool_call_payload = {
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments,
+                    "iteration": tool_calls_used,
+                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                }
+                self._trace("tool_call_started", tool_call_payload)
                 result = self.tool_registry.run(action.tool_name, action.arguments)
                 self.state.tool_calls.append(
                     {
@@ -173,6 +187,17 @@ class Agent:
                         "success": result.success,
                         "error": result.error,
                     },
+                )
+                completion_payload = {
+                    **tool_call_payload,
+                    "resolved_tool_name": result.tool_name,
+                    "success": result.success,
+                    "error": result.error,
+                    "metadata": result.metadata,
+                }
+                self._trace(
+                    "tool_call_completed" if result.success else "tool_call_failed",
+                    completion_payload,
                 )
                 observation, output_metadata = self._format_tool_observation(action.tool_name, result)
                 self.state.observations.append(
@@ -206,6 +231,7 @@ class Agent:
                     max_chars_per_skill=self.max_skill_content_chars,
                 ),
                 JSON_ACTION_PROMPT,
+                format_tool_call_rules(self.max_tool_calls_per_turn),
                 format_tools_for_prompt(self.tool_registry.tool_descriptions_for_prompt()),
             ]
         )

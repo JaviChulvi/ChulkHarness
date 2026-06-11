@@ -17,12 +17,21 @@ def save_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Memory content to store."},
-                "tags": {"type": "array", "description": "Optional tags such as persona, preference, project, task."},
+                "content": {"type": "string", "description": "Memory content to store.", "minLength": 1},
+                "tags": {
+                    "type": "array",
+                    "description": "Optional tags such as persona, preference, project, task.",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 20,
+                },
                 "metadata": {"type": "object", "description": "Optional structured metadata."},
-                "importance": {"type": "integer", "description": "Importance from 1 to 10."},
-                "source": {"type": "string", "description": "Memory source, for example manual or user_explicit."},
-                "confidence": {"type": "number", "description": "Confidence from 0 to 1."},
+                "importance": {"type": "integer", "description": "Importance from 1 to 10.", "minimum": 1, "maximum": 10},
+                "source": {
+                    "type": "string",
+                    "description": "Memory source, for example manual or user_explicit.",
+                    "minLength": 1,
+                },
+                "confidence": {"type": "number", "description": "Confidence from 0 to 1.", "minimum": 0, "maximum": 1},
             },
             "required": ["content"],
             "additionalProperties": False,
@@ -38,8 +47,8 @@ def search_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query."},
-                "limit": {"type": "integer", "description": "Maximum memories to return."},
+                "query": {"type": "string", "description": "Search query.", "minLength": 1},
+                "limit": {"type": "integer", "description": "Maximum memories to return.", "minimum": 1, "maximum": 100},
                 "include_archived": {"type": "boolean", "description": "Whether archived memories should be searched."},
             },
             "required": ["query"],
@@ -56,7 +65,7 @@ def list_memories_tool(memory_store: SQLiteMemoryStore) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Maximum memories to return."},
+                "limit": {"type": "integer", "description": "Maximum memories to return.", "minimum": 1, "maximum": 100},
                 "include_archived": {"type": "boolean", "description": "Whether archived memories should be listed."},
             },
             "required": [],
@@ -72,7 +81,7 @@ def delete_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         description="Delete a durable long-term memory by id.",
         args_schema={
             "type": "object",
-            "properties": {"memory_id": {"type": "string", "description": "Memory id to delete."}},
+            "properties": {"memory_id": {"type": "string", "description": "Memory id to delete.", "minLength": 1}},
             "required": ["memory_id"],
             "additionalProperties": False,
         },
@@ -87,13 +96,18 @@ def update_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "memory_id": {"type": "string", "description": "Memory id to update."},
-                "content": {"type": "string", "description": "Replacement memory content."},
-                "tags": {"type": "array", "description": "Replacement tags."},
+                "memory_id": {"type": "string", "description": "Memory id to update.", "minLength": 1},
+                "content": {"type": "string", "description": "Replacement memory content.", "minLength": 1},
+                "tags": {
+                    "type": "array",
+                    "description": "Replacement tags.",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 20,
+                },
                 "metadata": {"type": "object", "description": "Replacement metadata."},
-                "importance": {"type": "integer", "description": "Importance from 1 to 10."},
-                "source": {"type": "string", "description": "Replacement source."},
-                "confidence": {"type": "number", "description": "Confidence from 0 to 1."},
+                "importance": {"type": "integer", "description": "Importance from 1 to 10.", "minimum": 1, "maximum": 10},
+                "source": {"type": "string", "description": "Replacement source.", "minLength": 1},
+                "confidence": {"type": "number", "description": "Confidence from 0 to 1.", "minimum": 0, "maximum": 1},
             },
             "required": ["memory_id"],
             "additionalProperties": False,
@@ -109,8 +123,8 @@ def summarize_memories_tool(memory_store: SQLiteMemoryStore) -> Tool:
         args_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Optional search query before summarizing."},
-                "limit": {"type": "integer", "description": "Maximum memories to summarize."},
+                "query": {"type": "string", "description": "Optional search query before summarizing.", "minLength": 1},
+                "limit": {"type": "integer", "description": "Maximum memories to summarize.", "minimum": 1, "maximum": 100},
             },
             "required": [],
             "additionalProperties": False,
@@ -125,7 +139,7 @@ def archive_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         description="Archive a durable long-term memory without deleting it.",
         args_schema={
             "type": "object",
-            "properties": {"memory_id": {"type": "string", "description": "Memory id to archive."}},
+            "properties": {"memory_id": {"type": "string", "description": "Memory id to archive.", "minLength": 1}},
             "required": ["memory_id"],
             "additionalProperties": False,
         },
@@ -139,7 +153,7 @@ def restore_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
         description="Restore an archived durable long-term memory.",
         args_schema={
             "type": "object",
-            "properties": {"memory_id": {"type": "string", "description": "Memory id to restore."}},
+            "properties": {"memory_id": {"type": "string", "description": "Memory id to restore.", "minLength": 1}},
             "required": ["memory_id"],
             "additionalProperties": False,
         },
@@ -162,7 +176,13 @@ def import_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
         description="Import simple bullet memories from a Markdown file inside the project directory.",
         args_schema={
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "Markdown path relative to the project root."}},
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Markdown path relative to the project root.",
+                    "minLength": 1,
+                }
+            },
             "required": ["path"],
             "additionalProperties": False,
         },
@@ -177,7 +197,11 @@ def export_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
         args_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Markdown path relative to the project root."},
+                "path": {
+                    "type": "string",
+                    "description": "Markdown path relative to the project root.",
+                    "minLength": 1,
+                },
                 "include_archived": {"type": "boolean", "description": "Whether archived memories should be exported."},
             },
             "required": ["path"],

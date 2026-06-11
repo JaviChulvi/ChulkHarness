@@ -39,6 +39,8 @@ Traces are stored as JSONL files in `traces/`. Each model request logs the full 
 
 Large tool outputs are sent back to the model as bounded head/tail previews. When output is truncated, Chulk stores the full text as a local artifact under `traces/<conversation_id>_artifacts/` and includes the artifact path, length, and SHA-256 hash in the observation metadata. If the omitted middle may matter, the model is instructed to inspect the artifact or run a narrower follow-up tool call before answering. This keeps model context bounded without throwing away important details. Artifact files contain raw local output, so treat them as sensitive runtime data and keep `traces/` out of Git.
 
+Tool arguments are validated against each tool schema before execution. Invalid calls produce structured observations with field-level validation errors, so the model can correct the call or explain the limitation instead of failing silently.
+
 Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
 ## Planned Structure
