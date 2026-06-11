@@ -13,7 +13,6 @@ from typing import Any
 from src.tools.registry import Tool, ToolResult
 
 
-MAX_OUTPUT_CHARS = 20_000
 DESTRUCTIVE_PATTERNS = [
     re.compile(r"\brm\s+-[^;&|]*r[^;&|]*f\b"),
     re.compile(r"\bmkfs\b"),
@@ -80,8 +79,8 @@ def run_shell_command(
             tool_name="run_cmd",
             success=False,
             observation=f"Command timed out after {timeout_seconds} seconds.",
-            stdout=_truncate(exc.stdout or ""),
-            stderr=_truncate(exc.stderr or ""),
+            stdout=_coerce_output_text(exc.stdout),
+            stderr=_coerce_output_text(exc.stderr),
             error="timeout",
             metadata={
                 "command": command,
@@ -96,8 +95,8 @@ def run_shell_command(
         tool_name="run_cmd",
         success=completed.returncode == 0,
         observation="Command completed." if completed.returncode == 0 else "Command failed.",
-        stdout=_truncate(completed.stdout),
-        stderr=_truncate(completed.stderr),
+        stdout=completed.stdout,
+        stderr=completed.stderr,
         exit_code=completed.returncode,
         error=None if completed.returncode == 0 else "nonzero_exit",
         metadata={
@@ -121,6 +120,14 @@ def _blocked_reason(command: str, root: Path) -> str | None:
     return None
 
 
+def _coerce_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _redirects_outside_root(command: str, root: Path) -> bool:
     for match in re.finditer(r"(?:\d?>{1,2}|&>)\s*([^\s;&|]+)", command):
         raw_path = match.group(1).strip("'\"")
@@ -130,9 +137,3 @@ def _redirects_outside_root(command: str, root: Path) -> bool:
         if candidate != root and root not in candidate.parents:
             return True
     return False
-
-
-def _truncate(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n[truncated]"

@@ -6,6 +6,7 @@ import sys
 from src.memory import SQLiteMemoryStore
 from src.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from src.tools.output import preview_text
 from src.tools.registry import ToolResult
 from src.tools.shell import run_shell_command
 
@@ -67,6 +68,20 @@ def test_registry_catches_tool_exceptions():
     assert not result.success
     assert result.observation == "Tool execution failed."
     assert result.error == "boom"
+
+
+def test_preview_text_preserves_head_and_tail_when_truncated():
+    text = "HEAD-" + ("middle-" * 20) + "IMPORTANT_TAIL"
+
+    preview = preview_text(text, max_chars=80)
+
+    assert preview.truncated
+    assert preview.returned_length <= 80
+    assert preview.original_length == len(text)
+    assert "HEAD-" in preview.text
+    assert "IMPORTANT_TAIL" in preview.text
+    assert "middle omitted" in preview.text
+    assert preview.sha256
 
 
 def test_registry_returns_safe_unknown_tool_error():

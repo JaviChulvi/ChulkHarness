@@ -23,6 +23,8 @@ Tool call format:
 Use a final_answer when you can answer without a tool. Use a tool_call when you need a listed tool.
 For tool calls, arguments_json must be a JSON-encoded object string containing the tool arguments.
 After an observation is provided, use it to produce the next tool_call or final_answer.
+Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.
+If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final_answer.
 """
 
 JSON_REPAIR_PROMPT = """Your previous response could not be parsed as ChulkHarness action JSON.

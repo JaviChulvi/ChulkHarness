@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ class JSONLTraceLogger:
         self.conversation_id = conversation_id
         self.traces_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.traces_dir / f"{conversation_id}.jsonl"
+        self.artifacts_dir = self.traces_dir / f"{conversation_id}_artifacts"
 
     def log(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Append a trace event."""
@@ -37,6 +40,19 @@ class JSONLTraceLogger:
         event = TraceEvent(type=event_type, payload=safe_payload).to_dict()
         with self.path.open("a", encoding="utf-8") as trace_file:
             trace_file.write(json.dumps(event, sort_keys=True) + "\n")
+
+    def write_artifact(self, name: str, content: str) -> dict[str, Any]:
+        """Persist full trace-adjacent content that is too large for model context."""
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = _safe_artifact_name(name)
+        path = self.artifacts_dir / f"{safe_name}-{uuid4().hex}.txt"
+        path.write_text(content, encoding="utf-8")
+        return {
+            "path": str(path),
+            "char_count": len(content),
+            "byte_count": len(content.encode("utf-8")),
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
 
 
 def _redact(value: Any) -> Any:
@@ -65,3 +81,9 @@ def _redact_text(text: str) -> str:
     )
     redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[redacted]", redacted)
     return redacted
+
+
+def _safe_artifact_name(name: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip())
+    safe = safe.strip(".-")
+    return safe or "artifact"

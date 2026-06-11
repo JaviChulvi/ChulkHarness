@@ -840,14 +840,14 @@ Tool tests:
 
 Shell tool tests:
 
-- [ ] Test successful command.
-- [ ] Test stdout capture.
+- [x] Test successful command.
+- [x] Test stdout capture.
 - [ ] Test stderr capture.
 - [ ] Test non-zero exit code.
-- [ ] Test timeout.
-- [ ] Test blocked destructive command.
-- [ ] Test output truncation.
-- [ ] Test working directory behavior.
+- [x] Test timeout.
+- [x] Test blocked destructive command.
+- [x] Test tool-output truncation with full artifact preservation.
+- [x] Test working directory behavior.
 
 Memory tests:
 
@@ -1014,7 +1014,11 @@ Goal: make the harness easier to debug and harder to break.
 - [x] Log errors.
 - [x] Add retry handling to the LLM client.
 - [x] Add timeout handling to the LLM client.
-- [ ] Add safe output truncation.
+- [x] Add safe output truncation.
+  - [x] Use head/tail previews instead of prefix-only truncation.
+  - [x] Store full truncated output in trace artifacts.
+  - [x] Include artifact path, character count, and SHA-256 metadata.
+  - [x] Tell the model to inspect artifacts when the omitted middle may matter.
 - [x] Add full prompt tracing with redaction and `CHULK_TRACE_MAX_PROMPT_CHARS`.
 - [x] Add JSON repair flow.
 - [ ] Add stronger validation for tool arguments.
@@ -1024,9 +1028,9 @@ Goal: make the harness easier to debug and harder to break.
 Done when:
 
 - [ ] Failed tool calls are understandable.
-- [ ] Invalid model JSON is handled gracefully.
-- [ ] A trace file can explain a full turn.
-- [ ] Tests cover the main agent loop.
+- [x] Invalid model JSON is handled gracefully.
+- [x] A trace file can explain a full turn.
+- [x] Tests cover the main agent loop.
 
 ### Phase 6: Advanced Agent Behavior
 
@@ -1095,13 +1099,13 @@ The project is successful when:
 - [x] The agent injects only relevant memories into prompts.
 - [x] The agent can load relevant skills lazily.
 - [x] The agent does not inject every skill into every prompt.
-- [ ] The agent can feed tool observations back into the model.
-- [ ] The agent stops after a configured number of tool-call iterations.
-- [ ] I can inspect logs to understand every major decision.
+- [x] The agent can feed tool observations back into the model.
+- [x] The agent stops after a configured number of tool-call iterations.
+- [x] I can inspect logs to understand every major decision.
 - [x] Trace files show user messages, selected memories, selected skills, tool calls, observations, errors, and final answers.
 - [ ] The architecture is simple enough to inspect and maintain.
 - [x] The code is tested.
-- [ ] The safety limitations are documented clearly.
+- [x] The safety limitations are documented clearly.
 
 ## Immediate Next Actions
 

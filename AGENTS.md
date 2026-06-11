@@ -74,6 +74,9 @@ CHULK_HISTORY_LIMIT=20
 CHULK_MAX_SKILLS_PER_TURN=3
 CHULK_MAX_SKILL_CONTENT_CHARS=4000
 CHULK_TRACE_MAX_PROMPT_CHARS=50000
+CHULK_MAX_OBSERVATION_CHARS=12000
+CHULK_MAX_TOOL_STDOUT_CHARS=8000
+CHULK_MAX_TOOL_STDERR_CHARS=4000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
@@ -132,7 +135,8 @@ Shell and file tools are high-risk. Enforce safety in Python, not only in prompt
 - Block obviously destructive shell commands.
 - Use command timeouts.
 - Capture stdout, stderr, and exit code.
-- Limit output size.
+- Send large tool outputs back as bounded head/tail previews and preserve full truncated text in trace artifacts.
+- Treat trace artifacts as raw sensitive runtime output.
 - Restrict file reads/writes to the configured project root.
 - Normalize paths before checking boundaries.
 - Log side effects.

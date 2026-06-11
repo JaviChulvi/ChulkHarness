@@ -15,6 +15,9 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MAX_SKILLS_PER_TURN = 3
 DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
 DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
+DEFAULT_MAX_OBSERVATION_CHARS = 12000
+DEFAULT_MAX_TOOL_STDOUT_CHARS = 8000
+DEFAULT_MAX_TOOL_STDERR_CHARS = 4000
 SUPPORTED_LLM_PROVIDERS = {"openai", "deepseek"}
 
 
@@ -39,6 +42,9 @@ class Config:
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
     trace_max_prompt_chars: int = DEFAULT_TRACE_MAX_PROMPT_CHARS
+    max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS
+    max_tool_stdout_chars: int = DEFAULT_MAX_TOOL_STDOUT_CHARS
+    max_tool_stderr_chars: int = DEFAULT_MAX_TOOL_STDERR_CHARS
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
@@ -115,4 +121,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         llm_timeout_seconds=_env_float(env, "CHULK_LLM_TIMEOUT_SECONDS", 60.0),
         llm_max_retries=_env_int(env, "CHULK_LLM_MAX_RETRIES", 2),
         trace_max_prompt_chars=_env_int(env, "CHULK_TRACE_MAX_PROMPT_CHARS", DEFAULT_TRACE_MAX_PROMPT_CHARS),
+        max_observation_chars=_env_int(env, "CHULK_MAX_OBSERVATION_CHARS", DEFAULT_MAX_OBSERVATION_CHARS),
+        max_tool_stdout_chars=_env_int(env, "CHULK_MAX_TOOL_STDOUT_CHARS", DEFAULT_MAX_TOOL_STDOUT_CHARS),
+        max_tool_stderr_chars=_env_int(env, "CHULK_MAX_TOOL_STDERR_CHARS", DEFAULT_MAX_TOOL_STDERR_CHARS),
     )

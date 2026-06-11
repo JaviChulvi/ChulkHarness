@@ -1,12 +1,14 @@
 """Tests for the Phase 1 agent loop."""
 
 import json
+from pathlib import Path
 
 from src.core import Agent
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
-from src.tools import ToolRegistry, calculator_tool, shell_tool
+from src.tools import Tool, ToolRegistry, calculator_tool, shell_tool
+from src.tools.registry import ToolResult
 from src.tracing import JSONLTraceLogger
 
 
@@ -303,6 +305,112 @@ def test_agent_can_run_safe_shell_tool(tmp_path):
 
     assert response == "The command printed hello."
     assert "stdout:\nhello" in agent.state.observations[0]["observation"]
+
+
+def test_agent_truncates_tool_output_but_preserves_full_artifact(tmp_path):
+    full_stdout = "HEAD-" + ("middle-" * 200) + "IMPORTANT_TAIL"
+
+    def big_output_tool(_arguments):
+        return ToolResult(
+            tool_name="big_output",
+            success=True,
+            observation="Produced a long output.",
+            stdout=full_stdout,
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="big_output",
+            description="Return long output for testing.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=big_output_tool,
+        )
+    )
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "big_output", "arguments": {}}),
+            json.dumps({"type": "final_answer", "content": "Reviewed."}),
+        ]
+    )
+    agent = Agent(
+        llm,
+        tool_registry=registry,
+        trace_logger=trace_logger,
+        max_tool_stdout_chars=120,
+        max_observation_chars=1000,
+    )
+
+    response = agent.run_turn("produce long output")
+
+    observation = agent.state.observations[0]["observation"]
+    output_metadata = agent.state.observations[0]["output_metadata"]
+    stdout_artifact = next(artifact for artifact in output_metadata["artifacts"] if artifact["field"] == "stdout")
+    artifact_text = Path(stdout_artifact["path"]).read_text(encoding="utf-8")
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+
+    assert response == "Reviewed."
+    assert "HEAD-" in observation
+    assert "IMPORTANT_TAIL" in observation
+    assert "full stdout saved" in observation
+    assert output_metadata["stdout"]["truncated"] is True
+    assert artifact_text == full_stdout
+    assert "IMPORTANT_TAIL" in artifact_text
+    assert "tool_observation" in trace_text
+    assert stdout_artifact["sha256"] == output_metadata["stdout"]["sha256"]
+
+
+def test_agent_preserves_artifact_when_full_observation_is_truncated(tmp_path):
+    long_observation = "OBS_HEAD-" + ("obs-middle-" * 300) + "OBS_TAIL"
+    full_stdout = "STDOUT_HEAD-" + ("stdout-middle-" * 200) + "STDOUT_TAIL"
+
+    def verbose_tool(_arguments):
+        return ToolResult(
+            tool_name="verbose",
+            success=True,
+            observation=long_observation,
+            stdout=full_stdout,
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="verbose",
+            description="Return verbose output for testing.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=verbose_tool,
+        )
+    )
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "verbose", "arguments": {}}),
+            json.dumps({"type": "final_answer", "content": "Reviewed."}),
+        ]
+    )
+    agent = Agent(
+        llm,
+        tool_registry=registry,
+        trace_logger=trace_logger,
+        max_tool_stdout_chars=120,
+        max_observation_chars=500,
+    )
+
+    agent.run_turn("produce verbose output")
+
+    observation = agent.state.observations[0]["observation"]
+    output_metadata = agent.state.observations[0]["output_metadata"]
+    observation_artifact = next(
+        artifact for artifact in output_metadata["artifacts"] if artifact["field"] == "observation"
+    )
+    artifact_text = Path(observation_artifact["path"]).read_text(encoding="utf-8")
+
+    assert len(observation) <= 500
+    assert "full observation saved" in observation
+    assert output_metadata["observation"]["truncated"] is True
+    assert "OBS_TAIL" in artifact_text
+    assert "full stdout saved" in artifact_text
 
 
 def test_agent_repairs_invalid_model_json():

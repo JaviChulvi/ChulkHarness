@@ -16,6 +16,8 @@ from src.llm import LLMActionError, LLMClient
 from src.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from src.skills import SkillRegistry, SkillSelection
 from src.tools import ToolRegistry
+from src.tools.output import TextPreview, preview_text
+from src.tools.registry import ToolResult
 from src.tracing import JSONLTraceLogger
 
 
@@ -54,6 +56,9 @@ class Agent:
         max_skills_per_turn: int = 3,
         max_skill_content_chars: int = 4000,
         trace_max_prompt_chars: int = 50000,
+        max_observation_chars: int = 12000,
+        max_tool_stdout_chars: int = 8000,
+        max_tool_stderr_chars: int = 4000,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -63,6 +68,12 @@ class Agent:
             raise ValueError("max_skill_content_chars must be greater than zero")
         if trace_max_prompt_chars < 1:
             raise ValueError("trace_max_prompt_chars must be greater than zero")
+        if max_observation_chars < 1:
+            raise ValueError("max_observation_chars must be greater than zero")
+        if max_tool_stdout_chars < 1:
+            raise ValueError("max_tool_stdout_chars must be greater than zero")
+        if max_tool_stderr_chars < 1:
+            raise ValueError("max_tool_stderr_chars must be greater than zero")
         self.llm_client = llm_client
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()
@@ -76,6 +87,9 @@ class Agent:
         self.max_skills_per_turn = max_skills_per_turn
         self.max_skill_content_chars = max_skill_content_chars
         self.trace_max_prompt_chars = trace_max_prompt_chars
+        self.max_observation_chars = max_observation_chars
+        self.max_tool_stdout_chars = max_tool_stdout_chars
+        self.max_tool_stderr_chars = max_tool_stderr_chars
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -160,10 +174,23 @@ class Agent:
                         "error": result.error,
                     },
                 )
-                observation = result.to_observation()
-                self.state.observations.append({"tool_name": action.tool_name, "observation": observation})
+                observation, output_metadata = self._format_tool_observation(action.tool_name, result)
+                self.state.observations.append(
+                    {
+                        "tool_name": action.tool_name,
+                        "observation": observation,
+                        "output_metadata": output_metadata,
+                    }
+                )
                 self.memory.add_observation(observation)
-                self._trace("tool_observation", {"tool_name": action.tool_name, "observation": observation})
+                self._trace(
+                    "tool_observation",
+                    {
+                        "tool_name": action.tool_name,
+                        "observation": observation,
+                        "output_metadata": output_metadata,
+                    },
+                )
 
     def _build_messages(self) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
@@ -259,6 +286,22 @@ class Agent:
         if self.trace_logger is not None:
             self.trace_logger.log(event_type, payload or {})
 
+    def _format_tool_observation(self, requested_tool_name: str, result: ToolResult) -> tuple[str, dict]:
+        observation, metadata = _format_tool_observation(
+            requested_tool_name=requested_tool_name,
+            result=result,
+            max_observation_chars=self.max_observation_chars,
+            max_stdout_chars=self.max_tool_stdout_chars,
+            max_stderr_chars=self.max_tool_stderr_chars,
+            artifact_writer=self._write_tool_output_artifact,
+        )
+        return observation, metadata
+
+    def _write_tool_output_artifact(self, name: str, content: str) -> dict | None:
+        if self.trace_logger is None:
+            return None
+        return self.trace_logger.write_artifact(name, content)
+
 
 def _format_action_trace(action: FinalAnswerAction | ToolCallAction) -> dict:
     if isinstance(action, FinalAnswerAction):
@@ -308,3 +351,97 @@ def _format_model_request_trace(
         "loaded_skill_names": loaded_skill_names,
         "available_tool_names": available_tool_names,
     }
+
+
+def _format_tool_observation(
+    *,
+    requested_tool_name: str,
+    result: ToolResult,
+    max_observation_chars: int,
+    max_stdout_chars: int,
+    max_stderr_chars: int,
+    artifact_writer,
+) -> tuple[str, dict]:
+    status = "success" if result.success else "error"
+    parts = [f"Tool {result.tool_name} finished with {status}.", result.observation]
+    metadata = {
+        "requested_tool_name": requested_tool_name,
+        "tool_name": result.tool_name,
+        "success": result.success,
+        "stdout": None,
+        "stderr": None,
+        "observation": None,
+        "artifacts": [],
+    }
+
+    if result.stdout:
+        stdout_preview = preview_text(result.stdout, max_stdout_chars)
+        metadata["stdout"] = stdout_preview.to_metadata()
+        parts.append("stdout:\n" + stdout_preview.text)
+        _append_artifact_note(parts, metadata, artifact_writer, result.tool_name, "stdout", result.stdout, stdout_preview)
+
+    if result.stderr:
+        stderr_preview = preview_text(result.stderr, max_stderr_chars)
+        metadata["stderr"] = stderr_preview.to_metadata()
+        parts.append("stderr:\n" + stderr_preview.text)
+        _append_artifact_note(parts, metadata, artifact_writer, result.tool_name, "stderr", result.stderr, stderr_preview)
+
+    if result.exit_code is not None:
+        parts.append(f"exit_code: {result.exit_code}")
+    if result.error:
+        parts.append(f"error: {result.error}")
+
+    full_observation = "\n".join(parts)
+    observation_preview = preview_text(full_observation, max_observation_chars)
+    metadata["observation"] = observation_preview.to_metadata()
+    if observation_preview.truncated:
+        artifact = artifact_writer(f"{result.tool_name}-observation", full_observation)
+        if artifact is not None:
+            metadata["artifacts"].append({"field": "observation", **artifact})
+            artifact_note = _artifact_note("observation", artifact)
+            final_observation = _with_required_suffix(
+                full_observation,
+                suffix=artifact_note,
+                max_chars=max_observation_chars,
+            )
+        else:
+            final_observation = observation_preview.text
+    else:
+        final_observation = observation_preview.text
+
+    return final_observation, metadata
+
+
+def _append_artifact_note(
+    parts: list[str],
+    metadata: dict,
+    artifact_writer,
+    tool_name: str,
+    field: str,
+    content: str,
+    preview: TextPreview,
+) -> None:
+    if not preview.truncated:
+        return
+    artifact = artifact_writer(f"{tool_name}-{field}", content)
+    if artifact is None:
+        parts.append(f"[full {field} omitted from model context; no artifact writer configured]")
+        return
+    metadata["artifacts"].append({"field": field, **artifact})
+    parts.append(_artifact_note(field, artifact))
+
+
+def _artifact_note(field: str, artifact: dict) -> str:
+    return (
+        f"[full {field} saved to {artifact['path']}; "
+        f"chars={artifact['char_count']}; sha256={artifact['sha256']}]"
+    )
+
+
+def _with_required_suffix(text: str, *, suffix: str, max_chars: int) -> str:
+    separator = "\n"
+    suffix_block = separator + suffix
+    if len(suffix_block) >= max_chars:
+        return suffix_block[-max_chars:]
+    preview = preview_text(text, max_chars - len(suffix_block))
+    return preview.text + suffix_block

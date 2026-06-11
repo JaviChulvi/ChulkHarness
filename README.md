@@ -37,6 +37,8 @@ Skills live in the root-level `skills/` directory. Chulk loads only skill metada
 
 Traces are stored as JSONL files in `traces/`. Each model request logs the full message list sent to the provider by default, with obvious secrets redacted and a configurable prompt character cap.
 
+Large tool outputs are sent back to the model as bounded head/tail previews. When output is truncated, Chulk stores the full text as a local artifact under `traces/<conversation_id>_artifacts/` and includes the artifact path, length, and SHA-256 hash in the observation metadata. If the omitted middle may matter, the model is instructed to inspect the artifact or run a narrower follow-up tool call before answering. This keeps model context bounded without throwing away important details. Artifact files contain raw local output, so treat them as sensitive runtime data and keep `traces/` out of Git.
+
 Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
 
 ## Planned Structure
@@ -205,6 +207,9 @@ CHULK_HISTORY_LIMIT=20
 CHULK_MAX_SKILLS_PER_TURN=3
 CHULK_MAX_SKILL_CONTENT_CHARS=4000
 CHULK_TRACE_MAX_PROMPT_CHARS=50000
+CHULK_MAX_OBSERVATION_CHARS=12000
+CHULK_MAX_TOOL_STDOUT_CHARS=8000
+CHULK_MAX_TOOL_STDERR_CHARS=4000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```

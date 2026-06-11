@@ -12,7 +12,6 @@ from src.tools.registry import Tool, ToolResult
 
 IGNORED_DIRS = {".git", ".venv", ".conda", "__pycache__", ".pytest_cache", "chulkharness.egg-info"}
 MAX_TEXT_FILE_BYTES = 200_000
-MAX_OUTPUT_CHARS = 20_000
 
 
 def read_file_tool(project_root: Path) -> Tool:
@@ -95,7 +94,7 @@ def read_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return ToolResult("read_file", False, "File is not valid UTF-8 text.", error="not_text")
-    return ToolResult("read_file", True, _truncate(content), metadata={"path": str(path.relative_to(project_root))})
+    return ToolResult("read_file", True, content, metadata={"path": str(path.relative_to(project_root))})
 
 
 def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
@@ -157,12 +156,12 @@ def _search_with_rg(project_root: Path, directory: Path, query: str, pattern: st
         check=False,
     )
     if completed.returncode not in {0, 1}:
-        return ToolResult("search_files", False, "Search failed.", stderr=_truncate(completed.stderr), error="search_failed")
+        return ToolResult("search_files", False, "Search failed.", stderr=completed.stderr, error="search_failed")
     lines = completed.stdout.splitlines()[:max_results]
     normalized = []
     for line in lines:
         normalized.append(line.replace(str(project_root) + "/", ""))
-    return ToolResult("search_files", True, _truncate("\n".join(normalized) or "No matches found."))
+    return ToolResult("search_files", True, "\n".join(normalized) or "No matches found.")
 
 
 def _search_with_python(project_root: Path, directory: Path, query: str, pattern: str, max_results: int) -> ToolResult:
@@ -178,8 +177,8 @@ def _search_with_python(project_root: Path, directory: Path, query: str, pattern
             if query in line:
                 results.append(f"{path.relative_to(project_root)}:{index}:{line}")
                 if len(results) >= max_results:
-                    return ToolResult("search_files", True, _truncate("\n".join(results)))
-    return ToolResult("search_files", True, _truncate("\n".join(results) or "No matches found."))
+                    return ToolResult("search_files", True, "\n".join(results))
+    return ToolResult("search_files", True, "\n".join(results) or "No matches found.")
 
 
 def _resolve_inside_root(project_root: Path, raw_path: str) -> Path:
@@ -193,9 +192,3 @@ def _resolve_inside_root(project_root: Path, raw_path: str) -> Path:
 def _is_ignored(path: Path, project_root: Path) -> bool:
     relative_parts = path.relative_to(project_root).parts
     return any(part in IGNORED_DIRS for part in relative_parts)
-
-
-def _truncate(text: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n[truncated]"

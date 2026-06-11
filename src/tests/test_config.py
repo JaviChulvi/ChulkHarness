@@ -2,8 +2,11 @@
 
 from src.config import (
     DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_MAX_OBSERVATION_CHARS,
     DEFAULT_MAX_SKILL_CONTENT_CHARS,
     DEFAULT_MAX_SKILLS_PER_TURN,
+    DEFAULT_MAX_TOOL_STDERR_CHARS,
+    DEFAULT_MAX_TOOL_STDOUT_CHARS,
     DEFAULT_MODEL,
     DEFAULT_TRACE_MAX_PROMPT_CHARS,
     load_config,
@@ -22,6 +25,9 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.max_skills_per_turn == DEFAULT_MAX_SKILLS_PER_TURN
     assert config.max_skill_content_chars == DEFAULT_MAX_SKILL_CONTENT_CHARS
     assert config.trace_max_prompt_chars == DEFAULT_TRACE_MAX_PROMPT_CHARS
+    assert config.max_observation_chars == DEFAULT_MAX_OBSERVATION_CHARS
+    assert config.max_tool_stdout_chars == DEFAULT_MAX_TOOL_STDOUT_CHARS
+    assert config.max_tool_stderr_chars == DEFAULT_MAX_TOOL_STDERR_CHARS
 
 
 def test_load_config_reads_dotenv(tmp_path):
@@ -34,6 +40,9 @@ def test_load_config_reads_dotenv(tmp_path):
                 "CHULK_MAX_SKILLS_PER_TURN=2",
                 "CHULK_MAX_SKILL_CONTENT_CHARS=800",
                 "CHULK_TRACE_MAX_PROMPT_CHARS=1234",
+                "CHULK_MAX_OBSERVATION_CHARS=900",
+                "CHULK_MAX_TOOL_STDOUT_CHARS=700",
+                "CHULK_MAX_TOOL_STDERR_CHARS=300",
                 "DEEPSEEK_API_KEY=deepseek-key",
             ]
         ),
@@ -50,6 +59,9 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.max_skills_per_turn == 2
     assert config.max_skill_content_chars == 800
     assert config.trace_max_prompt_chars == 1234
+    assert config.max_observation_chars == 900
+    assert config.max_tool_stdout_chars == 700
+    assert config.max_tool_stderr_chars == 300
 
 
 def test_environment_overrides_dotenv(tmp_path):
