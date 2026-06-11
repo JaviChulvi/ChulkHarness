@@ -16,6 +16,7 @@ src/
   llm/               # Provider wrapper and LLM clients
   memory/            # Short-term memory and SQLite long-term memory
   tools/             # Tool primitives and implementations, including memory tools
+  cli/               # Terminal formatting and interactive CLI surface
   skills/            # Skill registry code
   tracing/           # Trace/log primitives
   tests/             # Pytest tests
@@ -32,6 +33,8 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Ask the LLM layer for validated actions with `complete_action(...)`; the agent loop should not parse provider text directly.
 - Keep provider-specific structured-output transports normalized into the shared action dataclasses before orchestration.
 - Keep prompt text in `src/core/prompts.py`.
+- Keep terminal colors, banners, slash-command text, and prompt styling in `src/cli/`.
+- Drive interactive progress lines, timing, summaries, and spinner activity from agent trace events through `Agent.event_callback`.
 - Keep session-wide data in `AgentState` and per-message execution details in `TurnState`.
 - Record tool calls and observations with `ToolCallRecord` and `ObservationRecord` before writing trace snapshots.
 - Keep skill playbooks in root-level `skills/`, outside the Python package.

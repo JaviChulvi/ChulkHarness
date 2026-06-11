@@ -131,6 +131,22 @@ Run the current CLI:
 chulk
 ```
 
+The interactive CLI always uses a Hulk-green terminal theme. During interactive turns, Chulk prints compact live progress lines such as memory search, skill selection, model requests, tool calls, command previews, elapsed time, and turn completion. Real terminals also show a small ASCII spinner while the model or a tool is working. The input prompt is intentionally short (`>`) so the transcript does not repeat a heavy label on every line. `chulk --once` remains plain output for scripting.
+
+At the end of each turn, Chulk prints a compact summary with total time, model request count, tools used, selected memory count, selected skills, and the trace path. Use `/quiet on` to hide live progress, `/verbose on` to include trace-event names in progress lines, and `/summary off` to hide the summary block.
+
+Useful interactive commands:
+
+- `/help`
+- `/status`
+- `/tools`
+- `/trace`
+- `/quiet on|off`
+- `/verbose on|off`
+- `/summary on|off`
+- `/clear`
+- `/q`
+
 Send a single message and exit:
 
 ```bash

@@ -1,6 +1,7 @@
 """Tests for the ChulkHarness CLI entrypoint."""
 
 import json
+import re
 
 from src import __version__
 from src.llm import LLMClient
@@ -21,7 +22,49 @@ def fake_factory(_config):
     return FakeLLMClient('{"type": "final_answer", "content": "hello from fake llm"}')
 
 
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 def test_main_prints_current_status(capsys):
+    inputs = iter(["/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=fake_factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "ChulkHarness CLI" in output
+    assert "Type /exit, /quit, or /q" in output
+    assert "bye" in output
+
+
+def test_main_uses_compact_prompt(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    prompts = []
+    inputs = iter(["/q"])
+
+    def input_func(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(inputs)
+
+    exit_code = main(
+        [],
+        input_func=input_func,
+        llm_client_factory=fake_factory,
+    )
+
+    assert exit_code == 0
+    assert [strip_ansi(prompt) for prompt in prompts] == ["> "]
+    assert "chulk >" not in strip_ansi(prompts[0])
+
+
+def test_main_uses_hulk_green_output(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     inputs = iter(["/q"])
 
     exit_code = main(
@@ -33,9 +76,197 @@ def test_main_prints_current_status(capsys):
     output = capsys.readouterr().out
 
     assert exit_code == 0
+    assert "\033[1;38;2;63;255;81m" in output
     assert "ChulkHarness CLI" in output
-    assert "Type /exit, /quit, or /q" in output
+
+
+def test_main_handles_interactive_slash_commands(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/help", "/status", "/tools", "/trace", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=fake_factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "Commands" in output
+    assert "/status" in output
+    assert "Status" in output
+    assert "provider" in output
+    assert "Tools" in output
+    assert "calculator" in output
+    assert "Trace" in output
     assert "bye" in output
+
+
+def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["what is 2 + 2?", "/q"])
+
+    class ToolProgressFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "calculator",
+                        "arguments_json": json.dumps({"expression": "2 + 2"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The result is 4."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    def factory(_config):
+        return ToolProgressFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert ".. starting turn" in output
+    assert ".. checking memory" in output
+    assert ".. loading skills" in output
+    assert ".. asking model - request 1" in output
+    assert ".. model chose tool - calculator" in output
+    assert ".. running tool - calculator" in output
+    assert ".. tool completed - calculator" in output
+    assert ".. turn completed - 2 model request(s), 1 tool call(s)" in output
+    assert "Turn Summary" in output
+    assert "worked for" in output
+    assert "model       2 request(s)" in output
+    assert "tools       calculator x1" in output
+    assert "The result is 4." in output
+
+
+def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["run printf hello", "/q"])
+
+    class ShellProgressFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "run_cmd",
+                        "arguments_json": json.dumps({"command": "printf hello"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The command printed hello."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    def factory(_config):
+        return ShellProgressFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert ".. running tool - run_cmd - cmd: printf hello" in output
+    assert ".. tool completed - run_cmd - cmd: printf hello" in output
+    assert "exit 0" in output
+    assert "stdout 5 chars" in output
+    assert "The command printed hello." in output
+
+
+def test_main_quiet_mode_hides_live_progress(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/quiet on", "what is 2 + 2?", "/q"])
+
+    class QuietFakeLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return json.dumps({"type": "final_answer", "content": "quiet answer"})
+
+    def factory(_config):
+        return QuietFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "quiet mode on" in output
+    assert ".. starting turn" not in output
+    assert "Turn Summary" not in output
+    assert "quiet answer" in output
+
+
+def test_main_verbose_mode_shows_event_names(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/verbose on", "what is 2 + 2?", "/q"])
+
+    class VerboseFakeLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return json.dumps({"type": "final_answer", "content": "verbose answer"})
+
+    def factory(_config):
+        return VerboseFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "verbose mode on" in output
+    assert "turn_started - starting turn" in output
+    assert "model_request_started - asking model" in output
+    assert "model_response_parsed - model returned final answer" in output
+    assert "verbose answer" in output
+
+
+def test_main_summary_mode_can_be_disabled(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/summary off", "hello", "/q"])
+
+    class SummaryFakeLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return json.dumps({"type": "final_answer", "content": "summary-free answer"})
+
+    def factory(_config):
+        return SummaryFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "turn summary off" in output
+    assert "Turn Summary" not in output
+    assert "summary-free answer" in output
 
 
 def test_main_prints_version(capsys):

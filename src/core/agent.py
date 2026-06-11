@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from uuid import uuid4
 
 from src.core.actions import FinalAnswerAction, ToolCallAction
@@ -194,6 +195,7 @@ class Agent:
         max_observation_chars: int = 12000,
         max_tool_stdout_chars: int = 8000,
         max_tool_stderr_chars: int = 4000,
+        event_callback: Callable[[str, dict], None] | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -225,6 +227,7 @@ class Agent:
         self.max_observation_chars = max_observation_chars
         self.max_tool_stdout_chars = max_tool_stdout_chars
         self.max_tool_stderr_chars = max_tool_stderr_chars
+        self.event_callback = event_callback
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -470,8 +473,11 @@ class Agent:
         return message
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
+        payload = payload or {}
         if self.trace_logger is not None:
-            self.trace_logger.log(event_type, payload or {})
+            self.trace_logger.log(event_type, payload)
+        if self.event_callback is not None:
+            self.event_callback(event_type, payload)
 
     def _state_snapshot(self, turn: TurnState) -> dict:
         return {

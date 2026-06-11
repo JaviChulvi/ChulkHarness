@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import Callable
 
 from src import __version__
+from src.cli import ProgressReporter, ProgressSettings, TerminalUI
 from src.config import Config, load_config
 from src.core import Agent, AgentState
 from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
@@ -17,6 +18,10 @@ from src.tracing import JSONLTraceLogger
 
 
 EXIT_COMMANDS = {"/exit", "/quit", "/q", "exit", "quit"}
+HELP_COMMANDS = {"/help", "help", "?"}
+VERBOSE_COMMANDS = {"/verbose on", "/verbose off"}
+QUIET_COMMANDS = {"/quiet on", "/quiet off"}
+SUMMARY_COMMANDS = {"/summary on", "/summary off"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,40 +130,104 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
 def run_chat_loop(
     agent: Agent,
     *,
+    config: Config | None = None,
+    terminal: TerminalUI | None = None,
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
 ) -> int:
     """Run the interactive chat loop."""
-    output_func("ChulkHarness CLI")
-    output_func("Type /exit, /quit, or /q to end the session.")
+    terminal = terminal or TerminalUI.themed()
+    progress_settings = ProgressSettings()
+    progress_reporter = ProgressReporter(
+        terminal,
+        output_func,
+        config=config,
+        agent=agent,
+        settings=progress_settings,
+        previous_callback=agent.event_callback,
+    )
+    agent.event_callback = progress_reporter.callback
+    if config is not None:
+        output_func(terminal.banner(config, agent))
+    else:
+        output_func("ChulkHarness CLI")
+    output_func(terminal.hint())
 
     while True:
         try:
-            user_message = input_func("you> ")
+            user_message = input_func(terminal.prompt())
         except EOFError:
-            output_func("bye")
+            output_func(terminal.bye())
             return 0
         except KeyboardInterrupt:
-            output_func("\nbye")
+            output_func("\n" + terminal.bye())
             return 0
 
         if not user_message.strip():
             continue
 
-        if user_message.strip().lower() in EXIT_COMMANDS:
-            output_func("bye")
+        normalized_message = user_message.strip().lower()
+
+        if normalized_message in EXIT_COMMANDS:
+            output_func(terminal.bye())
             return 0
+
+        if _handle_cli_command(normalized_message, agent, config, terminal, progress_settings, output_func):
+            continue
 
         try:
             assistant_response = agent.run_turn(user_message)
         except LLMError as exc:
-            output_func(f"error: {exc}")
+            output_func(terminal.error(f"error: {exc}"))
             return 1
         except Exception as exc:
-            output_func(f"error: unexpected failure: {exc}")
+            output_func(terminal.error(f"error: unexpected failure: {exc}"))
             return 1
+        finally:
+            progress_reporter.close()
 
-        output_func(f"assistant> {assistant_response}")
+        output_func(terminal.assistant_message(assistant_response))
+
+
+def _handle_cli_command(
+    command: str,
+    agent: Agent,
+    config: Config | None,
+    terminal: TerminalUI,
+    progress_settings: ProgressSettings,
+    output_func: Callable[[str], None],
+) -> bool:
+    if command in HELP_COMMANDS:
+        output_func(terminal.help_text())
+        return True
+    if command == "/status":
+        if config is None:
+            output_func(terminal.warning("status unavailable: no config object"))
+        else:
+            output_func(terminal.status(config, agent))
+        return True
+    if command == "/tools":
+        output_func(terminal.tools(agent))
+        return True
+    if command == "/trace":
+        output_func(terminal.trace(agent))
+        return True
+    if command == "/clear":
+        output_func(terminal.clear())
+        return True
+    if command in VERBOSE_COMMANDS:
+        progress_settings.verbose = command.endswith(" on")
+        output_func(terminal.warning(f"verbose mode {'on' if progress_settings.verbose else 'off'}"))
+        return True
+    if command in QUIET_COMMANDS:
+        progress_settings.quiet = command.endswith(" on")
+        output_func(terminal.warning(f"quiet mode {'on' if progress_settings.quiet else 'off'}"))
+        return True
+    if command in SUMMARY_COMMANDS:
+        progress_settings.summary = command.endswith(" on")
+        output_func(terminal.warning(f"turn summary {'on' if progress_settings.summary else 'off'}"))
+        return True
+    return False
 
 
 def main(
@@ -171,6 +240,7 @@ def main(
     """Run the current CLI."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    terminal = TerminalUI.themed()
 
     if args.version:
         print(f"ChulkHarness {__version__}")
@@ -184,7 +254,7 @@ def main(
         config = load_config()
         agent = create_agent(config, llm_client_factory)
     except (ValueError, LLMConfigurationError) as exc:
-        output_func(f"configuration error: {exc}")
+        output_func(terminal.error(f"configuration error: {exc}"))
         return 1
 
     if args.once is not None:
@@ -195,7 +265,7 @@ def main(
             return 1
         return 0
 
-    return run_chat_loop(agent, input_func=input_func, output_func=output_func)
+    return run_chat_loop(agent, config=config, terminal=terminal, input_func=input_func, output_func=output_func)
 
 
 if __name__ == "__main__":
