@@ -131,6 +131,52 @@ def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):
     assert request_payload["messages"][-1]["content"] == "run a shell command"
 
 
+def test_main_e2e_records_turn_state_for_tool_call(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+
+    class ToolTurnFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "calculator",
+                        "arguments_json": json.dumps({"expression": "2 + 2"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The result is 4."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    def factory(_config):
+        return ToolTurnFakeLLM()
+
+    exit_code = main(["--once", "what is 2 + 2?"], llm_client_factory=factory)
+
+    output = capsys.readouterr().out
+    trace_file = next((tmp_path / "traces").glob("*.jsonl"))
+    events = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    finished_payload = next(event["payload"] for event in events if event["type"] == "turn_finished")
+    turn = finished_payload["turn"]
+
+    assert exit_code == 0
+    assert output.strip() == "The result is 4."
+    assert "turn_started" in event_types
+    assert "tool_call_completed" in event_types
+    assert turn["status"] == "completed"
+    assert turn["user_message"] == "what is 2 + 2?"
+    assert turn["model_request_count"] == 2
+    assert turn["tool_call_count"] == 1
+    assert turn["tool_calls"][0]["tool_name"] == "calculator"
+    assert turn["tool_calls"][0]["success"] is True
+    assert turn["observations"][0]["tool_name"] == "calculator"
+    assert finished_payload["agent_state"]["turn_count"] == 1
+
+
 def test_main_memory_persists_across_separate_agent_sessions(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
 

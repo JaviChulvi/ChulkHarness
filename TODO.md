@@ -696,29 +696,29 @@ Create explicit state objects so the agent loop is inspectable.
 State fields:
 
 - [x] Current conversation id.
-- [ ] Current turn id.
+- [x] Current turn id.
 - [x] Messages.
 - [x] Loaded memories.
 - [x] Loaded skills.
-- [ ] Available tools.
+- [x] Available tools.
 - [x] Tool calls.
 - [x] Observations.
 - [x] Errors.
 - [x] Final answer.
 - [ ] Token estimates if possible.
-- [ ] Start time and end time.
-- [ ] Model request count.
-- [ ] Tool-call iteration count.
+- [x] Start time and end time.
+- [x] Model request count.
+- [x] Tool-call iteration count.
 
 Implementation tasks:
 
 - [x] Create `AgentState` dataclass.
-- [ ] Create `TurnState` dataclass.
-- [ ] Create `ToolCallRecord` dataclass.
-- [ ] Create `ObservationRecord` dataclass.
-- [ ] Add serialization helpers.
-- [ ] Include state snapshots in traces.
-- [ ] Keep state mutation centralized in the agent loop.
+- [x] Create `TurnState` dataclass.
+- [x] Create `ToolCallRecord` dataclass.
+- [x] Create `ObservationRecord` dataclass.
+- [x] Add serialization helpers.
+- [x] Include state snapshots in traces.
+- [x] Keep state mutation centralized in the agent loop.
 
 ## 12. Logging and Tracing
 

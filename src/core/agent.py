@@ -6,6 +6,7 @@ user message -> prompt -> model action -> optional tool call -> observation -> f
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -27,20 +28,148 @@ from src.tools.registry import ToolResult
 from src.tracing import JSONLTraceLogger
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class ToolCallRecord:
+    """Inspectable record for one requested tool call inside a turn."""
+
+    tool_name: str
+    arguments: dict
+    iteration: int
+    started_at: str = field(default_factory=_utc_now)
+    ended_at: str | None = None
+    resolved_tool_name: str | None = None
+    success: bool | None = None
+    error: str | None = None
+    metadata: dict = field(default_factory=dict)
+
+    def finish(self, result: ToolResult) -> None:
+        self.ended_at = _utc_now()
+        self.resolved_tool_name = result.tool_name
+        self.success = result.success
+        self.error = result.error
+        self.metadata = result.metadata
+
+    def to_dict(self) -> dict:
+        return {
+            "tool_name": self.tool_name,
+            "arguments": self.arguments,
+            "iteration": self.iteration,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "resolved_tool_name": self.resolved_tool_name,
+            "success": self.success,
+            "error": self.error,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass
+class ObservationRecord:
+    """Inspectable record for one tool observation added back to context."""
+
+    tool_name: str
+    content: str
+    output_metadata: dict = field(default_factory=dict)
+    created_at: str = field(default_factory=_utc_now)
+
+    def to_dict(self) -> dict:
+        return {
+            "tool_name": self.tool_name,
+            "content": self.content,
+            "output_metadata": self.output_metadata,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class TurnState:
+    """Inspectable state for one user turn."""
+
+    user_message: str
+    turn_id: str = field(default_factory=lambda: str(uuid4()))
+    started_at: str = field(default_factory=_utc_now)
+    ended_at: str | None = None
+    status: str = "in_progress"
+    model_request_count: int = 0
+    tool_call_count: int = 0
+    available_tool_names: list[str] = field(default_factory=list)
+    loaded_memory_ids: list[str] = field(default_factory=list)
+    extracted_memory_ids: list[str] = field(default_factory=list)
+    loaded_skill_names: list[str] = field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    observations: list[ObservationRecord] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    final_answer: str | None = None
+
+    def complete(self, final_answer: str) -> None:
+        self.status = "completed"
+        self.final_answer = final_answer
+        self.ended_at = _utc_now()
+
+    def fail(self, message: str) -> None:
+        self.status = "failed"
+        self.final_answer = message
+        self.errors.append(message)
+        self.ended_at = _utc_now()
+
+    def to_dict(self) -> dict:
+        return {
+            "turn_id": self.turn_id,
+            "user_message": self.user_message,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "status": self.status,
+            "model_request_count": self.model_request_count,
+            "tool_call_count": self.tool_call_count,
+            "available_tool_names": self.available_tool_names,
+            "loaded_memory_ids": self.loaded_memory_ids,
+            "extracted_memory_ids": self.extracted_memory_ids,
+            "loaded_skill_names": self.loaded_skill_names,
+            "tool_calls": [record.to_dict() for record in self.tool_calls],
+            "observations": [record.to_dict() for record in self.observations],
+            "errors": self.errors,
+            "final_answer": self.final_answer,
+        }
+
+
 @dataclass
 class AgentState:
     """Inspectable state for a single agent session."""
 
     conversation_id: str = field(default_factory=lambda: str(uuid4()))
+    current_turn_id: str | None = None
     messages: list[dict] = field(default_factory=list)
     loaded_memory_ids: list[str] = field(default_factory=list)
     extracted_memory_ids: list[str] = field(default_factory=list)
     loaded_skill_names: list[str] = field(default_factory=list)
+    available_tool_names: list[str] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     observations: list[dict] = field(default_factory=list)
+    turns: list[TurnState] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     final_answer: str | None = None
     json_repair_attempts: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "conversation_id": self.conversation_id,
+            "current_turn_id": self.current_turn_id,
+            "messages": self.messages,
+            "loaded_memory_ids": self.loaded_memory_ids,
+            "extracted_memory_ids": self.extracted_memory_ids,
+            "loaded_skill_names": self.loaded_skill_names,
+            "available_tool_names": self.available_tool_names,
+            "tool_calls": self.tool_calls,
+            "observations": self.observations,
+            "turns": [turn.to_dict() for turn in self.turns],
+            "errors": self.errors,
+            "final_answer": self.final_answer,
+            "json_repair_attempts": self.json_repair_attempts,
+        }
 
 
 class Agent:
@@ -106,26 +235,36 @@ class Agent:
         if not clean_message:
             raise ValueError("user_message cannot be empty")
 
+        turn = TurnState(
+            user_message=clean_message,
+            available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
+        )
+        self.state.current_turn_id = turn.turn_id
+        self.state.available_tool_names = turn.available_tool_names
+        self.state.turns.append(turn)
+        self._trace("turn_started", {"turn": turn.to_dict()})
+
         self._extract_long_term_memories(clean_message)
         self._select_long_term_memories(clean_message)
         self._select_skills(clean_message)
+        turn.extracted_memory_ids = list(self.state.extracted_memory_ids)
+        turn.loaded_memory_ids = list(self.state.loaded_memory_ids)
+        turn.loaded_skill_names = list(self.state.loaded_skill_names)
         self.memory.add_user_message(clean_message)
-        self._trace("user_message", {"content": clean_message})
-        tool_calls_used = 0
-        model_request_count = 0
+        self._trace("user_message", {"turn_id": turn.turn_id, "content": clean_message})
 
         while True:
             messages = self._build_messages()
-            model_request_count += 1
+            turn.model_request_count += 1
             self._trace(
                 "model_request_started",
                 _format_model_request_trace(
                     messages,
                     max_prompt_chars=self.trace_max_prompt_chars,
-                    request_index=model_request_count,
+                    request_index=turn.model_request_count,
                     loaded_memory_ids=self.state.loaded_memory_ids,
                     loaded_skill_names=self.state.loaded_skill_names,
-                    available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
+                    available_tool_names=turn.available_tool_names,
                 ),
             )
             try:
@@ -136,13 +275,16 @@ class Agent:
             except LLMActionError as exc:
                 self.state.json_repair_attempts += exc.repair_attempts
                 self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                return self._fail_turn(str(exc))
+                turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
+                return self._fail_turn(str(exc), turn)
             action = action_result.action
             self.state.json_repair_attempts += action_result.repair_attempts
             self.state.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
+            turn.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
             self._trace(
                 "model_response",
                 {
+                    "turn_id": turn.turn_id,
                     "content": action_result.raw_response,
                     "repair_attempts": action_result.repair_attempts,
                     "repair_errors": action_result.errors,
@@ -155,23 +297,32 @@ class Agent:
                 self.memory.add_assistant_message(action.content)
                 self.state.final_answer = action.content
                 self.state.messages = self.memory.recent()
-                self._trace("final_answer", {"content": action.content})
+                turn.complete(action.content)
+                self._trace("final_answer", {"turn_id": turn.turn_id, "content": action.content})
+                self._trace("turn_finished", self._state_snapshot(turn))
                 return action.content
 
             if isinstance(action, ToolCallAction):
-                if tool_calls_used >= self.max_tool_calls_per_turn:
+                if turn.tool_call_count >= self.max_tool_calls_per_turn:
                     return self._fail_turn(
-                        f"Tool call limit reached ({self.max_tool_calls_per_turn}) before a final answer."
+                        f"Tool call limit reached ({self.max_tool_calls_per_turn}) before a final answer.",
+                        turn,
                     )
-                tool_calls_used += 1
+                turn.tool_call_count += 1
+                tool_call_record = ToolCallRecord(
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    iteration=turn.tool_call_count,
+                )
+                turn.tool_calls.append(tool_call_record)
                 tool_call_payload = {
-                    "tool_name": action.tool_name,
-                    "arguments": action.arguments,
-                    "iteration": tool_calls_used,
+                    **tool_call_record.to_dict(),
+                    "turn_id": turn.turn_id,
                     "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
                 }
                 self._trace("tool_call_started", tool_call_payload)
                 result = self.tool_registry.run(action.tool_name, action.arguments)
+                tool_call_record.finish(result)
                 self.state.tool_calls.append(
                     {
                         "tool_name": action.tool_name,
@@ -182,6 +333,7 @@ class Agent:
                 self._trace(
                     "tool_call",
                     {
+                        "turn_id": turn.turn_id,
                         "tool_name": action.tool_name,
                         "arguments": action.arguments,
                         "success": result.success,
@@ -189,11 +341,9 @@ class Agent:
                     },
                 )
                 completion_payload = {
-                    **tool_call_payload,
-                    "resolved_tool_name": result.tool_name,
-                    "success": result.success,
-                    "error": result.error,
-                    "metadata": result.metadata,
+                    **tool_call_record.to_dict(),
+                    "turn_id": turn.turn_id,
+                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
                 }
                 self._trace(
                     "tool_call_completed" if result.success else "tool_call_failed",
@@ -207,10 +357,17 @@ class Agent:
                         "output_metadata": output_metadata,
                     }
                 )
+                observation_record = ObservationRecord(
+                    tool_name=action.tool_name,
+                    content=observation,
+                    output_metadata=output_metadata,
+                )
+                turn.observations.append(observation_record)
                 self.memory.add_observation(observation)
                 self._trace(
                     "tool_observation",
                     {
+                        "turn_id": turn.turn_id,
                         "tool_name": action.tool_name,
                         "observation": observation,
                         "output_metadata": output_metadata,
@@ -300,17 +457,37 @@ class Agent:
             },
         )
 
-    def _fail_turn(self, message: str) -> str:
+    def _fail_turn(self, message: str, turn: TurnState | None = None) -> str:
         self.state.errors.append(message)
         self.state.final_answer = message
         self.memory.add_assistant_message(message)
         self.state.messages = self.memory.recent()
-        self._trace("turn_failed", {"message": message})
+        if turn is not None:
+            turn.fail(message)
+        self._trace("turn_failed", {"turn_id": turn.turn_id if turn else None, "message": message})
+        if turn is not None:
+            self._trace("turn_finished", self._state_snapshot(turn))
         return message
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
         if self.trace_logger is not None:
             self.trace_logger.log(event_type, payload or {})
+
+    def _state_snapshot(self, turn: TurnState) -> dict:
+        return {
+            "turn": turn.to_dict(),
+            "agent_state": {
+                "conversation_id": self.state.conversation_id,
+                "current_turn_id": self.state.current_turn_id,
+                "message_count": len(self.memory.messages),
+                "turn_count": len(self.state.turns),
+                "loaded_memory_ids": self.state.loaded_memory_ids,
+                "loaded_skill_names": self.state.loaded_skill_names,
+                "available_tool_names": self.state.available_tool_names,
+                "error_count": len(self.state.errors),
+                "final_answer": self.state.final_answer,
+            },
+        }
 
     def _format_tool_observation(self, requested_tool_name: str, result: ToolResult) -> tuple[str, dict]:
         observation, metadata = _format_tool_observation(

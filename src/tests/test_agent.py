@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from src.core import Agent
+from src.core import Agent, ObservationRecord, ToolCallRecord, TurnState
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
@@ -38,6 +38,41 @@ def create_test_skill_registry(tmp_path):
     registry = SkillRegistry(skills_dir)
     registry.load_metadata()
     return registry
+
+
+def test_turn_state_records_serialize():
+    tool_call = ToolCallRecord(
+        tool_name="calculator",
+        arguments={"expression": "1 + 1"},
+        iteration=1,
+    )
+    tool_call.success = True
+    observation = ObservationRecord(
+        tool_name="calculator",
+        content="Tool calculator finished with success.",
+        output_metadata={"success": True},
+    )
+    turn = TurnState(
+        user_message="what is 1 + 1?",
+        available_tool_names=["calculator"],
+        tool_calls=[tool_call],
+        observations=[observation],
+    )
+    turn.model_request_count = 2
+    turn.tool_call_count = 1
+    turn.complete("2")
+
+    payload = turn.to_dict()
+
+    assert payload["turn_id"]
+    assert payload["status"] == "completed"
+    assert payload["started_at"]
+    assert payload["ended_at"]
+    assert payload["model_request_count"] == 2
+    assert payload["tool_call_count"] == 1
+    assert payload["available_tool_names"] == ["calculator"]
+    assert payload["tool_calls"][0]["tool_name"] == "calculator"
+    assert payload["observations"][0]["content"] == "Tool calculator finished with success."
 
 
 def test_agent_sends_user_message_and_stores_response():
@@ -122,6 +157,15 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
     assert response == "The result is 20."
     assert agent.state.tool_calls == [{"tool_name": "calculator", "arguments": {"expression": "(2 + 3) * 4"}, "success": True}]
     assert "calculator" in agent.state.observations[0]["observation"]
+    assert len(agent.state.turns) == 1
+    turn = agent.state.turns[0]
+    assert turn.status == "completed"
+    assert turn.final_answer == "The result is 20."
+    assert turn.model_request_count == 2
+    assert turn.tool_call_count == 1
+    assert turn.tool_calls[0].tool_name == "calculator"
+    assert turn.tool_calls[0].success is True
+    assert turn.observations[0].tool_name == "calculator"
     assert len(llm.requests) == 2
     assert any(message["role"] == "observation" for message in llm.requests[1])
 
@@ -326,14 +370,20 @@ def test_agent_traces_tool_call_lifecycle(tmp_path):
     events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
     event_types = [event["type"] for event in events]
     completed_payload = next(event["payload"] for event in events if event["type"] == "tool_call_completed")
+    turn_finished_payload = next(event["payload"] for event in events if event["type"] == "turn_finished")
 
     assert response == "The result is 2."
+    assert "turn_started" in event_types
     assert "tool_call_started" in event_types
     assert "tool_call_completed" in event_types
     assert "model_response_parsed" in event_types
     assert completed_payload["tool_name"] == "calculator"
     assert completed_payload["iteration"] == 1
     assert completed_payload["success"] is True
+    assert turn_finished_payload["turn"]["status"] == "completed"
+    assert turn_finished_payload["turn"]["model_request_count"] == 2
+    assert turn_finished_payload["turn"]["tool_call_count"] == 1
+    assert turn_finished_payload["turn"]["tool_calls"][0]["success"] is True
 
 
 def test_agent_truncates_tool_output_but_preserves_full_artifact(tmp_path):
@@ -529,3 +579,6 @@ def test_agent_enforces_tool_call_limit():
     response = agent.run_turn("keep calculating")
 
     assert "Tool call limit reached" in response
+    assert agent.state.turns[0].status == "failed"
+    assert agent.state.turns[0].tool_call_count == 1
+    assert "Tool call limit reached" in agent.state.turns[0].errors[0]
