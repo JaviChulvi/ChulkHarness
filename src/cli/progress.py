@@ -11,7 +11,7 @@ from typing import TextIO
 
 from src.cli.terminal import TerminalUI
 from src.config import Config
-from src.core import Agent
+from src.core import Agent, TraceEvent
 
 
 @dataclass
@@ -106,11 +106,11 @@ class ProgressReporter:
             self.previous_callback(event_type, payload)
 
         now = time.monotonic()
-        if event_type == "turn_started":
+        if event_type == TraceEvent.TURN_STARTED:
             self.turn_started_at = now
-        elif event_type == "model_request_started":
+        elif event_type == TraceEvent.MODEL_REQUEST_STARTED:
             self.model_started_at = now
-        elif event_type == "tool_call_started":
+        elif event_type == TraceEvent.TOOL_CALL_STARTED:
             self.tool_started_at[_tool_key(payload)] = now
 
         self._stop_spinner_if_needed(event_type)
@@ -128,7 +128,7 @@ class ProgressReporter:
         if line is not None:
             self.output_func(line)
 
-        if event_type == "turn_finished" and self.settings.summary:
+        if event_type == TraceEvent.TURN_FINISHED and self.settings.summary:
             self.output_func(self.terminal.turn_summary(payload, config=self.config, agent=self.agent))
 
         self._start_spinner_if_needed(event_type, payload)
@@ -142,39 +142,39 @@ class ProgressReporter:
         return now - self.turn_started_at
 
     def _duration(self, event_type: str, payload: dict, now: float) -> float | None:
-        if event_type == "model_response":
+        if event_type == TraceEvent.MODEL_RESPONSE:
             if self.model_started_at is None:
                 return None
             return now - self.model_started_at
-        if event_type in {"tool_call_completed", "tool_call_failed"}:
+        if event_type in {TraceEvent.TOOL_CALL_COMPLETED, TraceEvent.TOOL_CALL_FAILED}:
             started_at = self.tool_started_at.get(_tool_key(payload))
             if started_at is None:
                 return None
             return now - started_at
-        if event_type == "turn_finished":
+        if event_type == TraceEvent.TURN_FINISHED:
             return self._elapsed(now)
         return None
 
     def _start_spinner_if_needed(self, event_type: str, payload: dict) -> None:
         if self.settings.quiet:
             return
-        if event_type == "model_request_started":
+        if event_type == TraceEvent.MODEL_REQUEST_STARTED:
             request_index = payload.get("request_index", "?")
             self.current_activity = f"asking model request {request_index}"
             self.spinner.start(self.current_activity)
-        elif event_type == "tool_call_started":
+        elif event_type == TraceEvent.TOOL_CALL_STARTED:
             tool_name = payload.get("tool_name", "tool")
             self.current_activity = f"running {tool_name}"
             self.spinner.start(self.current_activity)
 
     def _stop_spinner_if_needed(self, event_type: str) -> None:
         if event_type in {
-            "model_response",
-            "model_response_parsed",
-            "tool_call_completed",
-            "tool_call_failed",
-            "turn_finished",
-            "turn_failed",
+            TraceEvent.MODEL_RESPONSE,
+            TraceEvent.MODEL_RESPONSE_PARSED,
+            TraceEvent.TOOL_CALL_COMPLETED,
+            TraceEvent.TOOL_CALL_FAILED,
+            TraceEvent.TURN_FINISHED,
+            TraceEvent.TURN_FAILED,
         }:
             self.spinner.stop()
 

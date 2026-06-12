@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from src.llm import (
     DeepSeekChatCompletionsClient,
+    LLM_PROVIDER_REGISTRY,
     LLMClient,
     LLMConfigurationError,
     OpenAIResponsesClient,
@@ -194,3 +195,13 @@ def test_create_llm_client_selects_deepseek_provider():
     )
 
     assert isinstance(client, DeepSeekChatCompletionsClient)
+
+
+def test_llm_provider_registry_exposes_provider_capabilities():
+    openai_provider = LLM_PROVIDER_REGISTRY["openai"]
+    deepseek_provider = LLM_PROVIDER_REGISTRY["deepseek"]
+
+    assert openai_provider.capabilities.supports_structured_output is True
+    assert openai_provider.capabilities.api_style == "responses"
+    assert deepseek_provider.capabilities.supports_json_mode is True
+    assert deepseek_provider.capabilities.api_style == "chat_completions"

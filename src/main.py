@@ -7,7 +7,14 @@ from collections.abc import Sequence
 from typing import Callable
 
 from src import __version__
-from src.cli import ProgressReporter, ProgressSettings, TerminalUI
+from src.cli import (
+    CLICommandContext,
+    EXIT_COMMANDS,
+    ProgressReporter,
+    ProgressSettings,
+    TerminalUI,
+    handle_cli_command,
+)
 from src.config import Config, load_config
 from src.core import Agent, AgentState
 from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
@@ -15,13 +22,6 @@ from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
 from src.tools import create_default_tool_registry
 from src.tracing import JSONLTraceLogger
-
-
-EXIT_COMMANDS = {"/exit", "/quit", "/q", "exit", "quit"}
-HELP_COMMANDS = {"/help", "help", "?"}
-VERBOSE_COMMANDS = {"/verbose on", "/verbose off"}
-QUIET_COMMANDS = {"/quiet on", "/quiet off"}
-SUMMARY_COMMANDS = {"/summary on", "/summary off"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -152,6 +152,13 @@ def run_chat_loop(
     else:
         output_func("ChulkHarness CLI")
     output_func(terminal.hint())
+    command_context = CLICommandContext(
+        agent=agent,
+        config=config,
+        terminal=terminal,
+        progress_settings=progress_settings,
+        output_func=output_func,
+    )
 
     while True:
         try:
@@ -172,7 +179,7 @@ def run_chat_loop(
             output_func(terminal.bye())
             return 0
 
-        if _handle_cli_command(normalized_message, agent, config, terminal, progress_settings, output_func):
+        if handle_cli_command(normalized_message, command_context):
             continue
 
         try:
@@ -187,47 +194,6 @@ def run_chat_loop(
             progress_reporter.close()
 
         output_func(terminal.assistant_message(assistant_response))
-
-
-def _handle_cli_command(
-    command: str,
-    agent: Agent,
-    config: Config | None,
-    terminal: TerminalUI,
-    progress_settings: ProgressSettings,
-    output_func: Callable[[str], None],
-) -> bool:
-    if command in HELP_COMMANDS:
-        output_func(terminal.help_text())
-        return True
-    if command == "/status":
-        if config is None:
-            output_func(terminal.warning("status unavailable: no config object"))
-        else:
-            output_func(terminal.status(config, agent))
-        return True
-    if command == "/tools":
-        output_func(terminal.tools(agent))
-        return True
-    if command == "/trace":
-        output_func(terminal.trace(agent))
-        return True
-    if command == "/clear":
-        output_func(terminal.clear())
-        return True
-    if command in VERBOSE_COMMANDS:
-        progress_settings.verbose = command.endswith(" on")
-        output_func(terminal.warning(f"verbose mode {'on' if progress_settings.verbose else 'off'}"))
-        return True
-    if command in QUIET_COMMANDS:
-        progress_settings.quiet = command.endswith(" on")
-        output_func(terminal.warning(f"quiet mode {'on' if progress_settings.quiet else 'off'}"))
-        return True
-    if command in SUMMARY_COMMANDS:
-        progress_settings.summary = command.endswith(" on")
-        output_func(terminal.warning(f"turn summary {'on' if progress_settings.summary else 'off'}"))
-        return True
-    return False
 
 
 def main(

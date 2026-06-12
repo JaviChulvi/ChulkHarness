@@ -51,12 +51,34 @@ Shell access and file-writing tools include local guardrails, timeouts, output l
 src/
   main.py
   config.py
+  cli/
+    commands.py
+    progress.py
+    terminal.py
   core/
+    actions.py
     agent.py
+    events.py
+    observations.py
+    prompt_builder.py
     prompts.py
+    state.py
+    trace_format.py
   llm/
+    base.py
+    capabilities.py
     client.py
+    factory.py
+    messages.py
+    providers/
+      openai.py
+      deepseek.py
   memory/
+    constants.py
+    extraction.py
+    markdown.py
+    models.py
+    retrieval.py
     store.py
     sqlite_store.py
   tools/
@@ -65,6 +87,7 @@ src/
     files.py
     memory.py
     registry.py
+    schema.py
     shell.py
   skills/
     registry.py

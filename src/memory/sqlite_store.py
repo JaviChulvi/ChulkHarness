@@ -4,70 +4,38 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
-import math
 from pathlib import Path
-import re
 import sqlite3
 from typing import Any
 from uuid import uuid4
 
-
-PROFILE_MEMORY_TAGS = {"persona", "preference", "style", "workflow"}
-DEFAULT_EMBEDDING_DIMENSIONS = 64
-SEARCH_STOPWORDS = {
-    "about",
-    "and",
-    "are",
-    "can",
-    "does",
-    "for",
-    "from",
-    "how",
-    "into",
-    "the",
-    "this",
-    "that",
-    "what",
-    "when",
-    "where",
-    "with",
-    "work",
-    "works",
-}
-
-
-@dataclass(frozen=True)
-class MemoryRecord:
-    """A durable memory record stored in SQLite."""
-
-    id: str
-    content: str
-    created_at: str
-    updated_at: str
-    tags: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    importance: int = 1
-    source: str = "manual"
-    confidence: float = 1.0
-    embedding: list[float] | None = None
-    archived_at: str | None = None
-    access_count: int = 0
-    last_accessed_at: str | None = None
-
-
-@dataclass(frozen=True)
-class MemoryExtractionCandidate:
-    """A candidate durable memory extracted from a user message."""
-
-    content: str
-    tags: list[str]
-    source: str = "auto_extracted"
-    confidence: float = 0.8
-    metadata: dict[str, Any] = field(default_factory=dict)
-    importance: int = 5
+from src.memory.constants import PROFILE_MEMORY_TAGS
+from src.memory.extraction import extract_memory_candidates
+from src.memory.markdown import parse_markdown_memory_line as _parse_markdown_memory_line
+from src.memory.models import MemoryExtractionCandidate, MemoryRecord
+from src.memory.retrieval import (
+    choose_memory_to_keep as _choose_memory_to_keep,
+    content_similarity as _content_similarity,
+    cosine_similarity as _cosine_similarity,
+    merge_ranked_memories as _merge_ranked_memories,
+    merge_tags as _merge_tags,
+    normalize_confidence as _normalize_confidence,
+    normalize_content as _normalize_content,
+    normalize_embedding as _normalize_embedding,
+    normalize_importance as _normalize_importance,
+    normalize_limit as _normalize_limit,
+    normalize_source as _normalize_source,
+    normalize_tags as _normalize_tags,
+    resolve_profile_conflicts as _resolve_profile_conflicts,
+    safe_json_dict as _safe_json_dict,
+    safe_json_float_list as _safe_json_float_list,
+    safe_json_list as _safe_json_list,
+    score_memory as _score_memory,
+    text_to_embedding,
+    tokenize as _tokenize,
+)
 
 
 class SQLiteMemoryStore:
@@ -641,60 +609,6 @@ def select_memories_for_prompt(
     return profile, relevant
 
 
-def extract_memory_candidates(text: str) -> list[MemoryExtractionCandidate]:
-    """Extract explicit memories from text without hidden inference."""
-    clean_text = text.strip()
-    if not clean_text:
-        return []
-
-    patterns = [
-        (r"\bremember that (?P<content>.+)", ["explicit", "user"]),
-        (r"\bplease remember (?P<content>.+)", ["explicit", "user"]),
-        (r"\bmy preference is (?P<content>.+)", ["preference", "user"]),
-        (r"\bi prefer (?P<content>.+)", ["preference", "user"]),
-    ]
-    candidates: list[MemoryExtractionCandidate] = []
-    seen_content: set[str] = set()
-    for pattern, tags in patterns:
-        match = re.search(pattern, clean_text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        content = _strip_sentence(match.group("content"))
-        if not content:
-            continue
-        if "preference" in tags and not content.lower().startswith("user prefers"):
-            content = f"User prefers {content}"
-        normalized = _normalize_content(content)
-        if normalized in seen_content:
-            continue
-        seen_content.add(normalized)
-        candidates.append(
-            MemoryExtractionCandidate(
-                content=content,
-                tags=tags,
-                metadata={"extracted_from": "user_message"},
-                importance=7 if "preference" in tags else 5,
-                confidence=0.9,
-            )
-        )
-    return candidates
-
-
-def text_to_embedding(text: str, dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS) -> list[float]:
-    """Create a small deterministic lexical embedding for local vector search."""
-    vector = [0.0] * dimensions
-    terms = _tokenize(text)
-    if not terms:
-        return vector
-    for term in terms:
-        index = sum(ord(char) for char in term) % dimensions
-        vector[index] += 1.0
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        return vector
-    return [value / norm for value in vector]
-
-
 def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
     return MemoryRecord(
         id=row["id"],
@@ -792,171 +706,3 @@ def _backfill_memory_fts(conn: sqlite3.Connection) -> None:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _normalize_tags(tags: list[str]) -> list[str]:
-    clean_tags = []
-    for tag in tags:
-        clean = str(tag).strip().lower()
-        if clean and clean not in clean_tags:
-            clean_tags.append(clean)
-    return clean_tags
-
-
-def _merge_tags(left: list[str], right: list[str]) -> list[str]:
-    return _normalize_tags([*left, *right])
-
-
-def _normalize_importance(importance: int) -> int:
-    if not isinstance(importance, int) or isinstance(importance, bool):
-        raise ValueError("Memory importance must be an integer")
-    if importance < 1 or importance > 10:
-        raise ValueError("Memory importance must be between 1 and 10")
-    return importance
-
-
-def _normalize_limit(limit: int) -> int:
-    if not isinstance(limit, int) or isinstance(limit, bool):
-        raise ValueError("Memory limit must be an integer")
-    if limit < 1:
-        raise ValueError("Memory limit must be greater than zero")
-    return min(limit, 100)
-
-
-def _normalize_source(source: str) -> str:
-    clean_source = str(source).strip().lower().replace(" ", "_")
-    return clean_source or "manual"
-
-
-def _normalize_confidence(confidence: float) -> float:
-    if not isinstance(confidence, int | float) or isinstance(confidence, bool):
-        raise ValueError("Memory confidence must be a number")
-    if confidence < 0 or confidence > 1:
-        raise ValueError("Memory confidence must be between 0 and 1")
-    return float(confidence)
-
-
-def _normalize_embedding(embedding: list[float] | None) -> list[float] | None:
-    if embedding is None:
-        return None
-    if not isinstance(embedding, list):
-        raise ValueError("Memory embedding must be a list of numbers")
-    clean_embedding: list[float] = []
-    for value in embedding:
-        if not isinstance(value, int | float) or isinstance(value, bool):
-            raise ValueError("Memory embedding values must be numbers")
-        clean_embedding.append(float(value))
-    return clean_embedding
-
-
-def _safe_json_list(value: str) -> list[str]:
-    try:
-        parsed = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return []
-    return parsed if isinstance(parsed, list) else []
-
-
-def _safe_json_float_list(value: str | None) -> list[float] | None:
-    if not value:
-        return None
-    parsed = _safe_json_list(value)
-    try:
-        return [float(item) for item in parsed]
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_json_dict(value: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _tokenize(text: str) -> list[str]:
-    terms = re.findall(r"[a-zA-Z0-9]+", text.lower())
-    return [term for term in terms if len(term) > 2 and term not in SEARCH_STOPWORDS]
-
-
-def _score_memory(memory: MemoryRecord, terms: list[str]) -> int:
-    haystack = " ".join(
-        [
-            memory.content,
-            " ".join(memory.tags),
-            json.dumps(memory.metadata, sort_keys=True),
-            memory.source,
-        ]
-    ).lower()
-    term_score = sum(haystack.count(term) for term in terms)
-    return term_score + memory.importance
-
-
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
-    numerator = sum(left_value * right_value for left_value, right_value in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if left_norm == 0 or right_norm == 0:
-        return 0.0
-    return numerator / (left_norm * right_norm)
-
-
-def _merge_ranked_memories(left: list[MemoryRecord], right: list[MemoryRecord]) -> list[MemoryRecord]:
-    merged: dict[str, MemoryRecord] = {}
-    for memory in [*left, *right]:
-        merged[memory.id] = memory
-    return list(merged.values())
-
-
-def _normalize_content(content: str) -> str:
-    return " ".join(_tokenize(content))
-
-
-def _content_similarity(left: str, right: str) -> float:
-    left_terms = set(_tokenize(left))
-    right_terms = set(_tokenize(right))
-    if not left_terms or not right_terms:
-        return 0.0
-    return len(left_terms & right_terms) / len(left_terms | right_terms)
-
-
-def _choose_memory_to_keep(left: MemoryRecord, right: MemoryRecord) -> tuple[MemoryRecord, MemoryRecord]:
-    left_score = (left.confidence, left.importance, left.updated_at)
-    right_score = (right.confidence, right.importance, right.updated_at)
-    return (left, right) if left_score >= right_score else (right, left)
-
-
-def _resolve_profile_conflicts(memories: list[MemoryRecord]) -> list[MemoryRecord]:
-    ordered = sorted(memories, key=lambda item: (item.confidence, item.importance, item.updated_at), reverse=True)
-    selected: list[MemoryRecord] = []
-    for memory in ordered:
-        is_near_duplicate = any(
-            set(memory.tags) & set(existing.tags) & PROFILE_MEMORY_TAGS
-            and _content_similarity(memory.content, existing.content) >= 0.86
-            for existing in selected
-        )
-        if not is_near_duplicate:
-            selected.append(memory)
-    return selected
-
-
-def _parse_markdown_memory_line(line: str) -> tuple[str, list[str]] | None:
-    stripped = line.strip()
-    if not stripped.startswith("- "):
-        return None
-    body = stripped[2:].strip()
-    tags: list[str] = []
-    tag_match = re.match(r"\[(?P<tags>[^\]]+)\]\s+(?P<content>.+)", body)
-    if tag_match:
-        tags = [tag.strip() for tag in tag_match.group("tags").split(",")]
-        body = tag_match.group("content").strip()
-    if not body:
-        return None
-    return body, _normalize_tags(tags)
-
-
-def _strip_sentence(text: str) -> str:
-    return text.strip().strip(".! ")

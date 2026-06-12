@@ -5,10 +5,15 @@ from src.llm.client import (
     LLMActionError,
     LLMActionResult,
     LLMClient,
+    LLMCapabilities,
+    LLMClientSettings,
     LLMConfigurationError,
     LLMError,
+    LLMProvider,
+    LLM_PROVIDER_REGISTRY,
     OpenAIResponsesClient,
     create_llm_client,
+    supported_llm_providers,
 )
 
 __all__ = [
@@ -16,8 +21,13 @@ __all__ = [
     "LLMActionError",
     "LLMActionResult",
     "LLMClient",
+    "LLMCapabilities",
+    "LLMClientSettings",
     "LLMConfigurationError",
     "LLMError",
+    "LLMProvider",
+    "LLM_PROVIDER_REGISTRY",
     "OpenAIResponsesClient",
     "create_llm_client",
+    "supported_llm_providers",
 ]

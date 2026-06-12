@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from src.llm import supported_llm_providers
+
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_PROVIDER = "openai"
@@ -18,7 +20,7 @@ DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
 DEFAULT_MAX_OBSERVATION_CHARS = 12000
 DEFAULT_MAX_TOOL_STDOUT_CHARS = 8000
 DEFAULT_MAX_TOOL_STDERR_CHARS = 4000
-SUPPORTED_LLM_PROVIDERS = {"openai", "deepseek"}
+SUPPORTED_LLM_PROVIDERS = supported_llm_providers()
 
 
 @dataclass(frozen=True)

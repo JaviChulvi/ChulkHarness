@@ -7,41 +7,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
-
-class ToolValidationError(ValueError):
-    """Raised when tool arguments do not match the declared schema."""
-
-    def __init__(self, tool_name: str, issues: list["ToolValidationIssue"], args_schema: dict[str, Any]) -> None:
-        self.tool_name = tool_name
-        self.issues = issues
-        self.args_schema = args_schema
-        super().__init__(_format_validation_summary(tool_name, issues))
-
-
-@dataclass(frozen=True)
-class ToolValidationIssue:
-    """One validation problem for model-provided tool arguments."""
-
-    path: str
-    message: str
-    expected: str | None = None
-    actual: str | None = None
-
-    def to_dict(self) -> dict[str, str | None]:
-        return {
-            "path": self.path,
-            "message": self.message,
-            "expected": self.expected,
-            "actual": self.actual,
-        }
-
-    def to_prompt_line(self) -> str:
-        detail = f"{self.path}: {self.message}"
-        if self.expected:
-            detail += f" Expected: {self.expected}."
-        if self.actual:
-            detail += f" Got: {self.actual}."
-        return detail
+from src.tools.schema import ToolValidationError, ToolValidationIssue, validate_tool_arguments, validate_tool_schema
 
 
 @dataclass(frozen=True)
@@ -97,6 +63,7 @@ class ToolRegistry:
             raise ValueError("Tool names must be non-empty and contain only letters, numbers, and underscores")
         if tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
+        validate_tool_schema(tool.name, tool.args_schema)
         self._tools[tool.name] = tool
 
     def list_tools(self) -> list[Tool]:
@@ -172,23 +139,7 @@ class ToolRegistry:
         return result
 
     def _validate_arguments(self, tool: Tool, arguments: dict[str, Any]) -> None:
-        schema = tool.args_schema or {}
-        issues: list[ToolValidationIssue] = []
-
-        if not isinstance(arguments, dict):
-            issues.append(
-                ToolValidationIssue(
-                    path="$",
-                    message="tool arguments must be a JSON object",
-                    expected="object",
-                    actual=_json_type_name(arguments),
-                )
-            )
-        else:
-            _validate_object("$", arguments, schema, issues)
-
-        if issues:
-            raise ToolValidationError(tool.name, issues, schema)
+        validate_tool_arguments(tool.name, arguments, tool.args_schema or {})
 
     def _log_call(self, name: str, arguments: dict[str, Any], result: ToolResult) -> None:
         self.call_log.append(
@@ -200,190 +151,6 @@ class ToolRegistry:
                 "observation": result.observation,
             }
         )
-
-
-def _matches_json_type(value: Any, expected: str | list[str]) -> bool:
-    expected_types = [expected] if isinstance(expected, str) else expected
-    return any(_matches_single_json_type(value, item) for item in expected_types)
-
-
-def _matches_single_json_type(value: Any, expected: str) -> bool:
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "number":
-        return isinstance(value, int | float) and not isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "null":
-        return value is None
-    return True
-
-
-def _validate_object(path: str, value: dict[str, Any], schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
-    expected = schema.get("type")
-    if expected and not _matches_json_type(value, expected):
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="value has the wrong type",
-                expected=_format_expected_type(expected),
-                actual=_json_type_name(value),
-            )
-        )
-        return
-
-    required = schema.get("required", [])
-    properties = schema.get("properties", {})
-    additional_allowed = schema.get("additionalProperties", True)
-
-    for field_name in required:
-        if field_name not in value:
-            issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Missing required argument"))
-
-    if not additional_allowed:
-        for field_name in sorted(set(value) - set(properties)):
-            issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Unknown argument"))
-
-    for field_name, item in value.items():
-        field_schema = properties.get(field_name)
-        if field_schema is None:
-            continue
-        _validate_value(_child_path(path, field_name), item, field_schema, issues)
-
-
-def _validate_value(path: str, value: Any, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
-    expected = schema.get("type")
-    if expected and not _matches_json_type(value, expected):
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="value has the wrong type",
-                expected=_format_expected_type(expected),
-                actual=_json_type_name(value),
-            )
-        )
-        return
-
-    if "enum" in schema and value not in schema["enum"]:
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="value is not one of the allowed options",
-                expected=", ".join(str(item) for item in schema["enum"]),
-                actual=repr(value),
-            )
-        )
-
-    if isinstance(value, str):
-        _validate_string(path, value, schema, issues)
-    elif isinstance(value, int | float) and not isinstance(value, bool):
-        _validate_number(path, value, schema, issues)
-    elif isinstance(value, list):
-        _validate_array(path, value, schema, issues)
-    elif isinstance(value, dict):
-        _validate_object(path, value, schema, issues)
-
-
-def _validate_string(path: str, value: str, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
-    min_length = schema.get("minLength")
-    max_length = schema.get("maxLength")
-    if isinstance(min_length, int) and len(value) < min_length:
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="string is too short",
-                expected=f"at least {min_length} characters",
-                actual=f"{len(value)} characters",
-            )
-        )
-    if isinstance(max_length, int) and len(value) > max_length:
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="string is too long",
-                expected=f"at most {max_length} characters",
-                actual=f"{len(value)} characters",
-            )
-        )
-
-
-def _validate_number(path: str, value: int | float, schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
-    minimum = schema.get("minimum")
-    maximum = schema.get("maximum")
-    if isinstance(minimum, int | float) and value < minimum:
-        issues.append(
-            ToolValidationIssue(path=path, message="number is too small", expected=f">= {minimum}", actual=str(value))
-        )
-    if isinstance(maximum, int | float) and value > maximum:
-        issues.append(
-            ToolValidationIssue(path=path, message="number is too large", expected=f"<= {maximum}", actual=str(value))
-        )
-
-
-def _validate_array(path: str, value: list[Any], schema: dict[str, Any], issues: list[ToolValidationIssue]) -> None:
-    min_items = schema.get("minItems")
-    max_items = schema.get("maxItems")
-    if isinstance(min_items, int) and len(value) < min_items:
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="array has too few items",
-                expected=f"at least {min_items} items",
-                actual=f"{len(value)} items",
-            )
-        )
-    if isinstance(max_items, int) and len(value) > max_items:
-        issues.append(
-            ToolValidationIssue(
-                path=path,
-                message="array has too many items",
-                expected=f"at most {max_items} items",
-                actual=f"{len(value)} items",
-            )
-        )
-    item_schema = schema.get("items")
-    if isinstance(item_schema, dict):
-        for index, item in enumerate(value):
-            _validate_value(f"{path}[{index}]", item, item_schema, issues)
-
-
-def _child_path(parent: str, child: str) -> str:
-    return child if parent == "$" else f"{parent}.{child}"
-
-
-def _json_type_name(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    if isinstance(value, list):
-        return "array"
-    if isinstance(value, dict):
-        return "object"
-    return type(value).__name__
-
-
-def _format_expected_type(expected: str | list[str]) -> str:
-    if isinstance(expected, list):
-        return " or ".join(expected)
-    return expected
-
-
-def _format_validation_summary(tool_name: str, issues: list[ToolValidationIssue]) -> str:
-    issue_text = "; ".join(issue.to_prompt_line() for issue in issues)
-    return f"Invalid arguments for tool {tool_name}: {issue_text}"
 
 
 def _format_invalid_arguments_observation(tool: Tool, issues: list[ToolValidationIssue]) -> str:

@@ -36,14 +36,33 @@ src/
   config.py
   core/
     agent.py
+    events.py
+    observations.py
+    prompt_builder.py
     prompts.py
+    state.py
+    trace_format.py
   llm/
+    base.py
+    capabilities.py
     client.py
+    factory.py
+    providers/
   memory/
+    extraction.py
+    markdown.py
+    models.py
+    retrieval.py
     store.py
+    sqlite_store.py
   tools/
     registry.py
+    schema.py
     shell.py
+  cli/
+    commands.py
+    progress.py
+    terminal.py
   skills/
     registry.py
   tracing/
@@ -69,18 +88,29 @@ Module responsibilities:
 
 - [ ] `src/core/agent.py`
   - [ ] Implement the core agent loop.
-  - [ ] Build prompts from system instructions, messages, memories, skills, and tools.
+  - [ ] Coordinate prompt building, memory selection, skill selection, model requests, tools, and observations.
   - [ ] Ask the model for either a direct answer or a tool call.
   - [ ] Execute tool calls through the tool registry.
   - [ ] Feed observations back into the model.
   - [ ] Track per-turn state and stop conditions.
 
-- [ ] `src/llm/client.py`
+- [ ] `src/core/state.py`
+  - [ ] Store session and per-turn dataclasses.
+  - [ ] Keep `AgentState`, `TurnState`, `ToolCallRecord`, and `ObservationRecord` inspectable.
+
+- [ ] `src/core/events.py`
+  - [ ] Store shared trace event names for the agent, traces, and CLI progress.
+
+- [ ] `src/core/prompt_builder.py`
+  - [ ] Compose prompts from base instructions, memory, skills, tools, and history.
+
+- [ ] `src/llm/`
   - [ ] Wrap the model provider API.
   - [ ] Support OpenAI first.
   - [ ] Hide provider-specific request and response details from the agent loop.
   - [ ] Provide text completion and structured JSON completion helpers.
   - [ ] Handle retries, timeouts, rate limits, and provider errors.
+  - [ ] Register providers through a provider registry and explicit capability metadata.
 
 - [x] `src/memory/`
   - [x] Manage short-term conversation history.
@@ -1036,8 +1066,37 @@ Done when:
 
 Goal: experiment with richer agent behavior after the core mechanics are understood.
 
-- [ ] Add planning prompt.
-- [ ] Add explicit plan data structure.
+- [ ] Add plan mode.
+  - [ ] Add `/plan on|off` CLI command.
+  - [ ] Add a planning prompt for multi-step requests.
+  - [ ] Add explicit `Plan` and `PlanStep` data structures.
+  - [ ] Track step status: `pending`, `in_progress`, `completed`, `blocked`.
+  - [ ] Let the agent create a checklist before executing multi-step work.
+  - [ ] Ask for user approval before executing a generated plan.
+  - [ ] Store the active plan in turn/session state.
+  - [ ] Update plan status after each tool call or model step.
+  - [ ] Include plan updates in traces.
+  - [ ] Add tests with a mocked LLM that creates, approves, and executes a plan.
+- [ ] Add session persistence and resume.
+  - [ ] Store conversations in SQLite.
+  - [ ] Store turns in SQLite.
+  - [ ] Store model requests, tool calls, observations, errors, and final answers.
+  - [ ] Store compact conversation summaries for older sessions.
+  - [ ] Add `/sessions` CLI command.
+  - [ ] Add `/resume <conversation_id>` CLI command.
+  - [ ] Add `/history` CLI command for the current session.
+  - [ ] Let resumed sessions reload short-term history from durable storage.
+  - [ ] Link trace files to persisted conversation ids.
+  - [ ] Add tests proving a session can be resumed after creating a new agent instance.
+- [ ] Add better context management.
+  - [ ] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
+  - [ ] Add configurable prompt budget limits.
+  - [ ] Add context budget reporting to `/status` or a new `/context` CLI command.
+  - [ ] Summarize older conversation messages when history grows too large.
+  - [ ] Keep the full prompt available in traces while showing compact context summaries in the CLI.
+  - [ ] Explain which memories, skills, tools, and history were injected into the current prompt.
+  - [ ] Avoid injecting large tool observations when an artifact path is enough.
+  - [ ] Add tests for token estimates, trimming, summarization, and prompt budget behavior.
 - [ ] Add reflection prompt.
 - [ ] Add post-tool reflection.
 - [ ] Add conversation summarization.

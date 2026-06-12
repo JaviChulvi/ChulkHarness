@@ -12,11 +12,11 @@ Current package layout:
 src/
   main.py            # CLI entrypoint
   config.py          # Environment and runtime config
-  core/              # Agent turn orchestration and prompts
-  llm/               # Provider wrapper and LLM clients
-  memory/            # Short-term memory and SQLite long-term memory
-  tools/             # Tool primitives and implementations, including memory tools
-  cli/               # Terminal formatting and interactive CLI surface
+  core/              # Agent orchestration, state, events, prompts, observations
+  llm/               # Provider registry, capabilities, and provider clients
+  memory/            # Short-term memory, SQLite memory, retrieval, extraction
+  tools/             # Tool primitives, schema validation, and implementations
+  cli/               # Terminal formatting, progress, and slash commands
   skills/            # Skill registry code
   tracing/           # Trace/log primitives
   tests/             # Pytest tests
@@ -30,12 +30,13 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Keep the harness small, readable, and modular.
 - Prefer explicit dataclasses, registries, and plain Python functions over hidden control flow.
 - Keep provider-specific logic inside `src/llm/`.
+- Add providers through `src/llm/factory.py` and `src/llm/providers/`; keep capabilities explicit.
 - Ask the LLM layer for validated actions with `complete_action(...)`; the agent loop should not parse provider text directly.
 - Keep provider-specific structured-output transports normalized into the shared action dataclasses before orchestration.
-- Keep prompt text in `src/core/prompts.py`.
-- Keep terminal colors, banners, slash-command text, and prompt styling in `src/cli/`.
-- Drive interactive progress lines, timing, summaries, and spinner activity from agent trace events through `Agent.event_callback`.
-- Keep session-wide data in `AgentState` and per-message execution details in `TurnState`.
+- Keep prompt text in `src/core/prompts.py` and prompt composition in `src/core/prompt_builder.py`.
+- Keep terminal colors, banners, and prompt styling in `src/cli/terminal.py`; keep slash commands in `src/cli/commands.py`.
+- Drive interactive progress lines, timing, summaries, and spinner activity from `TraceEvent` names through `Agent.event_callback`.
+- Keep session-wide data in `AgentState` and per-message execution details in `TurnState` from `src/core/state.py`.
 - Record tool calls and observations with `ToolCallRecord` and `ObservationRecord` before writing trace snapshots.
 - Keep skill playbooks in root-level `skills/`, outside the Python package.
 - Keep side-effecting tools behind registries and safety checks.
@@ -46,6 +47,7 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Treat memories tagged `persona`, `preference`, `style`, or `workflow` as profile context that can shape tone, level of detail, and task-solving style.
 - Do not store secrets in long-term memory.
 - SQLite is the runtime memory engine; `MEMORY.md` is only a human-readable import/export format.
+- Keep SQLite operations in `src/memory/sqlite_store.py`; keep pure retrieval, extraction, Markdown, and model helpers in their own memory modules.
 - Memory trace events should include selected memory ids so memory behavior can be debugged across sessions.
 - When marking TODO items complete, verify the corresponding code, tests, or command output first.
 

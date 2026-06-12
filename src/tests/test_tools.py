@@ -101,6 +101,33 @@ def test_registry_reports_multiple_argument_validation_errors():
     ]
 
 
+def test_registry_rejects_invalid_tool_schema_at_registration():
+    registry = ToolRegistry()
+
+    try:
+        registry.register(
+            Tool(
+                name="broken_schema",
+                description="Broken schema.",
+                args_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": ["missing"],
+                    "additionalProperties": "nope",
+                },
+                callable=lambda _arguments: ToolResult("broken_schema", True, "unused"),
+            )
+        )
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected invalid schema registration to fail")
+
+    assert "Invalid schema for tool broken_schema" in message
+    assert "required field missing is not declared in properties" in message
+    assert "additionalProperties must be boolean" in message
+
+
 def test_registry_catches_tool_exceptions():
     def broken_tool(_arguments):
         raise RuntimeError("boom")

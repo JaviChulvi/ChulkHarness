@@ -2,18 +2,25 @@
 
 from typing import Any
 
-__all__ = ["Agent", "AgentState", "ObservationRecord", "ToolCallRecord", "TurnState"]
+__all__ = ["Agent", "AgentState", "ObservationRecord", "ToolCallRecord", "TraceEvent", "TurnState"]
 
 
 def __getattr__(name: str) -> Any:
-    if name in __all__:
-        from src.core.agent import Agent, AgentState, ObservationRecord, ToolCallRecord, TurnState
+    if name == "Agent":
+        from src.core.agent import Agent
+
+        return Agent
+    if name in {"AgentState", "ObservationRecord", "ToolCallRecord", "TurnState"}:
+        from src.core.state import AgentState, ObservationRecord, ToolCallRecord, TurnState
 
         return {
-            "Agent": Agent,
             "AgentState": AgentState,
             "ObservationRecord": ObservationRecord,
             "ToolCallRecord": ToolCallRecord,
             "TurnState": TurnState,
         }[name]
+    if name == "TraceEvent":
+        from src.core.events import TraceEvent
+
+        return TraceEvent
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

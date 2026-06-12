@@ -1,6 +1,15 @@
 """Terminal UI helpers for the ChulkHarness CLI."""
 
+from src.cli.commands import CLICommandContext, EXIT_COMMANDS, handle_cli_command
 from src.cli.progress import ProgressReporter, ProgressSettings, Spinner
 from src.cli.terminal import TerminalUI
 
-__all__ = ["ProgressReporter", "ProgressSettings", "Spinner", "TerminalUI"]
+__all__ = [
+    "CLICommandContext",
+    "EXIT_COMMANDS",
+    "ProgressReporter",
+    "ProgressSettings",
+    "Spinner",
+    "TerminalUI",
+    "handle_cli_command",
+]

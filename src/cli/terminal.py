@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 
 from src.config import Config
-from src.core import Agent
+from src.core import Agent, TraceEvent
 
 
 HULK_GREEN = (63, 255, 81)
@@ -210,13 +210,13 @@ def _progress_message(
     verbose: bool = False,
 ) -> str | None:
     label = f"{event_type} - " if verbose else ""
-    if event_type == "turn_started":
+    if event_type == TraceEvent.TURN_STARTED:
         turn = payload.get("turn", {})
         tools = len(turn.get("available_tool_names", []))
         return label + f"starting turn - {tools} tools available{_elapsed_suffix(elapsed_seconds)}"
-    if event_type == "memory_search_started":
+    if event_type == TraceEvent.MEMORY_SEARCH_STARTED:
         return label + f"checking memory{_elapsed_suffix(elapsed_seconds)}"
-    if event_type == "memory_search_completed":
+    if event_type == TraceEvent.MEMORY_SEARCH_COMPLETED:
         profile = payload.get("profile_memory_ids", [])
         relevant = payload.get("relevant_memory_ids", [])
         loaded = payload.get("loaded_memory_ids", [])
@@ -225,36 +225,36 @@ def _progress_message(
             + f"memory loaded - {len(loaded)} selected - profile: {len(profile)}, relevant: {len(relevant)}"
             + _elapsed_suffix(elapsed_seconds)
         )
-    if event_type == "skill_selection_started":
+    if event_type == TraceEvent.SKILL_SELECTION_STARTED:
         return label + f"loading skills{_elapsed_suffix(elapsed_seconds)}"
-    if event_type == "skill_selection_completed":
+    if event_type == TraceEvent.SKILL_SELECTION_COMPLETED:
         skills = payload.get("loaded_skill_names", [])
         if not skills:
             return label + f"skills loaded - none{_elapsed_suffix(elapsed_seconds)}"
         matches = _skill_matches(payload)
         match_text = f" - matched: {matches}" if matches else ""
         return label + "skills loaded - " + ", ".join(skills) + match_text + _elapsed_suffix(elapsed_seconds)
-    if event_type == "model_request_started":
+    if event_type == TraceEvent.MODEL_REQUEST_STARTED:
         request_index = payload.get("request_index", "?")
         return label + f"asking model - request {request_index}{_elapsed_suffix(elapsed_seconds)}"
-    if event_type == "model_response":
+    if event_type == TraceEvent.MODEL_RESPONSE:
         return label + f"model responded{_duration_suffix(duration_seconds)}"
-    if event_type == "model_response_parsed":
+    if event_type == TraceEvent.MODEL_RESPONSE_PARSED:
         action_type = payload.get("type")
         if action_type == "tool_call":
             return label + f"model chose tool - {payload.get('tool_name')}{_elapsed_suffix(elapsed_seconds)}"
         if action_type == "final_answer":
             return label + f"model returned final answer{_elapsed_suffix(elapsed_seconds)}"
-    if event_type == "tool_call_started":
+    if event_type == TraceEvent.TOOL_CALL_STARTED:
         return label + _format_tool_progress("running tool", payload, elapsed_seconds=elapsed_seconds)
-    if event_type == "tool_call_completed":
+    if event_type == TraceEvent.TOOL_CALL_COMPLETED:
         return label + _format_tool_progress(
             "tool completed",
             payload,
             duration_seconds=duration_seconds,
             include_result=True,
         )
-    if event_type == "tool_call_failed":
+    if event_type == TraceEvent.TOOL_CALL_FAILED:
         error = payload.get("error") or "failed"
         return label + _format_tool_progress(
             "tool failed",
@@ -263,7 +263,7 @@ def _progress_message(
             duration_seconds=duration_seconds,
             include_result=True,
         )
-    if event_type == "turn_finished":
+    if event_type == TraceEvent.TURN_FINISHED:
         turn = payload.get("turn", {})
         status = turn.get("status", "done")
         requests = turn.get("model_request_count", 0)
@@ -272,7 +272,7 @@ def _progress_message(
             f"turn {status} - {requests} model request(s), {tools} tool call(s)"
             + _duration_suffix(duration_seconds)
         )
-    if event_type == "turn_failed":
+    if event_type == TraceEvent.TURN_FAILED:
         return label + f"turn failed{_elapsed_suffix(elapsed_seconds)}"
     return None
 
