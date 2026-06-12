@@ -7,7 +7,7 @@ from src.core import Agent, ObservationRecord, ToolCallRecord, TurnState
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
-from src.tools import Tool, ToolRegistry, calculator_tool, shell_tool
+from src.tools import Tool, ToolRegistry, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
 from src.tools.registry import ToolResult
 from src.tracing import JSONLTraceLogger
 
@@ -155,7 +155,9 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
     response = agent.run_turn("what is (2 + 3) * 4?")
 
     assert response == "The result is 20."
-    assert agent.state.tool_calls == [{"tool_name": "calculator", "arguments": {"expression": "(2 + 3) * 4"}, "success": True}]
+    assert agent.state.tool_calls == [
+        {"tool_name": "calculator", "arguments": {"expression": "(2 + 3) * 4"}, "phase": "execution", "success": True}
+    ]
     assert "calculator" in agent.state.observations[0]["observation"]
     assert len(agent.state.turns) == 1
     turn = agent.state.turns[0]
@@ -164,6 +166,7 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
     assert turn.model_request_count == 2
     assert turn.tool_call_count == 1
     assert turn.tool_calls[0].tool_name == "calculator"
+    assert turn.tool_calls[0].phase == "execution"
     assert turn.tool_calls[0].success is True
     assert turn.observations[0].tool_name == "calculator"
     assert len(llm.requests) == 2
@@ -384,6 +387,485 @@ def test_agent_traces_tool_call_lifecycle(tmp_path):
     assert turn_finished_payload["turn"]["model_request_count"] == 2
     assert turn_finished_payload["turn"]["tool_call_count"] == 1
     assert turn_finished_payload["turn"]["tool_calls"][0]["success"] is True
+
+
+def test_agent_planned_turn_creates_pending_plan_without_running_tools(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    plan_payload = {
+        "summary": "Calculate the answer safely.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Run calculator",
+                "description": "Use the calculator tool for the arithmetic.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            )
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    response = agent.run_planned_turn("what is 2 + 2?")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+
+    assert "Plan" in response
+    assert "Use /approve" in response
+    assert agent.has_pending_plan() is True
+    assert agent.state.tool_calls == []
+    assert agent.state.turns[0].status == "waiting_for_approval"
+    assert agent.state.turns[0].active_plan is not None
+    assert agent.state.turns[0].active_plan.summary == "Calculate the answer safely."
+    assert "Planning: requested for this turn." in llm.requests[0][0]["content"]
+    assert "return a plan action" in llm.requests[0][0]["content"]
+    assert "plan_created" in event_types
+    assert "tool_call_started" not in event_types
+
+
+def test_agent_planned_turn_allows_read_only_reconnaissance_before_plan(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "core.py").write_text("class Agent:\n    pass\n", encoding="utf-8")
+    plan_payload = {
+        "summary": "Add subagent support based on the inspected runtime.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Extend agent runtime",
+                "description": "Use the inspected src/core.py shape to add subagent orchestration.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": json.dumps({"path": "src/core.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(read_file_tool(tmp_path))
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_planned_turn("How would you add subagents?")
+    turn = agent.state.turns[0]
+
+    assert "Add subagent support" in response
+    assert turn.status == "waiting_for_approval"
+    assert turn.tool_call_count == 1
+    assert turn.tool_calls[0].tool_name == "read_file"
+    assert turn.tool_calls[0].phase == "planning"
+    assert "class Agent" in agent.state.observations[0]["observation"]
+    assert "read-only reconnaissance tools" in llm.requests[0][0]["content"]
+    assert any(message["role"] == "observation" for message in llm.requests[1])
+
+
+def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "config.py").write_text("class Config:\n    pass\n", encoding="utf-8")
+    weak_plan_payload = {
+        "summary": "Explore the current codebase before designing subagents.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Read main.py",
+                "description": "Understand the agent loop.",
+                "status": "pending",
+            },
+            {
+                "id": "2",
+                "title": "Read config.py",
+                "description": "Understand configuration patterns.",
+                "status": "pending",
+            },
+        ],
+    }
+    strong_plan_payload = {
+        "summary": "Implement subagent support in the inspected runtime.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Add subagent state models",
+                "description": "Extend src/core/state.py with records for child task requests and results.",
+                "status": "pending",
+            },
+            {
+                "id": "2",
+                "title": "Implement subagent orchestration",
+                "description": "Update src/core/agent.py to spawn isolated child agents and collect results.",
+                "status": "pending",
+            },
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "list_files",
+                    "arguments_json": json.dumps({"path": "src", "pattern": "*.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(weak_plan_payload),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": json.dumps({"path": "src/main.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(strong_plan_payload),
+                }
+            ),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(list_files_tool(tmp_path))
+    registry.register(read_file_tool(tmp_path))
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    response = agent.run_planned_turn("How would you add subagent functionality?")
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    turn = agent.state.turns[0]
+
+    assert "Add subagent state models" in response
+    assert "Read main.py" not in response
+    assert turn.status == "waiting_for_approval"
+    assert turn.tool_call_count == 2
+    assert [tool_call.phase for tool_call in turn.tool_calls] == ["planning", "planning"]
+    assert turn.planning_feedback_count == 1
+    assert "plan_revision_requested" in event_types
+    assert any(observation.tool_name == "planning_feedback" for observation in turn.observations)
+
+
+def test_agent_planned_turn_revises_direct_answer_into_plan():
+    plan_payload = {
+        "summary": "Add subagent delegation support.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Add subagent action type",
+                "description": "Extend src/core/actions.py with a delegation action for child-agent work.",
+                "status": "pending",
+            },
+            {
+                "id": "2",
+                "title": "Implement delegation runtime",
+                "description": "Update src/core/agent.py to create child agents and return their observations.",
+                "status": "pending",
+            },
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "Here is how I would add subagents conceptually."}),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+        ]
+    )
+    agent = Agent(llm)
+
+    response = agent.run_planned_turn("How would you add subagents?")
+    turn = agent.state.turns[0]
+
+    assert "Add subagent action type" in response
+    assert "conceptually" not in response
+    assert turn.status == "waiting_for_approval"
+    assert turn.planning_feedback_count == 1
+    assert turn.observations[0].tool_name == "planning_feedback"
+    assert "do not answer directly" in turn.observations[0].content
+
+
+def test_agent_planned_turn_requests_plan_when_reconnaissance_budget_is_exhausted(tmp_path):
+    (tmp_path / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("B = 2\n", encoding="utf-8")
+    plan_payload = {
+        "summary": "Implement the feature with the gathered context.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Update agent runtime",
+                "description": "Modify src/core/agent.py using the files already inspected.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": json.dumps({"path": "a.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": json.dumps({"path": "b.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": json.dumps({"path": "c.py"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(read_file_tool(tmp_path))
+    agent = Agent(llm, tool_registry=registry, max_tool_calls_per_turn=2)
+
+    response = agent.run_planned_turn("Plan the feature")
+    turn = agent.state.turns[0]
+
+    assert "Update agent runtime" in response
+    assert turn.status == "waiting_for_approval"
+    assert turn.tool_call_count == 2
+    assert turn.planning_tool_limit_feedback_sent is True
+    assert turn.planning_feedback_count == 1
+    assert "reconnaissance tool budget is exhausted" in turn.observations[-1].content
+
+
+def test_agent_planned_turn_blocks_mutating_tools_before_plan(tmp_path):
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "write_file",
+                    "arguments_json": json.dumps({"path": "created.txt", "content": "nope"}),
+                }
+            )
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(write_file_tool(tmp_path))
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_planned_turn("Create a file")
+
+    assert "Planning can only use read-only reconnaissance tools before approval" in response
+    assert not (tmp_path / "created.txt").exists()
+    assert agent.state.turns[0].status == "failed"
+    assert agent.state.turns[0].tool_call_count == 0
+
+
+def test_agent_run_planned_turn_forces_plan_for_one_turn():
+    plan_payload = {
+        "summary": "Plan a design change.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Add subagent task model",
+                "description": "Create a state record for delegated child-agent work.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Plan approved and completed."}),
+        ]
+    )
+    agent = Agent(llm)
+
+    response = agent.run_planned_turn("How would you add subagents?")
+    approved_response = agent.approve_plan()
+
+    assert "Use /approve" in response
+    assert approved_response == "Plan approved and completed."
+    assert "Planning: requested for this turn." in llm.requests[0][0]["content"]
+    assert "Planning: approved for this turn." in llm.requests[1][0]["content"]
+
+
+def test_agent_approve_plan_resumes_turn_and_tracks_plan_steps(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    plan_payload = {
+        "summary": "Calculate the answer safely.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Run calculator",
+                "description": "Use the calculator tool for the arithmetic.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "calculator",
+                    "arguments_json": json.dumps({"expression": "2 + 2"}),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "The result is 4."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    agent.run_planned_turn("what is 2 + 2?")
+    response = agent.approve_plan()
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    turn = agent.state.turns[0]
+
+    assert response == "The result is 4."
+    assert agent.has_pending_plan() is False
+    assert agent.state.active_plan is None
+    assert turn.status == "completed"
+    assert turn.plan_approved is True
+    assert turn.active_plan is not None
+    assert turn.active_plan.steps[0].status == "completed"
+    assert turn.model_request_count == 3
+    assert turn.tool_call_count == 1
+    assert "Planning: approved for this turn." in llm.requests[1][0]["content"]
+    assert "plan_approved" in event_types
+    assert "plan_step_started" in event_types
+    assert "plan_step_completed" in event_types
+    assert "turn_finished" in event_types
+
+
+def test_agent_reject_plan_finishes_without_tools(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    plan_payload = {
+        "summary": "Add project inspection support.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Add file inspection workflow",
+                "description": "Implement a project inspection path using the existing file tools.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            )
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    agent.run_planned_turn("inspect the project")
+    response = agent.reject_plan()
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    turn = agent.state.turns[0]
+
+    assert response == "Plan rejected. No tools were run."
+    assert agent.has_pending_plan() is False
+    assert agent.state.tool_calls == []
+    assert turn.status == "plan_rejected"
+    assert turn.active_plan is not None
+    assert turn.active_plan.status() == "rejected"
+    assert "plan_rejected" in event_types
+    assert "tool_call_started" not in event_types
 
 
 def test_agent_truncates_tool_output_but_preserves_full_artifact(tmp_path):

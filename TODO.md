@@ -1066,17 +1066,22 @@ Done when:
 
 Goal: experiment with richer agent behavior after the core mechanics are understood.
 
-- [ ] Add plan mode.
-  - [ ] Add `/plan on|off` CLI command.
-  - [ ] Add a planning prompt for multi-step requests.
-  - [ ] Add explicit `Plan` and `PlanStep` data structures.
-  - [ ] Track step status: `pending`, `in_progress`, `completed`, `blocked`.
-  - [ ] Let the agent create a checklist before executing multi-step work.
-  - [ ] Ask for user approval before executing a generated plan.
-  - [ ] Store the active plan in turn/session state.
-  - [ ] Update plan status after each tool call or model step.
-  - [ ] Include plan updates in traces.
-  - [ ] Add tests with a mocked LLM that creates, approves, and executes a plan.
+- [x] Add plan mode.
+  - [x] Add `/plan <request>` one-shot planning command.
+  - [x] Add `/plan`, `/approve`, and `/reject` CLI commands.
+  - [x] Add a planning prompt for multi-step requests.
+  - [x] Allow read-only reconnaissance tools before the final approval plan.
+  - [x] Block mutating tools before plan approval.
+  - [x] Add provider-agnostic `plan` action parsing.
+  - [x] Add explicit `Plan` and `PlanStep` data structures.
+  - [x] Track step status: `pending`, `in_progress`, `completed`, `blocked`.
+  - [x] Let the agent create a checklist before executing multi-step work.
+  - [x] Ask for user approval before executing a generated plan.
+  - [x] Store the active plan in turn/session state.
+  - [x] Update plan status after each tool call.
+  - [x] Include plan updates in traces.
+  - [x] Include plan status in CLI progress and turn summaries.
+  - [x] Add tests with a mocked LLM that creates, approves, rejects, and executes a plan.
 - [ ] Add session persistence and resume.
   - [ ] Store conversations in SQLite.
   - [ ] Store turns in SQLite.

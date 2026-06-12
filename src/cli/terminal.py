@@ -60,6 +60,10 @@ class TerminalUI:
             ("/status", "show provider, model, project, tools, and trace"),
             ("/tools", "list registered tools"),
             ("/trace", "show the current trace file"),
+            ("/plan <request>", "propose a plan for one request"),
+            ("/plan", "show current plan status"),
+            ("/approve", "approve a pending plan"),
+            ("/reject", "reject a pending plan"),
             ("/verbose on|off", "show or hide extra progress details"),
             ("/quiet on|off", "show or hide live progress lines"),
             ("/summary on|off", "show or hide the end-of-turn summary"),
@@ -82,8 +86,13 @@ class TerminalUI:
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
             f"  tools     {len(agent.tool_registry.list_tools())}",
             f"  turns     {len(agent.state.turns)}",
+            f"  plan      {'pending' if agent.has_pending_plan() else 'none'}",
         ]
         return "\n".join(lines)
+
+    def plan_status(self, agent: Agent) -> str:
+        """Return current plan-mode and pending-plan status."""
+        return f"{self.heading('Plan')}\n  {agent.describe_plan_status().replace(chr(10), chr(10) + '  ')}"
 
     def tools(self, agent: Agent) -> str:
         """Return registered tool names and descriptions."""
@@ -129,6 +138,10 @@ class TerminalUI:
         tool_counts = _tool_counts(turn.get("tool_calls", []))
         skills = turn.get("loaded_skill_names", [])
         loaded_memories = turn.get("loaded_memory_ids", [])
+        plan = turn.get("active_plan")
+        plan_text = "none"
+        if isinstance(plan, dict):
+            plan_text = plan.get("status", "unknown")
         lines = [
             self.heading("Turn Summary"),
             f"  worked for  {_format_duration(_turn_duration(turn))}",
@@ -136,6 +149,7 @@ class TerminalUI:
             f"  tools       {_format_tool_counts(tool_counts)}",
             f"  memory      {len(loaded_memories)} loaded",
             f"  skills      {', '.join(skills) if skills else 'none'}",
+            f"  plan        {plan_text}",
         ]
         trace_path = agent.trace_logger.path if agent and agent.trace_logger else None
         if trace_path is not None:
@@ -243,8 +257,35 @@ def _progress_message(
         action_type = payload.get("type")
         if action_type == "tool_call":
             return label + f"model chose tool - {payload.get('tool_name')}{_elapsed_suffix(elapsed_seconds)}"
+        if action_type == "plan":
+            plan = payload.get("plan", {})
+            steps = plan.get("steps", []) if isinstance(plan, dict) else []
+            return label + f"model proposed plan - {len(steps)} step(s){_elapsed_suffix(elapsed_seconds)}"
         if action_type == "final_answer":
             return label + f"model returned final answer{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_CREATED:
+        plan = payload.get("plan", {})
+        steps = plan.get("steps", []) if isinstance(plan, dict) else []
+        return label + f"plan waiting for approval - {len(steps)} step(s){_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_APPROVED:
+        return label + f"plan approved{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_REJECTED:
+        return label + f"plan rejected{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_REVISION_REQUESTED:
+        revision_count = payload.get("revision_count", "?")
+        return label + f"plan needs implementation details - revision {revision_count}{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_STEP_STARTED:
+        step = payload.get("step", {})
+        title = step.get("title", "step") if isinstance(step, dict) else "step"
+        return label + f"plan step started - {_compact(str(title))}{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_STEP_COMPLETED:
+        step = payload.get("step", {})
+        title = step.get("title", "step") if isinstance(step, dict) else "step"
+        return label + f"plan step completed - {_compact(str(title))}{_elapsed_suffix(elapsed_seconds)}"
+    if event_type == TraceEvent.PLAN_STEP_BLOCKED:
+        step = payload.get("step", {})
+        title = step.get("title", "step") if isinstance(step, dict) else "step"
+        return label + f"plan step blocked - {_compact(str(title))}{_elapsed_suffix(elapsed_seconds)}"
     if event_type == TraceEvent.TOOL_CALL_STARTED:
         return label + _format_tool_progress("running tool", payload, elapsed_seconds=elapsed_seconds)
     if event_type == TraceEvent.TOOL_CALL_COMPLETED:

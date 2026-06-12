@@ -191,6 +191,227 @@ def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, caps
     assert "The command printed hello." in output
 
 
+def test_main_plan_prefix_approve_flow_with_tools(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/plan what is 2 + 2?", "/approve", "/q"])
+
+    class PlanModeFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "plan",
+                        "content": None,
+                        "tool_name": None,
+                        "arguments_json": "{}",
+                        "plan_json": json.dumps(
+                            {
+                                "summary": "Calculate with a tool.",
+                                "steps": [
+                                    {
+                                        "id": "1",
+                                        "title": "Run calculator",
+                                        "description": "Use the calculator for the arithmetic.",
+                                        "status": "pending",
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "calculator",
+                        "arguments_json": json.dumps({"expression": "2 + 2"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The result is 4."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    def factory(_config):
+        return PlanModeFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert ".. model proposed plan - 1 step(s)" in output
+    assert ".. plan waiting for approval - 1 step(s)" in output
+    assert "Use /approve to execute this plan or /reject to cancel it." in output
+    assert ".. plan approved" in output
+    assert ".. plan step started - Run calculator" in output
+    assert ".. plan step completed - Run calculator" in output
+    assert "plan        completed" in output
+    assert "The result is 4." in output
+
+
+def test_main_plan_prefix_creates_one_shot_pending_plan(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/plan How would you add subagent functionality?", "/approve", "/q"])
+
+    class OneShotPlanFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.requests: list[list[dict[str, str]]] = []
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "plan",
+                        "content": None,
+                        "tool_name": None,
+                        "arguments_json": "{}",
+                        "plan_json": json.dumps(
+                            {
+                                "summary": "Design subagent support.",
+                                "steps": [
+                                    {
+                                        "id": "1",
+                                        "title": "Add subagent dispatcher",
+                                        "description": "Update src/core/agent.py with a parent-to-child delegation path.",
+                                        "status": "pending",
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "Subagent design approved."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            self.requests.append(messages)
+            return self.responses.pop(0)
+
+    fake_llm = OneShotPlanFakeLLM()
+
+    def factory(_config):
+        return fake_llm
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+    first_prompt = fake_llm.requests[0][0]["content"]
+    approved_prompt = fake_llm.requests[1][0]["content"]
+
+    assert exit_code == 0
+    assert ".. model proposed plan - 1 step(s)" in output
+    assert ".. plan waiting for approval - 1 step(s)" in output
+    assert "Use /approve to execute this plan or /reject to cancel it." in output
+    assert "Model proposed a new plan after execution had already been approved." not in output
+    assert "Before proposing the plan, you may call only these read-only reconnaissance tools" in first_prompt
+    assert "Planning: approved for this turn." in approved_prompt
+    assert "Subagent design approved." in output
+
+
+def test_main_plan_prefix_reject_flow(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/plan inspect files", "/reject", "/q"])
+
+    class RejectPlanFakeLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(
+                        {
+                        "summary": "Inspect the files.",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "title": "Add file inspection flow",
+                                "description": "Implement the requested file inspection behavior using existing tools.",
+                                "status": "pending",
+                            }
+                        ],
+                        }
+                    ),
+                }
+            )
+
+    def factory(_config):
+        return RejectPlanFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "Add file inspection flow" in output
+    assert ".. plan rejected" in output
+    assert "Plan rejected. No tools were run." in output
+    assert "plan        rejected" in output
+
+
+def test_main_pending_plan_blocks_normal_input(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/plan inspect files", "please continue anyway", "/reject", "/q"])
+
+    class BlockingPlanFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            self.request_count += 1
+            return json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(
+                        {
+                        "summary": "Inspect the files.",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "title": "Add file inspection flow",
+                                "description": "Implement the requested file inspection behavior using existing tools.",
+                                "status": "pending",
+                            }
+                        ],
+                        }
+                    ),
+                }
+            )
+
+    fake_llm = BlockingPlanFakeLLM()
+
+    def factory(_config):
+        return fake_llm
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it." in output
+    assert fake_llm.request_count == 1
+
+
 def test_main_quiet_mode_hides_live_progress(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     inputs = iter(["/quiet on", "what is 2 + 2?", "/q"])

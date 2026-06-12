@@ -177,13 +177,13 @@ python -m compileall src
 
 ## Roadmap Notes
 
-Phase 1 through Phase 4 are implemented. Phase 5 reliability hardening is the next large milestone. Do not blur skills with memory:
+Phase 1 through Phase 5 basics are implemented, and Phase 6 plan mode has started. Do not blur skills with memory:
 
 - Phase 1: config, CLI, LLM client, short-term history, final answers.
 - Phase 2: tool dataclasses, registry, calculator, shell tool, tool-call loop.
 - Phase 3: SQLite long-term memory, memory tools, and relevant memory prompt injection.
 - Phase 4: lazy-loaded skills with keyword selection and prompt injection.
 - Phase 5: logging, traces, reliability hardening.
-- Phase 6: planning, reflection, semantic memory, multi-step behavior.
+- Phase 6: explicit plan approval mode, reflection, semantic memory, multi-step behavior.
 
 If a requested change touches a later phase, implement only the smallest necessary bridge unless the user asks to move that phase forward.

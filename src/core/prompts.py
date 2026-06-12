@@ -2,6 +2,8 @@
 
 from src.memory import MemoryRecord
 from src.skills import SkillSelection
+from src.core.planning import format_read_only_planning_tools
+from src.core.state import Plan
 
 MAX_MEMORY_PROMPT_CONTENT_CHARS = 500
 MAX_SKILL_PROMPT_CONTENT_CHARS = 4000
@@ -15,13 +17,18 @@ When tools are available, call a tool only when it materially helps answer the u
 JSON_ACTION_PROMPT = """You must respond with exactly one JSON object and no extra prose.
 
 Direct answer format:
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}"}
+{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}"}
+
+Plan format:
+{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\"}]}"}
 
 Tool call format:
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}"}
+{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
 
 Use a final_answer when you can answer without a tool. Use a tool_call when you need a listed tool.
 For tool calls, arguments_json must be a JSON-encoded object string containing the tool arguments.
+Use a plan only when the Planning section explicitly tells you to propose a plan.
+For plans, plan_json must be a JSON-encoded object string with summary and steps.
 After an observation is provided, use it to produce the next tool_call or final_answer.
 Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.
 If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final_answer.
@@ -29,8 +36,9 @@ If the omitted middle may contain information needed to answer correctly, inspec
 
 JSON_REPAIR_PROMPT = """Your previous response could not be parsed as ChulkHarness action JSON.
 Return exactly one valid JSON object using one of these shapes:
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}"}
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}"}
+{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}"}
+{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\"}]}"}
+{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
 Do not include Markdown fences, comments, or prose outside the JSON object.
 """
 
@@ -49,6 +57,58 @@ def format_tools_for_prompt(tool_descriptions: str) -> str:
     if not tool_descriptions:
         return "Available tools: none."
     return f"Available tools:\n{tool_descriptions}"
+
+
+def format_planning_for_prompt(
+    *,
+    planning_enabled: bool,
+    active_plan: Plan | None,
+    plan_approved: bool,
+    require_plan: bool,
+    max_reconnaissance_tool_calls: int,
+) -> str:
+    """Format one-shot planning instructions for prompt injection."""
+    if not planning_enabled:
+        return "Planning: not requested for this turn."
+
+    if require_plan and active_plan is None:
+        read_only_tools = format_read_only_planning_tools()
+        return "\n".join(
+            [
+                "Planning: requested for this turn.",
+                f"Before proposing the plan, you may call only these read-only reconnaissance tools: {read_only_tools}.",
+                "Use reconnaissance when codebase details matter; inspect the smallest useful set of files before planning.",
+                "Use search_files to locate symbols or factory functions instead of guessing which file owns them.",
+                "Only name files/modules in the plan when they are supported by listed, searched, or read observations.",
+                f"You have at most {max_reconnaissance_tool_calls} reconnaissance tool calls. Do not spend them all unless necessary.",
+                "After two or three useful file reads/searches, stop reconnaissance and return the approval plan.",
+                "Do not call shell, write, memory-mutation, import/export, or other mutating tools before approval.",
+                "After reconnaissance, return a plan action. Do not execute implementation steps until the user approves the plan.",
+                "Keep the plan concrete, short, and executable, with specific files/modules when they are known.",
+                "The approval plan must be an implementation plan. Do not make read/list/search/explore/inspect steps the plan.",
+                "Because the user explicitly requested /plan, do not answer directly. Return a plan action after any needed reconnaissance.",
+            ]
+        )
+
+    if active_plan is not None and plan_approved:
+        return "\n".join(
+            [
+                "Planning: approved for this turn.",
+                "Follow the approved plan while executing this turn.",
+                active_plan.to_prompt(),
+            ]
+        )
+
+    if active_plan is not None:
+        return "\n".join(
+            [
+                "Planning: waiting for user approval.",
+                "Do not call tools while the plan is pending approval.",
+                active_plan.to_prompt(),
+            ]
+        )
+
+    return "Planning: requested for this turn."
 
 
 def format_memories_for_prompt(

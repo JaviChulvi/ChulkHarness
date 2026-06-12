@@ -12,6 +12,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 - Built-in command/shell tooling with safety controls.
 - Lazy-loaded skills for domain-specific workflows.
 - Structured model responses for tool calls and final answers.
+- Explicit plan approval mode before tool execution.
 - Trace logs that show messages, selected context, tool calls, observations, and errors.
 
 ## Design Principles
@@ -25,7 +26,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, and Phase 4 lazy-loaded skills in place. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 plan-mode workflow in place. The roadmap lives in [TODO.md](TODO.md).
 
 The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
 
@@ -38,6 +39,8 @@ Skills live in the root-level `skills/` directory. Chulk loads only skill metada
 Traces are stored as JSONL files in `traces/`. Each model request logs the full message list sent to the provider by default, with obvious secrets redacted and a configurable prompt character cap.
 
 Agent session state is split from per-turn state. `AgentState` tracks the conversation, while each user message gets a `TurnState` with timing, model request count, tool-call count, tool call records, observations, errors, and final status. Completed turn snapshots are written to traces so a run can be replayed from the logs.
+
+Planning is optional and controlled per request from the CLI. Use `/plan <request>` for a planned turn. During planning, Chulk allows only read-only reconnaissance tools such as `list_files`, `read_file`, `search_files`, and memory search tools, then asks the model to propose a structured plan action before any mutating execution. Chulk pauses that turn until the user runs `/approve` or `/reject`, then injects the approved plan back into the prompt and traces steps as they move from `pending` to `in_progress`, `completed`, or `blocked`.
 
 Large tool outputs are sent back to the model as bounded head/tail previews. When output is truncated, Chulk stores the full text as a local artifact under `traces/<conversation_id>_artifacts/` and includes the artifact path, length, and SHA-256 hash in the observation metadata. If the omitted middle may matter, the model is instructed to inspect the artifact or run a narrower follow-up tool call before answering. This keeps model context bounded without throwing away important details. Artifact files contain raw local output, so treat them as sensitive runtime data and keep `traces/` out of Git.
 
@@ -164,6 +167,10 @@ Useful interactive commands:
 - `/status`
 - `/tools`
 - `/trace`
+- `/plan <request>`
+- `/plan`
+- `/approve`
+- `/reject`
 - `/quiet on|off`
 - `/verbose on|off`
 - `/summary on|off`
@@ -259,13 +266,13 @@ CHULK_LLM_MAX_RETRIES=2
 
 ## Development Roadmap
 
-The implementation is currently through Phase 4. The next major milestone is Phase 5:
+The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, and explicit plan approval mode. The next larger milestones are session persistence, richer context management, and deeper multi-step behavior:
 
 - Phase 1: Minimal chat agent.
 - Phase 2: Tool registry and tool-call loop.
 - Phase 3: SQLite-backed memory.
 - Phase 4: Lazy-loaded skills.
 - Phase 5: Logging, tracing, tests, and reliability hardening.
-- Phase 6: Planning, reflection, semantic memory, and multi-step behavior.
+- Phase 6: Planning mode, reflection, semantic memory, and multi-step behavior.
 
 See [TODO.md](TODO.md) for the full checklist.

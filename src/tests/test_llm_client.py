@@ -111,7 +111,9 @@ def test_openai_responses_client_uses_strict_action_schema():
     assert result.action.content == "structured answer"
     assert response_format["type"] == "json_schema"
     assert response_format["strict"] is True
+    assert "plan" in schema["properties"]["type"]["enum"]
     assert "arguments_json" in schema["properties"]
+    assert "plan_json" in schema["properties"]
     assert "arguments" not in schema["properties"]
 
 
@@ -164,6 +166,46 @@ def test_deepseek_client_uses_json_object_mode_for_actions():
     )
 
     assert result.action.content == "structured answer"
+    assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_deepseek_client_can_parse_plan_action_from_json_mode():
+    plan_json = json.dumps(
+        {
+            "summary": "Inspect before editing.",
+            "steps": [
+                {
+                    "id": "1",
+                    "title": "Inspect files",
+                    "description": "List relevant files before editing.",
+                    "status": "pending",
+                }
+            ],
+        }
+    )
+    fake_client = FakeDeepSeekClient(
+        json.dumps(
+            {
+                "type": "plan",
+                "content": None,
+                "tool_name": None,
+                "arguments_json": "{}",
+                "plan_json": plan_json,
+            }
+        )
+    )
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    result = client.complete_action(
+        [
+            {"role": "system", "content": "Return action JSON."},
+            {"role": "user", "content": "Inspect the files"},
+        ]
+    )
+
+    assert result.action.type == "plan"
+    assert result.action.plan.summary == "Inspect before editing."
+    assert result.action.plan.steps[0].status == "pending"
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
 
 

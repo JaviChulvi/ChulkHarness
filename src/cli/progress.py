@@ -171,6 +171,9 @@ class ProgressReporter:
         if event_type in {
             TraceEvent.MODEL_RESPONSE,
             TraceEvent.MODEL_RESPONSE_PARSED,
+            TraceEvent.PLAN_CREATED,
+            TraceEvent.PLAN_APPROVED,
+            TraceEvent.PLAN_REJECTED,
             TraceEvent.TOOL_CALL_COMPLETED,
             TraceEvent.TOOL_CALL_FAILED,
             TraceEvent.TURN_FINISHED,

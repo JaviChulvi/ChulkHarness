@@ -2,7 +2,16 @@
 
 from typing import Any
 
-__all__ = ["Agent", "AgentState", "ObservationRecord", "ToolCallRecord", "TraceEvent", "TurnState"]
+__all__ = [
+    "Agent",
+    "AgentState",
+    "ObservationRecord",
+    "Plan",
+    "PlanStep",
+    "ToolCallRecord",
+    "TraceEvent",
+    "TurnState",
+]
 
 
 def __getattr__(name: str) -> Any:
@@ -10,12 +19,14 @@ def __getattr__(name: str) -> Any:
         from src.core.agent import Agent
 
         return Agent
-    if name in {"AgentState", "ObservationRecord", "ToolCallRecord", "TurnState"}:
-        from src.core.state import AgentState, ObservationRecord, ToolCallRecord, TurnState
+    if name in {"AgentState", "ObservationRecord", "Plan", "PlanStep", "ToolCallRecord", "TurnState"}:
+        from src.core.state import AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TurnState
 
         return {
             "AgentState": AgentState,
             "ObservationRecord": ObservationRecord,
+            "Plan": Plan,
+            "PlanStep": PlanStep,
             "ToolCallRecord": ToolCallRecord,
             "TurnState": TurnState,
         }[name]

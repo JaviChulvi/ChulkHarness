@@ -179,7 +179,20 @@ def run_chat_loop(
             output_func(terminal.bye())
             return 0
 
-        if handle_cli_command(normalized_message, command_context):
+        try:
+            if handle_cli_command(user_message.strip(), command_context):
+                continue
+        except LLMError as exc:
+            output_func(terminal.error(f"error: {exc}"))
+            return 1
+        except Exception as exc:
+            output_func(terminal.error(f"error: unexpected failure: {exc}"))
+            return 1
+        finally:
+            progress_reporter.close()
+
+        if agent.has_pending_plan():
+            output_func(terminal.warning("A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."))
             continue
 
         try:

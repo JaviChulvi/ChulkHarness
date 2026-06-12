@@ -1,4 +1,4 @@
-"""Model action parsing for direct answers and tool calls."""
+"""Model action parsing for direct answers, plans, and tool calls."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import json
 import re
 from typing import Any, Literal
+
+from src.core.state import PLAN_STEP_STATUSES, Plan, PlanStep
 
 
 class ActionParseError(ValueError):
@@ -29,15 +31,23 @@ class ToolCallAction:
     arguments: dict[str, Any]
 
 
-AgentAction = FinalAnswerAction | ToolCallAction
+@dataclass(frozen=True)
+class PlanAction:
+    """A plan proposed by the model before executing a turn."""
+
+    type: Literal["plan"]
+    plan: Plan
+
+
+AgentAction = FinalAnswerAction | ToolCallAction | PlanAction
 
 STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "type": {
             "type": "string",
-            "enum": ["final_answer", "tool_call"],
-            "description": "Whether the assistant is answering directly or requesting a tool call.",
+            "enum": ["final_answer", "tool_call", "plan"],
+            "description": "Whether the assistant is answering directly, proposing a plan, or requesting a tool call.",
         },
         "content": {
             "type": ["string", "null"],
@@ -51,11 +61,18 @@ STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Tool arguments encoded as a JSON object string when type is tool_call; "
-                "use {} when type is final_answer."
+                "use {} when type is final_answer or plan."
+            ),
+        },
+        "plan_json": {
+            "type": "string",
+            "description": (
+                "Plan encoded as a JSON object string when type is plan; "
+                "use {} when type is final_answer or tool_call."
             ),
         },
     },
-    "required": ["type", "content", "tool_name", "arguments_json"],
+    "required": ["type", "content", "tool_name", "arguments_json", "plan_json"],
     "additionalProperties": False,
 }
 
@@ -78,7 +95,10 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
             raise ActionParseError("tool_call.tool_name must be a non-empty string")
         return ToolCallAction(type="tool_call", tool_name=tool_name, arguments=arguments)
 
-    raise ActionParseError("model response type must be final_answer or tool_call")
+    if action_type == "plan":
+        return PlanAction(type="plan", plan=_coerce_plan(payload))
+
+    raise ActionParseError("model response type must be final_answer, tool_call, or plan")
 
 
 def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:
@@ -122,3 +142,59 @@ def _coerce_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise ActionParseError("tool_call.arguments_json must contain a JSON object")
     return arguments
+
+
+def _coerce_plan(payload: dict[str, Any]) -> Plan:
+    """Normalize provider-specific plan transports into a Plan object."""
+    if "plan" in payload:
+        plan_payload = payload.get("plan")
+    else:
+        raw_plan_json = payload.get("plan_json", "{}")
+        if not isinstance(raw_plan_json, str):
+            raise ActionParseError("plan.plan_json must be a string")
+        try:
+            plan_payload = json.loads(raw_plan_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ActionParseError("plan.plan_json must contain a JSON object") from exc
+
+    if not isinstance(plan_payload, dict):
+        raise ActionParseError("plan payload must be an object")
+
+    summary = plan_payload.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ActionParseError("plan.summary must be a non-empty string")
+
+    raw_steps = plan_payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ActionParseError("plan.steps must be a non-empty list")
+
+    steps: list[PlanStep] = []
+    for index, raw_step in enumerate(raw_steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise ActionParseError("each plan step must be an object")
+
+        step_id = raw_step.get("id")
+        title = raw_step.get("title")
+        description = raw_step.get("description")
+        status = raw_step.get("status", "pending")
+
+        if not isinstance(step_id, str) or not step_id.strip():
+            step_id = str(index)
+        if not isinstance(title, str) or not title.strip():
+            raise ActionParseError("plan step title must be a non-empty string")
+        if not isinstance(description, str) or not description.strip():
+            raise ActionParseError("plan step description must be a non-empty string")
+        if not isinstance(status, str) or status not in PLAN_STEP_STATUSES:
+            allowed = ", ".join(sorted(PLAN_STEP_STATUSES))
+            raise ActionParseError(f"plan step status must be one of: {allowed}")
+
+        steps.append(
+            PlanStep(
+                id=step_id.strip(),
+                title=title.strip(),
+                description=description.strip(),
+                status=status,
+            )
+        )
+
+    return Plan(summary=summary.strip(), steps=steps)

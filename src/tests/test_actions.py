@@ -2,7 +2,7 @@
 
 import json
 
-from src.core.actions import ActionParseError, FinalAnswerAction, ToolCallAction, parse_model_response
+from src.core.actions import ActionParseError, FinalAnswerAction, PlanAction, ToolCallAction, parse_model_response
 
 
 def test_parse_final_answer():
@@ -34,6 +34,39 @@ def test_parse_tool_call_with_arguments_json_transport():
     assert action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
 
 
+def test_parse_plan_action_with_plan_json_transport():
+    plan_json = json.dumps(
+        {
+            "summary": "Inspect the project and report back.",
+            "steps": [
+                {
+                    "id": "1",
+                    "title": "List files",
+                    "description": "Use the file listing tool to inspect the project shape.",
+                    "status": "pending",
+                }
+            ],
+        }
+    )
+
+    action = parse_model_response(
+        json.dumps(
+            {
+                "type": "plan",
+                "content": None,
+                "tool_name": None,
+                "arguments_json": "{}",
+                "plan_json": plan_json,
+            }
+        )
+    )
+
+    assert isinstance(action, PlanAction)
+    assert action.plan.summary == "Inspect the project and report back."
+    assert action.plan.steps[0].title == "List files"
+    assert action.plan.steps[0].status == "pending"
+
+
 def test_parse_json_markdown_block():
     action = parse_model_response('```json\n{"type": "final_answer", "content": "hello"}\n```')
 
@@ -56,3 +89,36 @@ def test_parse_invalid_tool_call_arguments_raises():
         assert "arguments" in str(exc)
     else:
         raise AssertionError("Expected invalid arguments to fail")
+
+
+def test_parse_plan_action_rejects_invalid_step_status():
+    plan_json = json.dumps(
+        {
+            "summary": "Invalid plan.",
+            "steps": [
+                {
+                    "id": "1",
+                    "title": "Bad step",
+                    "description": "This step has an invalid status.",
+                    "status": "done",
+                }
+            ],
+        }
+    )
+
+    try:
+        parse_model_response(
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": plan_json,
+                }
+            )
+        )
+    except ActionParseError as exc:
+        assert "plan step status" in str(exc)
+    else:
+        raise AssertionError("Expected invalid plan status to fail")

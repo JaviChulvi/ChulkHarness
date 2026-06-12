@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from src.core.actions import FinalAnswerAction, ToolCallAction
+from src.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
 
 
-def format_action_trace(action: FinalAnswerAction | ToolCallAction) -> dict:
+def format_action_trace(action: FinalAnswerAction | PlanAction | ToolCallAction) -> dict:
     """Return a trace-safe payload for a parsed action."""
     if isinstance(action, FinalAnswerAction):
         return {"type": action.type}
+    if isinstance(action, PlanAction):
+        return {"type": action.type, "plan": action.plan.to_dict()}
     return {"type": action.type, "tool_name": action.tool_name, "arguments": action.arguments}
 
 
