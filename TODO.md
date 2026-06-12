@@ -1082,22 +1082,22 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
   - [x] Include plan updates in traces.
   - [x] Include plan status in CLI progress and turn summaries.
   - [x] Add tests with a mocked LLM that creates, approves, rejects, and executes a plan.
-- [ ] Add session persistence and resume.
-  - [ ] Store conversations in SQLite.
-  - [ ] Store turns in SQLite.
-  - [ ] Store model requests, tool calls, observations, errors, and final answers.
-  - [ ] Store compact conversation summaries for older sessions.
-  - [ ] Add `/sessions` CLI command.
-  - [ ] Add `/resume <conversation_id>` CLI command.
-  - [ ] Add `/history` CLI command for the current session.
-  - [ ] Let resumed sessions reload short-term history from durable storage.
-  - [ ] Link trace files to persisted conversation ids.
-  - [ ] Add tests proving a session can be resumed after creating a new agent instance.
+- [x] Add session persistence and resume.
+  - [x] Store conversations in SQLite.
+  - [x] Store turns in SQLite.
+  - [x] Store model requests, tool calls, observations, errors, and final answers.
+  - [x] Add `/sessions` CLI command.
+  - [x] Add `/resume <conversation_id>` CLI command.
+  - [x] Add `/history` CLI command for the current session.
+  - [x] Let resumed sessions reload short-term history from durable storage.
+  - [x] Link trace files to persisted conversation ids.
+  - [x] Add tests proving a session can be resumed after creating a new agent instance.
 - [ ] Add better context management.
   - [ ] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
   - [ ] Add configurable prompt budget limits.
   - [ ] Add context budget reporting to `/status` or a new `/context` CLI command.
   - [ ] Summarize older conversation messages when history grows too large.
+  - [ ] Store compact conversation summaries for older persisted sessions.
   - [ ] Keep the full prompt available in traces while showing compact context summaries in the CLI.
   - [ ] Explain which memories, skills, tools, and history were injected into the current prompt.
   - [ ] Avoid injecting large tool observations when an artifact path is enough.

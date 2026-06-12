@@ -188,6 +188,7 @@ class Agent:
                     messages,
                     max_prompt_chars=self.trace_max_prompt_chars,
                     request_index=turn.model_request_count,
+                    turn_id=turn.turn_id,
                     loaded_memory_ids=self.state.loaded_memory_ids,
                     loaded_skill_names=self.state.loaded_skill_names,
                     available_tool_names=turn.available_tool_names,
@@ -211,6 +212,7 @@ class Agent:
                 TraceEvent.MODEL_RESPONSE,
                 {
                     "turn_id": turn.turn_id,
+                    "request_index": turn.model_request_count,
                     "content": action_result.raw_response,
                     "repair_attempts": action_result.repair_attempts,
                     "repair_errors": action_result.errors,
@@ -381,7 +383,7 @@ class Agent:
         response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
         self.memory.add_assistant_message(response)
         self.state.messages = self.memory.recent()
-        self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict()})
+        self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()})
         return response
 
     def _plan_needs_revision(self, plan, turn: TurnState) -> bool:

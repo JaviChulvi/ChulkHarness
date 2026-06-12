@@ -19,6 +19,7 @@ def format_model_request_trace(
     *,
     max_prompt_chars: int,
     request_index: int,
+    turn_id: str | None = None,
     loaded_memory_ids: list[str],
     loaded_skill_names: list[str],
     available_tool_names: list[str],
@@ -46,6 +47,7 @@ def format_model_request_trace(
         )
 
     return {
+        "turn_id": turn_id,
         "request_index": request_index,
         "messages": traced_messages,
         "message_count": len(messages),

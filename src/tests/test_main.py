@@ -6,6 +6,7 @@ import re
 from src import __version__
 from src.llm import LLMClient
 from src.main import main
+from src.sessions import SQLiteSessionStore
 
 
 class FakeLLMClient(LLMClient):
@@ -41,6 +42,25 @@ def test_main_prints_current_status(capsys):
     assert "ChulkHarness CLI" in output
     assert "Type /exit, /quit, or /q" in output
     assert "bye" in output
+    assert "/resume " in output
+
+
+def test_main_exit_prints_resume_command_for_current_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["hello", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=fake_factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+    session = SQLiteSessionStore(tmp_path / "src" / "store.sqlite").list_conversations()[0]
+
+    assert exit_code == 0
+    assert "Resume this session next time with:" in output
+    assert f"/resume {session.id}" in output
 
 
 def test_main_uses_compact_prompt(monkeypatch, tmp_path, capsys):

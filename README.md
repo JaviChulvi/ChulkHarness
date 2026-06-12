@@ -8,6 +8,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 - Conversation state for short-running sessions.
 - SQLite-backed long-term memory for durable facts, preferences, and project context.
+- SQLite-backed session persistence and resume.
 - Dynamic tool registration and execution.
 - Built-in command/shell tooling with safety controls.
 - Lazy-loaded skills for domain-specific workflows.
@@ -26,7 +27,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 plan-mode workflow in place. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 workflows for plan mode plus session resume in place. The roadmap lives in [TODO.md](TODO.md).
 
 The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
 
@@ -39,6 +40,8 @@ Skills live in the root-level `skills/` directory. Chulk loads only skill metada
 Traces are stored as JSONL files in `traces/`. Each model request logs the full message list sent to the provider by default, with obvious secrets redacted and a configurable prompt character cap.
 
 Agent session state is split from per-turn state. `AgentState` tracks the conversation, while each user message gets a `TurnState` with timing, model request count, tool-call count, tool call records, observations, errors, and final status. Completed turn snapshots are written to traces so a run can be replayed from the logs.
+
+Sessions are persisted in the same local SQLite database as long-term memory, using separate conversation tables. Use `/sessions` to list recent sessions, `/resume <conversation_id>` to resume one by full id or unique prefix, and `/history` to inspect recent persisted messages for the active session. Resumed sessions reload short-term history, append to the same trace file, and preserve pending `/plan` approvals across restarts.
 
 Planning is optional and controlled per request from the CLI. Use `/plan <request>` for a planned turn. During planning, Chulk allows only read-only reconnaissance tools such as `list_files`, `read_file`, `search_files`, and memory search tools, then asks the model to propose a structured plan action before any mutating execution. Chulk pauses that turn until the user runs `/approve` or `/reject`, then injects the approved plan back into the prompt and traces steps as they move from `pending` to `in_progress`, `completed`, or `blocked`.
 
@@ -94,6 +97,10 @@ src/
     shell.py
   skills/
     registry.py
+  sessions/
+    models.py
+    recorder.py
+    sqlite_store.py
   tracing/
     logger.py
   tests/
@@ -157,7 +164,7 @@ Run the current CLI:
 chulk
 ```
 
-The interactive CLI always uses a Hulk-green terminal theme. During interactive turns, Chulk prints compact live progress lines such as memory search, skill selection, model requests, tool calls, command previews, elapsed time, and turn completion. Real terminals also show a small ASCII spinner while the model or a tool is working. The input prompt is intentionally short (`>`) so the transcript does not repeat a heavy label on every line. `chulk --once` remains plain output for scripting.
+The interactive CLI always uses a Hulk-green terminal theme. During interactive turns, Chulk prints compact live progress lines such as memory search, skill selection, model requests, tool calls, command previews, elapsed time, and turn completion. Real terminals also show a small ASCII spinner while the model or a tool is working. Arrow up/down navigates prompt history for the active session when terminal `readline` support is available. The input prompt is intentionally short (`>`) so the transcript does not repeat a heavy label on every line. `chulk --once` remains plain output for scripting.
 
 At the end of each turn, Chulk prints a compact summary with total time, model request count, tools used, selected memory count, selected skills, and the trace path. Use `/quiet on` to hide live progress, `/verbose on` to include trace-event names in progress lines, and `/summary off` to hide the summary block.
 
@@ -166,6 +173,9 @@ Useful interactive commands:
 - `/help`
 - `/status`
 - `/tools`
+- `/sessions`
+- `/resume <conversation_id>`
+- `/history`
 - `/trace`
 - `/plan <request>`
 - `/plan`

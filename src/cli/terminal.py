@@ -13,6 +13,7 @@ import shutil
 
 from src.config import Config
 from src.core import Agent, TraceEvent
+from src.sessions import ConversationRecord, MessageRecord
 
 
 HULK_GREEN = (63, 255, 81)
@@ -47,6 +48,7 @@ class TerminalUI:
         rows = [
             self._row("mode", "interactive agent harness"),
             self._row("provider", f"{config.llm_provider} / {config.model}"),
+            self._row("session", _short_id(agent.state.conversation_id)),
             self._row("project", _short_path(config.project_root)),
             self._row("tools", str(len(agent.tool_registry.list_tools()))),
             self._row("trace", _short_path(trace_path) if trace_path else "disabled"),
@@ -59,6 +61,9 @@ class TerminalUI:
             ("/help", "show this command list"),
             ("/status", "show provider, model, project, tools, and trace"),
             ("/tools", "list registered tools"),
+            ("/sessions", "list recent persisted sessions"),
+            ("/resume <id>", "resume a persisted session"),
+            ("/history", "show recent persisted messages"),
             ("/trace", "show the current trace file"),
             ("/plan <request>", "propose a plan for one request"),
             ("/plan", "show current plan status"),
@@ -81,6 +86,7 @@ class TerminalUI:
             self.heading("Status"),
             f"  provider  {config.llm_provider}",
             f"  model     {config.model}",
+            f"  session   {agent.state.conversation_id}",
             f"  project   {_short_path(config.project_root)}",
             f"  memory    {_short_path(config.store_path)}",
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
@@ -99,6 +105,31 @@ class TerminalUI:
         lines = [self.heading("Tools")]
         for tool in agent.tool_registry.list_tools():
             lines.append(f"  {self.accent(tool.name):<24} {tool.description}")
+        return "\n".join(lines)
+
+    def sessions(self, records: list[ConversationRecord]) -> str:
+        """Return recent persisted sessions."""
+        lines = [self.heading("Sessions")]
+        if not records:
+            lines.append("  none")
+            return "\n".join(lines)
+        for record in records:
+            title = record.title or "(untitled)"
+            lines.append(
+                f"  {self.accent(_short_id(record.id)):<8} "
+                f"{record.status:<20} turns {record.turn_count:<3} "
+                f"{_short_timestamp(record.updated_at):<16} {_compact(title, 56)}"
+            )
+        return "\n".join(lines)
+
+    def history(self, messages: list[MessageRecord]) -> str:
+        """Return recent persisted conversation messages."""
+        lines = [self.heading("History")]
+        if not messages:
+            lines.append("  none")
+            return "\n".join(lines)
+        for message in messages:
+            lines.append(f"  {message.role:<11} {_compact(message.content, 86)}")
         return "\n".join(lines)
 
     def trace(self, agent: Agent) -> str:
@@ -158,8 +189,17 @@ class TerminalUI:
             lines.append(f"  traces dir  {_short_path(config.traces_dir)}")
         return "\n".join(lines)
 
-    def bye(self) -> str:
-        return self.muted("bye")
+    def bye(self, agent: Agent | None = None) -> str:
+        if agent is None:
+            return self.muted("bye")
+        command = f"/resume {agent.state.conversation_id}"
+        return "\n".join(
+            [
+                self.muted("bye"),
+                self.muted("Resume this session next time with:"),
+                f"  {self.accent(command)}",
+            ]
+        )
 
     def hint(self) -> str:
         return self.muted("Type /help for commands. Type /exit, /quit, or /q to end the session.")
@@ -213,6 +253,20 @@ def _short_path(path: Path | str | None) -> str:
     if raw.startswith(home + os.sep):
         return "~" + raw[len(home) :]
     return raw
+
+
+def _short_id(value: str) -> str:
+    return value[:8]
+
+
+def _short_timestamp(value: str) -> str:
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value[:16]
+    return parsed.strftime("%Y-%m-%d %H:%M")
 
 
 def _progress_message(
