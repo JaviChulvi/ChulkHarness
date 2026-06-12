@@ -60,6 +60,7 @@ class TerminalUI:
         commands = [
             ("/help", "show this command list"),
             ("/status", "show provider, model, project, tools, and trace"),
+            ("/context", "show latest prompt context report"),
             ("/tools", "list registered tools"),
             ("/sessions", "list recent persisted sessions"),
             ("/resume <id>", "resume a persisted session"),
@@ -93,7 +94,44 @@ class TerminalUI:
             f"  tools     {len(agent.tool_registry.list_tools())}",
             f"  turns     {len(agent.state.turns)}",
             f"  plan      {'pending' if agent.has_pending_plan() else 'none'}",
+            f"  context   {_context_status(agent.state.last_context_report, getattr(agent, 'context_budget', None))}",
         ]
+        return "\n".join(lines)
+
+    def context(self, agent: Agent) -> str:
+        """Return the latest prompt context report."""
+        report = agent.state.last_context_report
+        if not isinstance(report, dict):
+            return f"{self.heading('Context')}\n  no model request context recorded yet"
+
+        budget = report.get("budget", {})
+        sections = [section for section in report.get("sections", []) if isinstance(section, dict)]
+        largest_sections = sorted(
+            sections,
+            key=lambda section: int(section.get("estimated_tokens") or 0),
+            reverse=True,
+        )[:8]
+        lines = [
+            self.heading("Context"),
+            f"  estimated {_format_count(int(report.get('estimated_tokens') or 0))} tokens, "
+            f"{_format_count(int(report.get('total_char_count') or 0))} chars",
+            f"  budget    {_context_budget_text(budget, int(report.get('over_budget_tokens') or 0))}",
+            f"  messages  {report.get('included_message_count', 0)} included, "
+            f"{report.get('omitted_message_count', 0)} omitted",
+            f"  obs omit  {report.get('omitted_observation_count', 0)} observation message(s)",
+            "  sections",
+        ]
+        if not largest_sections:
+            lines.append("    none")
+            return "\n".join(lines)
+        for section in largest_sections:
+            name = str(section.get("label") or section.get("name") or "section")
+            tokens = _format_count(int(section.get("estimated_tokens") or 0))
+            chars = _format_count(int(section.get("char_count") or 0))
+            items = section.get("item_count", 0)
+            detail = _context_section_detail(section)
+            suffix = f" - {detail}" if detail else ""
+            lines.append(f"    {name:<22} {tokens:>6} tok  {chars:>6} chars  items {items}{suffix}")
         return "\n".join(lines)
 
     def plan_status(self, agent: Agent) -> str:
@@ -182,6 +220,9 @@ class TerminalUI:
             f"  skills      {', '.join(skills) if skills else 'none'}",
             f"  plan        {plan_text}",
         ]
+        context_report = turn.get("context_reports", [])
+        if isinstance(context_report, list) and context_report:
+            lines.append(f"  context     {_context_summary_text(context_report[-1])}")
         trace_path = agent.trace_logger.path if agent and agent.trace_logger else None
         if trace_path is not None:
             lines.append(f"  trace       {_short_path(trace_path)}")
@@ -231,6 +272,70 @@ class TerminalUI:
         prefix = "1;" if bold else ""
         red, green, blue = rgb
         return f"\033[{prefix}38;2;{red};{green};{blue}m{text}\033[0m"
+
+
+def _context_status(report, budget=None) -> str:
+    if not isinstance(report, dict):
+        if budget is not None and getattr(budget, "enabled", False):
+            input_budget = getattr(budget, "input_token_budget", None)
+            context_window = getattr(budget, "max_prompt_tokens", 0)
+            reserve = getattr(budget, "response_reserve_tokens", 0)
+            return (
+                f"{_format_count(int(input_budget or 0))} input budget "
+                f"({_format_count(int(context_window or 0))} context, {_format_count(int(reserve or 0))} reserve)"
+            )
+        return "not recorded"
+    tokens = int(report.get("estimated_tokens") or 0)
+    omitted = int(report.get("omitted_message_count") or 0)
+    suffix = f", {omitted} omitted" if omitted else ""
+    return f"{_format_count(tokens)} est tokens{suffix}"
+
+
+def _context_summary_text(report) -> str:
+    if not isinstance(report, dict):
+        return "not recorded"
+    tokens = _format_count(int(report.get("estimated_tokens") or 0))
+    omitted = int(report.get("omitted_message_count") or 0)
+    budget = report.get("budget", {})
+    budget_text = "budget off"
+    if isinstance(budget, dict) and budget.get("enabled"):
+        input_budget = budget.get("input_token_budget")
+        budget_text = f"budget {_format_count(int(input_budget or 0))}"
+    return f"{tokens} est tokens, {omitted} omitted, {budget_text}"
+
+
+def _context_budget_text(budget, over_budget_tokens: int) -> str:
+    if not isinstance(budget, dict) or not budget.get("enabled"):
+        return "off"
+    input_budget = int(budget.get("input_token_budget") or 0)
+    context_window = int(budget.get("context_window_tokens") or budget.get("max_prompt_tokens") or 0)
+    reserve = int(budget.get("response_reserve_tokens") or 0)
+    over_text = f", over by {_format_count(over_budget_tokens)}" if over_budget_tokens else ""
+    return (
+        f"{_format_count(input_budget)} input tokens "
+        f"({_format_count(context_window)} context, {_format_count(reserve)} output reserve{over_text})"
+    )
+
+
+def _context_section_detail(section: dict) -> str:
+    metadata = section.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    if "profile_memory_ids" in metadata or "relevant_memory_ids" in metadata:
+        profile = metadata.get("profile_memory_ids", [])
+        relevant = metadata.get("relevant_memory_ids", [])
+        return f"profile {len(profile)}, relevant {len(relevant)}"
+    if "skill_names" in metadata:
+        skills = metadata.get("skill_names", [])
+        return ", ".join(skills) if skills else "none"
+    if "tool_names" in metadata:
+        tools = metadata.get("tool_names", [])
+        return f"{len(tools)} tool(s)"
+    if "roles" in metadata:
+        roles = metadata.get("roles", {})
+        if isinstance(roles, dict) and roles:
+            return ", ".join(f"{role} {count}" for role, count in sorted(roles.items()))
+    return ""
 
 
 def _rule(title: str, width: int) -> str:

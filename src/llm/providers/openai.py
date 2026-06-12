@@ -30,9 +30,11 @@ class OpenAIResponsesClient(LLMClient):
         api_key: str | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
+        max_output_tokens: int | None = None,
         client: Any | None = None,
     ) -> None:
         self.model = model
+        self.max_output_tokens = _validate_max_output_tokens(max_output_tokens)
 
         if client is not None:
             self._client = client
@@ -54,15 +56,19 @@ class OpenAIResponsesClient(LLMClient):
             max_retries=max_retries,
         )
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
+    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using OpenAI's Responses API."""
         instructions, response_input = split_instructions(messages)
+        request = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
         try:
-            response = self._client.responses.create(
-                model=self.model,
-                instructions=instructions or None,
-                input=response_input,
-            )
+            response = self._client.responses.create(**request)
         except Exception as exc:
             raise LLMError(f"OpenAI request failed: {exc}") from exc
 
@@ -71,23 +77,27 @@ class OpenAIResponsesClient(LLMClient):
             return output_text
         raise LLMError("OpenAI response did not include output_text")
 
-    def _complete_action_once(self, messages: list[dict[str, str]]) -> str:
+    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response using OpenAI Structured Outputs."""
         instructions, response_input = split_instructions(messages)
+        request = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "agent_action",
+                    "strict": True,
+                    "schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                }
+            },
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
         try:
-            response = self._client.responses.create(
-                model=self.model,
-                instructions=instructions or None,
-                input=response_input,
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": "agent_action",
-                        "strict": True,
-                        "schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
-                    }
-                },
-            )
+            response = self._client.responses.create(**request)
         except Exception as exc:
             raise LLMError(f"OpenAI structured action request failed: {exc}") from exc
 
@@ -95,3 +105,19 @@ class OpenAIResponsesClient(LLMClient):
         if isinstance(output_text, str) and output_text:
             return output_text
         raise LLMError("OpenAI structured action response did not include output_text")
+
+
+def _validate_max_output_tokens(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        raise ValueError("max_output_tokens must be greater than zero")
+    return value
+
+
+def _request_max_output_tokens(model_limit: int | None, request_limit: int | None) -> int | None:
+    if model_limit is None:
+        return _validate_max_output_tokens(request_limit)
+    if request_limit is None:
+        return model_limit
+    return min(model_limit, _validate_max_output_tokens(request_limit) or model_limit)

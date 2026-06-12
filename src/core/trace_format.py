@@ -23,6 +23,8 @@ def format_model_request_trace(
     loaded_memory_ids: list[str],
     loaded_skill_names: list[str],
     available_tool_names: list[str],
+    context_report: dict | None = None,
+    max_output_tokens: int | None = None,
 ) -> dict:
     """Return a bounded, redaction-ready trace payload for one model request."""
     prompt_char_count = sum(len(str(message.get("content", ""))) for message in messages)
@@ -58,4 +60,6 @@ def format_model_request_trace(
         "loaded_memory_ids": loaded_memory_ids,
         "loaded_skill_names": loaded_skill_names,
         "available_tool_names": available_tool_names,
+        "context_report": context_report or {},
+        "max_output_tokens": max_output_tokens,
     }

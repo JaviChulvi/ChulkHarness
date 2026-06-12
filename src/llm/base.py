@@ -40,7 +40,7 @@ class LLMActionResult:
 class LLMClient:
     """Small provider-agnostic LLM client interface."""
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
+    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a normal text response."""
         raise NotImplementedError
 
@@ -55,15 +55,23 @@ class LLMClient:
             raise LLMError("Model JSON response must be an object")
         return parsed
 
-    def complete_action(self, messages: list[dict[str, str]], *, max_repair_attempts: int = 2) -> LLMActionResult:
+    def complete_action(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_repair_attempts: int = 2,
+        max_output_tokens: int | None = None,
+    ) -> LLMActionResult:
         """Return a validated agent action using provider-native structure when available."""
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts cannot be negative")
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be greater than zero")
 
         action_messages = list(messages)
         errors: list[str] = []
         for attempt in range(max_repair_attempts + 1):
-            raw_response = self._complete_action_once(action_messages)
+            raw_response = self._complete_action_once(action_messages, max_output_tokens=max_output_tokens)
             try:
                 return LLMActionResult(
                     action=parse_model_response(raw_response),
@@ -89,7 +97,7 @@ class LLMClient:
 
         raise LLMActionError("Model response was not valid action JSON")
 
-    def _complete_action_once(self, messages: list[dict[str, str]]) -> str:
+    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response attempt."""
         return self.complete(messages)
 

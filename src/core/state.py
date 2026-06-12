@@ -186,6 +186,7 @@ class TurnState:
     plan_approved: bool = False
     planning_feedback_count: int = 0
     planning_tool_limit_feedback_sent: bool = False
+    context_reports: list[dict] = field(default_factory=list)
 
     def complete(self, final_answer: str) -> None:
         self.status = "completed"
@@ -238,6 +239,7 @@ class TurnState:
             "plan_approved": self.plan_approved,
             "planning_feedback_count": self.planning_feedback_count,
             "planning_tool_limit_feedback_sent": self.planning_tool_limit_feedback_sent,
+            "context_reports": self.context_reports,
         }
 
 
@@ -260,6 +262,7 @@ class AgentState:
     json_repair_attempts: int = 0
     active_plan: Plan | None = None
     pending_plan_turn_id: str | None = None
+    last_context_report: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -278,4 +281,5 @@ class AgentState:
             "json_repair_attempts": self.json_repair_attempts,
             "active_plan": self.active_plan.to_dict() if self.active_plan else None,
             "pending_plan_turn_id": self.pending_plan_turn_id,
+            "last_context_report": self.last_context_report,
         }

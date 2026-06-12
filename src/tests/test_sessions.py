@@ -112,6 +112,19 @@ def test_create_agent_resumes_short_term_history(monkeypatch, tmp_path):
     assert second_agent.trace_logger.path == tmp_path / "traces" / f"{first_agent.state.conversation_id}.jsonl"
 
 
+def test_create_agent_requires_model_token_capabilities(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_MODEL", "unknown-model")
+    config = load_config()
+
+    try:
+        create_agent(config, lambda _config: FakeLLMClient())
+    except ValueError as exc:
+        assert "No token capability metadata configured for openai/unknown-model" in str(exc)
+    else:
+        raise AssertionError("Expected unknown model capability metadata to fail")
+
+
 def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp_path):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     config = load_config()
@@ -135,11 +148,17 @@ def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp
     with sqlite3.connect(config.store_path) as conn:
         conn.row_factory = sqlite3.Row
         request_count = conn.execute("SELECT count(*) AS count FROM conversation_model_requests").fetchone()["count"]
+        request_json = conn.execute(
+            "SELECT request_json FROM conversation_model_requests ORDER BY request_index LIMIT 1"
+        ).fetchone()["request_json"]
         tool_call = conn.execute("SELECT * FROM conversation_tool_calls").fetchone()
         observation = conn.execute("SELECT * FROM conversation_observations").fetchone()
         turn = conn.execute("SELECT * FROM conversation_turns").fetchone()
 
     assert request_count == 2
+    request_payload = json.loads(request_json)
+    assert request_payload["context_report"]["estimated_tokens"] > 0
+    assert request_payload["max_output_tokens"] > 0
     assert tool_call["tool_name"] == "calculator"
     assert tool_call["success"] == 1
     assert "4" in observation["content"]
@@ -246,3 +265,24 @@ def test_cli_resume_reloads_arrow_key_prompt_history(monkeypatch, tmp_path, caps
     assert prompt_history.items == ["persisted prompt for arrows"]
     assert f"/resume {session_id}" in prompt_history.added
     assert "/q" not in prompt_history.added
+
+
+def test_cli_context_command_shows_latest_prompt_report(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["hello context", "/context", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: FakeLLMClient(
+            [json.dumps({"type": "final_answer", "content": "context ready"})]
+        ),
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Context" in output
+    assert "estimated" in output
+    assert "sections" in output
+    assert "Conversation history" in output

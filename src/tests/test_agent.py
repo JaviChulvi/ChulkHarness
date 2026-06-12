@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from src.core import Agent, ObservationRecord, ToolCallRecord, TurnState
+from src.core.context import ContextBudget
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
@@ -20,6 +21,15 @@ class RecordingLLMClient(LLMClient):
     def complete(self, messages: list[dict[str, str]]) -> str:
         self.requests.append(messages)
         return self.responses.pop(0)
+
+
+class OutputLimitRecordingLLMClient(LLMClient):
+    def __init__(self) -> None:
+        self.max_output_tokens: list[int | None] = []
+
+    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+        self.max_output_tokens.append(max_output_tokens)
+        return json.dumps({"type": "final_answer", "content": "ok"})
 
 
 def create_test_skill_registry(tmp_path):
@@ -186,6 +196,37 @@ def test_agent_prompt_shows_available_tools():
     assert "calculator" in system_prompt
     assert "Tool-call limit" in system_prompt
     assert "at most 4 tool calls" in system_prompt
+
+
+def test_agent_records_context_report_in_state_and_trace(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-session")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
+    agent = Agent(llm, trace_logger=trace_logger)
+
+    agent.run_turn("hello")
+
+    turn = agent.state.turns[0]
+    report = agent.state.last_context_report
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+
+    assert isinstance(report, dict)
+    assert turn.context_reports == [report]
+    assert report["estimated_tokens"] > 0
+    assert any(section["name"] == "history" for section in report["sections"])
+    assert "context_report" in trace_text
+    assert "estimated_tokens" in trace_text
+
+
+def test_agent_passes_remaining_context_as_output_limit():
+    llm = OutputLimitRecordingLLMClient()
+    agent = Agent(llm, context_budget=ContextBudget(max_prompt_tokens=3000, response_reserve_tokens=200))
+
+    response = agent.run_turn("hello")
+
+    report = agent.state.last_context_report
+    assert response == "ok"
+    assert isinstance(report, dict)
+    assert llm.max_output_tokens == [3000 - report["estimated_tokens"]]
 
 
 def test_agent_injects_profile_and_relevant_long_term_memories(tmp_path):

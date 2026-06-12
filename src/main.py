@@ -18,7 +18,8 @@ from src.cli import (
 )
 from src.config import Config, load_config
 from src.core import Agent, AgentState
-from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client
+from src.core.context import ContextBudget
+from src.llm import LLMClient, LLMConfigurationError, LLMError, create_llm_client, resolve_model_capabilities
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.sessions import SQLiteSessionStore, SessionRecorder
 from src.skills import SkillRegistry
@@ -88,6 +89,11 @@ def create_agent(
     """Create the agent runtime."""
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
+    model_capabilities = resolve_model_capabilities(config.llm_provider, config.model)
+    context_budget = ContextBudget(
+        max_prompt_tokens=model_capabilities.context_window_tokens,
+        response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
+    )
     memory_store = SQLiteMemoryStore(config.store_path)
     session_store = SQLiteSessionStore(config.store_path)
     skill_registry = SkillRegistry(
@@ -129,6 +135,7 @@ def create_agent(
         max_observation_chars=config.max_observation_chars,
         max_tool_stdout_chars=config.max_tool_stdout_chars,
         max_tool_stderr_chars=config.max_tool_stderr_chars,
+        context_budget=context_budget,
         event_callback=session_recorder.callback,
     )
     agent.session_store = session_store
@@ -155,6 +162,8 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
     state.available_tool_names = list(latest_turn.available_tool_names)
     state.errors = [error for turn in state.turns for error in turn.errors]
     state.final_answer = latest_turn.final_answer
+    if latest_turn.context_reports:
+        state.last_context_report = latest_turn.context_reports[-1]
     for turn in reversed(state.turns):
         if turn.status == "waiting_for_approval" and turn.active_plan is not None and not turn.plan_approved:
             state.active_plan = turn.active_plan

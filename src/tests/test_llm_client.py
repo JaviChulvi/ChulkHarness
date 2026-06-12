@@ -10,6 +10,7 @@ from src.llm import (
     LLMConfigurationError,
     OpenAIResponsesClient,
     create_llm_client,
+    resolve_model_capabilities,
 )
 
 
@@ -117,6 +118,27 @@ def test_openai_responses_client_uses_strict_action_schema():
     assert "arguments" not in schema["properties"]
 
 
+def test_openai_responses_client_applies_output_limits():
+    fake_client = FakeOpenAIClient(
+        json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
+    )
+    client = OpenAIResponsesClient(model="test-model", client=fake_client, max_output_tokens=100)
+
+    client.complete([{"role": "user", "content": "Hello"}], max_output_tokens=25)
+
+    assert fake_client.responses.kwargs["max_output_tokens"] == 25
+
+    client.complete_action(
+        [
+            {"role": "system", "content": "Return action JSON."},
+            {"role": "user", "content": "Hello"},
+        ],
+        max_output_tokens=250,
+    )
+
+    assert fake_client.responses.kwargs["max_output_tokens"] == 100
+
+
 def test_deepseek_client_sends_chat_completion_messages():
     fake_client = FakeDeepSeekClient()
     client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
@@ -167,6 +189,27 @@ def test_deepseek_client_uses_json_object_mode_for_actions():
 
     assert result.action.content == "structured answer"
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_deepseek_client_applies_output_limits():
+    fake_client = FakeDeepSeekClient(
+        json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
+    )
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client, max_output_tokens=100)
+
+    client.complete([{"role": "user", "content": "Hello"}], max_output_tokens=25)
+
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 25
+
+    client.complete_action(
+        [
+            {"role": "system", "content": "Return action JSON."},
+            {"role": "user", "content": "Hello"},
+        ],
+        max_output_tokens=250,
+    )
+
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 100
 
 
 def test_deepseek_client_can_parse_plan_action_from_json_mode():
@@ -247,3 +290,35 @@ def test_llm_provider_registry_exposes_provider_capabilities():
     assert openai_provider.capabilities.api_style == "responses"
     assert deepseek_provider.capabilities.supports_json_mode is True
     assert deepseek_provider.capabilities.api_style == "chat_completions"
+
+
+def test_resolve_model_capabilities_returns_context_window_and_output_limit():
+    openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
+    deepseek_caps = resolve_model_capabilities("deepseek", "deepseek-v4-flash")
+
+    assert openai_caps.context_window_tokens == 1_047_576
+    assert openai_caps.max_output_tokens == 32_768
+    assert openai_caps.default_response_reserve_tokens == 8_192
+    assert openai_caps.input_budget_tokens == 1_039_384
+    assert deepseek_caps.context_window_tokens == 1_000_000
+    assert deepseek_caps.max_output_tokens == 384_000
+    assert deepseek_caps.default_response_reserve_tokens == 16_384
+    assert deepseek_caps.input_budget_tokens == 983_616
+
+
+def test_resolve_model_capabilities_supports_known_family_aliases():
+    caps = resolve_model_capabilities("openai", "gpt-4.1-mini-2099-01-01")
+
+    assert caps.model == "gpt-4.1-mini-2099-01-01"
+    assert caps.context_window_tokens == 1_047_576
+    assert caps.max_output_tokens == 32_768
+
+
+def test_resolve_model_capabilities_rejects_unknown_models():
+    try:
+        resolve_model_capabilities("openai", "unknown-model")
+    except ValueError as exc:
+        assert "No token capability metadata" in str(exc)
+        assert "src/llm/capabilities.py" in str(exc)
+    else:
+        raise AssertionError("Expected unknown model capability lookup to fail")

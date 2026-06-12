@@ -47,6 +47,9 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
         else:
             context.output_func(context.terminal.status(context.config, context.agent))
         return True
+    if normalized_command == "/context":
+        context.output_func(context.terminal.context(context.agent))
+        return True
     if normalized_command == "/tools":
         context.output_func(context.terminal.tools(context.agent))
         return True

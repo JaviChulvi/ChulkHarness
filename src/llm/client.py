@@ -1,7 +1,7 @@
 """Compatibility imports for LLM provider clients and shared interfaces."""
 
 from src.llm.base import LLMActionError, LLMActionResult, LLMClient, LLMConfigurationError, LLMError
-from src.llm.capabilities import LLMCapabilities
+from src.llm.capabilities import LLMCapabilities, LLMModelCapabilities, resolve_model_capabilities
 from src.llm.factory import (
     LLM_PROVIDER_REGISTRY,
     LLMClientSettings,
@@ -21,9 +21,11 @@ __all__ = [
     "LLMClientSettings",
     "LLMConfigurationError",
     "LLMError",
+    "LLMModelCapabilities",
     "LLMProvider",
     "LLM_PROVIDER_REGISTRY",
     "OpenAIResponsesClient",
     "create_llm_client",
+    "resolve_model_capabilities",
     "supported_llm_providers",
 ]

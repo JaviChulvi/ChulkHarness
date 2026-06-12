@@ -9,10 +9,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from src.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
+from src.core.context import AgentPrompt, ContextBudget
 from src.core.events import TraceEvent
 from src.core.observations import format_tool_observation
 from src.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
-from src.core.prompt_builder import build_agent_messages
+from src.core.prompt_builder import build_agent_prompt
 from src.core.prompts import BASE_SYSTEM_PROMPT
 from src.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
 from src.core.trace_format import format_action_trace, format_model_request_trace
@@ -46,6 +47,7 @@ class Agent:
         max_observation_chars: int = 12000,
         max_tool_stdout_chars: int = 8000,
         max_tool_stderr_chars: int = 4000,
+        context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
@@ -62,6 +64,7 @@ class Agent:
             raise ValueError("max_tool_stdout_chars must be greater than zero")
         if max_tool_stderr_chars < 1:
             raise ValueError("max_tool_stderr_chars must be greater than zero")
+        self.context_budget = context_budget or ContextBudget()
         self.llm_client = llm_client
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()
@@ -180,7 +183,12 @@ class Agent:
     def _run_action_loop(self, turn: TurnState, *, require_plan: bool) -> str:
         """Run model/tool iterations until the turn pauses or completes."""
         while True:
-            messages = self._build_messages(turn, require_plan=require_plan)
+            prompt = self._build_prompt(turn, require_plan=require_plan)
+            messages = prompt.messages
+            context_report = prompt.context_report.to_dict()
+            turn.context_reports.append(context_report)
+            self.state.last_context_report = context_report
+            max_output_tokens = self._max_output_tokens_for_prompt(context_report)
             turn.model_request_count += 1
             self._trace(
                 TraceEvent.MODEL_REQUEST_STARTED,
@@ -192,12 +200,15 @@ class Agent:
                     loaded_memory_ids=self.state.loaded_memory_ids,
                     loaded_skill_names=self.state.loaded_skill_names,
                     available_tool_names=turn.available_tool_names,
+                    context_report=context_report,
+                    max_output_tokens=max_output_tokens,
                 ),
             )
             try:
                 action_result = self.llm_client.complete_action(
                     messages,
                     max_repair_attempts=self.max_json_repair_attempts,
+                    max_output_tokens=max_output_tokens,
                 )
             except LLMActionError as exc:
                 self.state.json_repair_attempts += exc.repair_attempts
@@ -351,7 +362,11 @@ class Agent:
 
     def _build_messages(self, turn: TurnState, *, require_plan: bool) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
-        return build_agent_messages(
+        return self._build_prompt(turn, require_plan=require_plan).messages
+
+    def _build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
+        """Build the model input and context report."""
+        return build_agent_prompt(
             system_prompt=self.system_prompt,
             memory=self.memory,
             profile_memories=self._profile_memories,
@@ -364,7 +379,16 @@ class Agent:
             active_plan=turn.active_plan,
             plan_approved=turn.plan_approved,
             require_plan=require_plan,
+            context_budget=self.context_budget,
         )
+
+    def _max_output_tokens_for_prompt(self, context_report: dict) -> int | None:
+        """Return available output tokens for this request based on prompt size."""
+        if not self.context_budget.enabled:
+            return None
+        prompt_tokens = int(context_report.get("estimated_tokens") or 0)
+        remaining_tokens = self.context_budget.max_prompt_tokens - prompt_tokens
+        return max(1, remaining_tokens)
 
     def _handle_plan_action(self, action: PlanAction, turn: TurnState, *, require_plan: bool) -> str:
         if not require_plan:
@@ -585,6 +609,7 @@ class Agent:
                 "final_answer": self.state.final_answer,
                 "active_plan": self.state.active_plan.to_dict() if self.state.active_plan else None,
                 "pending_plan_turn_id": self.state.pending_plan_turn_id,
+                "last_context_report": self.state.last_context_report,
             },
         }
 

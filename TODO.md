@@ -1093,14 +1093,14 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
   - [x] Link trace files to persisted conversation ids.
   - [x] Add tests proving a session can be resumed after creating a new agent instance.
 - [ ] Add better context management.
-  - [ ] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
-  - [ ] Add configurable prompt budget limits.
-  - [ ] Add context budget reporting to `/status` or a new `/context` CLI command.
+  - [x] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
+  - [x] Add model-derived prompt budget limits.
+  - [x] Add context budget reporting to `/status` or a new `/context` CLI command.
   - [ ] Summarize older conversation messages when history grows too large.
   - [ ] Store compact conversation summaries for older persisted sessions.
-  - [ ] Keep the full prompt available in traces while showing compact context summaries in the CLI.
-  - [ ] Explain which memories, skills, tools, and history were injected into the current prompt.
-  - [ ] Avoid injecting large tool observations when an artifact path is enough.
+  - [x] Keep the full prompt available in traces while showing compact context summaries in the CLI.
+  - [x] Explain which memories, skills, tools, and history were injected into the current prompt.
+  - [x] Avoid injecting large tool observations when an artifact path is enough.
   - [ ] Add tests for token estimates, trimming, summarization, and prompt budget behavior.
 - [ ] Add reflection prompt.
 - [ ] Add post-tool reflection.

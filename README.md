@@ -166,12 +166,13 @@ chulk
 
 The interactive CLI always uses a Hulk-green terminal theme. During interactive turns, Chulk prints compact live progress lines such as memory search, skill selection, model requests, tool calls, command previews, elapsed time, and turn completion. Real terminals also show a small ASCII spinner while the model or a tool is working. Arrow up/down navigates prompt history for the active session when terminal `readline` support is available. The input prompt is intentionally short (`>`) so the transcript does not repeat a heavy label on every line. `chulk --once` remains plain output for scripting.
 
-At the end of each turn, Chulk prints a compact summary with total time, model request count, tools used, selected memory count, selected skills, and the trace path. Use `/quiet on` to hide live progress, `/verbose on` to include trace-event names in progress lines, and `/summary off` to hide the summary block.
+At the end of each turn, Chulk prints a compact summary with total time, model request count, tools used, selected memory count, selected skills, context estimate, and the trace path. Use `/context` to inspect the latest prompt section breakdown, `/quiet on` to hide live progress, `/verbose on` to include trace-event names in progress lines, and `/summary off` to hide the summary block.
 
 Useful interactive commands:
 
 - `/help`
 - `/status`
+- `/context`
 - `/tools`
 - `/sessions`
 - `/resume <conversation_id>`
@@ -273,6 +274,10 @@ CHULK_MAX_TOOL_STDERR_CHARS=4000
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
+
+Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `src/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then omits older history or stale observations when needed. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
+
+Large file rewrites are still bounded by the selected model's output capacity because `write_file` arguments are model-generated JSON. If a whole file cannot fit in one model output, use smaller edits or add a patch/chunked-write tool.
 
 ## Development Roadmap
 
