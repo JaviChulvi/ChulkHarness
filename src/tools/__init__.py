@@ -2,7 +2,7 @@
 
 from src.tools.builtins import create_default_tool_registry
 from src.tools.calculator import calculator_tool
-from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from src.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from src.tools.memory import (
     archive_memory_tool,
     compact_memories_tool,
@@ -23,6 +23,7 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "ToolResult",
+    "apply_patch_tool",
     "calculator_tool",
     "create_default_tool_registry",
     "archive_memory_tool",

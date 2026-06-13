@@ -8,7 +8,7 @@ from src.core.context import ContextBudget
 from src.llm import LLMClient
 from src.memory import ConversationMemory, SQLiteMemoryStore
 from src.skills import SkillRegistry
-from src.tools import Tool, ToolRegistry, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
+from src.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
 from src.tools.registry import ToolResult
 from src.tracing import JSONLTraceLogger
 
@@ -180,6 +180,48 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
     assert turn.tool_calls[0].success is True
     assert turn.observations[0].tool_name == "calculator"
     assert len(llm.requests) == 2
+    assert any(message["role"] == "observation" for message in llm.requests[1])
+
+
+def test_agent_calls_apply_patch_tool_then_returns_final_answer(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "apply_patch",
+                    "arguments_json": json.dumps(
+                        {
+                            "patch": "\n".join(
+                                [
+                                    "--- a/notes.txt",
+                                    "+++ b/notes.txt",
+                                    "@@ -1 +1 @@",
+                                    "-hello",
+                                    "+hello chulk",
+                                ]
+                            )
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Updated notes.txt."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(apply_patch_tool(tmp_path))
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_turn("update notes")
+
+    assert response == "Updated notes.txt."
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello chulk\n"
+    assert agent.state.tool_calls == [
+        {"tool_name": "apply_patch", "arguments": {"patch": "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-hello\n+hello chulk"}, "phase": "execution", "success": True}
+    ]
+    assert "Applied patch" in agent.state.observations[0]["observation"]
     assert any(message["role"] == "observation" for message in llm.requests[1])
 
 

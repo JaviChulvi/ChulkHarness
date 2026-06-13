@@ -236,6 +236,7 @@ Built-in tools currently registered at startup:
 - `calculator`
 - `run_cmd`
 - `read_file`
+- `apply_patch`
 - `write_file`
 - `list_files`
 - `search_files`
@@ -277,7 +278,7 @@ CHULK_LLM_MAX_RETRIES=2
 
 Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `src/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then omits older history or stale observations when needed. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
 
-Large file rewrites are still bounded by the selected model's output capacity because `write_file` arguments are model-generated JSON. If a whole file cannot fit in one model output, use smaller edits or add a patch/chunked-write tool.
+Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
 
 ## Development Roadmap
 

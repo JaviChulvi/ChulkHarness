@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.memory import SQLiteMemoryStore
+from src.tools.files import resolve_inside_root, safe_write_error
 from src.tools.registry import Tool, ToolResult
 
 
@@ -291,7 +292,7 @@ def compact_memories(_arguments: dict[str, Any], memory_store: SQLiteMemoryStore
 
 
 def import_memories(arguments: dict[str, Any], memory_store: SQLiteMemoryStore, project_root: Path) -> ToolResult:
-    path = _resolve_inside_root(project_root, arguments["path"])
+    path = resolve_inside_root(project_root, arguments["path"])
     memory_ids = memory_store.import_markdown(path)
     return ToolResult(
         "import_memories",
@@ -302,7 +303,16 @@ def import_memories(arguments: dict[str, Any], memory_store: SQLiteMemoryStore, 
 
 
 def export_memories(arguments: dict[str, Any], memory_store: SQLiteMemoryStore, project_root: Path) -> ToolResult:
-    path = _resolve_inside_root(project_root, arguments["path"])
+    path = resolve_inside_root(project_root, arguments["path"])
+    safety_error = safe_write_error(path, project_root)
+    if safety_error:
+        return ToolResult(
+            "export_memories",
+            False,
+            safety_error,
+            error="unsafe_path",
+            metadata={"path": str(path.relative_to(project_root.resolve()))},
+        )
     count = memory_store.export_markdown(path, include_archived=arguments.get("include_archived", False))
     return ToolResult(
         "export_memories",
@@ -333,11 +343,3 @@ def _format_memories(memories: list[Any]) -> str:
         for memory in memories
     ]
     return json.dumps(payload, indent=2, sort_keys=True)
-
-
-def _resolve_inside_root(project_root: Path, raw_path: str) -> Path:
-    root = project_root.resolve()
-    candidate = (root / raw_path).resolve()
-    if candidate != root and root not in candidate.parents:
-        raise ValueError("Path is outside the project root")
-    return candidate

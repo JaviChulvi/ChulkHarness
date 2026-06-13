@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.memory import SQLiteMemoryStore
 from src.tools.calculator import calculator_tool
-from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from src.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from src.tools.memory import (
     archive_memory_tool,
     compact_memories_tool,
@@ -34,6 +34,7 @@ def create_default_tool_registry(
     registry.register(calculator_tool())
     registry.register(shell_tool(project_root, timeout_seconds=shell_timeout_seconds))
     registry.register(read_file_tool(project_root))
+    registry.register(apply_patch_tool(project_root))
     registry.register(write_file_tool(project_root))
     registry.register(list_files_tool(project_root))
     registry.register(search_files_tool(project_root))

@@ -5,7 +5,7 @@ import sys
 
 from src.memory import SQLiteMemoryStore
 from src.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
-from src.tools.files import list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from src.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from src.tools.output import preview_text
 from src.tools.registry import ToolResult
 from src.tools.shell import run_shell_command
@@ -249,6 +249,137 @@ def test_file_tools_read_write_list_and_search(tmp_path):
     assert "notes/example.txt" in search_result.observation
 
 
+def test_apply_patch_tool_modifies_existing_file(tmp_path):
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(apply_patch_tool(tmp_path))
+
+    result = registry.run(
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "--- a/notes.txt",
+                    "+++ b/notes.txt",
+                    "@@ -1,3 +1,3 @@",
+                    " one",
+                    "-two",
+                    "+TWO",
+                    " three",
+                ]
+            )
+        },
+    )
+
+    assert result.success
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "one\nTWO\nthree\n"
+    assert result.metadata["paths"] == ["notes.txt"]
+    assert result.metadata["changed_count"] == 1
+    assert result.metadata["modified_count"] == 1
+    assert result.metadata["changes"][0]["sha256_before"]
+    assert result.metadata["changes"][0]["sha256_after"]
+
+
+def test_apply_patch_tool_creates_new_file(tmp_path):
+    registry = ToolRegistry()
+    registry.register(apply_patch_tool(tmp_path))
+
+    result = registry.run(
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "--- /dev/null",
+                    "+++ b/notes/new.txt",
+                    "@@ -0,0 +1,2 @@",
+                    "+alpha",
+                    "+beta",
+                ]
+            )
+        },
+    )
+
+    assert result.success
+    assert (tmp_path / "notes" / "new.txt").read_text(encoding="utf-8") == "alpha\nbeta\n"
+    assert result.metadata["created_count"] == 1
+    assert result.metadata["changes"][0]["status"] == "created"
+    assert result.metadata["changes"][0]["sha256_before"] is None
+
+
+def test_apply_patch_tool_blocks_unsafe_paths(tmp_path):
+    registry = ToolRegistry()
+    registry.register(apply_patch_tool(tmp_path))
+
+    for path in [".env", "src/store.sqlite", ".git/config", "secrets.txt", "traces/output.txt"]:
+        result = registry.run(
+            "apply_patch",
+            {
+                "patch": "\n".join(
+                    [
+                        "--- /dev/null",
+                        f"+++ b/{path}",
+                        "@@ -0,0 +1 @@",
+                        "+blocked",
+                    ]
+                )
+            },
+        )
+
+        assert not result.success
+        assert result.error == "unsafe_path"
+        assert not (tmp_path / path).exists()
+
+
+def test_apply_patch_tool_is_atomic_on_multi_file_failure(tmp_path):
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(apply_patch_tool(tmp_path))
+
+    result = registry.run(
+        "apply_patch",
+        {
+            "patch": "\n".join(
+                [
+                    "--- a/a.txt",
+                    "+++ b/a.txt",
+                    "@@ -1 +1 @@",
+                    "-a",
+                    "+A",
+                    "--- a/b.txt",
+                    "+++ b/b.txt",
+                    "@@ -1 +1 @@",
+                    "-not-b",
+                    "+B",
+                ]
+            )
+        },
+    )
+
+    assert not result.success
+    assert result.error == "patch_context_mismatch"
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
+
+
+def test_write_file_blocks_unsafe_paths_and_guards_overwrites(tmp_path):
+    registry = ToolRegistry()
+    registry.register(write_file_tool(tmp_path))
+
+    create_result = registry.run("write_file", {"path": "safe.txt", "content": "hello"})
+    exists_result = registry.run("write_file", {"path": "safe.txt", "content": "replace"})
+    overwrite_result = registry.run("write_file", {"path": "safe.txt", "content": "replace", "overwrite": True})
+    unsafe_result = registry.run("write_file", {"path": ".env", "content": "OPENAI_API_KEY=secret"})
+    tokenizer_result = registry.run("write_file", {"path": "tokenizer.json", "content": "{}"})
+
+    assert create_result.success
+    assert exists_result.error == "exists"
+    assert overwrite_result.success
+    assert overwrite_result.metadata["status"] == "modified"
+    assert unsafe_result.error == "unsafe_path"
+    assert tokenizer_result.success
+
+
 def test_file_tools_block_path_traversal(tmp_path):
     registry = ToolRegistry()
     registry.register(read_file_tool(tmp_path))
@@ -263,7 +394,7 @@ def test_default_tool_registry_contains_builtins(tmp_path):
     registry = create_default_tool_registry(tmp_path)
     names = {tool.name for tool in registry.list_tools()}
 
-    assert {"calculator", "run_cmd", "read_file", "write_file", "list_files", "search_files"} <= names
+    assert {"calculator", "run_cmd", "read_file", "apply_patch", "write_file", "list_files", "search_files"} <= names
 
 
 def test_default_tool_registry_contains_memory_tools_when_store_is_provided(tmp_path):
@@ -330,3 +461,13 @@ def test_memory_tools_import_export_archive_restore_and_compact(tmp_path):
     assert compact_result.success
     assert export_result.success
     assert (tmp_path / "memory-export.md").exists()
+
+
+def test_memory_export_blocks_unsafe_paths(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    registry = create_default_tool_registry(tmp_path, memory_store=memory_store)
+
+    result = registry.run("export_memories", {"path": "src/store.sqlite"})
+
+    assert not result.success
+    assert result.error == "unsafe_path"

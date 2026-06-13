@@ -342,7 +342,15 @@ Example tools:
   - [x] Write a text file inside the project directory.
   - [x] Block writes outside the allowed root.
   - [x] Require an explicit overwrite flag for overwrites.
+  - [x] Block unsafe write targets such as `.env`, credentials, SQLite stores, traces, caches, and dependency/build folders.
   - [x] Log path and byte count.
+
+- [x] `apply_patch`
+  - [x] Apply unified-diff edits inside the project directory.
+  - [x] Prefer patch edits over whole-file rewrites for existing files.
+  - [x] Validate every target and hunk before writing anything.
+  - [x] Reject deletes, renames, unsafe paths, and mismatched context.
+  - [x] Return changed paths and before/after SHA-256 metadata.
 
 - [x] `list_files`
   - [x] List files under the project directory.
@@ -815,12 +823,12 @@ Shell safety:
 Filesystem safety:
 
 - [ ] Limit file reads to the project directory.
-- [ ] Limit file writes to the project directory.
-- [ ] Normalize paths before checking them.
-- [ ] Block path traversal outside the project root.
-- [ ] Prevent writes to `.env` unless explicitly confirmed later.
-- [ ] Prevent writes to secrets or credential files unless explicitly confirmed later.
-- [ ] Require confirmation before overwriting files later.
+- [x] Limit file writes to the project directory.
+- [x] Normalize paths before checking them.
+- [x] Block path traversal outside the project root.
+- [x] Prevent writes to `.env` unless explicitly confirmed later.
+- [x] Prevent writes to secrets or credential files unless explicitly confirmed later.
+- [x] Require explicit overwrite for guarded whole-file replacement.
 
 Permission model:
 
