@@ -31,7 +31,7 @@ Core principles:
 Proposed file structure:
 
 ```text
-src/
+chulk/
   main.py
   config.py
   core/
@@ -80,13 +80,13 @@ skills/
 
 Module responsibilities:
 
-- [ ] `src/main.py`
+- [ ] `chulk/main.py`
   - [ ] Provide the CLI entrypoint.
   - [ ] Read user input from the terminal.
   - [ ] Create the agent, registries, memory store, logger, and LLM client.
   - [ ] Run the conversation loop until the user exits.
 
-- [ ] `src/core/agent.py`
+- [ ] `chulk/core/agent.py`
   - [ ] Implement the core agent loop.
   - [ ] Coordinate prompt building, memory selection, skill selection, model requests, tools, and observations.
   - [ ] Ask the model for either a direct answer or a tool call.
@@ -94,17 +94,17 @@ Module responsibilities:
   - [ ] Feed observations back into the model.
   - [ ] Track per-turn state and stop conditions.
 
-- [ ] `src/core/state.py`
+- [ ] `chulk/core/state.py`
   - [ ] Store session and per-turn dataclasses.
   - [ ] Keep `AgentState`, `TurnState`, `ToolCallRecord`, and `ObservationRecord` inspectable.
 
-- [ ] `src/core/events.py`
+- [ ] `chulk/core/events.py`
   - [ ] Store shared trace event names for the agent, traces, and CLI progress.
 
-- [ ] `src/core/prompt_builder.py`
+- [ ] `chulk/core/prompt_builder.py`
   - [ ] Compose prompts from base instructions, memory, skills, tools, and history.
 
-- [ ] `src/llm/`
+- [ ] `chulk/llm/`
   - [ ] Wrap the model provider API.
   - [ ] Support OpenAI first.
   - [ ] Hide provider-specific request and response details from the agent loop.
@@ -112,49 +112,49 @@ Module responsibilities:
   - [ ] Handle retries, timeouts, rate limits, and provider errors.
   - [ ] Register providers through a provider registry and explicit capability metadata.
 
-- [x] `src/memory/`
+- [x] `chulk/memory/`
   - [x] Manage short-term conversation history.
   - [x] Manage long-term SQLite memory.
   - [x] Save, search, list, delete, and summarize memories.
   - [x] Keep memory retrieval separate from skill loading.
 
-- [ ] `src/tools/registry.py`
+- [ ] `chulk/tools/registry.py`
   - [ ] Define the `Tool` dataclass.
   - [ ] Register callable tools.
   - [ ] List tool schemas for the model.
   - [ ] Validate and execute tool calls by name.
   - [ ] Convert tool outputs into observations.
 
-- [x] `src/skills/registry.py`
+- [x] `chulk/skills/registry.py`
   - [x] Define the `Skill` dataclass.
   - [x] Load skill metadata at startup.
   - [x] Select relevant skills for a user request.
   - [x] Lazy-load full `SKILL.md` files only when needed.
   - [x] Return skill instructions for prompt injection.
 
-- [ ] `src/tools/shell.py`
+- [ ] `chulk/tools/shell.py`
   - [ ] Implement safe-ish command execution.
   - [ ] Run commands with timeout.
   - [ ] Capture stdout, stderr, and exit code.
   - [ ] Apply basic destructive-command blocking.
   - [ ] Log every executed command.
 
-- [ ] `src/core/prompts.py`
+- [ ] `chulk/core/prompts.py`
   - [ ] Store prompt templates.
   - [ ] Keep base system prompts, tool prompts, memory prompts, skill prompts, and repair prompts separate.
   - [ ] Make prompt composition readable and testable.
 
-- [x] `src/tracing/logger.py`
+- [x] `chulk/tracing/logger.py`
   - [x] Write structured logs and traces.
   - [x] Create one trace file per session.
   - [ ] Record user messages, selected memories, selected skills, model responses, tool calls, observations, and errors.
 
-- [ ] `src/config.py`
+- [ ] `chulk/config.py`
   - [ ] Centralize model name, API settings, paths, limits, timeouts, and safety options.
   - [ ] Read environment variables.
   - [ ] Provide sensible defaults for local development.
 
-- [ ] `src/store.sqlite`
+- [ ] `chulk/store.sqlite`
   - [ ] Store long-term memories.
   - [ ] Optionally store conversations, traces, and tool-call history later.
   - [ ] Treat as local development data, not source code.
@@ -164,7 +164,7 @@ Module responsibilities:
   - [x] Keep each skill in its own folder.
   - [x] Start with `shell`, `memory`, and `files`.
 
-- [ ] `src/tests/`
+- [ ] `chulk/tests/`
   - [ ] Store unit tests and integration tests.
   - [ ] Mock the LLM client for deterministic agent-loop tests.
 
@@ -231,7 +231,7 @@ Stop conditions:
 
 Build a small provider wrapper before adding agent complexity.
 
-- [x] Create `LLMClient` in `src/llm/client.py`.
+- [x] Create `LLMClient` in `chulk/llm/client.py`.
 - [x] Add a `complete(messages: list[dict]) -> str` method.
 - [x] Add a `complete_json(messages: list[dict]) -> dict` method.
 - [x] Support OpenAI first.
@@ -369,7 +369,7 @@ The shell tool is dangerous. It should be treated as a local development feature
 
 Requirements:
 
-- [x] Implement shell execution in `src/tools/shell.py`.
+- [x] Implement shell execution in `chulk/tools/shell.py`.
 - [x] Use `subprocess.run` or `asyncio.create_subprocess_shell`.
 - [x] Run every command with a timeout.
 - [x] Capture stdout.
@@ -454,7 +454,7 @@ Use SQLite initially because it is simple, inspectable, and local.
 
 Next big implementation milestone:
 
-- [x] Create `src/memory/sqlite_store.py`.
+- [x] Create `chulk/memory/sqlite_store.py`.
 - [x] Create a `SQLiteMemoryStore` class that owns connection setup and schema initialization.
 - [x] Store the database at `config.store_path`.
 - [x] Add a durable `MemoryRecord` dataclass separate from short-term conversation messages.
@@ -628,7 +628,7 @@ Example skills:
 
 ## 9. Prompting Strategy
 
-Prompt templates should live in `src/core/prompts.py`.
+Prompt templates should live in `chulk/core/prompts.py`.
 
 Prompt types:
 
@@ -764,7 +764,7 @@ The project should be easy to debug. A trace should explain exactly what the age
 
 Logging tasks:
 
-- [x] Create `src/tracing/logger.py`.
+- [x] Create `chulk/tracing/logger.py`.
 - [x] Create a `TraceLogger`.
 - [x] Create a trace file per session.
 - [x] Use JSONL for trace events.
@@ -988,7 +988,7 @@ Done when:
 
 Goal: durable local memory backed by SQLite.
 
-- [x] Create `src/memory/sqlite_store.py`.
+- [x] Create `chulk/memory/sqlite_store.py`.
 - [x] Create SQLite store initialization.
 - [x] Create memory schema with `id`, `content`, `created_at`, `updated_at`, `tags`, `metadata`, and `importance`.
 - [x] Implement `save_memory`.
@@ -1100,6 +1100,13 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
   - [x] Let resumed sessions reload short-term history from durable storage.
   - [x] Link trace files to persisted conversation ids.
   - [x] Add tests proving a session can be resumed after creating a new agent instance.
+- [x] Add programmable agent API foundation.
+  - [x] Rename the import package from `src` to `chulk`.
+  - [x] Add `from chulk import Agent, Tool, Tools, Skills`.
+  - [x] Add a reusable runtime builder shared by the CLI and public API.
+  - [x] Add a software-engineer preset for prompt, tools, and skills.
+  - [x] Add first-success provider fallback chain support.
+  - [x] Add tests for public tool calls, pinned skills, and fallback tracing.
 - [ ] Add better context management.
   - [x] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
   - [x] Add model-derived prompt budget limits.
@@ -1181,10 +1188,10 @@ The project is successful when:
 
 ## Immediate Next Actions
 
-- [x] Create the `src/` package.
-- [x] Create `src/main.py`.
-- [x] Create `src/config.py`.
-- [x] Create `src/llm/client.py`.
+- [x] Create the `chulk/` package.
+- [x] Create `chulk/main.py`.
+- [x] Create `chulk/config.py`.
+- [x] Create `chulk/llm/client.py`.
 - [x] Build the simplest possible CLI chat loop.
 - [x] Add a mocked LLM test before wiring real API calls.
 - [x] Add real OpenAI support.

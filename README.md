@@ -12,6 +12,8 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 - Dynamic tool registration and execution.
 - Built-in command/shell tooling with safety controls.
 - Lazy-loaded skills for domain-specific workflows.
+- Public `from chulk import Agent, Tool` API for embedding the runtime in Python code.
+- Provider fallback chains that still satisfy the shared `LLMClient` contract.
 - Structured model responses for tool calls and final answers.
 - Explicit plan approval mode before tool execution.
 - Trace logs that show messages, selected context, tool calls, observations, and errors.
@@ -27,11 +29,11 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 ## Current Scope
 
-This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 workflows for plan mode plus session resume in place. The roadmap lives in [TODO.md](TODO.md).
+This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 workflows for plan mode plus session resume in place. It also exposes a small programmable API so the same runtime used by the CLI can be embedded with `from chulk import Agent`. The roadmap lives in [TODO.md](TODO.md).
 
 The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
 
-Long-term memory is stored in the local SQLite database at `src/store.sqlite`, which is ignored by Git. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
+Long-term memory is stored in the local SQLite database at `chulk/store.sqlite`, which is ignored by Git. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
 
 Memory search uses SQLite FTS when available, with a fallback keyword search and local vector reranking. Memories also track tags, source, confidence, importance, archive state, and access metadata. A human-readable `MEMORY.md` can be imported or exported through memory tools, but SQLite remains the runtime memory engine.
 
@@ -54,9 +56,11 @@ Shell access and file-writing tools include local guardrails, timeouts, output l
 ## Planned Structure
 
 ```text
-src/
+chulk/
+  api.py
   main.py
   config.py
+  runtime.py
   cli/
     commands.py
     progress.py
@@ -76,6 +80,7 @@ src/
     client.py
     factory.py
     messages.py
+    public.py
     providers/
       openai.py
       deepseek.py
@@ -92,6 +97,7 @@ src/
     calculator.py
     files.py
     memory.py
+    public.py
     registry.py
     schema.py
     shell.py
@@ -103,6 +109,8 @@ src/
     sqlite_store.py
   tracing/
     logger.py
+  presets/
+    software_engineer.py
   tests/
 skills/
   shell/
@@ -157,6 +165,101 @@ CHULK_LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your_deepseek_key
 CHULK_MODEL=deepseek-v4-flash
 ```
+
+The CLI coding agent can use provider fallback with the same public provider objects exposed by `chulk.llm`. Configure the primary provider normally, then add fallback providers as a comma-separated list. Each fallback entry can be `provider` or `provider:model`:
+
+```bash
+CHULK_LLM_PROVIDER=deepseek
+CHULK_MODEL=deepseek-v4-pro
+DEEPSEEK_API_KEY=your_deepseek_key
+OPENAI_API_KEY=your_openai_key
+CHULK_LLM_FALLBACK_PROVIDERS=openai:gpt-4.1-mini
+```
+
+At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds.
+
+## Programmable API
+
+Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
+
+Create the default coding agent:
+
+```python
+from chulk import Agent
+from chulk.presets import SoftwareEngineer
+
+a = Agent(preset=SoftwareEngineer())
+
+print(a.run("Inspect this repository and summarize the CLI entrypoint."))
+```
+
+Pick specific built-in tools and skills:
+
+```python
+from chulk import Agent, Tools, Skills
+
+a = Agent(
+    tools=[Tools.read_file, Tools.search_files, Tools.apply_patch],
+    skills=[Skills.files, Skills.shell],
+)
+
+print(a.run("Find where the CLI is wired and suggest a small cleanup."))
+```
+
+Expose one of your own Python functions as a tool:
+
+```python
+from chulk import Agent, Tool
+
+@Tool
+def lookup_order(order_id: str) -> str:
+    """Look up an order by id."""
+    return f"Order {order_id} ships tomorrow."
+
+a = Agent(
+    tools=[lookup_order],
+    skills=[],
+)
+
+print(a.run("When does order A-100 ship?"))
+```
+
+Use provider fallback:
+
+```python
+from chulk import Agent, Tools, Skills
+from chulk.llm import FallbackChain, OpenAIProvider, DeepSeekProvider
+from chulk.presets import SoftwareEngineer
+
+a = Agent(
+    preset=SoftwareEngineer(),
+    llm=FallbackChain(
+        providers=[
+            OpenAIProvider(model="gpt-4.1-mini"),
+            DeepSeekProvider(model="deepseek-v4-flash"),
+        ],
+        strategy="first_success",
+    ),
+    tools=[Tools.read_file, Tools.search_files, Tools.apply_patch],
+    skills=[Skills.files, Skills.shell, Skills.memory],
+)
+
+print(a.run("Inspect the project and update the README"))
+```
+
+Ask for an approval plan before mutation:
+
+```python
+from chulk import Agent
+from chulk.presets import SoftwareEngineer
+
+a = Agent(preset=SoftwareEngineer())
+
+print(a.plan("Add a small public API example to the README."))
+print(a.approve())
+```
+
+The public handle wraps the same explicit `chulk.core.Agent` used by the CLI. It supports `run(...)`, `plan(...)`, `approve()`, `reject()`, `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry`.
 
 Run the current CLI:
 
@@ -263,6 +366,7 @@ OPENAI_API_KEY=
 DEEPSEEK_API_KEY=
 CHULK_LLM_PROVIDER=openai
 CHULK_MODEL=
+CHULK_LLM_FALLBACK_PROVIDERS=
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_HISTORY_LIMIT=20
@@ -276,7 +380,7 @@ CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
 
-Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `src/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then omits older history or stale observations when needed. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
+Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then omits older history or stale observations when needed. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
 
 Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
 

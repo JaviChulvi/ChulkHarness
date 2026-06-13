@@ -9,7 +9,7 @@ ChulkHarness is a lightweight Python agent harness. The project should stay expl
 Current package layout:
 
 ```text
-src/
+chulk/
   main.py            # CLI entrypoint
   config.py          # Environment and runtime config
   core/              # Agent orchestration, state, events, prompts, observations
@@ -29,14 +29,16 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 
 - Keep the harness small, readable, and modular.
 - Prefer explicit dataclasses, registries, and plain Python functions over hidden control flow.
-- Keep provider-specific logic inside `src/llm/`.
-- Add providers through `src/llm/factory.py` and `src/llm/providers/`; keep capabilities explicit.
+- Keep provider-specific logic inside `chulk/llm/`.
+- Add providers through `chulk/llm/factory.py` and `chulk/llm/providers/`; keep capabilities explicit.
+- Keep runtime assembly in `chulk/runtime.py`; the CLI and public API should consume the same builder.
+- Keep public import ergonomics in `chulk/api.py`, `chulk/tools/public.py`, `chulk/skills/__init__.py`, and `chulk/presets/`.
 - Ask the LLM layer for validated actions with `complete_action(...)`; the agent loop should not parse provider text directly.
 - Keep provider-specific structured-output transports normalized into the shared action dataclasses before orchestration.
-- Keep prompt text in `src/core/prompts.py` and prompt composition in `src/core/prompt_builder.py`.
-- Keep terminal colors, banners, and prompt styling in `src/cli/terminal.py`; keep slash commands in `src/cli/commands.py`.
+- Keep prompt text in `chulk/core/prompts.py` and prompt composition in `chulk/core/prompt_builder.py`.
+- Keep terminal colors, banners, and prompt styling in `chulk/cli/terminal.py`; keep slash commands in `chulk/cli/commands.py`.
 - Drive interactive progress lines, timing, summaries, and spinner activity from `TraceEvent` names through `Agent.event_callback`.
-- Keep session-wide data in `AgentState` and per-message execution details in `TurnState` from `src/core/state.py`.
+- Keep session-wide data in `AgentState` and per-message execution details in `TurnState` from `chulk/core/state.py`.
 - Record tool calls and observations with `ToolCallRecord` and `ObservationRecord` before writing trace snapshots.
 - Keep skill playbooks in root-level `skills/`, outside the Python package.
 - Keep side-effecting tools behind registries and safety checks.
@@ -47,7 +49,7 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Treat memories tagged `persona`, `preference`, `style`, or `workflow` as profile context that can shape tone, level of detail, and task-solving style.
 - Do not store secrets in long-term memory.
 - SQLite is the runtime memory engine; `MEMORY.md` is only a human-readable import/export format.
-- Keep SQLite operations in `src/memory/sqlite_store.py`; keep pure retrieval, extraction, Markdown, and model helpers in their own memory modules.
+- Keep SQLite operations in `chulk/memory/sqlite_store.py`; keep pure retrieval, extraction, Markdown, and model helpers in their own memory modules.
 - Memory trace events should include selected memory ids so memory behavior can be debugged across sessions.
 - When marking TODO items complete, verify the corresponding code, tests, or command output first.
 
@@ -75,6 +77,7 @@ OPENAI_API_KEY=
 DEEPSEEK_API_KEY=
 CHULK_LLM_PROVIDER=openai
 CHULK_MODEL=
+CHULK_LLM_FALLBACK_PROVIDERS=
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_HISTORY_LIMIT=20
@@ -90,7 +93,7 @@ CHULK_LLM_MAX_RETRIES=2
 
 Never commit real API keys, secrets, traces with secrets, or local SQLite state.
 
-The default memory database is `src/store.sqlite`; it is local runtime state and must stay ignored.
+The default memory database is `chulk/store.sqlite`; it is local runtime state and must stay ignored.
 
 ## Commands
 
@@ -103,20 +106,20 @@ python -m pytest
 Compile-check the package:
 
 ```bash
-python -m compileall src
+python -m compileall chulk
 ```
 
 Run CLI metadata commands:
 
 ```bash
-python -m src.main --version
-python -m src.main --show-config
+python -m chulk.main --version
+python -m chulk.main --show-config
 ```
 
 Run a one-shot chat call:
 
 ```bash
-python -m src.main --once "Hello"
+python -m chulk.main --once "Hello"
 ```
 
 This requires `OPENAI_API_KEY` unless the code path injects a fake LLM client in tests.
@@ -132,7 +135,7 @@ This requires `OPENAI_API_KEY` unless the code path injects a fake LLM client in
 
 ```bash
 python -m pytest
-python -m compileall src
+python -m compileall chulk
 ```
 
 ## Safety Rules
@@ -163,7 +166,7 @@ Do not add hidden destructive behavior or bypasses for convenience.
 ```bash
 git status --short --branch
 python -m pytest
-python -m compileall src
+python -m compileall chulk
 ```
 
 ## Style

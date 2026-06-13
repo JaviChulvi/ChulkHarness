@@ -19,16 +19,16 @@ openai = [
 ]
 
 [project.scripts]
-chulk = "src.main:main"
+chulk = "chulk.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["chulk*"]
 exclude = ["chulkharness.egg-info*"]
 
 [tool.pytest.ini_options]
-testpaths = ["src/tests"]
+testpaths = ["chulk/tests"]
 pythonpath = ["."]
