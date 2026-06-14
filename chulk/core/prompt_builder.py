@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from chulk.core.prompts import (
     JSON_ACTION_PROMPT,
+    format_conversation_summary_for_prompt,
     format_memories_for_prompt,
     format_planning_for_prompt,
     format_skills_for_prompt,
@@ -83,6 +84,7 @@ def build_agent_prompt(
         selected_skills,
         max_chars_per_skill=max_skill_content_chars,
     )
+    conversation_summary_prompt = format_conversation_summary_for_prompt(memory.conversation_summary)
     planning_prompt = format_planning_for_prompt(
         planning_enabled=planning_enabled,
         active_plan=active_plan,
@@ -108,6 +110,15 @@ def build_agent_prompt(
             "Selected skills",
             skills_prompt,
             {"skill_names": [selection.skill.name for selection in selected_skills]},
+        ),
+        (
+            "conversation_summary",
+            "Conversation summary",
+            conversation_summary_prompt,
+            {
+                "summary_message_count": memory.summary_message_count,
+                "has_summary": memory.conversation_summary is not None,
+            },
         ),
         ("planning", "Planning instructions", planning_prompt, {"enabled": planning_enabled}),
         ("action_protocol", "Action protocol", JSON_ACTION_PROMPT, {}),
@@ -145,7 +156,7 @@ def build_agent_prompt(
         budget=budget,
         sent_messages=messages,
     )
-    return AgentPrompt(messages=messages, context_report=context_report)
+    return AgentPrompt(messages=messages, context_report=context_report, omitted_messages=omitted_messages)
 
 
 def _section_item_count(name: str, content: str, metadata: dict) -> int:

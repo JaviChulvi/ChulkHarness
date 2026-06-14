@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from chulk.core.state import ObservationRecord, Plan, PlanStep, ToolCallRecord, TurnState
-from chulk.sessions.models import ConversationRecord, MessageRecord
+from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
 
 
 class SessionNotFoundError(ValueError):
@@ -161,6 +161,26 @@ class SQLiteSessionStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_summaries (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source_message_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_summaries_lookup
+                ON conversation_summaries(conversation_id, updated_at)
+                """
+            )
 
     def create_conversation(
         self,
@@ -275,28 +295,90 @@ class SQLiteSessionStore:
             )
             _touch_conversation(conn, conversation_id, now)
 
-    def list_messages(self, conversation_id: str, *, limit: int = 50) -> list[MessageRecord]:
+    def list_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 50,
+        after_ordinal: int = 0,
+    ) -> list[MessageRecord]:
         """Return persisted messages for a conversation in display order."""
         clean_limit = max(1, min(limit, 500))
+        clean_after_ordinal = max(0, after_ordinal)
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT *
                 FROM conversation_messages
                 WHERE conversation_id = ?
+                  AND ordinal > ?
                 ORDER BY ordinal DESC
                 LIMIT ?
                 """,
-                (conversation_id, clean_limit),
+                (conversation_id, clean_after_ordinal, clean_limit),
             ).fetchall()
         return [_row_to_message(row) for row in reversed(rows)]
 
-    def load_recent_messages(self, conversation_id: str, limit: int) -> list[dict[str, str]]:
+    def load_recent_messages(
+        self,
+        conversation_id: str,
+        limit: int,
+        *,
+        after_ordinal: int = 0,
+    ) -> list[dict[str, str]]:
         """Return recent messages in the format expected by ConversationMemory."""
         return [
             {"role": message.role, "content": message.content}
-            for message in self.list_messages(conversation_id, limit=limit)
+            for message in self.list_messages(conversation_id, limit=limit, after_ordinal=after_ordinal)
         ]
+
+    def save_conversation_summary(
+        self,
+        conversation_id: str,
+        *,
+        content: str,
+        source_message_count: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist the latest compact summary for a conversation."""
+        clean_content = content.strip()
+        if not clean_content:
+            return
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversation_summaries (
+                    id, conversation_id, content, source_message_count, created_at, updated_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    conversation_id,
+                    clean_content,
+                    max(0, source_message_count),
+                    now,
+                    now,
+                    json.dumps(metadata or {}, sort_keys=True),
+                ),
+            )
+            _touch_conversation(conn, conversation_id, now)
+
+    def load_latest_summary(self, conversation_id: str) -> ConversationSummaryRecord | None:
+        """Return the latest compact summary for a conversation, if any."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM conversation_summaries
+                WHERE conversation_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+        return _row_to_summary(row) if row is not None else None
 
     def save_turn_snapshot(self, conversation_id: str, turn: dict[str, Any]) -> None:
         """Upsert the latest inspectable turn snapshot."""
@@ -566,6 +648,18 @@ def _row_to_message(row: sqlite3.Row) -> MessageRecord:
         content=row["content"],
         ordinal=int(row["ordinal"]),
         created_at=row["created_at"],
+        metadata=_safe_json_dict(row["metadata"]),
+    )
+
+
+def _row_to_summary(row: sqlite3.Row) -> ConversationSummaryRecord:
+    return ConversationSummaryRecord(
+        id=row["id"],
+        conversation_id=row["conversation_id"],
+        content=row["content"],
+        source_message_count=int(row["source_message_count"] or 0),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
         metadata=_safe_json_dict(row["metadata"]),
     )
 

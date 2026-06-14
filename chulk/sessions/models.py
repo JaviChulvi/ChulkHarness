@@ -34,3 +34,16 @@ class MessageRecord:
     ordinal: int
     created_at: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ConversationSummaryRecord:
+    """A compact task-local summary for older messages in a conversation."""
+
+    id: str
+    conversation_id: str
+    content: str
+    source_message_count: int
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)

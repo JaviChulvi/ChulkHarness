@@ -259,6 +259,38 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert "estimated_tokens" in trace_text
 
 
+def test_agent_summarizes_omitted_history_before_action_request():
+    llm = RecordingLLMClient(
+        [
+            "Earlier summary: keep the context compaction decision and update context tests.",
+            json.dumps({"type": "final_answer", "content": "continued with summary"}),
+        ]
+    )
+    memory = ConversationMemory(max_messages=10)
+    memory.add_user_message("old decision " + ("a" * 2500))
+    memory.add_assistant_message("old answer " + ("b" * 2500))
+    agent = Agent(
+        llm,
+        memory=memory,
+        context_budget=ContextBudget(max_prompt_tokens=1200, response_reserve_tokens=0),
+    )
+
+    response = agent.run_turn("latest question")
+
+    action_request = llm.requests[-1]
+    action_system_prompt = action_request[0]["content"]
+    report = agent.state.last_context_report
+
+    assert response == "continued with summary"
+    assert len(llm.requests) == 2
+    assert "You update a compact" in llm.requests[0][0]["content"]
+    assert "Earlier summary: keep the context compaction decision" in action_system_prompt
+    assert "old decision" not in json.dumps(action_request)
+    assert agent.memory.summary_message_count == 2
+    assert isinstance(report, dict)
+    assert report["omitted_message_count"] == 0
+
+
 def test_agent_passes_remaining_context_as_output_limit():
     llm = OutputLimitRecordingLLMClient()
     agent = Agent(llm, context_budget=ContextBudget(max_prompt_tokens=3000, response_reserve_tokens=200))

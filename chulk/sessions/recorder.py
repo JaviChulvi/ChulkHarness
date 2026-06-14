@@ -58,6 +58,20 @@ class SessionRecorder:
             self.store.save_model_request(self.conversation_id, {**payload, "turn_id": _payload_turn_id(payload, self.current_turn_id)})
             return
 
+        if event_type == TraceEvent.CONTEXT_SUMMARY_CREATED:
+            self.store.save_conversation_summary(
+                self.conversation_id,
+                content=str(payload.get("summary") or ""),
+                source_message_count=int(payload.get("source_message_count") or 0),
+                metadata={
+                    "event": event_type,
+                    "turn_id": _payload_turn_id(payload, self.current_turn_id),
+                    "summarized_message_count": int(payload.get("summarized_message_count") or 0),
+                    "fallback": bool(payload.get("fallback")),
+                },
+            )
+            return
+
         if event_type == TraceEvent.MODEL_RESPONSE:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
             self.store.save_model_response(self.conversation_id, {**payload, "turn_id": turn_id})

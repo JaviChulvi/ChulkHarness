@@ -330,6 +330,9 @@ def _context_section_detail(section: dict) -> str:
     if "tool_names" in metadata:
         tools = metadata.get("tool_names", [])
         return f"{len(tools)} tool(s)"
+    if "summary_message_count" in metadata:
+        count = int(metadata.get("summary_message_count") or 0)
+        return f"{count} summarized message(s)" if metadata.get("has_summary") else "none"
     if "roles" in metadata:
         roles = metadata.get("roles", {})
         if isinstance(roles, dict) and roles:
@@ -406,6 +409,10 @@ def _progress_message(
         matches = _skill_matches(payload)
         match_text = f" - matched: {matches}" if matches else ""
         return label + "skills loaded - " + ", ".join(skills) + match_text + _elapsed_suffix(elapsed_seconds)
+    if event_type == TraceEvent.CONTEXT_SUMMARY_CREATED:
+        count = int(payload.get("summarized_message_count") or 0)
+        fallback = " with fallback" if payload.get("fallback") else ""
+        return label + f"context compacted - {count} message(s){fallback}{_elapsed_suffix(elapsed_seconds)}"
     if event_type == TraceEvent.MODEL_REQUEST_STARTED:
         request_index = payload.get("request_index", "?")
         return label + f"asking model - request {request_index}{_elapsed_suffix(elapsed_seconds)}"

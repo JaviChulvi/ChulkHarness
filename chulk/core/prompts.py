@@ -59,6 +59,19 @@ def format_tools_for_prompt(tool_descriptions: str) -> str:
     return f"Available tools:\n{tool_descriptions}"
 
 
+def format_conversation_summary_for_prompt(summary: str | None) -> str:
+    """Format the task-local compact summary for prompt injection."""
+    if not summary:
+        return "Conversation summary: none."
+    return "\n".join(
+        [
+            "Conversation summary from earlier turns:",
+            "This is task-local context, not durable long-term memory.",
+            summary,
+        ]
+    )
+
+
 def format_planning_for_prompt(
     *,
     planning_enabled: bool,

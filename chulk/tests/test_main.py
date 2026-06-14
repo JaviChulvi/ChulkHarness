@@ -2,10 +2,12 @@
 
 import json
 import re
+import sqlite3
 
 from chulk import __version__
 from chulk.config import load_config
 from chulk.llm import DeepSeekProvider, FallbackChain, LLMClient, OpenAIProvider
+from chulk.llm.capabilities import LLMModelCapabilities, register_model_capabilities
 from chulk.main import create_cli_llm, main
 from chulk.sessions import SQLiteSessionStore
 
@@ -674,6 +676,124 @@ def test_main_e2e_records_turn_state_for_tool_call(monkeypatch, tmp_path, capsys
     assert turn["tool_calls"][0]["success"] is True
     assert turn["observations"][0]["tool_name"] == "calculator"
     assert finished_payload["agent_state"]["turn_count"] == 1
+
+
+def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_path, capsys):
+    model = "chulk-e2e-context-compaction"
+    register_model_capabilities(
+        LLMModelCapabilities(
+            provider="openai",
+            model=model,
+            context_window_tokens=1200,
+            max_output_tokens=128,
+            default_response_reserve_tokens=128,
+        )
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_MODEL", model)
+    old_marker = "OLD_CONTEXT_E2E_MARKER"
+    summary_text = "E2E compact summary: old marker established the context compaction path."
+
+    class CompactionE2EFakeLLM(LLMClient):
+        def __init__(self, action_responses: list[str]) -> None:
+            self.action_responses = action_responses
+            self.action_requests: list[list[dict[str, str]]] = []
+            self.summary_requests: list[list[dict[str, str]]] = []
+
+        def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+            if "You update a compact, task-local conversation summary" in messages[0]["content"]:
+                self.summary_requests.append(messages)
+                return summary_text
+            self.action_requests.append(messages)
+            return self.action_responses.pop(0)
+
+    first_llm = CompactionE2EFakeLLM(
+        [
+            json.dumps({"type": "final_answer", "content": "first turn complete"}),
+            json.dumps({"type": "final_answer", "content": "second turn complete"}),
+        ]
+    )
+    inputs = iter(
+        [
+            old_marker + " " + ("x" * 5000),
+            "continue after the old context",
+            "/q",
+        ]
+    )
+
+    first_exit = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: first_llm,
+    )
+
+    first_output = strip_ansi(capsys.readouterr().out)
+    store = SQLiteSessionStore(tmp_path / "chulk" / "store.sqlite")
+    session = next(record for record in store.list_conversations() if record.turn_count == 2)
+    summary = store.load_latest_summary(session.id)
+    trace_file = tmp_path / "traces" / f"{session.id}.jsonl"
+    events = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+    summary_event = next(event for event in events if event["type"] == "context_summary_created")
+    second_request = first_llm.action_requests[1]
+    second_request_payload = json.dumps(second_request)
+    model_request_payloads = [event["payload"] for event in events if event["type"] == "model_request_started"]
+    summary_request_payload = next(payload for payload in model_request_payloads if payload.get("purpose") == "context_summary")
+    action_request_payloads = [payload for payload in model_request_payloads if payload.get("purpose") != "context_summary"]
+    with sqlite3.connect(tmp_path / "chulk" / "store.sqlite") as conn:
+        conn.row_factory = sqlite3.Row
+        persisted_model_requests = [
+            json.loads(row["request_json"])
+            for row in conn.execute(
+                "SELECT request_json FROM conversation_model_requests WHERE conversation_id = ?",
+                (session.id,),
+            ).fetchall()
+        ]
+    second_context_report = action_request_payloads[1]["context_report"]
+    summary_section = next(
+        section for section in second_context_report["sections"] if section["name"] == "conversation_summary"
+    )
+
+    assert first_exit == 0
+    assert "first turn complete" in first_output
+    assert "second turn complete" in first_output
+    assert len(first_llm.summary_requests) == 1
+    assert old_marker in json.dumps(first_llm.summary_requests[0])
+    assert summary is not None
+    assert summary.content == summary_text
+    assert summary.source_message_count == 2
+    assert summary_request_payload["summary_source_message_count"] == 2
+    assert summary_request_payload["context_report"]["purpose"] == "context_summary"
+    assert any(payload.get("purpose") == "context_summary" for payload in persisted_model_requests)
+    assert summary_event["payload"]["source_message_count"] == 2
+    assert summary_event["payload"]["summary"] == summary_text
+    assert summary_event["payload"]["fallback"] is False
+    assert summary_text in second_request[0]["content"]
+    assert old_marker not in second_request_payload
+    assert second_context_report["omitted_message_count"] == 0
+    assert summary_section["metadata"] == {"has_summary": True, "summary_message_count": 2}
+
+    resumed_llm = CompactionE2EFakeLLM(
+        [json.dumps({"type": "final_answer", "content": "resume saw summary"})]
+    )
+    resumed_inputs = iter([f"/resume {session.id}", "continue from resume", "/q"])
+
+    second_exit = main(
+        [],
+        input_func=lambda _prompt: next(resumed_inputs),
+        llm_client_factory=lambda _config: resumed_llm,
+    )
+
+    resumed_output = strip_ansi(capsys.readouterr().out)
+    resumed_request = resumed_llm.action_requests[0]
+    resumed_request_payload = json.dumps(resumed_request)
+
+    assert second_exit == 0
+    assert "resumed session" in resumed_output
+    assert "resume saw summary" in resumed_output
+    assert summary_text in resumed_request[0]["content"]
+    assert old_marker not in resumed_request_payload
+    assert len(resumed_llm.summary_requests) == 1
+    assert old_marker not in json.dumps(resumed_llm.summary_requests[0])
 
 
 def test_main_memory_persists_across_separate_agent_sessions(monkeypatch, tmp_path, capsys):

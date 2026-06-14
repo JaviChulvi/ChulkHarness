@@ -69,9 +69,19 @@ def create_agent(
     trace_logger = JSONLTraceLogger(config.traces_dir, state.conversation_id)
     conversation_memory = ConversationMemory(max_messages=config.history_limit)
     if conversation_id is not None:
-        conversation_memory.messages = session_store.load_recent_messages(state.conversation_id, config.history_limit)
-        conversation_memory.trim_to_limit()
+        latest_summary = session_store.load_latest_summary(state.conversation_id)
+        recent_messages = session_store.load_recent_messages(
+            state.conversation_id,
+            config.history_limit,
+            after_ordinal=latest_summary.source_message_count if latest_summary is not None else 0,
+        )
+        conversation_memory.replace(
+            recent_messages,
+            conversation_summary=latest_summary.content if latest_summary is not None else None,
+            summary_message_count=latest_summary.source_message_count if latest_summary is not None else 0,
+        )
         state.messages = conversation_memory.recent()
+        state.conversation_summary = conversation_memory.conversation_summary
     session_recorder = SessionRecorder(
         session_store,
         state.conversation_id,

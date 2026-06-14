@@ -13,6 +13,7 @@ class TraceEvent:
     MEMORY_SEARCH_COMPLETED = "memory_search_completed"
     SKILL_SELECTION_STARTED = "skill_selection_started"
     SKILL_SELECTION_COMPLETED = "skill_selection_completed"
+    CONTEXT_SUMMARY_CREATED = "context_summary_created"
     MODEL_REQUEST_STARTED = "model_request_started"
     LLM_FALLBACK_ATTEMPTS = "llm_fallback_attempts"
     MODEL_RESPONSE = "model_response"

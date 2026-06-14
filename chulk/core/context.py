@@ -162,6 +162,7 @@ class AgentPrompt:
 
     messages: list[dict[str, str]]
     context_report: ContextReport
+    omitted_messages: list[dict[str, str]] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:

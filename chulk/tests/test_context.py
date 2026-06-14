@@ -45,6 +45,34 @@ def test_build_agent_prompt_reports_named_sections():
     assert "observations" in section_names
 
 
+def test_build_agent_prompt_injects_conversation_summary_section():
+    memory = ConversationMemory()
+    memory.replace(
+        [{"role": "user", "content": "latest question"}],
+        conversation_summary="Earlier work chose prompt compaction and ruled out long-term memory.",
+        summary_message_count=4,
+    )
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    summary_section = next(section for section in report["sections"] if section["name"] == "conversation_summary")
+
+    assert "Conversation summary from earlier turns" in system_prompt
+    assert "prompt compaction" in system_prompt
+    assert summary_section["metadata"]["has_summary"] is True
+    assert summary_section["metadata"]["summary_message_count"] == 4
+
+
 def test_context_budget_trims_old_observations_and_keeps_latest_user():
     memory = ConversationMemory(max_messages=10)
     memory.add_user_message("older question")

@@ -380,13 +380,13 @@ CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
 
-Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then omits older history or stale observations when needed. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
+Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
 
 Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
 
 ## Development Roadmap
 
-The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, and explicit plan approval mode. The next larger milestones are session persistence, richer context management, and deeper multi-step behavior:
+The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, explicit plan approval mode, session persistence, and compact context summaries. The next larger milestones are reflection, deeper multi-step behavior, richer skill routing, and optional provider-native tool calling:
 
 - Phase 1: Minimal chat agent.
 - Phase 2: Tool registry and tool-call loop.

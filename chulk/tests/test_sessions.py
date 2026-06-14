@@ -5,6 +5,7 @@ import sqlite3
 
 import chulk.main as main_module
 from chulk.config import load_config
+from chulk.core.context import ContextBudget
 from chulk.core.state import Plan, PlanStep, TurnState
 from chulk.llm import LLMClient
 from chulk.main import create_agent, main
@@ -67,6 +68,28 @@ def test_session_store_saves_messages_and_turn_snapshots(tmp_path):
     assert turns[0].final_answer == "hi back"
 
 
+def test_session_store_saves_summary_and_loads_unsummarized_messages(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    store.create_conversation("conversation-1", provider="test", model="mock")
+    store.save_message("conversation-1", role="user", content="old question", message_key="m1")
+    store.save_message("conversation-1", role="assistant", content="old answer", message_key="m2")
+    store.save_message("conversation-1", role="user", content="latest question", message_key="m3")
+
+    store.save_conversation_summary(
+        "conversation-1",
+        content="Old question and answer were about context compaction.",
+        source_message_count=2,
+    )
+
+    summary = store.load_latest_summary("conversation-1")
+    assert summary is not None
+    messages = store.load_recent_messages("conversation-1", limit=10, after_ordinal=summary.source_message_count)
+
+    assert summary.content == "Old question and answer were about context compaction."
+    assert summary.source_message_count == 2
+    assert messages == [{"role": "user", "content": "latest question"}]
+
+
 def test_session_store_restores_pending_plan_turn(tmp_path):
     store = SQLiteSessionStore(tmp_path / "store.sqlite")
     store.create_conversation("conversation-1", provider="test", model="mock")
@@ -110,6 +133,34 @@ def test_create_agent_resumes_short_term_history(monkeypatch, tmp_path):
     assert any(message["content"] == "remember this short term detail" for message in resumed_prompt_messages)
     assert any(message["content"] == "stored in session" for message in resumed_prompt_messages)
     assert second_agent.trace_logger.path == tmp_path / "traces" / f"{first_agent.state.conversation_id}.jsonl"
+
+
+def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    llm = FakeLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "first answer"}),
+            "Summary: first turn established the compaction approach.",
+            json.dumps({"type": "final_answer", "content": "second answer"}),
+        ]
+    )
+    first_agent = create_agent(config, lambda _config: llm)
+
+    first_agent.run_turn("old context " + ("x" * 2500))
+    first_agent.context_budget = ContextBudget(max_prompt_tokens=1200, response_reserve_tokens=0)
+    first_agent.run_turn("latest question")
+
+    resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "resumed"})])
+    resumed_agent = create_agent(config, lambda _config: resumed_llm, conversation_id=first_agent.state.conversation_id)
+    resumed_agent.run_turn("continue")
+
+    resumed_prompt = resumed_llm.requests[0][0]["content"]
+    resumed_payload = json.dumps(resumed_llm.requests[0])
+
+    assert "Summary: first turn established the compaction approach." in resumed_prompt
+    assert "old context" not in resumed_payload
+    assert resumed_agent.memory.summary_message_count == 2
 
 
 def test_create_agent_requires_model_token_capabilities(monkeypatch, tmp_path):

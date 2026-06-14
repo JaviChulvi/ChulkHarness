@@ -1107,19 +1107,19 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
   - [x] Add a software-engineer preset for prompt, tools, and skills.
   - [x] Add first-success provider fallback chain support.
   - [x] Add tests for public tool calls, pinned skills, and fallback tracing.
-- [ ] Add better context management.
+- [x] Add better context management.
   - [x] Estimate tokens for system prompt, history, memories, skills, tools, and observations.
   - [x] Add model-derived prompt budget limits.
   - [x] Add context budget reporting to `/status` or a new `/context` CLI command.
-  - [ ] Summarize older conversation messages when history grows too large.
-  - [ ] Store compact conversation summaries for older persisted sessions.
+  - [x] Summarize older conversation messages when history grows too large.
+  - [x] Store compact conversation summaries for older persisted sessions.
   - [x] Keep the full prompt available in traces while showing compact context summaries in the CLI.
   - [x] Explain which memories, skills, tools, and history were injected into the current prompt.
   - [x] Avoid injecting large tool observations when an artifact path is enough.
-  - [ ] Add tests for token estimates, trimming, summarization, and prompt budget behavior.
+  - [x] Add tests for token estimates, trimming, summarization, and prompt budget behavior.
 - [ ] Add reflection prompt.
 - [ ] Add post-tool reflection.
-- [ ] Add conversation summarization.
+- [x] Add conversation summarization.
 - [x] Add local embedding/vector memory search.
 - [x] Add memory importance scoring.
 - [ ] Add external semantic embedding provider integration.
@@ -1134,7 +1134,7 @@ Done when:
 
 - [ ] The agent can plan before acting.
 - [ ] The agent can perform multiple tool-backed steps.
-- [ ] The agent can summarize older context.
+- [x] The agent can summarize older context.
 - [ ] The agent can retrieve memories semantically.
 
 ## 16. Stretch Goals

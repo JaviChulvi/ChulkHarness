@@ -7,6 +7,7 @@ user message -> prompt -> model action -> optional tool call -> observation -> f
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 
 from chulk.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
 from chulk.core.context import AgentPrompt, ContextBudget
@@ -17,12 +18,17 @@ from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
-from chulk.llm import LLMActionError, LLMClient
+from chulk.llm import LLMActionError, LLMClient, LLMError
 from chulk.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import ToolRegistry
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
+
+
+MAX_SUMMARY_SOURCE_CHARS = 12000
+MAX_SUMMARY_CHARS = 4000
+SUMMARY_COMPACTION_PASSES = 3
 
 
 class Agent:
@@ -87,6 +93,7 @@ class Agent:
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
+        self.state.conversation_summary = self.memory.conversation_summary
 
     def run_turn(self, user_message: str) -> str:
         """Run one user turn and return the assistant response."""
@@ -186,6 +193,7 @@ class Agent:
         """Run model/tool iterations until the turn pauses or completes."""
         while True:
             prompt = self._build_prompt(turn, require_plan=require_plan)
+            prompt = self._compact_context_if_needed(prompt, turn, require_plan=require_plan)
             messages = prompt.messages
             context_report = prompt.context_report.to_dict()
             turn.context_reports.append(context_report)
@@ -396,6 +404,107 @@ class Agent:
             require_plan=require_plan,
             context_budget=self.context_budget,
         )
+
+    def _compact_context_if_needed(self, prompt: AgentPrompt, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
+        """Summarize old raw messages that would otherwise be dropped from context."""
+        current_prompt = prompt
+        for _ in range(SUMMARY_COMPACTION_PASSES):
+            pending_messages = self.memory.consume_pending_summary_messages()
+            omitted_messages = current_prompt.omitted_messages
+            messages_to_summarize = _dedupe_messages([*pending_messages, *omitted_messages])
+            if not messages_to_summarize:
+                return current_prompt
+
+            summary, fallback, error = self._summarize_context_messages(messages_to_summarize, turn)
+            removed_count = self.memory.remove_messages(omitted_messages)
+            summarized_message_count = len(pending_messages) + removed_count
+            self.memory.update_conversation_summary(summary, summarized_message_count=summarized_message_count)
+            self.state.conversation_summary = self.memory.conversation_summary
+            self._trace(
+                TraceEvent.CONTEXT_SUMMARY_CREATED,
+                {
+                    "turn_id": turn.turn_id,
+                    "summary": self.memory.conversation_summary,
+                    "source_message_count": self.memory.summary_message_count,
+                    "summarized_message_count": summarized_message_count,
+                    "fallback": fallback,
+                    "error": error,
+                },
+            )
+            current_prompt = self._build_prompt(turn, require_plan=require_plan)
+        return current_prompt
+
+    def _summarize_context_messages(
+        self,
+        messages: list[dict[str, str]],
+        turn: TurnState,
+    ) -> tuple[str, bool, str | None]:
+        """Return an updated compact conversation summary for older messages."""
+        summary_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You update a compact, task-local conversation summary for an agent harness. "
+                    "Preserve decisions, constraints, files or tools used, important results, plan status, "
+                    "failed attempts, and next actions. Do not store secrets or API keys. "
+                    "Keep the summary concise and useful for continuing the current task."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _format_context_summary_request(
+                    previous_summary=self.memory.conversation_summary,
+                    messages=messages,
+                ),
+            },
+        ]
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        request_payload = format_model_request_trace(
+            summary_messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report={
+                "purpose": "context_summary",
+                "source_message_count": len(messages),
+                "existing_summary": self.memory.conversation_summary is not None,
+            },
+        )
+        request_payload["purpose"] = "context_summary"
+        request_payload["summary_source_message_count"] = len(messages)
+        self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+        try:
+            raw_summary = self.llm_client.complete(summary_messages)
+        except LLMError as exc:
+            self._trace(
+                TraceEvent.MODEL_RESPONSE,
+                {
+                    "turn_id": turn.turn_id,
+                    "request_index": request_index,
+                    "content": "",
+                    "purpose": "context_summary",
+                    "error": str(exc),
+                },
+            )
+            return _fallback_context_summary(self.memory.conversation_summary, messages), True, str(exc)
+
+        self._trace(
+            TraceEvent.MODEL_RESPONSE,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "content": raw_summary,
+                "purpose": "context_summary",
+            },
+        )
+        clean_summary = _clean_summary(raw_summary)
+        if not clean_summary:
+            return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
+        return clean_summary, False, None
 
     def _max_output_tokens_for_prompt(self, context_report: dict) -> int | None:
         """Return available output tokens for this request based on prompt size."""
@@ -645,6 +754,7 @@ class Agent:
                 "active_plan": self.state.active_plan.to_dict() if self.state.active_plan else None,
                 "pending_plan_turn_id": self.state.pending_plan_turn_id,
                 "last_context_report": self.state.last_context_report,
+                "conversation_summary": self.state.conversation_summary,
             },
         }
 
@@ -663,3 +773,87 @@ class Agent:
         if self.trace_logger is None:
             return None
         return self.trace_logger.write_artifact(name, content)
+
+
+def _dedupe_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen_ids: set[int] = set()
+    for message in messages:
+        marker = id(message)
+        if marker in seen_ids:
+            continue
+        seen_ids.add(marker)
+        deduped.append(message)
+    return deduped
+
+
+def _format_context_summary_request(*, previous_summary: str | None, messages: list[dict[str, str]]) -> str:
+    sections = []
+    if previous_summary:
+        sections.extend(["Previous compact summary:", previous_summary.strip(), ""])
+    sections.extend(
+        [
+            "New older messages to fold into the compact summary:",
+            _format_messages_for_summary(messages),
+            "",
+            "Return only the updated compact summary.",
+        ]
+    )
+    return "\n".join(sections)
+
+
+def _format_messages_for_summary(messages: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    remaining_chars = MAX_SUMMARY_SOURCE_CHARS
+    for message in messages:
+        if remaining_chars <= 0:
+            lines.append("[older-message input truncated]")
+            break
+        role = str(message.get("role") or "message")
+        content = _clean_summary_source(str(message.get("content") or ""))
+        line = f"{role}: {content}"
+        if len(line) > remaining_chars:
+            line = line[:remaining_chars].rstrip() + "..."
+        lines.append(line)
+        remaining_chars -= len(line)
+    return "\n".join(lines)
+
+
+def _fallback_context_summary(previous_summary: str | None, messages: list[dict[str, str]]) -> str:
+    parts = []
+    if previous_summary:
+        parts.append(previous_summary.strip())
+    parts.append("Recent compacted context:")
+    for message in messages[:8]:
+        role = str(message.get("role") or "message")
+        content = _compact_summary_line(_clean_summary_source(str(message.get("content") or "")), limit=300)
+        parts.append(f"- {role}: {content}")
+    return _clean_summary("\n".join(parts))
+
+
+def _clean_summary(value: str) -> str:
+    clean = _redact_summary_text(" ".join(value.strip().split()))
+    if len(clean) <= MAX_SUMMARY_CHARS:
+        return clean
+    return clean[:MAX_SUMMARY_CHARS].rstrip() + "..."
+
+
+def _clean_summary_source(value: str) -> str:
+    return _redact_summary_text(" ".join(value.split()))
+
+
+def _compact_summary_line(value: str, *, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _redact_summary_text(value: str) -> str:
+    patterns = [
+        r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+",
+        r"\bsk-[A-Za-z0-9_-]{16,}\b",
+    ]
+    redacted = value
+    for pattern in patterns:
+        redacted = re.sub(pattern, "[redacted secret]", redacted)
+    return redacted

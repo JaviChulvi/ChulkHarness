@@ -263,6 +263,7 @@ class AgentState:
     active_plan: Plan | None = None
     pending_plan_turn_id: str | None = None
     last_context_report: dict | None = None
+    conversation_summary: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -282,4 +283,5 @@ class AgentState:
             "active_plan": self.active_plan.to_dict() if self.active_plan else None,
             "pending_plan_turn_id": self.pending_plan_turn_id,
             "last_context_report": self.last_context_report,
+            "conversation_summary": self.conversation_summary,
         }
