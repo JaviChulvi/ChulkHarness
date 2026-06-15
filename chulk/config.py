@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from chulk.llm import supported_llm_providers
+from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
@@ -62,6 +63,7 @@ class Config:
     max_tool_stdout_chars: int = DEFAULT_MAX_TOOL_STDOUT_CHARS
     max_tool_stderr_chars: int = DEFAULT_MAX_TOOL_STDERR_CHARS
     max_reflection_attempts: int = DEFAULT_MAX_REFLECTION_ATTEMPTS
+    permission_profile: str = DEFAULT_PERMISSION_PROFILE
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
@@ -167,6 +169,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
             "CHULK_MAX_REFLECTION_ATTEMPTS",
             DEFAULT_MAX_REFLECTION_ATTEMPTS,
         ),
+        permission_profile=normalize_permission_profile(env.get("CHULK_PERMISSION_PROFILE")),
     )
 
 

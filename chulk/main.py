@@ -66,6 +66,7 @@ def format_config(config: Config) -> str:
         "llm_provider": config.llm_provider,
         "model": config.model,
         "llm_fallback_providers": _format_fallback_providers(config),
+        "permission_profile": config.permission_profile,
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
         "deepseek_base_url": config.deepseek_base_url,

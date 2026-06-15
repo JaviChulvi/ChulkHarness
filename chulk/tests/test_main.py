@@ -120,6 +120,7 @@ def test_main_handles_interactive_slash_commands(monkeypatch, tmp_path, capsys):
     assert "/status" in output
     assert "Status" in output
     assert "provider" in output
+    assert "permissions" in output
     assert "Tools" in output
     assert "calculator" in output
     assert "Trace" in output
@@ -176,6 +177,7 @@ def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsy
 
 def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "trusted-local")
     inputs = iter(["run printf hello", "/q"])
 
     class ShellProgressFakeLLM(LLMClient):
@@ -528,6 +530,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_LLM_PROVIDER", "deepseek")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
     monkeypatch.setenv("CHULK_LLM_FALLBACK_PROVIDERS", "openai:gpt-4.1-mini")
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "read-only")
 
     exit_code = main(["--show-config"])
 
@@ -540,6 +543,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "llm_provider: deepseek" in output
     assert "model: test-model" in output
     assert "llm_fallback_providers: openai:gpt-4.1-mini" in output
+    assert "permission_profile: read-only" in output
     assert "deepseek_api_key: set" in output
     assert "local_base_url: http://localhost:1234/v1" in output
     assert "trace_max_prompt_chars: 50000" in output

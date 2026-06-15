@@ -50,6 +50,7 @@ class TerminalUI:
             self._row("provider", _provider_text(config)),
             self._row("session", _short_id(agent.state.conversation_id)),
             self._row("project", _short_path(config.project_root)),
+            self._row("permissions", config.permission_profile),
             self._row("tools", str(len(agent.tool_registry.list_tools()))),
             self._row("trace", _short_path(trace_path) if trace_path else "disabled"),
         ]
@@ -88,6 +89,7 @@ class TerminalUI:
             f"  provider  {_provider_text(config)}",
             f"  session   {agent.state.conversation_id}",
             f"  project   {_short_path(config.project_root)}",
+            f"  permissions {config.permission_profile}",
             f"  memory    {_short_path(config.store_path)}",
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
             f"  tools     {len(agent.tool_registry.list_tools())}",
