@@ -16,6 +16,7 @@ from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, create_default_tool_registry
+from chulk.tools.permissions import permission_policy_for_profile
 from chulk.tracing import JSONLTraceLogger
 
 
@@ -108,6 +109,7 @@ def create_agent(
         max_tool_stdout_chars=config.max_tool_stdout_chars,
         max_tool_stderr_chars=config.max_tool_stderr_chars,
         max_reflection_attempts=config.max_reflection_attempts,
+        permission_policy=permission_policy_for_profile(config.permission_profile),
         context_budget=context_budget,
         event_callback=session_recorder.callback,
         pinned_skill_names=pinned_skill_names,

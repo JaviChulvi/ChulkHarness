@@ -193,6 +193,8 @@ CHULK_LLM_FALLBACK_PROVIDERS=openai:gpt-4.1-mini
 
 At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds. The `local` provider can also appear in fallback chains, for example `CHULK_LLM_FALLBACK_PROVIDERS=local:google/gemma-4-12b-qat,openai:gpt-4.1-mini`.
 
+Choose the tool permission profile with `CHULK_PERMISSION_PROFILE`. Built-in profiles are `read-only`, `workspace-write` (default), `trusted-local`, and `full-access`. The default allows read, write, and memory tools, but asks before shell, network, external-service, or destructive tool calls.
+
 ## Programmable API
 
 Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
@@ -383,6 +385,7 @@ DEEPSEEK_API_KEY=
 CHULK_LLM_PROVIDER=openai
 CHULK_MODEL=
 CHULK_LLM_FALLBACK_PROVIDERS=
+CHULK_PERMISSION_PROFILE=workspace-write
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_LOCAL_BASE_URL=http://localhost:1234/v1

@@ -174,6 +174,7 @@ class ProgressReporter:
             TraceEvent.PLAN_CREATED,
             TraceEvent.PLAN_APPROVED,
             TraceEvent.PLAN_REJECTED,
+            TraceEvent.TOOL_PERMISSION_REQUESTED,
             TraceEvent.TOOL_CALL_COMPLETED,
             TraceEvent.TOOL_CALL_FAILED,
             TraceEvent.TURN_FINISHED,

@@ -7,6 +7,7 @@ terminal presence while keeping the harness easy to inspect.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
@@ -14,6 +15,7 @@ import shutil
 from chulk.config import Config
 from chulk.core import Agent, TraceEvent
 from chulk.sessions import ConversationRecord, MessageRecord
+from chulk.tools.permissions import PermissionDecisionRecord, PermissionRequest
 
 
 HULK_GREEN = (63, 255, 81)
@@ -50,6 +52,7 @@ class TerminalUI:
             self._row("provider", _provider_text(config)),
             self._row("session", _short_id(agent.state.conversation_id)),
             self._row("project", _short_path(config.project_root)),
+            self._row("permissions", config.permission_profile),
             self._row("tools", str(len(agent.tool_registry.list_tools()))),
             self._row("trace", _short_path(trace_path) if trace_path else "disabled"),
         ]
@@ -88,6 +91,7 @@ class TerminalUI:
             f"  provider  {_provider_text(config)}",
             f"  session   {agent.state.conversation_id}",
             f"  project   {_short_path(config.project_root)}",
+            f"  permissions {config.permission_profile}",
             f"  memory    {_short_path(config.store_path)}",
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
             f"  tools     {len(agent.tool_registry.list_tools())}",
@@ -178,6 +182,23 @@ class TerminalUI:
     def assistant_message(self, content: str) -> str:
         """Format an assistant response."""
         return _labeled_block(self.accent("chulk"), content)
+
+    def permission_request(self, request: PermissionRequest, record: PermissionDecisionRecord) -> str:
+        """Return a tool permission approval block."""
+        arguments = _compact(json.dumps(request.arguments, sort_keys=True), 86)
+        lines = [
+            self.heading("Tool Permission"),
+            f"  tool      {request.tool_name}",
+            f"  level     {request.permission_level.value}",
+            f"  profile   {request.policy_name}",
+            f"  reason    {record.reason}",
+            f"  args      {arguments}",
+        ]
+        return "\n".join(lines)
+
+    def permission_prompt(self) -> str:
+        """Return the interactive tool approval prompt."""
+        return f"{self.accent('?')} Approve tool call? [y/N] "
 
     def progress(
         self,
@@ -453,6 +474,16 @@ def _progress_message(
         return label + f"plan step blocked - {_compact(str(title))}{_elapsed_suffix(elapsed_seconds)}"
     if event_type == TraceEvent.TOOL_CALL_STARTED:
         return label + _format_tool_progress("running tool", payload, elapsed_seconds=elapsed_seconds)
+    if event_type == TraceEvent.TOOL_PERMISSION_REQUESTED:
+        return label + _format_permission_progress("permission requested", payload, elapsed_seconds=elapsed_seconds)
+    if event_type == TraceEvent.TOOL_PERMISSION_DECIDED:
+        decision_record = payload.get("decision", {})
+        decision = decision_record.get("decision", "unknown") if isinstance(decision_record, dict) else "unknown"
+        return label + _format_permission_progress(
+            f"permission {decision}",
+            payload,
+            elapsed_seconds=elapsed_seconds,
+        )
     if event_type == TraceEvent.TOOL_CALL_COMPLETED:
         return label + _format_tool_progress(
             "tool completed",
@@ -507,6 +538,20 @@ def _format_tool_progress(
     if duration_seconds is not None:
         return message + _duration_suffix(duration_seconds)
     return message + _elapsed_suffix(elapsed_seconds)
+
+
+def _format_permission_progress(
+    prefix: str,
+    payload: dict,
+    *,
+    elapsed_seconds: float | None = None,
+) -> str:
+    details = payload.get("request") or payload.get("decision") or payload
+    if not isinstance(details, dict):
+        details = {}
+    tool_name = details.get("tool_name", "tool")
+    level = details.get("permission_level", "unknown")
+    return f"{prefix} - {tool_name} - {level}{_elapsed_suffix(elapsed_seconds)}"
 
 
 def _tool_detail(payload: dict) -> str | None:

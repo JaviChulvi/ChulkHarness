@@ -10,6 +10,7 @@ import re
 import subprocess
 from typing import Any
 
+from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolResult
 
 
@@ -51,6 +52,7 @@ def shell_tool(project_root: Path, timeout_seconds: int = 10) -> Tool:
         callable=lambda arguments: run_shell_command(arguments, project_root, timeout_seconds),
         timeout_seconds=timeout_seconds,
         requires_confirmation=True,
+        permission_level=ToolPermissionLevel.SHELL,
     )
 
 

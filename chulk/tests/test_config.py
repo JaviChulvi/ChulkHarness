@@ -11,6 +11,7 @@ from chulk.config import (
     DEFAULT_MAX_TOOL_STDERR_CHARS,
     DEFAULT_MAX_TOOL_STDOUT_CHARS,
     DEFAULT_MODEL,
+    DEFAULT_PERMISSION_PROFILE,
     DEFAULT_TRACE_MAX_PROMPT_CHARS,
     load_config,
 )
@@ -35,6 +36,7 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.max_tool_stdout_chars == DEFAULT_MAX_TOOL_STDOUT_CHARS
     assert config.max_tool_stderr_chars == DEFAULT_MAX_TOOL_STDERR_CHARS
     assert config.max_reflection_attempts == DEFAULT_MAX_REFLECTION_ATTEMPTS
+    assert config.permission_profile == DEFAULT_PERMISSION_PROFILE
 
 
 def test_load_config_reads_dotenv(tmp_path):
@@ -51,6 +53,7 @@ def test_load_config_reads_dotenv(tmp_path):
                 "CHULK_MAX_TOOL_STDOUT_CHARS=700",
                 "CHULK_MAX_TOOL_STDERR_CHARS=300",
                 "CHULK_MAX_REFLECTION_ATTEMPTS=1",
+                "CHULK_PERMISSION_PROFILE=read-only",
                 "DEEPSEEK_API_KEY=deepseek-key",
                 "CHULK_LOCAL_API_KEY=local-key",
                 "CHULK_LOCAL_BASE_URL=http://localhost:11434/v1",
@@ -75,6 +78,7 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.max_tool_stdout_chars == 700
     assert config.max_tool_stderr_chars == 300
     assert config.max_reflection_attempts == 1
+    assert config.permission_profile == "read-only"
 
 
 def test_environment_overrides_dotenv(tmp_path):
@@ -106,6 +110,20 @@ def test_invalid_reflection_attempts_config_raises():
         assert "CHULK_MAX_REFLECTION_ATTEMPTS" in str(exc)
     else:
         raise AssertionError("Expected invalid reflection attempt config to fail")
+
+
+def test_invalid_permission_profile_config_raises(tmp_path):
+    try:
+        load_config(
+            {
+                "CHULK_PROJECT_ROOT": str(tmp_path),
+                "CHULK_PERMISSION_PROFILE": "anything-goes",
+            }
+        )
+    except ValueError as exc:
+        assert "CHULK_PERMISSION_PROFILE" in str(exc)
+    else:
+        raise AssertionError("Expected invalid permission profile config to fail")
 
 
 def test_deepseek_provider_uses_deepseek_default_model(tmp_path):

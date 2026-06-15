@@ -7,6 +7,13 @@ from chulk.memory import SQLiteMemoryStore
 from chulk.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.output import preview_text
+from chulk.tools.permissions import (
+    PermissionDecision,
+    ToolPermissionLevel,
+    ToolPermissionPolicy,
+    normalize_permission_level,
+    permission_policy_for_profile,
+)
 from chulk.tools.registry import ToolResult
 from chulk.tools.shell import run_shell_command
 
@@ -19,6 +26,76 @@ def test_registry_descriptions_include_registered_tool():
 
     assert "calculator" in description
     assert "expression" in description
+    assert "permission_level" in description
+    assert "read" in description
+
+
+def test_tool_permission_policy_requires_confirmation_by_default():
+    tool = Tool(
+        name="dangerous",
+        description="Dangerous test tool.",
+        args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        callable=lambda _arguments: ToolResult("dangerous", True, "ran"),
+        requires_confirmation=True,
+        permission_level=ToolPermissionLevel.SHELL,
+    )
+    policy = ToolPermissionPolicy()
+
+    request = policy.request_for_tool(tool, {})
+    decision = policy.decide(request)
+
+    assert request.permission_level == ToolPermissionLevel.SHELL
+    assert decision.decision == PermissionDecision.ASK
+    assert decision.requires_confirmation is True
+
+
+def test_unknown_permission_level_fails_closed():
+    try:
+        normalize_permission_level("not-a-level")
+    except ValueError as exc:
+        assert "Unknown tool permission level" in str(exc)
+        assert "read" in str(exc)
+    else:
+        raise AssertionError("Expected unknown permission level to fail")
+
+
+def test_registry_rejects_unknown_tool_permission_level():
+    registry = ToolRegistry()
+
+    try:
+        registry.register(
+            Tool(
+                name="bad_permission",
+                description="Bad permission level.",
+                args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                callable=lambda _arguments: ToolResult("bad_permission", True, "ran"),
+                permission_level="not-a-level",
+            )
+        )
+    except ValueError as exc:
+        assert "Unknown tool permission level" in str(exc)
+    else:
+        raise AssertionError("Expected invalid tool permission level registration to fail")
+
+
+def test_built_in_permission_profiles_have_expected_decisions():
+    read_tool = _permission_test_tool("reader", ToolPermissionLevel.READ)
+    write_tool = _permission_test_tool("writer", ToolPermissionLevel.WRITE)
+    shell_tool = _permission_test_tool("sheller", ToolPermissionLevel.SHELL, requires_confirmation=True)
+    destructive_tool = _permission_test_tool("destroyer", ToolPermissionLevel.DESTRUCTIVE)
+
+    read_only = permission_policy_for_profile("read-only")
+    workspace_write = permission_policy_for_profile("workspace-write")
+    trusted_local = permission_policy_for_profile("trusted-local")
+    full_access = permission_policy_for_profile("full-access")
+
+    assert read_only.decide(read_only.request_for_tool(read_tool, {})).decision == PermissionDecision.ALLOW
+    assert read_only.decide(read_only.request_for_tool(write_tool, {})).decision == PermissionDecision.DENY
+    assert workspace_write.decide(workspace_write.request_for_tool(write_tool, {})).decision == PermissionDecision.ALLOW
+    assert workspace_write.decide(workspace_write.request_for_tool(shell_tool, {})).decision == PermissionDecision.ASK
+    assert trusted_local.decide(trusted_local.request_for_tool(shell_tool, {})).decision == PermissionDecision.ALLOW
+    assert trusted_local.decide(trusted_local.request_for_tool(destructive_tool, {})).decision == PermissionDecision.ASK
+    assert full_access.decide(full_access.request_for_tool(destructive_tool, {})).decision == PermissionDecision.ALLOW
 
 
 def test_registry_logs_tool_calls():
@@ -36,6 +113,22 @@ def test_registry_logs_tool_calls():
             "observation": "1 + 1 = 2",
         }
     ]
+
+
+def _permission_test_tool(
+    name: str,
+    permission_level: ToolPermissionLevel,
+    *,
+    requires_confirmation: bool = False,
+) -> Tool:
+    return Tool(
+        name=name,
+        description="Permission profile test tool.",
+        args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        callable=lambda _arguments: ToolResult(name, True, "ran"),
+        requires_confirmation=requires_confirmation,
+        permission_level=permission_level,
+    )
 
 
 def test_registry_validates_required_arguments():

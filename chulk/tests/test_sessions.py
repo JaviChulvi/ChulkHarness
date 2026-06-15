@@ -213,7 +213,7 @@ def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp
     assert request_count == 2
     request_payload = json.loads(request_json)
     assert request_payload["context_report"]["estimated_tokens"] > 0
-    assert request_payload["max_output_tokens"] > 0
+    assert "max_output_tokens" not in request_payload
     assert tool_call["tool_name"] == "calculator"
     assert tool_call["success"] == 1
     assert "4" in observation["content"]

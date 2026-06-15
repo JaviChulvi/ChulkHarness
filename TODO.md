@@ -403,9 +403,9 @@ Future permission model:
 
 - [ ] Add command allowlist mode.
 - [ ] Add command denylist mode.
-- [ ] Add user confirmation before risky commands.
-- [ ] Add per-tool permission levels.
-- [ ] Add read-only mode.
+- [x] Add user confirmation before risky commands.
+- [x] Add per-tool permission levels.
+- [x] Add read-only mode.
 - [ ] Add a sandboxed execution backend.
 - [ ] Add container execution for untrusted commands.
 - [ ] Add a permission UI if a web interface is built later.
@@ -832,13 +832,13 @@ Filesystem safety:
 
 Permission model:
 
-- [ ] Add user confirmation for risky operations later.
-- [ ] Add per-tool permission levels.
-- [ ] Add read-only mode.
+- [x] Add user confirmation for risky operations later.
+- [x] Add per-tool permission levels.
+- [x] Add read-only mode.
 - [ ] Add trusted and untrusted tool categories.
 - [ ] Add command allowlists later.
 - [ ] Add command denylists.
-- [ ] Add a permission prompt in the CLI.
+- [x] Add a permission prompt in the CLI.
 - [ ] Add a permission UI in a future web app.
 
 Operational safety:
@@ -1171,8 +1171,8 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add reflection loop after model actions.
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
 - [ ] Add true multi-step task execution on top of approved plans.
-- [ ] Add per-tool permissions.
-- [ ] Add CLI permission prompts for individual risky tool calls.
+- [x] Add per-tool permissions.
+- [x] Add CLI permission prompts for individual risky tool calls.
 - [ ] Add local code review mode.
 - [ ] Add optional web/search tool.
 - [ ] Add MCP client support.
@@ -1201,9 +1201,9 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 
 ### Permissions And Safety
 
-- [ ] Turn `Tool.requires_confirmation` into an enforced permission gate.
-- [ ] Add permission levels: read, write, shell, network, external-service, and destructive.
-- [ ] Add built-in permission profiles: read-only, workspace-write, trusted-local, and full-access.
+- [x] Turn `Tool.requires_confirmation` into an enforced permission gate.
+- [x] Add permission levels: read, write, shell, network, external-service, and destructive.
+- [x] Add built-in permission profiles: read-only, workspace-write, trusted-local, and full-access.
 - [ ] Add custom permission profiles in config.
 - [ ] Add workspace root allowlists.
 - [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, and build artifacts.

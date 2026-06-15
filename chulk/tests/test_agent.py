@@ -9,6 +9,7 @@ from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
+from chulk.tools.permissions import PermissionDecision, ToolPermissionPolicy
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
 
@@ -25,10 +26,10 @@ class RecordingLLMClient(LLMClient):
 
 class OutputLimitRecordingLLMClient(LLMClient):
     def __init__(self) -> None:
-        self.max_output_tokens: list[int | None] = []
+        self.action_kwargs: list[dict] = []
 
-    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        self.max_output_tokens.append(max_output_tokens)
+    def _complete_action_once(self, messages: list[dict[str, str]], **kwargs) -> str:
+        self.action_kwargs.append(kwargs)
         return json.dumps({"type": "final_answer", "content": "ok"})
 
 
@@ -377,7 +378,7 @@ def test_agent_summarizes_omitted_history_before_action_request():
     assert report["omitted_message_count"] == 0
 
 
-def test_agent_passes_remaining_context_as_output_limit():
+def test_agent_does_not_pass_remaining_context_as_output_limit():
     llm = OutputLimitRecordingLLMClient()
     agent = Agent(llm, context_budget=ContextBudget(max_prompt_tokens=3000, response_reserve_tokens=200))
 
@@ -386,7 +387,8 @@ def test_agent_passes_remaining_context_as_output_limit():
     report = agent.state.last_context_report
     assert response == "ok"
     assert isinstance(report, dict)
-    assert llm.max_output_tokens == [3000 - report["estimated_tokens"]]
+    assert report["budget"]["input_token_budget"] == 2800
+    assert llm.action_kwargs == [{}]
 
 
 def test_agent_injects_profile_and_relevant_long_term_memories(tmp_path):
@@ -549,12 +551,95 @@ def test_agent_can_run_safe_shell_tool(tmp_path):
     )
     registry = ToolRegistry()
     registry.register(shell_tool(tmp_path))
-    agent = Agent(llm, tool_registry=registry)
+    policy = ToolPermissionPolicy(confirmation_decision=PermissionDecision.ALLOW)
+    agent = Agent(llm, tool_registry=registry, permission_policy=policy)
 
     response = agent.run_turn("run printf hello")
 
     assert response == "The command printed hello."
     assert "stdout:\nhello" in agent.state.observations[0]["observation"]
+
+
+def test_agent_blocks_confirmation_tool_without_permission_callback(tmp_path):
+    calls = []
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "dangerous", "arguments": {"value": "run"}}),
+            json.dumps({"type": "final_answer", "content": "I could not run the tool without approval."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="dangerous",
+            description="Dangerous test tool.",
+            args_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            callable=lambda arguments: calls.append(arguments) or ToolResult("dangerous", True, "ran"),
+            requires_confirmation=True,
+        )
+    )
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    response = agent.run_turn("run the dangerous tool")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+    turn = agent.state.turns[0]
+
+    assert response == "I could not run the tool without approval."
+    assert calls == []
+    assert turn.tool_calls[0].success is False
+    assert turn.tool_calls[0].error == "permission_denied"
+    assert turn.tool_calls[0].metadata["permission_decision"]["decision"] == "deny"
+    assert "permission policy" in turn.observations[0].content
+    assert any(message["role"] == "observation" and "permission policy" in message["content"] for message in llm.requests[1])
+    assert "tool_permission_requested" in event_types
+    assert "tool_permission_decided" in event_types
+
+
+def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):
+    calls = []
+    approvals = []
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "dangerous", "arguments": {"value": "run"}}),
+            json.dumps({"type": "final_answer", "content": "The approved tool ran."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="dangerous",
+            description="Dangerous test tool.",
+            args_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            callable=lambda arguments: calls.append(arguments) or ToolResult("dangerous", True, "ran"),
+            requires_confirmation=True,
+        )
+    )
+
+    def approve(request, record):
+        approvals.append((request.tool_name, record.decision))
+        return PermissionDecision.ALLOW
+
+    agent = Agent(llm, tool_registry=registry, permission_callback=approve)
+
+    response = agent.run_turn("run the dangerous tool")
+
+    assert response == "The approved tool ran."
+    assert calls == [{"value": "run"}]
+    assert approvals == [("dangerous", PermissionDecision.ASK)]
+    assert agent.state.turns[0].tool_calls[0].success is True
 
 
 def test_agent_traces_tool_call_lifecycle(tmp_path):

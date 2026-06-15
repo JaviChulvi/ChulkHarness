@@ -6,6 +6,7 @@ import ast
 import operator
 from typing import Any
 
+from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolResult
 
 
@@ -57,6 +58,7 @@ def calculator_tool() -> Tool:
             "additionalProperties": False,
         },
         callable=calculate,
+        permission_level=ToolPermissionLevel.READ,
     )
 
 

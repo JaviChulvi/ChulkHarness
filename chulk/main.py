@@ -30,6 +30,7 @@ from chulk.llm import (
 from chulk.presets import software_engineer
 from chulk.runtime import create_agent
 from chulk.sessions import SQLiteSessionStore
+from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +67,7 @@ def format_config(config: Config) -> str:
         "llm_provider": config.llm_provider,
         "model": config.model,
         "llm_fallback_providers": _format_fallback_providers(config),
+        "permission_profile": config.permission_profile,
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
         "deepseek_base_url": config.deepseek_base_url,
@@ -165,6 +167,13 @@ def run_chat_loop(
         previous_callback=agent.event_callback,
     )
     agent.event_callback = progress_reporter.callback
+    permission_callback = _make_cli_permission_callback(
+        terminal,
+        input_func=input_func,
+        output_func=output_func,
+        before_prompt=progress_reporter.close,
+    )
+    agent.permission_callback = permission_callback
     session_store = SQLiteSessionStore(config.store_path) if config is not None else None
     prompt_history = PromptHistory.create(enabled=input_func is input)
     _load_prompt_history(prompt_history, session_store, agent)
@@ -179,6 +188,7 @@ def run_chat_loop(
         progress_reporter.agent = next_agent
         progress_reporter.previous_callback = next_agent.event_callback
         next_agent.event_callback = progress_reporter.callback
+        next_agent.permission_callback = permission_callback
         command_context.agent = next_agent
         _load_prompt_history(prompt_history, session_store, next_agent)
 
@@ -280,6 +290,11 @@ def main(
     try:
         config = load_config()
         agent = create_cli_agent(config, llm_client_factory)
+        agent.permission_callback = _make_cli_permission_callback(
+            terminal,
+            input_func=input_func,
+            output_func=output_func,
+        )
     except (ValueError, LLMConfigurationError) as exc:
         output_func(terminal.error(f"configuration error: {exc}"))
         return 1
@@ -304,6 +319,43 @@ def main(
         input_func=input_func,
         output_func=output_func,
     )
+
+
+def _make_cli_permission_callback(
+    terminal: TerminalUI,
+    *,
+    input_func: Callable[[str], str],
+    output_func: Callable[[str], None],
+    before_prompt: Callable[[], None] | None = None,
+) -> Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision]:
+    """Create the CLI permission approval callback."""
+
+    def approve(request: PermissionRequest, record: PermissionDecisionRecord) -> PermissionDecision:
+        if before_prompt is not None:
+            before_prompt()
+        output_func(terminal.permission_request(request, record))
+        while True:
+            try:
+                answer = input_func(terminal.permission_prompt())
+            except (EOFError, KeyboardInterrupt):
+                output_func(terminal.warning("permission denied"))
+                return PermissionDecision.DENY
+
+            decision = _parse_permission_answer(answer)
+            if decision is not None:
+                return decision
+            output_func(terminal.warning("Enter y to approve or n to deny."))
+
+    return approve
+
+
+def _parse_permission_answer(answer: str) -> PermissionDecision | None:
+    normalized = answer.strip().lower()
+    if normalized in {"y", "yes", "a", "allow", "approve"}:
+        return PermissionDecision.ALLOW
+    if normalized in {"", "n", "no", "d", "deny", "reject"}:
+        return PermissionDecision.DENY
+    return None
 
 
 if __name__ == "__main__":
