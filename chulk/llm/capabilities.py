@@ -7,28 +7,27 @@ from typing import Literal
 
 
 OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS = 1_047_576
-OPENAI_GPT_4_1_MAX_OUTPUT_TOKENS = 32_768
 OPENAI_GPT_4_1_DEFAULT_RESPONSE_RESERVE_TOKENS = 8_192
 DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
-DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 384_000
 DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = 16_384
 LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072
-LOCAL_DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
+LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = 262_144
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
-    OPENAI_GPT_4_1_MAX_OUTPUT_TOKENS,
     OPENAI_GPT_4_1_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 DEEPSEEK_V4_LIMITS = (
     DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
-    DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
     DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 LOCAL_DEFAULT_LIMITS = (
     LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
-    LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+    LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+LOCAL_QWEN_3_5_35B_LIMITS = (
+    LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS,
     LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 
@@ -50,18 +49,13 @@ class LLMModelCapabilities:
     provider: str
     model: str
     context_window_tokens: int
-    max_output_tokens: int
     default_response_reserve_tokens: int
 
     def __post_init__(self) -> None:
         if self.context_window_tokens < 1:
             raise ValueError("context_window_tokens must be greater than zero")
-        if self.max_output_tokens < 1:
-            raise ValueError("max_output_tokens must be greater than zero")
         if self.default_response_reserve_tokens < 1:
             raise ValueError("default_response_reserve_tokens must be greater than zero")
-        if self.default_response_reserve_tokens > self.max_output_tokens:
-            raise ValueError("default_response_reserve_tokens cannot exceed max_output_tokens")
 
     @property
     def input_budget_tokens(self) -> int:
@@ -72,7 +66,6 @@ class LLMModelCapabilities:
             "provider": self.provider,
             "model": self.model,
             "context_window_tokens": self.context_window_tokens,
-            "max_output_tokens": self.max_output_tokens,
             "default_response_reserve_tokens": self.default_response_reserve_tokens,
             "input_budget_tokens": self.input_budget_tokens,
         }
@@ -118,7 +111,6 @@ def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCap
             provider=normalized_provider,
             model=normalized_model,
             context_window_tokens=LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
-            max_output_tokens=LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
             default_response_reserve_tokens=LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
         )
     family_prefixes = [
@@ -128,19 +120,18 @@ def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCap
         ("deepseek", "deepseek-v4-flash-", *DEEPSEEK_V4_LIMITS),
         ("deepseek", "deepseek-v4-pro-", *DEEPSEEK_V4_LIMITS),
     ]
-    for family_provider, prefix, context_window, max_output, response_reserve in family_prefixes:
+    for family_provider, prefix, context_window, response_reserve in family_prefixes:
         if normalized_provider == family_provider and normalized_model.startswith(prefix):
             return LLMModelCapabilities(
                 provider=normalized_provider,
                 model=normalized_model,
                 context_window_tokens=context_window,
-                max_output_tokens=max_output,
                 default_response_reserve_tokens=response_reserve,
             )
     return None
 
 
-for _provider, _model, _context_window, _max_output, _response_reserve in [
+for _provider, _model, _context_window, _response_reserve in [
     ("openai", "gpt-4.1", *OPENAI_GPT_4_1_LIMITS),
     ("openai", "gpt-4.1-mini", *OPENAI_GPT_4_1_LIMITS),
     ("openai", "gpt-4.1-mini-2025-04-14", *OPENAI_GPT_4_1_LIMITS),
@@ -152,13 +143,13 @@ for _provider, _model, _context_window, _max_output, _response_reserve in [
     ("local", "google/gemma-4-12b-qat", *LOCAL_DEFAULT_LIMITS),
     ("local", "gemma4:12b", *LOCAL_DEFAULT_LIMITS),
     ("local", "gemma3:12b", *LOCAL_DEFAULT_LIMITS),
+    ("local", "qwen/qwen3.5-35b-a3b", *LOCAL_QWEN_3_5_35B_LIMITS),
 ]:
     register_model_capabilities(
         LLMModelCapabilities(
             provider=_provider,
             model=_model,
             context_window_tokens=_context_window,
-            max_output_tokens=_max_output,
             default_response_reserve_tokens=_response_reserve,
         )
     )

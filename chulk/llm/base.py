@@ -21,10 +21,18 @@ class LLMConfigurationError(LLMError):
 class LLMActionError(LLMError):
     """Raised when an LLM cannot produce a valid agent action."""
 
-    def __init__(self, message: str, *, repair_attempts: int = 0, errors: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        repair_attempts: int = 0,
+        errors: list[str] | None = None,
+        raw_response: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.repair_attempts = repair_attempts
         self.errors = errors or []
+        self.raw_response = raw_response
 
 
 @dataclass(frozen=True)
@@ -86,6 +94,7 @@ class LLMClient:
                         f"Model response was not valid action JSON: {exc}",
                         repair_attempts=attempt,
                         errors=errors,
+                        raw_response=raw_response,
                     ) from exc
                 action_messages = [
                     *action_messages,

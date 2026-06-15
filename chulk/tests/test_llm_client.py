@@ -401,22 +401,22 @@ def test_llm_provider_registry_exposes_provider_capabilities():
     assert local_provider.capabilities.supports_structured_output is False
 
 
-def test_resolve_model_capabilities_returns_context_window_and_output_limit():
+def test_resolve_model_capabilities_returns_context_window_and_reserve():
     openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
     deepseek_caps = resolve_model_capabilities("deepseek", "deepseek-v4-flash")
     local_caps = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
+    local_qwen_caps = resolve_model_capabilities("local", "qwen/qwen3.5-35b-a3b")
 
     assert openai_caps.context_window_tokens == 1_047_576
-    assert openai_caps.max_output_tokens == 32_768
     assert openai_caps.default_response_reserve_tokens == 8_192
     assert openai_caps.input_budget_tokens == 1_039_384
     assert deepseek_caps.context_window_tokens == 1_000_000
-    assert deepseek_caps.max_output_tokens == 384_000
     assert deepseek_caps.default_response_reserve_tokens == 16_384
     assert deepseek_caps.input_budget_tokens == 983_616
     assert local_caps.context_window_tokens == 131_072
-    assert local_caps.max_output_tokens == 8_192
     assert local_caps.default_response_reserve_tokens == 4_096
+    assert local_qwen_caps.context_window_tokens == 262_144
+    assert local_qwen_caps.default_response_reserve_tokens == 4_096
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():
@@ -424,7 +424,6 @@ def test_resolve_model_capabilities_supports_known_family_aliases():
 
     assert caps.model == "gpt-4.1-mini-2099-01-01"
     assert caps.context_window_tokens == 1_047_576
-    assert caps.max_output_tokens == 32_768
 
 
 def test_resolve_model_capabilities_uses_conservative_defaults_for_local_models():
@@ -432,7 +431,6 @@ def test_resolve_model_capabilities_uses_conservative_defaults_for_local_models(
 
     assert caps.model == "ollama/custom-model:latest"
     assert caps.context_window_tokens == 131_072
-    assert caps.max_output_tokens == 8_192
 
 
 def test_resolve_model_capabilities_rejects_unknown_models():

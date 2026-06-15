@@ -249,6 +249,21 @@ def test_file_tools_read_write_list_and_search(tmp_path):
     assert "notes/example.txt" in search_result.observation
 
 
+def test_search_files_ignores_runtime_trace_artifacts(tmp_path):
+    (tmp_path / "chulk" / "core").mkdir(parents=True)
+    (tmp_path / "traces").mkdir()
+    (tmp_path / "chulk" / "core" / "agent.py").write_text("agentic loop lives here\n", encoding="utf-8")
+    (tmp_path / "traces" / "session.jsonl").write_text("agentic loop noisy trace\n", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(search_files_tool(tmp_path))
+
+    result = registry.run("search_files", {"query": "agentic loop", "path": ".", "max_results": 10})
+
+    assert result.success
+    assert "chulk/core/agent.py" in result.observation
+    assert "traces/session.jsonl" not in result.observation
+
+
 def test_apply_patch_tool_modifies_existing_file(tmp_path):
     (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
     registry = ToolRegistry()

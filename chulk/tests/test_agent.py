@@ -70,6 +70,8 @@ def test_turn_state_records_serialize():
     )
     turn.model_request_count = 2
     turn.tool_call_count = 1
+    turn.reflection_count = 1
+    turn.reflections.append({"attempt": 1, "approved": True, "reason": "ok", "feedback": None})
     turn.complete("2")
 
     payload = turn.to_dict()
@@ -80,6 +82,8 @@ def test_turn_state_records_serialize():
     assert payload["ended_at"]
     assert payload["model_request_count"] == 2
     assert payload["tool_call_count"] == 1
+    assert payload["reflection_count"] == 1
+    assert payload["reflections"][0]["approved"] is True
     assert payload["available_tool_names"] == ["calculator"]
     assert payload["tool_calls"][0]["tool_name"] == "calculator"
     assert payload["observations"][0]["content"] == "Tool calculator finished with success."
@@ -181,6 +185,88 @@ def test_agent_calls_calculator_tool_then_returns_final_answer():
     assert turn.observations[0].tool_name == "calculator"
     assert len(llm.requests) == 2
     assert any(message["role"] == "observation" for message in llm.requests[1])
+
+
+def test_agent_reflection_approves_final_answer():
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "Hi Javier"}),
+            json.dumps({"approved": True, "reason": "The answer addresses the greeting.", "feedback": None}),
+        ]
+    )
+    agent = Agent(llm, max_reflection_attempts=1)
+
+    response = agent.run_turn("hello")
+
+    turn = agent.state.turns[0]
+    assert response == "Hi Javier"
+    assert turn.reflection_count == 1
+    assert turn.reflections[0]["approved"] is True
+    assert turn.model_request_count == 2
+    assert "final-answer reviewer" in llm.requests[1][0]["content"]
+
+
+def test_agent_reflection_feedback_triggers_one_more_action_loop(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "Done."}),
+            json.dumps(
+                {
+                    "approved": False,
+                    "reason": "The answer claims completion without mentioning the missing tool evidence.",
+                    "feedback": "Explain that no tool evidence was gathered before answering.",
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "I do not have tool evidence for completion."}),
+        ]
+    )
+    agent = Agent(llm, trace_logger=trace_logger, max_reflection_attempts=1)
+
+    response = agent.run_turn("did you inspect the file?")
+
+    turn = agent.state.turns[0]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+
+    assert response == "I do not have tool evidence for completion."
+    assert turn.reflection_count == 1
+    assert turn.model_request_count == 3
+    assert turn.observations[-1].tool_name == "reflection_feedback"
+    assert "no tool evidence" in turn.observations[-1].content
+    assert any(message["role"] == "observation" and "Reflection feedback" in message["content"] for message in llm.requests[2])
+    assert any(
+        event["type"] == "tool_observation" and event["payload"]["tool_name"] == "reflection_feedback"
+        for event in events
+    )
+    assert "reflection_started" in event_types
+    assert "reflection_completed" in event_types
+    assert "reflection_revision_requested" in event_types
+
+
+def test_agent_reflection_attempt_limit_prevents_revision_loop():
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "First answer."}),
+            json.dumps(
+                {
+                    "approved": False,
+                    "reason": "Needs one more pass.",
+                    "feedback": "Return a revised final answer.",
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Second answer."}),
+        ]
+    )
+    agent = Agent(llm, max_reflection_attempts=1)
+
+    response = agent.run_turn("answer carefully")
+
+    turn = agent.state.turns[0]
+    assert response == "Second answer."
+    assert turn.reflection_count == 1
+    assert len(turn.reflections) == 1
+    assert len(llm.requests) == 3
 
 
 def test_agent_calls_apply_patch_tool_then_returns_final_answer(tmp_path):
@@ -698,6 +784,10 @@ def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
     assert [tool_call.phase for tool_call in turn.tool_calls] == ["planning", "planning"]
     assert turn.planning_feedback_count == 1
     assert "plan_revision_requested" in event_types
+    assert any(
+        event["type"] == "tool_observation" and event["payload"]["tool_name"] == "planning_feedback"
+        for event in events
+    )
     assert any(observation.tool_name == "planning_feedback" for observation in turn.observations)
 
 
@@ -1108,14 +1198,19 @@ def test_agent_repairs_invalid_model_json():
 
 
 def test_agent_fails_after_json_repair_limit():
-    llm = RecordingLLMClient(["not json", "still not json"])
+    llm = RecordingLLMClient(["not json", "## Markdown answer\n\nStill not action JSON."])
     agent = Agent(llm, max_json_repair_attempts=1)
 
     response = agent.run_turn("hello")
 
     assert "not valid action JSON" in response
+    assert "I did not execute any tools from the invalid response." in response
+    assert "Unparsed model output" in response
+    assert "## Markdown answer" in response
     assert agent.state.json_repair_attempts == 1
     assert agent.state.errors
+    assert agent.state.turns[0].status == "failed"
+    assert agent.state.turns[0].tool_calls == []
 
 
 def test_agent_feeds_unknown_tool_observation_back_to_model():

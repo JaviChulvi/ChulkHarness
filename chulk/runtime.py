@@ -107,6 +107,7 @@ def create_agent(
         max_observation_chars=config.max_observation_chars,
         max_tool_stdout_chars=config.max_tool_stdout_chars,
         max_tool_stderr_chars=config.max_tool_stderr_chars,
+        max_reflection_attempts=config.max_reflection_attempts,
         context_budget=context_budget,
         event_callback=session_recorder.callback,
         pinned_skill_names=pinned_skill_names,

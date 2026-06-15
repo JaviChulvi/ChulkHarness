@@ -186,6 +186,8 @@ class TurnState:
     plan_approved: bool = False
     planning_feedback_count: int = 0
     planning_tool_limit_feedback_sent: bool = False
+    reflection_count: int = 0
+    reflections: list[dict] = field(default_factory=list)
     context_reports: list[dict] = field(default_factory=list)
 
     def complete(self, final_answer: str) -> None:
@@ -239,6 +241,8 @@ class TurnState:
             "plan_approved": self.plan_approved,
             "planning_feedback_count": self.planning_feedback_count,
             "planning_tool_limit_feedback_sent": self.planning_tool_limit_feedback_sent,
+            "reflection_count": self.reflection_count,
+            "reflections": self.reflections,
             "context_reports": self.context_reports,
         }
 

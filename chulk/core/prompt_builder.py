@@ -121,14 +121,14 @@ def build_agent_prompt(
             },
         ),
         ("planning", "Planning instructions", planning_prompt, {"enabled": planning_enabled}),
-        ("action_protocol", "Action protocol", JSON_ACTION_PROMPT, {}),
-        ("tool_rules", "Tool-call rules", tool_rules, {"max_tool_calls_per_turn": max_tool_calls_per_turn}),
         (
             "tools",
             "Available tools",
             tools_prompt,
             {"tool_names": [tool.name for tool in tool_registry.list_tools()]},
         ),
+        ("tool_rules", "Tool-call rules", tool_rules, {"max_tool_calls_per_turn": max_tool_calls_per_turn}),
+        ("action_protocol", "Action protocol", JSON_ACTION_PROMPT, {}),
     ]
     system_sections = [
         ContextSection.from_text(

@@ -82,6 +82,7 @@ def format_config(config: Config) -> str:
         "max_observation_chars": config.max_observation_chars,
         "max_tool_stdout_chars": config.max_tool_stdout_chars,
         "max_tool_stderr_chars": config.max_tool_stderr_chars,
+        "max_reflection_attempts": config.max_reflection_attempts,
     }
     lines = ["ChulkHarness configuration:"]
     lines.extend(f"  {key}: {value}" for key, value in values.items())

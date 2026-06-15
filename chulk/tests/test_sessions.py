@@ -54,6 +54,8 @@ def test_session_store_saves_messages_and_turn_snapshots(tmp_path):
     )
 
     turn = TurnState(user_message="hello", turn_id="turn-1")
+    turn.reflection_count = 1
+    turn.reflections.append({"attempt": 1, "approved": True, "reason": "ok", "feedback": None})
     turn.complete("hi back")
     store.save_turn_snapshot("conversation-1", turn.to_dict())
 
@@ -66,6 +68,8 @@ def test_session_store_saves_messages_and_turn_snapshots(tmp_path):
     assert messages == [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi back"}]
     assert turns[0].turn_id == "turn-1"
     assert turns[0].final_answer == "hi back"
+    assert turns[0].reflection_count == 1
+    assert turns[0].reflections[0]["approved"] is True
 
 
 def test_session_store_saves_summary_and_loads_unsummarized_messages(tmp_path):

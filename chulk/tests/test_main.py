@@ -546,6 +546,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "max_observation_chars: 12000" in output
     assert "max_tool_stdout_chars: 8000" in output
     assert "max_tool_stderr_chars: 4000" in output
+    assert "max_reflection_attempts: 0" in output
 
 
 def test_create_cli_llm_uses_public_fallback_provider_specs(tmp_path):
@@ -706,7 +707,6 @@ def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_pat
             provider="openai",
             model=model,
             context_window_tokens=1200,
-            max_output_tokens=128,
             default_response_reserve_tokens=128,
         )
     )

@@ -86,6 +86,8 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ActionParseError("final_answer.content must be a non-empty string")
+        if _has_tool_call_fields(payload):
+            raise ActionParseError("final_answer must not include tool call fields")
         return FinalAnswerAction(type="final_answer", content=content)
 
     if action_type == "tool_call":
@@ -99,6 +101,28 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
         return PlanAction(type="plan", plan=_coerce_plan(payload))
 
     raise ActionParseError("model response type must be final_answer, tool_call, or plan")
+
+
+def _has_tool_call_fields(payload: dict[str, Any]) -> bool:
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name.strip():
+        return True
+
+    arguments = payload.get("arguments")
+    if arguments not in (None, {}):
+        return True
+
+    raw_arguments_json = payload.get("arguments_json")
+    if raw_arguments_json in (None, "", "{}"):
+        return False
+    if not isinstance(raw_arguments_json, str):
+        return True
+
+    try:
+        arguments = json.loads(raw_arguments_json)
+    except json.JSONDecodeError:
+        return True
+    return bool(arguments)
 
 
 def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:

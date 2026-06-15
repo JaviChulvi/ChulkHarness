@@ -11,6 +11,24 @@ def test_parse_final_answer():
     assert action == FinalAnswerAction(type="final_answer", content="hello")
 
 
+def test_parse_final_answer_rejects_embedded_tool_call_fields():
+    raw_response = json.dumps(
+        {
+            "type": "final_answer",
+            "content": "I will search the files.",
+            "tool_name": "search_files",
+            "arguments_json": '{"query":"agent loop"}',
+        }
+    )
+
+    try:
+        parse_model_response(raw_response)
+    except ActionParseError as exc:
+        assert "tool call fields" in str(exc)
+    else:
+        raise AssertionError("Expected final_answer with tool fields to fail")
+
+
 def test_parse_tool_call():
     action = parse_model_response(
         json.dumps({"type": "tool_call", "tool_name": "calculator", "arguments": {"expression": "1 + 1"}})
