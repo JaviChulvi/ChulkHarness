@@ -7,6 +7,12 @@ from chulk.memory import SQLiteMemoryStore
 from chulk.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.output import preview_text
+from chulk.tools.permissions import (
+    PermissionDecision,
+    ToolPermissionLevel,
+    ToolPermissionPolicy,
+    normalize_permission_level,
+)
 from chulk.tools.registry import ToolResult
 from chulk.tools.shell import run_shell_command
 
@@ -19,6 +25,56 @@ def test_registry_descriptions_include_registered_tool():
 
     assert "calculator" in description
     assert "expression" in description
+    assert "permission_level" in description
+    assert "read" in description
+
+
+def test_tool_permission_policy_requires_confirmation_by_default():
+    tool = Tool(
+        name="dangerous",
+        description="Dangerous test tool.",
+        args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        callable=lambda _arguments: ToolResult("dangerous", True, "ran"),
+        requires_confirmation=True,
+        permission_level=ToolPermissionLevel.SHELL,
+    )
+    policy = ToolPermissionPolicy()
+
+    request = policy.request_for_tool(tool, {})
+    decision = policy.decide(request)
+
+    assert request.permission_level == ToolPermissionLevel.SHELL
+    assert decision.decision == PermissionDecision.ASK
+    assert decision.requires_confirmation is True
+
+
+def test_unknown_permission_level_fails_closed():
+    try:
+        normalize_permission_level("not-a-level")
+    except ValueError as exc:
+        assert "Unknown tool permission level" in str(exc)
+        assert "read" in str(exc)
+    else:
+        raise AssertionError("Expected unknown permission level to fail")
+
+
+def test_registry_rejects_unknown_tool_permission_level():
+    registry = ToolRegistry()
+
+    try:
+        registry.register(
+            Tool(
+                name="bad_permission",
+                description="Bad permission level.",
+                args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                callable=lambda _arguments: ToolResult("bad_permission", True, "ran"),
+                permission_level="not-a-level",
+            )
+        )
+    except ValueError as exc:
+        assert "Unknown tool permission level" in str(exc)
+    else:
+        raise AssertionError("Expected invalid tool permission level registration to fail")
 
 
 def test_registry_logs_tool_calls():

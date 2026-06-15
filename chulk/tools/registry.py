@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from chulk.tools.permissions import ToolPermissionLevel, normalize_permission_level
 from chulk.tools.schema import ToolValidationError, ToolValidationIssue, validate_tool_arguments, validate_tool_schema
 
 
@@ -47,8 +48,12 @@ class Tool:
     args_schema: dict[str, Any]
     callable: Callable[[dict[str, Any]], ToolResult]
     requires_confirmation: bool = False
+    permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ
     timeout_seconds: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def normalized_permission_level(self) -> ToolPermissionLevel:
+        return normalize_permission_level(self.permission_level)
 
 
 class ToolRegistry:
@@ -63,6 +68,7 @@ class ToolRegistry:
             raise ValueError("Tool names must be non-empty and contain only letters, numbers, and underscores")
         if tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
+        tool.normalized_permission_level()
         validate_tool_schema(tool.name, tool.args_schema)
         self._tools[tool.name] = tool
 
@@ -83,6 +89,7 @@ class ToolRegistry:
                 "description": tool.description,
                 "arguments": tool.args_schema,
                 "requires_confirmation": tool.requires_confirmation,
+                "permission_level": tool.normalized_permission_level().value,
             }
             for tool in self.list_tools()
         ]

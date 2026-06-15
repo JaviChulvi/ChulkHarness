@@ -19,6 +19,8 @@ class TraceEvent:
     MODEL_RESPONSE = "model_response"
     PARSED_ACTION = "parsed_action"
     MODEL_RESPONSE_PARSED = "model_response_parsed"
+    TOOL_PERMISSION_REQUESTED = "tool_permission_requested"
+    TOOL_PERMISSION_DECIDED = "tool_permission_decided"
     TOOL_CALL_STARTED = "tool_call_started"
     TOOL_CALL = "tool_call"
     TOOL_CALL_COMPLETED = "tool_call_completed"

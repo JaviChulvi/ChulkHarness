@@ -8,6 +8,7 @@ import inspect
 import json
 from typing import Any, get_args, get_origin, get_type_hints
 
+from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.memory import (
@@ -43,6 +44,8 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
+    permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ,
+    requires_confirmation: bool = False,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Convert a Python callable into a Chulk tool."""
 
@@ -67,6 +70,8 @@ def tool(
             description=tool_description,
             args_schema=args_schema,
             callable=invoke,
+            permission_level=permission_level,
+            requires_confirmation=requires_confirmation,
         )
 
     if fn is None:

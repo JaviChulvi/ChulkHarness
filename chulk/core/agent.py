@@ -28,6 +28,12 @@ from chulk.llm import LLMActionError, LLMClient, LLMError
 from chulk.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import ToolRegistry
+from chulk.tools.permissions import (
+    PermissionDecision,
+    PermissionDecisionRecord,
+    PermissionRequest,
+    ToolPermissionPolicy,
+)
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
 
@@ -61,6 +67,8 @@ class Agent:
         max_tool_stdout_chars: int = 8000,
         max_tool_stderr_chars: int = 4000,
         max_reflection_attempts: int = 0,
+        permission_policy: ToolPermissionPolicy | None = None,
+        permission_callback: Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool] | None = None,
         context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         pinned_skill_names: list[str] | None = None,
@@ -99,6 +107,8 @@ class Agent:
         self.max_tool_stdout_chars = max_tool_stdout_chars
         self.max_tool_stderr_chars = max_tool_stderr_chars
         self.max_reflection_attempts = max_reflection_attempts
+        self.permission_policy = permission_policy or ToolPermissionPolicy()
+        self.permission_callback = permission_callback
         self.event_callback = event_callback
         self.pinned_skill_names = pinned_skill_names or []
         self._profile_memories: list[MemoryRecord] = []
@@ -346,7 +356,8 @@ class Agent:
                     "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
                 }
                 self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
-                result = self.tool_registry.run(action.tool_name, action.arguments)
+                permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
+                result = permission_result or self.tool_registry.run(action.tool_name, action.arguments)
                 tool_call_record.finish(result)
                 self.state.tool_calls.append(
                     {
@@ -552,6 +563,71 @@ class Agent:
         self.state.messages = self.memory.recent()
         self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()})
         return response
+
+    def _permission_result_for_tool_call(
+        self,
+        tool_name: str,
+        arguments: dict,
+        turn: TurnState,
+    ) -> ToolResult | None:
+        try:
+            tool = self.tool_registry.get(tool_name)
+        except KeyError:
+            return None
+
+        request = self.permission_policy.request_for_tool(tool, arguments)
+        self._trace(
+            TraceEvent.TOOL_PERMISSION_REQUESTED,
+            {
+                "turn_id": turn.turn_id,
+                "request": request.to_dict(),
+            },
+        )
+        record = self.permission_policy.decide(request)
+        if record.decision == PermissionDecision.ASK:
+            record = self._resolve_permission_approval(request, record)
+        self._trace(
+            TraceEvent.TOOL_PERMISSION_DECIDED,
+            {
+                "turn_id": turn.turn_id,
+                "decision": record.to_dict(),
+            },
+        )
+        if record.decision == PermissionDecision.ALLOW:
+            return None
+        return _permission_denied_result(request, record)
+
+    def _resolve_permission_approval(
+        self,
+        request: PermissionRequest,
+        record: PermissionDecisionRecord,
+    ) -> PermissionDecisionRecord:
+        if self.permission_callback is None:
+            return PermissionDecisionRecord(
+                tool_name=request.tool_name,
+                permission_level=request.permission_level,
+                decision=PermissionDecision.DENY,
+                reason="tool call requires approval but no permission callback is configured",
+                policy_name=record.policy_name,
+                requires_confirmation=request.requires_confirmation,
+            )
+
+        callback_decision = self.permission_callback(request, record)
+        if isinstance(callback_decision, bool):
+            decision = PermissionDecision.ALLOW if callback_decision else PermissionDecision.DENY
+        elif isinstance(callback_decision, PermissionDecision):
+            decision = callback_decision
+        else:
+            decision = PermissionDecision(str(callback_decision))
+        reason = "tool call approved by permission callback" if decision == PermissionDecision.ALLOW else "tool call denied by permission callback"
+        return PermissionDecisionRecord(
+            tool_name=request.tool_name,
+            permission_level=request.permission_level,
+            decision=decision,
+            reason=reason,
+            policy_name=record.policy_name,
+            requires_confirmation=request.requires_confirmation,
+        )
 
     def _complete_final_answer(self, content: str, turn: TurnState) -> str:
         self.memory.add_assistant_message(content)
@@ -1012,6 +1088,22 @@ def _format_action_protocol_failure(error: str, raw_response: str | None) -> str
             ]
         )
     return "\n".join(lines)
+
+
+def _permission_denied_result(request: PermissionRequest, record: PermissionDecisionRecord) -> ToolResult:
+    return ToolResult(
+        tool_name=request.tool_name,
+        success=False,
+        observation=(
+            f"Tool call blocked by permission policy: {record.reason}. "
+            "Do not claim the tool ran. Either request approval, choose an allowed tool, or explain the limitation."
+        ),
+        error="permission_denied",
+        metadata={
+            "permission_request": request.to_dict(),
+            "permission_decision": record.to_dict(),
+        },
+    )
 
 
 def _format_indented_preview(text: str, max_chars: int) -> str:

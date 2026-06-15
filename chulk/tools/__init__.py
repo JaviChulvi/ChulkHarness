@@ -17,6 +17,13 @@ from chulk.tools.memory import (
     update_memory_tool,
 )
 from chulk.tools.registry import Tool, ToolRegistry, ToolResult
+from chulk.tools.permissions import (
+    PermissionDecision,
+    PermissionDecisionRecord,
+    PermissionRequest,
+    ToolPermissionLevel,
+    ToolPermissionPolicy,
+)
 from chulk.tools.public import (
     ToolRef,
     apply_patch,
@@ -44,9 +51,14 @@ from chulk.tools.shell import run_shell_command, shell_tool
 
 __all__ = [
     "Tool",
+    "ToolPermissionLevel",
+    "ToolPermissionPolicy",
     "ToolRef",
     "ToolRegistry",
     "ToolResult",
+    "PermissionDecision",
+    "PermissionDecisionRecord",
+    "PermissionRequest",
     "apply_patch",
     "apply_patch_tool",
     "archive_memory",
