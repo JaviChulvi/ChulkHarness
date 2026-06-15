@@ -34,12 +34,10 @@ class LocalOpenAICompatibleClient(LLMClient):
         base_url: str = DEFAULT_LOCAL_BASE_URL,
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
-        max_output_tokens: int | None = None,
         client: Any | None = None,
     ) -> None:
         self.model = model
         self.base_url = _validate_base_url(base_url)
-        self.max_output_tokens = _validate_max_output_tokens(max_output_tokens)
 
         if client is not None:
             self._client = client
@@ -66,9 +64,6 @@ class LocalOpenAICompatibleClient(LLMClient):
             "messages": local_chat_messages(messages),
             "stream": False,
         }
-        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
-        if output_limit is not None:
-            request["max_tokens"] = output_limit
         try:
             response = self._client.chat.completions.create(**request)
         except Exception as exc:
@@ -85,26 +80,10 @@ class LocalOpenAICompatibleClient(LLMClient):
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response from the local model."""
-        return self.complete(messages, max_output_tokens=max_output_tokens)
+        return self.complete(messages)
 
 
 def _validate_base_url(value: str) -> str:
     if not value.strip():
         raise ValueError("base_url must be non-empty")
     return value.strip()
-
-
-def _validate_max_output_tokens(value: int | None) -> int | None:
-    if value is None:
-        return None
-    if value < 1:
-        raise ValueError("max_output_tokens must be greater than zero")
-    return value
-
-
-def _request_max_output_tokens(model_limit: int | None, request_limit: int | None) -> int | None:
-    if model_limit is None:
-        return _validate_max_output_tokens(request_limit)
-    if request_limit is None:
-        return model_limit
-    return min(model_limit, _validate_max_output_tokens(request_limit) or model_limit)

@@ -197,15 +197,15 @@ def test_deepseek_client_uses_json_object_mode_for_actions():
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
 
 
-def test_deepseek_client_applies_output_limits():
+def test_deepseek_client_does_not_send_max_tokens():
     fake_client = FakeDeepSeekClient(
         json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
     )
-    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client, max_output_tokens=100)
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
 
     client.complete([{"role": "user", "content": "Hello"}], max_output_tokens=25)
 
-    assert fake_client.chat.completions.kwargs["max_tokens"] == 25
+    assert "max_tokens" not in fake_client.chat.completions.kwargs
 
     client.complete_action(
         [
@@ -215,7 +215,7 @@ def test_deepseek_client_applies_output_limits():
         max_output_tokens=250,
     )
 
-    assert fake_client.chat.completions.kwargs["max_tokens"] == 100
+    assert "max_tokens" not in fake_client.chat.completions.kwargs
 
 
 def test_deepseek_client_can_parse_plan_action_from_json_mode():
@@ -323,7 +323,7 @@ def test_local_client_actions_use_plain_chat_completion_contract():
     fake_client = FakeLocalClient(
         json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
     )
-    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client, max_output_tokens=100)
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
 
     result = client.complete_action(
         [
@@ -334,7 +334,7 @@ def test_local_client_actions_use_plain_chat_completion_contract():
     )
 
     assert result.action.content == "structured answer"
-    assert fake_client.chat.completions.kwargs["max_tokens"] == 100
+    assert "max_tokens" not in fake_client.chat.completions.kwargs
     assert "response_format" not in fake_client.chat.completions.kwargs
     assert fake_client.chat.completions.kwargs["messages"] == [
         {"role": "user", "content": "Instructions:\nReturn action JSON.\n\nUser message:\n\nHello"}

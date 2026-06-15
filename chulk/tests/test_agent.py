@@ -26,10 +26,10 @@ class RecordingLLMClient(LLMClient):
 
 class OutputLimitRecordingLLMClient(LLMClient):
     def __init__(self) -> None:
-        self.max_output_tokens: list[int | None] = []
+        self.action_kwargs: list[dict] = []
 
-    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        self.max_output_tokens.append(max_output_tokens)
+    def _complete_action_once(self, messages: list[dict[str, str]], **kwargs) -> str:
+        self.action_kwargs.append(kwargs)
         return json.dumps({"type": "final_answer", "content": "ok"})
 
 
@@ -378,7 +378,7 @@ def test_agent_summarizes_omitted_history_before_action_request():
     assert report["omitted_message_count"] == 0
 
 
-def test_agent_passes_remaining_context_as_output_limit():
+def test_agent_does_not_pass_remaining_context_as_output_limit():
     llm = OutputLimitRecordingLLMClient()
     agent = Agent(llm, context_budget=ContextBudget(max_prompt_tokens=3000, response_reserve_tokens=200))
 
@@ -387,7 +387,8 @@ def test_agent_passes_remaining_context_as_output_limit():
     report = agent.state.last_context_report
     assert response == "ok"
     assert isinstance(report, dict)
-    assert llm.max_output_tokens == [3000 - report["estimated_tokens"]]
+    assert report["budget"]["input_token_budget"] == 2800
+    assert llm.action_kwargs == [{}]
 
 
 def test_agent_injects_profile_and_relevant_long_term_memories(tmp_path):

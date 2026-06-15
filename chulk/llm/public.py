@@ -147,7 +147,7 @@ class FallbackChain(LLMClient):
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         return self._try_providers(
-            lambda provider: provider._complete_action_once(messages, max_output_tokens=max_output_tokens)
+            lambda provider: _complete_action_once(provider, messages, max_output_tokens=max_output_tokens)
         )
 
     def _try_providers(self, call) -> str:
@@ -177,9 +177,17 @@ class FallbackChain(LLMClient):
 
 def _complete(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> str:
     try:
+        if max_output_tokens is None:
+            return provider.complete(messages)
         return provider.complete(messages, max_output_tokens=max_output_tokens)
     except TypeError:
         return provider.complete(messages)
+
+
+def _complete_action_once(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> str:
+    if max_output_tokens is None:
+        return provider._complete_action_once(messages)
+    return provider._complete_action_once(messages, max_output_tokens=max_output_tokens)
 
 
 def _provider_identity(provider: object) -> tuple[str, str | None]:

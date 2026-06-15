@@ -219,7 +219,6 @@ class Agent:
             context_report = prompt.context_report.to_dict()
             turn.context_reports.append(context_report)
             self.state.last_context_report = context_report
-            max_output_tokens = self._max_output_tokens_for_prompt(context_report)
             turn.model_request_count += 1
             self._trace(
                 TraceEvent.MODEL_REQUEST_STARTED,
@@ -232,14 +231,12 @@ class Agent:
                     loaded_skill_names=self.state.loaded_skill_names,
                     available_tool_names=turn.available_tool_names,
                     context_report=context_report,
-                    max_output_tokens=max_output_tokens,
                 ),
             )
             try:
                 action_result = self.llm_client.complete_action(
                     messages,
                     max_repair_attempts=self.max_json_repair_attempts,
-                    max_output_tokens=max_output_tokens,
                 )
             except LLMActionError as exc:
                 self.state.json_repair_attempts += exc.repair_attempts
@@ -535,14 +532,6 @@ class Agent:
         if not clean_summary:
             return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
         return clean_summary, False, None
-
-    def _max_output_tokens_for_prompt(self, context_report: dict) -> int | None:
-        """Return available output tokens for this request based on prompt size."""
-        if not self.context_budget.enabled:
-            return None
-        prompt_tokens = int(context_report.get("estimated_tokens") or 0)
-        remaining_tokens = self.context_budget.max_prompt_tokens - prompt_tokens
-        return max(1, remaining_tokens)
 
     def _handle_plan_action(self, action: PlanAction, turn: TurnState, *, require_plan: bool) -> str:
         if not require_plan:

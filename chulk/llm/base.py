@@ -79,7 +79,10 @@ class LLMClient:
         action_messages = list(messages)
         errors: list[str] = []
         for attempt in range(max_repair_attempts + 1):
-            raw_response = self._complete_action_once(action_messages, max_output_tokens=max_output_tokens)
+            if max_output_tokens is None:
+                raw_response = self._complete_action_once(action_messages)
+            else:
+                raw_response = self._complete_action_once(action_messages, max_output_tokens=max_output_tokens)
             try:
                 return LLMActionResult(
                     action=parse_model_response(raw_response),
