@@ -24,6 +24,7 @@ from chulk.llm import (
     LLMClient,
     LLMConfigurationError,
     LLMError,
+    LocalProvider,
     OpenAIProvider,
 )
 from chulk.presets import software_engineer
@@ -68,6 +69,8 @@ def format_config(config: Config) -> str:
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
         "deepseek_base_url": config.deepseek_base_url,
+        "local_api_key": "set" if config.local_api_key else "not set",
+        "local_base_url": config.local_base_url,
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -114,7 +117,9 @@ def create_cli_agent(
 
 def create_cli_llm(config: Config) -> FallbackChain:
     """Create the CLI LLM chain from public provider objects."""
-    providers: list[OpenAIProvider | DeepSeekProvider] = [_create_provider_spec(config.llm_provider, config.model)]
+    providers: list[OpenAIProvider | DeepSeekProvider | LocalProvider] = [
+        _create_provider_spec(config.llm_provider, config.model)
+    ]
     providers.extend(
         _create_provider_spec(provider_config.provider, provider_config.model)
         for provider_config in config.llm_fallback_providers
@@ -122,11 +127,13 @@ def create_cli_llm(config: Config) -> FallbackChain:
     return FallbackChain(providers=providers)
 
 
-def _create_provider_spec(provider: str, model: str) -> OpenAIProvider | DeepSeekProvider:
+def _create_provider_spec(provider: str, model: str) -> OpenAIProvider | DeepSeekProvider | LocalProvider:
     if provider == "openai":
         return OpenAIProvider(model=model)
     if provider == "deepseek":
         return DeepSeekProvider(model=model)
+    if provider == "local":
+        return LocalProvider(model=model)
     raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
 
 

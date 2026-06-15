@@ -2,6 +2,8 @@
 
 from chulk.config import (
     DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_LOCAL_BASE_URL,
+    DEFAULT_LOCAL_MODEL,
     DEFAULT_MAX_OBSERVATION_CHARS,
     DEFAULT_MAX_SKILL_CONTENT_CHARS,
     DEFAULT_MAX_SKILLS_PER_TURN,
@@ -22,6 +24,8 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.llm_fallback_providers == ()
     assert config.openai_api_key is None
     assert config.deepseek_api_key is None
+    assert config.local_api_key is None
+    assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
     assert config.history_limit == 20
     assert config.max_skills_per_turn == DEFAULT_MAX_SKILLS_PER_TURN
     assert config.max_skill_content_chars == DEFAULT_MAX_SKILL_CONTENT_CHARS
@@ -45,6 +49,8 @@ def test_load_config_reads_dotenv(tmp_path):
                 "CHULK_MAX_TOOL_STDOUT_CHARS=700",
                 "CHULK_MAX_TOOL_STDERR_CHARS=300",
                 "DEEPSEEK_API_KEY=deepseek-key",
+                "CHULK_LOCAL_API_KEY=local-key",
+                "CHULK_LOCAL_BASE_URL=http://localhost:11434/v1",
             ]
         ),
         encoding="utf-8",
@@ -55,6 +61,8 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.project_root == tmp_path
     assert config.openai_api_key == "dotenv-key"
     assert config.deepseek_api_key == "deepseek-key"
+    assert config.local_api_key == "local-key"
+    assert config.local_base_url == "http://localhost:11434/v1"
     assert config.model == "dotenv-model"
     assert config.history_limit == 7
     assert config.max_skills_per_turn == 2
@@ -101,6 +109,20 @@ def test_deepseek_provider_uses_deepseek_default_model(tmp_path):
     assert config.deepseek_api_key == "deepseek-key"
 
 
+def test_local_provider_uses_local_default_model_and_base_url(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+        }
+    )
+
+    assert config.llm_provider == "local"
+    assert config.model == DEFAULT_LOCAL_MODEL
+    assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
+    assert config.local_api_key is None
+
+
 def test_load_config_parses_fallback_providers(tmp_path):
     config = load_config(
         {
@@ -128,6 +150,19 @@ def test_load_config_uses_provider_default_for_fallback_without_model(tmp_path):
 
     assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
         ("deepseek", DEFAULT_DEEPSEEK_MODEL),
+    ]
+
+
+def test_load_config_uses_local_default_for_fallback_without_model(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_FALLBACK_PROVIDERS": "local",
+        }
+    )
+
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
+        ("local", DEFAULT_LOCAL_MODEL),
     ]
 
 

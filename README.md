@@ -164,6 +164,18 @@ CHULK_MODEL=gpt-4.1-mini
 CHULK_LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your_deepseek_key
 CHULK_MODEL=deepseek-v4-flash
+
+# Local OpenAI-compatible server, such as LM Studio
+CHULK_LLM_PROVIDER=local
+CHULK_MODEL=google/gemma-4-12b-qat
+CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
+CHULK_LOCAL_API_KEY=local
+
+# Ollama can use the same local provider with a different base URL
+CHULK_LLM_PROVIDER=local
+CHULK_MODEL=gemma4:12b
+CHULK_LOCAL_BASE_URL=http://localhost:11434/v1
+CHULK_LOCAL_API_KEY=ollama
 ```
 
 The CLI coding agent can use provider fallback with the same public provider objects exposed by `chulk.llm`. Configure the primary provider normally, then add fallback providers as a comma-separated list. Each fallback entry can be `provider` or `provider:model`:
@@ -176,7 +188,7 @@ OPENAI_API_KEY=your_openai_key
 CHULK_LLM_FALLBACK_PROVIDERS=openai:gpt-4.1-mini
 ```
 
-At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds.
+At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds. The `local` provider can also appear in fallback chains, for example `CHULK_LLM_FALLBACK_PROVIDERS=local:google/gemma-4-12b-qat,openai:gpt-4.1-mini`.
 
 ## Programmable API
 
@@ -228,7 +240,7 @@ Use provider fallback:
 
 ```python
 from chulk import Agent, Tools, Skills
-from chulk.llm import FallbackChain, OpenAIProvider, DeepSeekProvider
+from chulk.llm import FallbackChain, OpenAIProvider, DeepSeekProvider, LocalProvider
 from chulk.presets import SoftwareEngineer
 
 a = Agent(
@@ -236,6 +248,7 @@ a = Agent(
     llm=FallbackChain(
         providers=[
             OpenAIProvider(model="gpt-4.1-mini"),
+            LocalProvider(model="google/gemma-4-12b-qat", base_url="http://localhost:1234/v1"),
             DeepSeekProvider(model="deepseek-v4-flash"),
         ],
         strategy="first_success",
@@ -369,6 +382,8 @@ CHULK_MODEL=
 CHULK_LLM_FALLBACK_PROVIDERS=
 CHULK_PROJECT_ROOT=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
+CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
+CHULK_LOCAL_API_KEY=
 CHULK_HISTORY_LIMIT=20
 CHULK_MAX_SKILLS_PER_TURN=3
 CHULK_MAX_SKILL_CONTENT_CHARS=4000
@@ -380,7 +395,7 @@ CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
 
-Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request also receives an output cap based on the remaining context for that specific prompt. If you add a new model name, add its context window and output-token metadata to the capability registry first.
+Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request also receives an output cap based on the remaining context for that specific prompt. Hosted providers require explicit model metadata; the `local` provider uses conservative default metadata for arbitrary local model names, with known local Gemma aliases registered explicitly.
 
 Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
 

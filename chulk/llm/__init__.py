@@ -12,12 +12,13 @@ from chulk.llm.client import (
     LLMModelCapabilities,
     LLMProvider,
     LLM_PROVIDER_REGISTRY,
+    LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
     resolve_model_capabilities,
     supported_llm_providers,
 )
-from chulk.llm.public import DeepSeekProvider, FallbackChain, FallbackStrategy, OpenAIProvider, ProviderAttempt
+from chulk.llm.public import DeepSeekProvider, FallbackChain, FallbackStrategy, LocalProvider, OpenAIProvider, ProviderAttempt
 
 __all__ = [
     "DeepSeekProvider",
@@ -34,6 +35,8 @@ __all__ = [
     "LLMModelCapabilities",
     "LLMProvider",
     "LLM_PROVIDER_REGISTRY",
+    "LocalOpenAICompatibleClient",
+    "LocalProvider",
     "OpenAIProvider",
     "OpenAIResponsesClient",
     "ProviderAttempt",

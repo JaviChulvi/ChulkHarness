@@ -12,6 +12,9 @@ OPENAI_GPT_4_1_DEFAULT_RESPONSE_RESERVE_TOKENS = 8_192
 DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 384_000
 DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = 16_384
+LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072
+LOCAL_DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -22,6 +25,11 @@ DEEPSEEK_V4_LIMITS = (
     DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
     DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
     DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+LOCAL_DEFAULT_LIMITS = (
+    LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+    LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 
 
@@ -105,6 +113,14 @@ def _model_key(provider: str, model: str) -> tuple[str, str]:
 
 def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCapabilities | None:
     normalized_provider, normalized_model = _model_key(provider, model)
+    if normalized_provider == "local":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_output_tokens=LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+            default_response_reserve_tokens=LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
     family_prefixes = [
         ("openai", "gpt-4.1-mini-", *OPENAI_GPT_4_1_LIMITS),
         ("openai", "gpt-4.1-nano-", *OPENAI_GPT_4_1_LIMITS),
@@ -133,6 +149,9 @@ for _provider, _model, _context_window, _max_output, _response_reserve in [
     ("deepseek", "deepseek-v4-pro", *DEEPSEEK_V4_LIMITS),
     ("deepseek", "deepseek-chat", *DEEPSEEK_V4_LIMITS),
     ("deepseek", "deepseek-reasoner", *DEEPSEEK_V4_LIMITS),
+    ("local", "google/gemma-4-12b-qat", *LOCAL_DEFAULT_LIMITS),
+    ("local", "gemma4:12b", *LOCAL_DEFAULT_LIMITS),
+    ("local", "gemma3:12b", *LOCAL_DEFAULT_LIMITS),
 ]:
     register_model_capabilities(
         LLMModelCapabilities(

@@ -72,6 +72,31 @@ class DeepSeekProvider:
 
 
 @dataclass(frozen=True)
+class LocalProvider:
+    """Local OpenAI-compatible provider spec for the public API."""
+
+    model: str
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_seconds: float | None = None
+    max_retries: int | None = None
+    provider: str = "local"
+
+    def bind_config(self, config: Config) -> LLMClient:
+        return create_llm_client(
+            provider=self.provider,
+            model=self.model,
+            openai_api_key=config.openai_api_key,
+            deepseek_api_key=config.deepseek_api_key,
+            deepseek_base_url=config.deepseek_base_url,
+            local_api_key=self.api_key or config.local_api_key,
+            local_base_url=self.base_url or config.local_base_url,
+            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
+            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+        )
+
+
+@dataclass(frozen=True)
 class ProviderAttempt:
     """One provider attempt inside a fallback request."""
 
@@ -167,6 +192,7 @@ __all__ = [
     "DeepSeekProvider",
     "FallbackChain",
     "FallbackStrategy",
+    "LocalProvider",
     "OpenAIProvider",
     "ProviderAttempt",
 ]

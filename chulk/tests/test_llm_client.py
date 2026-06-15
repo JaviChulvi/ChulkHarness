@@ -8,6 +8,7 @@ from chulk.llm import (
     LLM_PROVIDER_REGISTRY,
     LLMClient,
     LLMConfigurationError,
+    LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
     resolve_model_capabilities,
@@ -47,6 +48,11 @@ class FakeChatCompletionsResource:
 
 class FakeDeepSeekClient:
     def __init__(self, content: str = "deepseek answer") -> None:
+        self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content))
+
+
+class FakeLocalClient:
+    def __init__(self, content: str = "local answer") -> None:
         self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content))
 
 
@@ -252,6 +258,89 @@ def test_deepseek_client_can_parse_plan_action_from_json_mode():
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_local_client_sends_local_template_friendly_chat_completion_messages():
+    fake_client = FakeLocalClient()
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    response = client.complete(
+        [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "Continue"},
+        ]
+    )
+
+    assert response == "local answer"
+    assert fake_client.chat.completions.kwargs == {
+        "model": "google/gemma-4-12b-qat",
+        "messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "Instructions:\nBe concise.\n\nUser message:\n\nContinue"},
+        ],
+        "stream": False,
+    }
+
+
+def test_local_client_guarantees_user_message_for_system_only_requests():
+    fake_client = FakeLocalClient()
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    client.complete([{"role": "system", "content": "Return action JSON."}])
+
+    assert fake_client.chat.completions.kwargs["messages"] == [
+        {"role": "user", "content": "Instructions:\nReturn action JSON."}
+    ]
+
+
+def test_local_client_converts_observations_to_user_messages():
+    fake_client = FakeLocalClient()
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    client.complete(
+        [
+            {"role": "system", "content": "Return action JSON."},
+            {"role": "user", "content": "Find the file."},
+            {"role": "observation", "content": "Tool read_file finished with success."},
+        ]
+    )
+
+    assert fake_client.chat.completions.kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": (
+                "Instructions:\nReturn action JSON.\n\n"
+                "User message:\n\n"
+                "Find the file.\n\n"
+                "observation: Tool read_file finished with success."
+            ),
+        }
+    ]
+
+
+def test_local_client_actions_use_plain_chat_completion_contract():
+    fake_client = FakeLocalClient(
+        json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
+    )
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client, max_output_tokens=100)
+
+    result = client.complete_action(
+        [
+            {"role": "system", "content": "Return action JSON."},
+            {"role": "user", "content": "Hello"},
+        ],
+        max_output_tokens=250,
+    )
+
+    assert result.action.content == "structured answer"
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 100
+    assert "response_format" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["messages"] == [
+        {"role": "user", "content": "Instructions:\nReturn action JSON.\n\nUser message:\n\nHello"}
+    ]
+
+
 def test_llm_client_repairs_invalid_action_json():
     client = ScriptedLLMClient(
         [
@@ -282,19 +371,40 @@ def test_create_llm_client_selects_deepseek_provider():
     assert isinstance(client, DeepSeekChatCompletionsClient)
 
 
+def test_create_llm_client_selects_local_provider():
+    client = create_llm_client(
+        provider="local",
+        model="google/gemma-4-12b-qat",
+        openai_api_key=None,
+        deepseek_api_key=None,
+        deepseek_base_url="https://api.deepseek.com",
+        local_api_key=None,
+        local_base_url="http://localhost:1234/v1",
+        timeout_seconds=60,
+        max_retries=2,
+    )
+
+    assert isinstance(client, LocalOpenAICompatibleClient)
+    assert client.base_url == "http://localhost:1234/v1"
+
+
 def test_llm_provider_registry_exposes_provider_capabilities():
     openai_provider = LLM_PROVIDER_REGISTRY["openai"]
     deepseek_provider = LLM_PROVIDER_REGISTRY["deepseek"]
+    local_provider = LLM_PROVIDER_REGISTRY["local"]
 
     assert openai_provider.capabilities.supports_structured_output is True
     assert openai_provider.capabilities.api_style == "responses"
     assert deepseek_provider.capabilities.supports_json_mode is True
     assert deepseek_provider.capabilities.api_style == "chat_completions"
+    assert local_provider.capabilities.api_style == "chat_completions"
+    assert local_provider.capabilities.supports_structured_output is False
 
 
 def test_resolve_model_capabilities_returns_context_window_and_output_limit():
     openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
     deepseek_caps = resolve_model_capabilities("deepseek", "deepseek-v4-flash")
+    local_caps = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
 
     assert openai_caps.context_window_tokens == 1_047_576
     assert openai_caps.max_output_tokens == 32_768
@@ -304,6 +414,9 @@ def test_resolve_model_capabilities_returns_context_window_and_output_limit():
     assert deepseek_caps.max_output_tokens == 384_000
     assert deepseek_caps.default_response_reserve_tokens == 16_384
     assert deepseek_caps.input_budget_tokens == 983_616
+    assert local_caps.context_window_tokens == 131_072
+    assert local_caps.max_output_tokens == 8_192
+    assert local_caps.default_response_reserve_tokens == 4_096
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():
@@ -312,6 +425,14 @@ def test_resolve_model_capabilities_supports_known_family_aliases():
     assert caps.model == "gpt-4.1-mini-2099-01-01"
     assert caps.context_window_tokens == 1_047_576
     assert caps.max_output_tokens == 32_768
+
+
+def test_resolve_model_capabilities_uses_conservative_defaults_for_local_models():
+    caps = resolve_model_capabilities("local", "ollama/custom-model:latest")
+
+    assert caps.model == "ollama/custom-model:latest"
+    assert caps.context_window_tokens == 131_072
+    assert caps.max_output_tokens == 8_192
 
 
 def test_resolve_model_capabilities_rejects_unknown_models():

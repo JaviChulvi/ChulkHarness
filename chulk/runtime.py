@@ -153,6 +153,8 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
         openai_api_key=config.openai_api_key,
         deepseek_api_key=config.deepseek_api_key,
         deepseek_base_url=config.deepseek_base_url,
+        local_api_key=config.local_api_key,
+        local_base_url=config.local_base_url,
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )

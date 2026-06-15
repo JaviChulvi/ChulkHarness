@@ -6,7 +6,7 @@ import sqlite3
 
 from chulk import __version__
 from chulk.config import load_config
-from chulk.llm import DeepSeekProvider, FallbackChain, LLMClient, OpenAIProvider
+from chulk.llm import DeepSeekProvider, FallbackChain, LLMClient, LocalProvider, OpenAIProvider
 from chulk.llm.capabilities import LLMModelCapabilities, register_model_capabilities
 from chulk.main import create_cli_llm, main
 from chulk.sessions import SQLiteSessionStore
@@ -541,6 +541,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "model: test-model" in output
     assert "llm_fallback_providers: openai:gpt-4.1-mini" in output
     assert "deepseek_api_key: set" in output
+    assert "local_base_url: http://localhost:1234/v1" in output
     assert "trace_max_prompt_chars: 50000" in output
     assert "max_observation_chars: 12000" in output
     assert "max_tool_stdout_chars: 8000" in output
@@ -568,6 +569,26 @@ def test_create_cli_llm_uses_public_fallback_provider_specs(tmp_path):
         ("deepseek", "deepseek-v4-pro"),
         ("openai", "gpt-4.1-mini"),
         ("deepseek", "deepseek-v4-flash"),
+    ]
+
+
+def test_create_cli_llm_supports_local_provider_specs(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "google/gemma-4-12b-qat",
+            "CHULK_LLM_FALLBACK_PROVIDERS": "openai:gpt-4.1-mini",
+        }
+    )
+
+    chain = create_cli_llm(config)
+
+    assert isinstance(chain.providers[0], LocalProvider)
+    assert isinstance(chain.providers[1], OpenAIProvider)
+    assert [(provider.provider, provider.model) for provider in chain.providers] == [
+        ("local", "google/gemma-4-12b-qat"),
+        ("openai", "gpt-4.1-mini"),
     ]
 
 

@@ -14,6 +14,8 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LOCAL_MODEL = "google/gemma-4-12b-qat"
+DEFAULT_LOCAL_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_MAX_SKILLS_PER_TURN = 3
 DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
 DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
@@ -44,6 +46,8 @@ class Config:
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    local_api_key: str | None = None
+    local_base_url: str = DEFAULT_LOCAL_BASE_URL
     llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
@@ -125,6 +129,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         openai_api_key=env.get("OPENAI_API_KEY") or None,
         deepseek_api_key=env.get("CHULK_DEEPSEEK_API_KEY") or env.get("DEEPSEEK_API_KEY") or None,
         deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
+        local_api_key=env.get("CHULK_LOCAL_API_KEY") or None,
+        local_base_url=env.get("CHULK_LOCAL_BASE_URL") or DEFAULT_LOCAL_BASE_URL,
         llm_fallback_providers=_parse_fallback_providers(
             env,
             primary_provider=llm_provider,
@@ -145,7 +151,11 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
 
 
 def _default_model_for_provider(provider: str) -> str:
-    return DEFAULT_DEEPSEEK_MODEL if provider == "deepseek" else DEFAULT_MODEL
+    if provider == "deepseek":
+        return DEFAULT_DEEPSEEK_MODEL
+    if provider == "local":
+        return DEFAULT_LOCAL_MODEL
+    return DEFAULT_MODEL
 
 
 def _parse_fallback_providers(
