@@ -6,6 +6,7 @@ from chulk import Agent, Skills, Tool, Tools, agent, skills, tool, tools
 from chulk.config import load_config
 from chulk.llm import FallbackChain, LLMClient, LLMError
 from chulk.presets import SoftwareEngineer, software_engineer
+from chulk.presets.software_engineer import DEFAULT_AGENT_PLAYBOOK, SOFTWARE_ENGINEER_SYSTEM_PROMPT
 
 
 class FakeLLMClient(LLMClient):
@@ -34,6 +35,33 @@ def test_public_api_exports_capitalized_aliases():
     assert Tools is tools
     assert Skills is skills
     assert SoftwareEngineer is software_engineer
+
+
+def test_software_engineer_preset_loads_default_agent_playbook():
+    preset = SoftwareEngineer()
+
+    assert "# Default Agent Playbook" in DEFAULT_AGENT_PLAYBOOK
+    assert "Read the relevant code before making claims" in SOFTWARE_ENGINEER_SYSTEM_PROMPT
+    assert "Use `search_files` to find symbols" in SOFTWARE_ENGINEER_SYSTEM_PROMPT
+    assert "If a tool returns `invalid_arguments`" in SOFTWARE_ENGINEER_SYSTEM_PROMPT
+    assert preset.system_prompt == SOFTWARE_ENGINEER_SYSTEM_PROMPT
+
+
+def test_public_agent_with_preset_injects_default_agent_playbook(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+
+    class PromptAwareLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            system_prompt = messages[0]["content"]
+            assert "# Default Agent Playbook" in system_prompt
+            assert "Treat generated tool arguments as untrusted input" in system_prompt
+            assert "Use `apply_patch` for edits to existing text files" in system_prompt
+            assert "memory tools only for durable user, project, preference, or prior-work facts" in system_prompt
+            return json.dumps({"type": "final_answer", "content": "preset prompt loaded"})
+
+    handle = Agent(config=config, preset=SoftwareEngineer(), llm=PromptAwareLLM(), tools=[], skills=[])
+
+    assert handle.run("hello") == "preset prompt loaded"
 
 
 def test_public_agent_runs_decorated_tool(tmp_path):

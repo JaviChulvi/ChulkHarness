@@ -33,6 +33,8 @@ This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLit
 
 The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
 
+The default `SoftwareEngineer` preset keeps its operating guidance in `chulk/presets/AGENT.md` and injects that playbook into the base system prompt. This keeps durable agent behavior separate from per-turn skills, memory, and tool schemas.
+
 Long-term memory is stored in the local SQLite database at `chulk/store.sqlite`, which is ignored by Git. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
 
 Memory search uses SQLite FTS when available, with a fallback keyword search and local vector reranking. Memories also track tags, source, confidence, importance, archive state, and access metadata. A human-readable `MEMORY.md` can be imported or exported through memory tools, but SQLite remains the runtime memory engine.
@@ -110,6 +112,7 @@ chulk/
   tracing/
     logger.py
   presets/
+    AGENT.md
     software_engineer.py
   tests/
 skills/
@@ -391,11 +394,14 @@ CHULK_TRACE_MAX_PROMPT_CHARS=50000
 CHULK_MAX_OBSERVATION_CHARS=12000
 CHULK_MAX_TOOL_STDOUT_CHARS=8000
 CHULK_MAX_TOOL_STDERR_CHARS=4000
+CHULK_MAX_REFLECTION_ATTEMPTS=0
 CHULK_LLM_TIMEOUT_SECONDS=60
 CHULK_LLM_MAX_RETRIES=2
 ```
 
-Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window, max output size, and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request also receives an output cap based on the remaining context for that specific prompt. Hosted providers require explicit model metadata; the `local` provider uses conservative default metadata for arbitrary local model names, with known local Gemma aliases registered explicitly.
+Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request receives an output limit based only on the remaining context for that specific prompt, not a fixed provider cap. Hosted providers require explicit model metadata; the `local` provider uses conservative default metadata for arbitrary local model names, with known local aliases registered explicitly.
+
+Set `CHULK_MAX_REFLECTION_ATTEMPTS=1` to add a bounded pre-final reflection pass. The reviewer returns structured JSON, can approve the proposed final answer, or can add a `reflection_feedback` observation that sends the agent through one more action loop before the answer is shown.
 
 Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
 

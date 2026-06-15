@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from importlib.resources import files
+
 from chulk.api import AgentPreset
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 import chulk.skills as skills
 import chulk.tools as tools
 
 
+DEFAULT_AGENT_PLAYBOOK = files("chulk.presets").joinpath("AGENT.md").read_text(encoding="utf-8").strip()
+
 SOFTWARE_ENGINEER_SYSTEM_PROMPT = "\n\n".join(
     [
         BASE_SYSTEM_PROMPT,
-        """You are configured as an agentic software engineer.
-
-Read the code before making claims about it. Prefer small, inspectable changes that fit the existing architecture. Use tools to inspect files, edit with patches, run focused validation, and explain concrete outcomes. Treat tool arguments as untrusted, keep all file and shell work inside the configured project root, and preserve unrelated user changes.""",
+        DEFAULT_AGENT_PLAYBOOK,
     ]
 )
 
@@ -30,4 +32,4 @@ def software_engineer() -> AgentPreset:
 SoftwareEngineer = software_engineer
 
 
-__all__ = ["SOFTWARE_ENGINEER_SYSTEM_PROMPT", "SoftwareEngineer", "software_engineer"]
+__all__ = ["DEFAULT_AGENT_PLAYBOOK", "SOFTWARE_ENGINEER_SYSTEM_PROMPT", "SoftwareEngineer", "software_engineer"]

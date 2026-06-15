@@ -683,6 +683,8 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         plan_approved=bool(payload.get("plan_approved")),
         planning_feedback_count=int(payload.get("planning_feedback_count") or 0),
         planning_tool_limit_feedback_sent=bool(payload.get("planning_tool_limit_feedback_sent")),
+        reflection_count=int(payload.get("reflection_count") or 0),
+        reflections=_safe_dict_list(payload.get("reflections")),
         context_reports=_safe_dict_list(payload.get("context_reports")),
     )
     turn.tool_calls = [_tool_call_from_dict(item) for item in _safe_dict_list(payload.get("tool_calls"))]

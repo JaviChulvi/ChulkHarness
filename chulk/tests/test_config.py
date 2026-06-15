@@ -5,6 +5,7 @@ from chulk.config import (
     DEFAULT_LOCAL_BASE_URL,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_MAX_OBSERVATION_CHARS,
+    DEFAULT_MAX_REFLECTION_ATTEMPTS,
     DEFAULT_MAX_SKILL_CONTENT_CHARS,
     DEFAULT_MAX_SKILLS_PER_TURN,
     DEFAULT_MAX_TOOL_STDERR_CHARS,
@@ -33,6 +34,7 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.max_observation_chars == DEFAULT_MAX_OBSERVATION_CHARS
     assert config.max_tool_stdout_chars == DEFAULT_MAX_TOOL_STDOUT_CHARS
     assert config.max_tool_stderr_chars == DEFAULT_MAX_TOOL_STDERR_CHARS
+    assert config.max_reflection_attempts == DEFAULT_MAX_REFLECTION_ATTEMPTS
 
 
 def test_load_config_reads_dotenv(tmp_path):
@@ -48,6 +50,7 @@ def test_load_config_reads_dotenv(tmp_path):
                 "CHULK_MAX_OBSERVATION_CHARS=900",
                 "CHULK_MAX_TOOL_STDOUT_CHARS=700",
                 "CHULK_MAX_TOOL_STDERR_CHARS=300",
+                "CHULK_MAX_REFLECTION_ATTEMPTS=1",
                 "DEEPSEEK_API_KEY=deepseek-key",
                 "CHULK_LOCAL_API_KEY=local-key",
                 "CHULK_LOCAL_BASE_URL=http://localhost:11434/v1",
@@ -71,6 +74,7 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.max_observation_chars == 900
     assert config.max_tool_stdout_chars == 700
     assert config.max_tool_stderr_chars == 300
+    assert config.max_reflection_attempts == 1
 
 
 def test_environment_overrides_dotenv(tmp_path):
@@ -93,6 +97,15 @@ def test_invalid_integer_config_raises():
         assert "CHULK_HISTORY_LIMIT" in str(exc)
     else:
         raise AssertionError("Expected invalid integer config to fail")
+
+
+def test_invalid_reflection_attempts_config_raises():
+    try:
+        load_config({"CHULK_MAX_REFLECTION_ATTEMPTS": "-1"})
+    except ValueError as exc:
+        assert "CHULK_MAX_REFLECTION_ATTEMPTS" in str(exc)
+    else:
+        raise AssertionError("Expected invalid reflection attempt config to fail")
 
 
 def test_deepseek_provider_uses_deepseek_default_model(tmp_path):

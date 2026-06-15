@@ -1117,7 +1117,7 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
   - [x] Explain which memories, skills, tools, and history were injected into the current prompt.
   - [x] Avoid injecting large tool observations when an artifact path is enough.
   - [x] Add tests for token estimates, trimming, summarization, and prompt budget behavior.
-- [ ] Add reflection prompt.
+- [x] Add reflection prompt.
 - [ ] Add post-tool reflection.
 - [x] Add conversation summarization.
 - [x] Add local embedding/vector memory search.
@@ -1162,7 +1162,232 @@ Optional future directions:
 - [ ] Agent evaluation scripts.
 - [ ] Benchmark prompts for regression testing.
 
-## 17. Definition of Done
+## 17. Agent Harness Feature Backlog
+
+Ideas from studying Codex-like coding agents, Hermes-style persistent agents, and OpenClaw-style personal automation harnesses. These are not committed milestones yet; use this backlog when choosing future Chulk features that fit the explicit, inspectable runtime.
+
+### Recommended Next Sequence
+
+- [ ] Add reflection loop after model actions.
+- [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
+- [ ] Add true multi-step task execution on top of approved plans.
+- [ ] Add per-tool permissions.
+- [ ] Add CLI permission prompts for individual risky tool calls.
+- [ ] Add local code review mode.
+- [ ] Add optional web/search tool.
+- [ ] Add MCP client support.
+- [ ] Add subagents.
+- [ ] Add lifecycle hooks and automations.
+
+### Core Agent Behavior
+
+- [ ] Add a provider-agnostic `reflection` action.
+- [ ] Add a post-turn self-check before returning final answers.
+- [ ] Add a satisfaction check that can decide whether another tool call is needed.
+- [ ] Add retry strategy metadata to tool observations.
+- [ ] Add tool failure classification: invalid arguments, unsafe, timeout, provider failure, environment failure, and user-blocked.
+- [ ] Add plan step dependencies.
+- [ ] Add plan step retry limits.
+- [ ] Add plan step-specific tool budgets.
+- [ ] Add plan step acceptance criteria.
+- [ ] Add plan step evidence fields.
+- [ ] Add blocked-step recovery prompts.
+- [ ] Add resumable multi-turn goals.
+- [ ] Add task budgets for tool calls, model requests, elapsed time, and tokens.
+- [ ] Add goal status: active, paused, complete, blocked, abandoned.
+- [ ] Add user-steering updates while a goal is active.
+- [ ] Add an ephemeral side conversation mode that does not pollute main history.
+- [ ] Add conversation fork support for exploring alternate approaches.
+
+### Permissions And Safety
+
+- [ ] Turn `Tool.requires_confirmation` into an enforced permission gate.
+- [ ] Add permission levels: read, write, shell, network, external-service, and destructive.
+- [ ] Add built-in permission profiles: read-only, workspace-write, trusted-local, and full-access.
+- [ ] Add custom permission profiles in config.
+- [ ] Add workspace root allowlists.
+- [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, and build artifacts.
+- [ ] Add network allow/deny domain rules.
+- [ ] Add command prefix rules: allow, prompt, deny.
+- [ ] Add trusted command catalog for low-risk read-only commands.
+- [ ] Add approval prompts with approve once, deny once, always allow, and always deny choices.
+- [ ] Add auto-reviewer approvals as an optional reviewer mode.
+- [ ] Add audit records for every permission decision.
+- [ ] Add sandbox backend interface.
+- [ ] Add Docker sandbox backend.
+- [ ] Add `bubblewrap` sandbox backend for Linux.
+- [ ] Add temporary workspace sandbox for risky file operations.
+- [ ] Add safer package-manager policy for installs and scripts.
+- [ ] Add fatal safety errors that stop the turn immediately.
+- [ ] Add prompt-injection warnings for web, browser, and external document inputs.
+
+### Tools
+
+- [ ] Add web search with disabled, cached, and live modes.
+- [ ] Add citation-aware web research.
+- [ ] Add HTTP fetch with bounded output and untrusted-content labeling.
+- [ ] Add browser automation tool for local web app verification.
+- [ ] Add screenshot capture and image attachment support.
+- [ ] Add image generation/editing as an optional tool.
+- [ ] Add Python code-interpreter or REPL tool.
+- [ ] Add structured symbol search separate from shell.
+- [ ] Add artifact reader for full truncated outputs saved under traces.
+- [ ] Add Git status tool.
+- [ ] Add Git diff tool that includes untracked files.
+- [ ] Add Git stage tool with explicit file list.
+- [ ] Add Git commit tool with message preview.
+- [ ] Add Git branch and worktree tools.
+- [ ] Add local test-runner tool with parsed failure summaries.
+- [ ] Add package-manager tool with permission-aware installs.
+- [ ] Add file mention or attach tool for pinning files into the next prompt.
+- [ ] Add notebook tooling.
+- [ ] Add document and spreadsheet tooling as optional extras.
+- [ ] Add tool search/discovery when tool catalogs grow.
+- [ ] Add tool grouping and enable/disable controls.
+- [ ] Add tool result schemas for richer observations.
+
+### Memory And Knowledge
+
+- [ ] Add external embedding provider integration.
+- [ ] Add memory review queue before saving inferred memories.
+- [ ] Add background memory extraction from completed sessions.
+- [ ] Add per-thread memory controls: use existing memories, generate future memories, both, or neither.
+- [ ] Add short-lived commitment memories for follow-ups.
+- [ ] Add memory expiry dates.
+- [ ] Add memory provenance and evidence records.
+- [ ] Add contradiction detection.
+- [ ] Add freshness tracking.
+- [ ] Add memory confidence recalculation.
+- [ ] Add memory consolidation jobs.
+- [ ] Add memory import/export review summaries.
+- [ ] Add memory wiki vault with deterministic pages.
+- [ ] Add structured memory claims and evidence.
+- [ ] Add `wiki_search`, `wiki_get`, `wiki_apply`, and `wiki_lint` tools.
+- [ ] Add compiled memory digests for prompt injection.
+- [ ] Add daily memory notes.
+- [ ] Add workspace memory files as optional context.
+- [ ] Add memory backup/export command.
+
+### Skills
+
+- [ ] Add LLM-based skill router.
+- [ ] Add embedding-based skill selection.
+- [ ] Add hybrid keyword, embedding, and LLM skill ranking.
+- [ ] Add skill watcher for changed `SKILL.md` files.
+- [ ] Add skill install/list/remove commands.
+- [ ] Add skill allowlists per agent preset.
+- [ ] Add skill dependency checks.
+- [ ] Add skill environment gating.
+- [ ] Add skill metadata linting.
+- [ ] Add skill workshop for agent-drafted skill proposals.
+- [ ] Add user approval flow for newly proposed skills.
+- [ ] Add skill self-improvement suggestions after repeated task patterns.
+- [ ] Add skill examples, references, scripts, and assets conventions.
+- [ ] Add packaged skill bundles.
+- [ ] Add skill marketplace or folder installer.
+
+### Orchestration And Multi-Agent Work
+
+- [ ] Add subagent runtime primitives.
+- [ ] Add built-in `explorer`, `worker`, and `reviewer` agents.
+- [ ] Add custom agent manifests under `.chulk/agents/`.
+- [ ] Add parent-child trace linking.
+- [ ] Add subagent result aggregation.
+- [ ] Add subagent permission inheritance.
+- [ ] Add subagent depth and concurrency limits.
+- [ ] Add parallel read-only exploration.
+- [ ] Add `/agent` command to switch between active agent threads.
+- [ ] Add `/fork` command to branch a conversation.
+- [ ] Add `/side` or `/btw` command for temporary side questions.
+- [ ] Add background task ledger.
+- [ ] Add task cancellation.
+- [ ] Add task audit command.
+- [ ] Add scheduled tasks.
+- [ ] Add heartbeat checks.
+- [ ] Add worktree-isolated automations.
+- [ ] Add task flow definitions for durable multi-step jobs.
+- [ ] Add external harness bridge, ACP-style.
+- [ ] Add Chulk as an MCP client.
+- [ ] Add Chulk as an MCP server exposing sessions, memory, and tools.
+
+### Interfaces And Product Surfaces
+
+- [ ] Add non-interactive `chulk exec` for scripts and CI.
+- [ ] Add JSON output mode for automation.
+- [ ] Add richer Python SDK around `AgentHandle`.
+- [ ] Add JSON-RPC app server.
+- [ ] Add WebSocket event streaming.
+- [ ] Add FastAPI server.
+- [ ] Add REST API for chat.
+- [ ] Add trace viewer UI.
+- [ ] Add conversation replay UI.
+- [ ] Add local web UI.
+- [ ] Add IDE/editor context injection.
+- [ ] Add `/mention` command for files and folders.
+- [ ] Add `/copy` command for latest assistant output.
+- [ ] Add `/diff` command.
+- [ ] Add `/review` command.
+- [ ] Add `/model` command.
+- [ ] Add `/permissions` command.
+- [ ] Add `/compact` command.
+- [ ] Add `/goal` command.
+- [ ] Add `/memories` command.
+- [ ] Add `/skills` command.
+- [ ] Add `/hooks` command.
+- [ ] Add `/mcp` command.
+
+### Providers And Runtime
+
+- [ ] Add provider-native tool calling as an optional mode.
+- [ ] Add streaming model output.
+- [ ] Add model switching mid-session.
+- [ ] Add model reasoning-effort profiles where providers support them.
+- [ ] Add configurable model/provider profiles.
+- [ ] Add token usage logging.
+- [ ] Add cost tracking per provider and model.
+- [ ] Add provider health checks.
+- [ ] Add invalid-model diagnostics.
+- [ ] Add rate-limit handling.
+- [ ] Add provider fallback strategies beyond first-success.
+- [ ] Add prompt caching metadata where providers support it.
+- [ ] Add multimodal input support for images and screenshots.
+- [ ] Add local model capability detection.
+- [ ] Add OpenTelemetry-style trace export.
+
+### Review, Evals, And Quality
+
+- [ ] Add local code review agent for uncommitted changes.
+- [ ] Add review against a base branch.
+- [ ] Add review of a selected commit.
+- [ ] Add custom review instructions.
+- [ ] Add eval scripts for agent workflows.
+- [ ] Add benchmark prompts for regression testing.
+- [ ] Add trace-based regression replay.
+- [ ] Add golden tests for tool-use loops.
+- [ ] Add safety red-team prompts.
+- [ ] Add prompt-performance dashboards.
+- [ ] Add `chulk doctor` diagnostics.
+- [ ] Add config validation command.
+- [ ] Add tool inventory drift checks.
+- [ ] Add release-readiness checklist command.
+
+### Plugin And Distribution
+
+- [ ] Add plugin manifest format.
+- [ ] Add plugin loader.
+- [ ] Add plugin trust review.
+- [ ] Add plugin hooks.
+- [ ] Add plugin-provided tools.
+- [ ] Add plugin-provided skills.
+- [ ] Add plugin-provided providers.
+- [ ] Add plugin-provided config defaults.
+- [ ] Add plugin install/list/remove commands.
+- [ ] Add bundled plugin inventory.
+- [ ] Add migration/import from Codex-style config.
+- [ ] Add migration/import from OpenClaw-style workspace files.
+- [ ] Add Docker development environment.
+
+## 18. Definition of Done
 
 The project is successful when:
 

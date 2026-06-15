@@ -24,7 +24,6 @@ class LLMClientSettings:
     local_base_url: str
     timeout_seconds: float
     max_retries: int
-    max_output_tokens: int
 
 
 @dataclass(frozen=True)
@@ -78,7 +77,7 @@ def create_llm_client(
     if provider_spec is None:
         raise LLMConfigurationError(f"Unsupported LLM provider: {provider}")
     try:
-        model_capabilities = resolve_model_capabilities(normalized_provider, model)
+        resolve_model_capabilities(normalized_provider, model)
     except ValueError as exc:
         raise LLMConfigurationError(str(exc)) from exc
 
@@ -92,7 +91,6 @@ def create_llm_client(
             local_base_url=local_base_url,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
-            max_output_tokens=model_capabilities.max_output_tokens,
         )
     )
 
@@ -103,7 +101,6 @@ def _create_openai_client(settings: LLMClientSettings) -> LLMClient:
         api_key=settings.openai_api_key,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
-        max_output_tokens=settings.max_output_tokens,
     )
 
 
@@ -114,7 +111,6 @@ def _create_deepseek_client(settings: LLMClientSettings) -> LLMClient:
         base_url=settings.deepseek_base_url,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
-        max_output_tokens=settings.max_output_tokens,
     )
 
 
@@ -125,5 +121,4 @@ def _create_local_client(settings: LLMClientSettings) -> LLMClient:
         base_url=settings.local_base_url,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
-        max_output_tokens=settings.max_output_tokens,
     )

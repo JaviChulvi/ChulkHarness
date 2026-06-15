@@ -13,7 +13,22 @@ from typing import Any
 from chulk.tools.registry import Tool, ToolResult
 
 
-IGNORED_DIRS = {".git", ".venv", ".conda", "__pycache__", ".pytest_cache", "chulkharness.egg-info", "chulk.egg-info"}
+IGNORED_DIRS = {
+    ".git",
+    ".venv",
+    ".conda",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "build",
+    "dist",
+    "node_modules",
+    "traces",
+    "chulkharness.egg-info",
+    "chulk.egg-info",
+}
 UNSAFE_WRITE_DIRS = {
     *IGNORED_DIRS,
     ".mypy_cache",
@@ -347,8 +362,13 @@ def search_files(arguments: dict[str, Any], project_root: Path) -> ToolResult:
 
 
 def _search_with_rg(project_root: Path, directory: Path, query: str, pattern: str, max_results: int) -> ToolResult:
+    command = ["rg", "--line-number", "--color", "never", "--glob", pattern]
+    for ignored_dir in sorted(IGNORED_DIRS):
+        command.extend(["--glob", f"!{ignored_dir}/**", "--glob", f"!**/{ignored_dir}/**"])
+    command.extend(["--", query, str(directory)])
+
     completed = subprocess.run(
-        ["rg", "--line-number", "--color", "never", "--glob", pattern, "--", query, str(directory)],
+        command,
         cwd=project_root,
         text=True,
         capture_output=True,

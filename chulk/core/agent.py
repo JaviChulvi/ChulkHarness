@@ -16,6 +16,12 @@ from chulk.core.observations import format_tool_observation
 from chulk.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
+from chulk.core.reflection import (
+    ReflectionParseError,
+    ReflectionResult,
+    build_reflection_messages,
+    parse_reflection_response,
+)
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
 from chulk.llm import LLMActionError, LLMClient, LLMError
@@ -29,6 +35,7 @@ from chulk.tracing import JSONLTraceLogger
 MAX_SUMMARY_SOURCE_CHARS = 12000
 MAX_SUMMARY_CHARS = 4000
 SUMMARY_COMPACTION_PASSES = 3
+MAX_UNPARSED_MODEL_OUTPUT_CHARS = 2000
 
 
 class Agent:
@@ -53,6 +60,7 @@ class Agent:
         max_observation_chars: int = 12000,
         max_tool_stdout_chars: int = 8000,
         max_tool_stderr_chars: int = 4000,
+        max_reflection_attempts: int = 0,
         context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         pinned_skill_names: list[str] | None = None,
@@ -71,6 +79,8 @@ class Agent:
             raise ValueError("max_tool_stdout_chars must be greater than zero")
         if max_tool_stderr_chars < 1:
             raise ValueError("max_tool_stderr_chars must be greater than zero")
+        if max_reflection_attempts < 0:
+            raise ValueError("max_reflection_attempts cannot be negative")
         self.context_budget = context_budget or ContextBudget()
         self.llm_client = llm_client
         self.state = state or AgentState()
@@ -88,6 +98,7 @@ class Agent:
         self.max_observation_chars = max_observation_chars
         self.max_tool_stdout_chars = max_tool_stdout_chars
         self.max_tool_stderr_chars = max_tool_stderr_chars
+        self.max_reflection_attempts = max_reflection_attempts
         self.event_callback = event_callback
         self.pinned_skill_names = pinned_skill_names or []
         self._profile_memories: list[MemoryRecord] = []
@@ -224,7 +235,19 @@ class Agent:
                 self.state.json_repair_attempts += exc.repair_attempts
                 self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
                 turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                return self._fail_turn(str(exc), turn)
+                if exc.raw_response:
+                    self._trace(
+                        TraceEvent.MODEL_RESPONSE,
+                        {
+                            "turn_id": turn.turn_id,
+                            "request_index": turn.model_request_count,
+                            "content": exc.raw_response,
+                            "repair_attempts": exc.repair_attempts,
+                            "repair_errors": exc.errors,
+                            "parse_failed": True,
+                        },
+                    )
+                return self._fail_action_protocol_turn(exc, turn)
             action = action_result.action
             self.state.json_repair_attempts += action_result.repair_attempts
             self.state.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
@@ -272,14 +295,10 @@ class Agent:
                     )
                     return self._run_action_loop(turn, require_plan=True)
 
-                self.memory.add_assistant_message(action.content)
-                self.state.final_answer = action.content
-                self.state.messages = self.memory.recent()
-                turn.complete(action.content)
-                self._clear_active_plan_for_turn(turn)
-                self._trace(TraceEvent.FINAL_ANSWER, {"turn_id": turn.turn_id, "content": action.content})
-                self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
-                return action.content
+                if self._final_answer_needs_revision(action.content, turn):
+                    return self._run_action_loop(turn, require_plan=False)
+
+                return self._complete_final_answer(action.content, turn)
 
             if isinstance(action, ToolCallAction):
                 if require_plan:
@@ -534,6 +553,166 @@ class Agent:
         self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()})
         return response
 
+    def _complete_final_answer(self, content: str, turn: TurnState) -> str:
+        self.memory.add_assistant_message(content)
+        self.state.final_answer = content
+        self.state.messages = self.memory.recent()
+        turn.complete(content)
+        self._clear_active_plan_for_turn(turn)
+        self._trace(TraceEvent.FINAL_ANSWER, {"turn_id": turn.turn_id, "content": content})
+        self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
+        return content
+
+    def _final_answer_needs_revision(self, proposed_answer: str, turn: TurnState) -> bool:
+        if self.max_reflection_attempts == 0 or turn.reflection_count >= self.max_reflection_attempts:
+            return False
+
+        reflection = self._reflect_before_final_answer(proposed_answer, turn)
+        if reflection.approved:
+            return False
+
+        self._request_reflection_revision(turn, proposed_answer, reflection)
+        return True
+
+    def _reflect_before_final_answer(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
+        turn.reflection_count += 1
+        attempt = turn.reflection_count
+        messages = build_reflection_messages(turn, proposed_answer)
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        context_report = {
+            "purpose": "reflection",
+            "reflection_attempt": attempt,
+            "proposed_answer_chars": len(proposed_answer),
+        }
+        self._trace(
+            TraceEvent.REFLECTION_STARTED,
+            {
+                "turn_id": turn.turn_id,
+                "reflection_attempt": attempt,
+                "proposed_answer": proposed_answer,
+            },
+        )
+        request_payload = format_model_request_trace(
+            messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report=context_report,
+        )
+        request_payload["purpose"] = "reflection"
+        request_payload["reflection_attempt"] = attempt
+        self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+
+        try:
+            raw_response = self.llm_client.complete(messages)
+        except LLMError as exc:
+            return self._fail_open_reflection(
+                turn,
+                proposed_answer,
+                attempt=attempt,
+                error=str(exc),
+                raw_response=None,
+                request_index=request_index,
+            )
+
+        self._trace(
+            TraceEvent.MODEL_RESPONSE,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "content": raw_response,
+                "purpose": "reflection",
+                "reflection_attempt": attempt,
+            },
+        )
+        try:
+            reflection = parse_reflection_response(raw_response)
+        except ReflectionParseError as exc:
+            return self._fail_open_reflection(
+                turn,
+                proposed_answer,
+                attempt=attempt,
+                error=str(exc),
+                raw_response=raw_response,
+                request_index=request_index,
+            )
+
+        record = {
+            **reflection.to_dict(),
+            "attempt": attempt,
+            "proposed_answer": proposed_answer,
+        }
+        turn.reflections.append(record)
+        self._trace(TraceEvent.REFLECTION_COMPLETED, {"turn_id": turn.turn_id, **record})
+        return reflection
+
+    def _fail_open_reflection(
+        self,
+        turn: TurnState,
+        proposed_answer: str,
+        *,
+        attempt: int,
+        error: str,
+        raw_response: str | None,
+        request_index: int,
+    ) -> ReflectionResult:
+        reason = f"Reflection failed open: {error}"
+        reflection = ReflectionResult(approved=True, reason=reason)
+        record = {
+            **reflection.to_dict(),
+            "attempt": attempt,
+            "proposed_answer": proposed_answer,
+            "error": error,
+            "raw_response": raw_response,
+        }
+        turn.reflections.append(record)
+        turn.errors.append(reason)
+        self._trace(
+            TraceEvent.REFLECTION_FAILED,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                **record,
+            },
+        )
+        return reflection
+
+    def _request_reflection_revision(
+        self,
+        turn: TurnState,
+        proposed_answer: str,
+        reflection: ReflectionResult,
+    ) -> None:
+        feedback = (
+            "Reflection feedback: revise the proposed final answer before showing it to the user.\n"
+            f"Reason: {reflection.reason}\n"
+            f"Instruction: {reflection.feedback}"
+        )
+        metadata = {
+            "reflection_count": turn.reflection_count,
+            "approved": reflection.approved,
+            "reason": reflection.reason,
+            "feedback": reflection.feedback,
+            "proposed_answer": proposed_answer,
+        }
+        self._add_synthetic_observation(
+            turn,
+            tool_name="reflection_feedback",
+            content=feedback,
+            output_metadata=metadata,
+        )
+        self._trace(
+            TraceEvent.REFLECTION_REVISION_REQUESTED,
+            {
+                "turn_id": turn.turn_id,
+                **metadata,
+            },
+        )
+
     def _plan_needs_revision(self, plan, turn: TurnState) -> bool:
         return plan_looks_like_reconnaissance([(step.title, step.description) for step in plan.steps])
 
@@ -550,20 +729,12 @@ class Agent:
         metadata = {"revision_count": turn.planning_feedback_count}
         if plan is not None:
             metadata["rejected_plan"] = plan.to_dict()
-        observation_record = ObservationRecord(
+        self._add_synthetic_observation(
+            turn,
             tool_name="planning_feedback",
             content=feedback,
             output_metadata=metadata,
         )
-        turn.observations.append(observation_record)
-        self.state.observations.append(
-            {
-                "tool_name": "planning_feedback",
-                "observation": feedback,
-                "output_metadata": metadata,
-            }
-        )
-        self.memory.add_observation(feedback)
         self._trace(
             TraceEvent.PLAN_REVISION_REQUESTED,
             {
@@ -571,6 +742,39 @@ class Agent:
                 "revision_count": turn.planning_feedback_count,
                 "plan": plan.to_dict() if plan is not None else None,
                 "feedback": feedback,
+            },
+        )
+
+    def _add_synthetic_observation(
+        self,
+        turn: TurnState,
+        *,
+        tool_name: str,
+        content: str,
+        output_metadata: dict,
+    ) -> None:
+        metadata = {**output_metadata, "synthetic": True}
+        observation_record = ObservationRecord(
+            tool_name=tool_name,
+            content=content,
+            output_metadata=metadata,
+        )
+        turn.observations.append(observation_record)
+        self.state.observations.append(
+            {
+                "tool_name": tool_name,
+                "observation": content,
+                "output_metadata": metadata,
+            }
+        )
+        self.memory.add_observation(content)
+        self._trace(
+            TraceEvent.TOOL_OBSERVATION,
+            {
+                "turn_id": turn.turn_id,
+                "tool_name": tool_name,
+                "observation": content,
+                "output_metadata": metadata,
             },
         )
 
@@ -731,6 +935,10 @@ class Agent:
             self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
         return message
 
+    def _fail_action_protocol_turn(self, exc: LLMActionError, turn: TurnState) -> str:
+        message = _format_action_protocol_failure(str(exc), exc.raw_response)
+        return self._fail_turn(message, turn)
+
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
         payload = payload or {}
         if self.trace_logger is not None:
@@ -785,6 +993,33 @@ def _dedupe_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         seen_ids.add(marker)
         deduped.append(message)
     return deduped
+
+
+def _format_action_protocol_failure(error: str, raw_response: str | None) -> str:
+    lines = [
+        "Model response was not valid action JSON after repair.",
+        "I did not execute any tools from the invalid response.",
+        "",
+        f"Error: {error}",
+    ]
+    if raw_response:
+        lines.extend(
+            [
+                "",
+                "Unparsed model output:",
+                "",
+                _format_indented_preview(raw_response, MAX_UNPARSED_MODEL_OUTPUT_CHARS),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _format_indented_preview(text: str, max_chars: int) -> str:
+    preview = text.strip()
+    truncated = len(preview) > max_chars
+    if truncated:
+        preview = preview[:max_chars].rstrip() + "\n... [truncated]"
+    return "\n".join(f"    {line}" if line else "" for line in preview.splitlines())
 
 
 def _format_context_summary_request(*, previous_summary: str | None, messages: list[dict[str, str]]) -> str:

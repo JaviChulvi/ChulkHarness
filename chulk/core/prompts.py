@@ -26,7 +26,10 @@ Tool call format:
 {"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
 
 Use a final_answer when you can answer without a tool. Use a tool_call when you need a listed tool.
+If you intend to use a tool, the type must be tool_call; never put tool_name or arguments_json on a final_answer.
+If you intend to answer the user, the type must be final_answer, tool_name must be null, and arguments_json must be "{}".
 For tool calls, arguments_json must be a JSON-encoded object string containing the tool arguments.
+For tool calls, use only argument fields from the listed tool schema.
 Use a plan only when the Planning section explicitly tells you to propose a plan.
 For plans, plan_json must be a JSON-encoded object string with summary and steps.
 After an observation is provided, use it to produce the next tool_call or final_answer.
@@ -39,6 +42,25 @@ Return exactly one valid JSON object using one of these shapes:
 {"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}"}
 {"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\"}]}"}
 {"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
+Do not include Markdown fences, comments, or prose outside the JSON object.
+If your previous response included tool_name or tool arguments, return a tool_call action.
+If your previous response was a direct answer, return a final_answer action with tool_name null and arguments_json "{}".
+If an observation reported invalid_arguments, remove unsupported fields and use only the listed schema fields.
+"""
+
+REFLECTION_PROMPT = """You are ChulkHarness's final-answer reviewer.
+Review a proposed final answer before it is shown to the user.
+
+Return only one JSON object with this shape:
+{
+  "approved": true,
+  "reason": "short reason",
+  "feedback": null
+}
+
+Set approved to false only when the answer has a material issue: it contradicts the user's request, ignores tool output, skips an approved plan step, hides a tool error, claims unverified work, or should take another action before answering.
+Do not reject merely for style, wording preference, or optional extra detail.
+When approved is false, feedback must be a concise instruction for the next model action.
 Do not include Markdown fences, comments, or prose outside the JSON object.
 """
 

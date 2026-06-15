@@ -22,6 +22,7 @@ DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
 DEFAULT_MAX_OBSERVATION_CHARS = 12000
 DEFAULT_MAX_TOOL_STDOUT_CHARS = 8000
 DEFAULT_MAX_TOOL_STDERR_CHARS = 4000
+DEFAULT_MAX_REFLECTION_ATTEMPTS = 0
 SUPPORTED_LLM_PROVIDERS = supported_llm_providers()
 
 
@@ -60,6 +61,7 @@ class Config:
     max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS
     max_tool_stdout_chars: int = DEFAULT_MAX_TOOL_STDOUT_CHARS
     max_tool_stderr_chars: int = DEFAULT_MAX_TOOL_STDERR_CHARS
+    max_reflection_attempts: int = DEFAULT_MAX_REFLECTION_ATTEMPTS
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
@@ -87,6 +89,19 @@ def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
         raise ValueError(f"{key} must be an integer") from exc
     if parsed < 1:
         raise ValueError(f"{key} must be greater than zero")
+    return parsed
+
+
+def _env_nonnegative_int(env: Mapping[str, str], key: str, default: int) -> int:
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{key} must be zero or greater")
     return parsed
 
 
@@ -147,6 +162,11 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         max_observation_chars=_env_int(env, "CHULK_MAX_OBSERVATION_CHARS", DEFAULT_MAX_OBSERVATION_CHARS),
         max_tool_stdout_chars=_env_int(env, "CHULK_MAX_TOOL_STDOUT_CHARS", DEFAULT_MAX_TOOL_STDOUT_CHARS),
         max_tool_stderr_chars=_env_int(env, "CHULK_MAX_TOOL_STDERR_CHARS", DEFAULT_MAX_TOOL_STDERR_CHARS),
+        max_reflection_attempts=_env_nonnegative_int(
+            env,
+            "CHULK_MAX_REFLECTION_ATTEMPTS",
+            DEFAULT_MAX_REFLECTION_ATTEMPTS,
+        ),
     )
 
 
