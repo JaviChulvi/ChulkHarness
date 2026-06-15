@@ -216,6 +216,91 @@ def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, caps
     assert "The command printed hello." in output
 
 
+def test_main_prompts_for_default_shell_permission_and_approves(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
+    prompts = []
+    inputs = iter(["run printf hello", "y", "/q"])
+
+    class ShellApprovalFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "run_cmd",
+                        "arguments_json": json.dumps({"command": "printf hello"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The command printed hello."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    def input_func(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(inputs)
+
+    exit_code = main(
+        [],
+        input_func=input_func,
+        llm_client_factory=lambda _config: ShellApprovalFakeLLM(),
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+    stripped_prompts = [strip_ansi(prompt) for prompt in prompts]
+
+    assert exit_code == 0
+    assert "Tool Permission" in output
+    assert "tool      run_cmd" in output
+    assert "level     shell" in output
+    assert "permission requested - run_cmd - shell" in output
+    assert "permission allow - run_cmd - shell" in output
+    assert "Approve tool call? [y/N]" in " ".join(stripped_prompts)
+    assert "exit 0" in output
+    assert "The command printed hello." in output
+
+
+def test_main_prompts_for_default_shell_permission_and_denies(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
+    inputs = iter(["run printf hello", "n", "/q"])
+
+    class ShellDenyFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "run_cmd",
+                        "arguments_json": json.dumps({"command": "printf hello"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "I did not run the command."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: ShellDenyFakeLLM(),
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "Tool Permission" in output
+    assert "permission deny - run_cmd - shell" in output
+    assert "tool failed - run_cmd - cmd: printf hello - permission_denied" in output
+    assert "exit 0" not in output
+    assert "I did not run the command." in output
+
+
 def test_main_plan_prefix_approve_flow_with_tools(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     inputs = iter(["/plan what is 2 + 2?", "/approve", "/q"])

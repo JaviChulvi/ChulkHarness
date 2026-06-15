@@ -602,6 +602,45 @@ def test_agent_blocks_confirmation_tool_without_permission_callback(tmp_path):
     assert "tool_permission_decided" in event_types
 
 
+def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):
+    calls = []
+    approvals = []
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "dangerous", "arguments": {"value": "run"}}),
+            json.dumps({"type": "final_answer", "content": "The approved tool ran."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="dangerous",
+            description="Dangerous test tool.",
+            args_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            callable=lambda arguments: calls.append(arguments) or ToolResult("dangerous", True, "ran"),
+            requires_confirmation=True,
+        )
+    )
+
+    def approve(request, record):
+        approvals.append((request.tool_name, record.decision))
+        return PermissionDecision.ALLOW
+
+    agent = Agent(llm, tool_registry=registry, permission_callback=approve)
+
+    response = agent.run_turn("run the dangerous tool")
+
+    assert response == "The approved tool ran."
+    assert calls == [{"value": "run"}]
+    assert approvals == [("dangerous", PermissionDecision.ASK)]
+    assert agent.state.turns[0].tool_calls[0].success is True
+
+
 def test_agent_traces_tool_call_lifecycle(tmp_path):
     trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
     llm = RecordingLLMClient(
