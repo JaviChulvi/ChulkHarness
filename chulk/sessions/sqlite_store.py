@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
-from chulk.core.state import ObservationRecord, Plan, PlanStep, ToolCallRecord, TurnState
+from chulk.core.state import ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
 from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
 
 
@@ -686,6 +686,7 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         reflection_count=int(payload.get("reflection_count") or 0),
         reflections=_safe_dict_list(payload.get("reflections")),
         context_reports=_safe_dict_list(payload.get("context_reports")),
+        plan_execution_feedback_count=int(payload.get("plan_execution_feedback_count") or 0),
     )
     turn.tool_calls = [_tool_call_from_dict(item) for item in _safe_dict_list(payload.get("tool_calls"))]
     turn.observations = [_observation_from_dict(item) for item in _safe_dict_list(payload.get("observations"))]
@@ -710,6 +711,14 @@ def _plan_from_dict(payload: Any) -> Plan | None:
                 title=title,
                 description=description,
                 status=str(item.get("status") or "pending"),
+                depends_on=_safe_string_list(item.get("depends_on")),
+                acceptance_criteria=_safe_string_list(item.get("acceptance_criteria")),
+                retry_limit=int(item.get("retry_limit") or 0),
+                evidence=[_plan_step_evidence_from_dict(record) for record in _safe_dict_list(item.get("evidence"))],
+                started_at=item.get("started_at"),
+                completed_at=item.get("completed_at"),
+                blocked_at=item.get("blocked_at"),
+                blocked_reason=item.get("blocked_reason"),
             )
         )
     if not steps:
@@ -730,11 +739,22 @@ def _tool_call_from_dict(payload: dict[str, Any]) -> ToolCallRecord:
         arguments=_safe_json_object(payload.get("arguments")),
         iteration=int(payload.get("iteration") or 0),
         phase=str(payload.get("phase") or "execution"),
+        plan_step_id=payload.get("plan_step_id"),
         started_at=str(payload.get("started_at") or _utc_now()),
         ended_at=payload.get("ended_at"),
         resolved_tool_name=payload.get("resolved_tool_name"),
         success=payload.get("success"),
         error=payload.get("error"),
+        metadata=_safe_json_object(payload.get("metadata")),
+    )
+
+
+def _plan_step_evidence_from_dict(payload: dict[str, Any]) -> PlanStepEvidence:
+    return PlanStepEvidence(
+        content=str(payload.get("content") or ""),
+        tool_name=payload.get("tool_name"),
+        tool_call_iteration=payload.get("tool_call_iteration"),
+        created_at=str(payload.get("created_at") or _utc_now()),
         metadata=_safe_json_object(payload.get("metadata")),
     )
 
@@ -790,6 +810,8 @@ def _conversation_status_from_turn(turn: dict[str, Any]) -> str:
         return "waiting_for_approval"
     if status == "failed":
         return "failed"
+    if status == "blocked":
+        return "blocked"
     if status == "plan_rejected":
         return "plan_rejected"
     if status == "completed":

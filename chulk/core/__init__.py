@@ -8,6 +8,7 @@ __all__ = [
     "ObservationRecord",
     "Plan",
     "PlanStep",
+    "PlanStepEvidence",
     "ToolCallRecord",
     "TraceEvent",
     "TurnState",
@@ -19,14 +20,15 @@ def __getattr__(name: str) -> Any:
         from chulk.core.agent import Agent
 
         return Agent
-    if name in {"AgentState", "ObservationRecord", "Plan", "PlanStep", "ToolCallRecord", "TurnState"}:
-        from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TurnState
+    if name in {"AgentState", "ObservationRecord", "Plan", "PlanStep", "PlanStepEvidence", "ToolCallRecord", "TurnState"}:
+        from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
 
         return {
             "AgentState": AgentState,
             "ObservationRecord": ObservationRecord,
             "Plan": Plan,
             "PlanStep": PlanStep,
+            "PlanStepEvidence": PlanStepEvidence,
             "ToolCallRecord": ToolCallRecord,
             "TurnState": TurnState,
         }[name]

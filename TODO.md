@@ -1123,7 +1123,7 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
 - [x] Add local embedding/vector memory search.
 - [x] Add memory importance scoring.
 - [ ] Add external semantic embedding provider integration.
-- [ ] Add multi-step task execution.
+- [x] Add multi-step task execution.
 - [ ] Add optional web/search tool.
 - [ ] Add skill router using an LLM classifier.
 - [ ] Add embedding-based skill selection.
@@ -1133,7 +1133,7 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
 Done when:
 
 - [ ] The agent can plan before acting.
-- [ ] The agent can perform multiple tool-backed steps.
+- [x] The agent can perform multiple tool-backed steps.
 - [x] The agent can summarize older context.
 - [ ] The agent can retrieve memories semantically.
 
@@ -1170,7 +1170,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 
 - [ ] Add reflection loop after model actions.
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
-- [ ] Add true multi-step task execution on top of approved plans.
+- [x] Add true multi-step task execution on top of approved plans.
 - [x] Add per-tool permissions.
 - [x] Add CLI permission prompts for individual risky tool calls.
 - [ ] Add local code review mode.
@@ -1186,11 +1186,11 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add a satisfaction check that can decide whether another tool call is needed.
 - [ ] Add retry strategy metadata to tool observations.
 - [ ] Add tool failure classification: invalid arguments, unsafe, timeout, provider failure, environment failure, and user-blocked.
-- [ ] Add plan step dependencies.
-- [ ] Add plan step retry limits.
+- [x] Add plan step dependencies.
+- [x] Add plan step retry limits.
 - [ ] Add plan step-specific tool budgets.
-- [ ] Add plan step acceptance criteria.
-- [ ] Add plan step evidence fields.
+- [x] Add plan step acceptance criteria.
+- [x] Add plan step evidence fields.
 - [ ] Add blocked-step recovery prompts.
 - [ ] Add resumable multi-turn goals.
 - [ ] Add task budgets for tool calls, model requests, elapsed time, and tokens.

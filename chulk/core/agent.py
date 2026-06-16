@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import re
 
-from chulk.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
+from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
 from chulk.core.context import AgentPrompt, ContextBudget
 from chulk.core.events import TraceEvent
 from chulk.core.observations import format_tool_observation
@@ -213,6 +213,10 @@ class Agent:
     def _run_action_loop(self, turn: TurnState, *, require_plan: bool) -> str:
         """Run model/tool iterations until the turn pauses or completes."""
         while True:
+            blocked_response = self._prepare_plan_execution_step(turn, require_plan=require_plan)
+            if blocked_response is not None:
+                return blocked_response
+
             prompt = self._build_prompt(turn, require_plan=require_plan)
             prompt = self._compact_context_if_needed(prompt, turn, require_plan=require_plan)
             messages = prompt.messages
@@ -288,6 +292,12 @@ class Agent:
             if isinstance(action, PlanAction):
                 return self._handle_plan_action(action, turn, require_plan=require_plan)
 
+            if isinstance(action, PlanStepUpdateAction):
+                step_update_response = self._handle_plan_step_update(action, turn, require_plan=require_plan)
+                if step_update_response is not None:
+                    return step_update_response
+                continue
+
             if isinstance(action, FinalAnswerAction):
                 if require_plan:
                     if turn.planning_feedback_count >= 2:
@@ -301,6 +311,22 @@ class Agent:
                         ),
                     )
                     return self._run_action_loop(turn, require_plan=True)
+
+                if self._approved_plan_incomplete(turn):
+                    if turn.plan_execution_feedback_count >= 1:
+                        return self._fail_turn(
+                            "Plan execution failed because the model returned a final answer before completing the approved plan.",
+                            turn,
+                        )
+                    self._request_plan_execution_feedback(
+                        turn,
+                        feedback=(
+                            "Plan execution feedback: the approved plan is not complete. "
+                            "Continue the current executable step with a tool call, or return a plan_step_update "
+                            "if the step's acceptance criteria are already satisfied. Do not return final_answer yet."
+                        ),
+                    )
+                    return self._run_action_loop(turn, require_plan=False)
 
                 if self._final_answer_needs_revision(action.content, turn):
                     return self._run_action_loop(turn, require_plan=False)
@@ -339,12 +365,13 @@ class Agent:
                         turn,
                     )
                 turn.tool_call_count += 1
-                plan_step = None if require_plan else self._start_plan_step(turn)
+                plan_step = None if require_plan else self._active_plan_step_for_tool(turn)
                 tool_call_record = ToolCallRecord(
                     tool_name=action.tool_name,
                     arguments=action.arguments,
                     iteration=turn.tool_call_count,
                     phase=phase,
+                    plan_step_id=plan_step.id if plan_step else None,
                 )
                 turn.tool_calls.append(tool_call_record)
                 tool_call_payload = {
@@ -356,14 +383,15 @@ class Agent:
                 permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
                 result = permission_result or self.tool_registry.run(action.tool_name, action.arguments)
                 tool_call_record.finish(result)
-                self.state.tool_calls.append(
-                    {
-                        "tool_name": action.tool_name,
-                        "arguments": action.arguments,
-                        "phase": phase,
-                        "success": result.success,
-                    }
-                )
+                state_tool_call = {
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments,
+                    "phase": phase,
+                    "success": result.success,
+                }
+                if tool_call_record.plan_step_id is not None:
+                    state_tool_call["plan_step_id"] = tool_call_record.plan_step_id
+                self.state.tool_calls.append(state_tool_call)
                 self._trace(
                     TraceEvent.TOOL_CALL,
                     {
@@ -371,6 +399,7 @@ class Agent:
                         "tool_name": action.tool_name,
                         "arguments": action.arguments,
                         "phase": phase,
+                        "plan_step_id": tool_call_record.plan_step_id,
                         "success": result.success,
                         "error": result.error,
                     },
@@ -384,7 +413,6 @@ class Agent:
                     TraceEvent.TOOL_CALL_COMPLETED if result.success else TraceEvent.TOOL_CALL_FAILED,
                     completion_payload,
                 )
-                self._finish_plan_step(turn, plan_step, result)
                 observation, output_metadata = self._format_tool_observation(action.tool_name, result)
                 self.state.observations.append(
                     {
@@ -409,6 +437,19 @@ class Agent:
                         "output_metadata": output_metadata,
                     },
                 )
+                if plan_step is not None:
+                    if result.success:
+                        self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
+                    else:
+                        blocked_response = self._block_plan_step_after_tool_failure(
+                            turn,
+                            plan_step,
+                            tool_call_record,
+                            result,
+                            observation,
+                            output_metadata,
+                        )
+                        return blocked_response
 
     def _build_messages(self, turn: TurnState, *, require_plan: bool) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
@@ -810,6 +851,15 @@ class Agent:
             },
         )
 
+    def _request_plan_execution_feedback(self, turn: TurnState, *, feedback: str) -> None:
+        turn.plan_execution_feedback_count += 1
+        self._add_synthetic_observation(
+            turn,
+            tool_name="plan_execution_feedback",
+            content=feedback,
+            output_metadata={"feedback_count": turn.plan_execution_feedback_count},
+        )
+
     def _add_synthetic_observation(
         self,
         turn: TurnState,
@@ -861,46 +911,140 @@ class Agent:
     def _tool_call_count_for_phase(self, turn: TurnState, phase: str) -> int:
         return sum(1 for tool_call in turn.tool_calls if tool_call.phase == phase)
 
-    def _start_plan_step(self, turn: TurnState) -> PlanStep | None:
+    def _prepare_plan_execution_step(self, turn: TurnState, *, require_plan: bool) -> str | None:
+        if require_plan:
+            return None
+
         plan = turn.active_plan
         if plan is None or not turn.plan_approved:
             return None
 
+        if plan.status() == "completed":
+            return None
+        if plan.status() == "blocked":
+            return self._block_turn("Plan execution is blocked.", turn)
+
         step = plan.active_step()
         if step is not None:
-            return step
-
-        step = plan.next_pending_step()
-        if step is None:
             return None
+
+        step = plan.next_ready_step()
+        if step is None:
+            return self._block_turn("Plan execution blocked because no pending step is ready.", turn)
 
         step.mark("in_progress")
         self._trace(
             TraceEvent.PLAN_STEP_STARTED,
             {"turn_id": turn.turn_id, "step": step.to_dict(), "plan": plan.to_dict()},
         )
-        return step
+        return None
 
-    def _finish_plan_step(self, turn: TurnState, step: PlanStep | None, result: ToolResult) -> None:
+    def _active_plan_step_for_tool(self, turn: TurnState) -> PlanStep | None:
         plan = turn.active_plan
-        if plan is None or step is None:
+        if plan is None or not turn.plan_approved:
+            return None
+        return plan.active_step()
+
+    def _approved_plan_incomplete(self, turn: TurnState) -> bool:
+        plan = turn.active_plan
+        return bool(plan is not None and turn.plan_approved and plan.status() != "completed")
+
+    def _record_plan_tool_evidence(
+        self,
+        step: PlanStep,
+        tool_call_record: ToolCallRecord,
+        observation: str,
+        output_metadata: dict,
+    ) -> None:
+        step.add_evidence(
+            observation,
+            tool_name=tool_call_record.tool_name,
+            tool_call_iteration=tool_call_record.iteration,
+            metadata={
+                "phase": tool_call_record.phase,
+                "output_metadata": output_metadata,
+                "tool_call": tool_call_record.to_dict(),
+            },
+        )
+
+    def _handle_plan_step_update(
+        self,
+        action: PlanStepUpdateAction,
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> str | None:
+        if require_plan:
+            return self._fail_turn("Planning cannot update plan step status before user approval.", turn)
+
+        plan = turn.active_plan
+        if plan is None or not turn.plan_approved:
+            return self._fail_turn("Model returned plan_step_update without an approved active plan.", turn)
+
+        step = plan.active_step()
+        if step is None:
+            return self._fail_turn("Model returned plan_step_update but no plan step is currently active.", turn)
+
+        if action.step_id != step.id:
+            if turn.plan_execution_feedback_count >= 1:
+                return self._fail_turn("Plan execution failed because the model updated the wrong plan step.", turn)
+            self._request_plan_execution_feedback(
+                turn,
+                feedback=(
+                    "Plan execution feedback: update only the current executable step. "
+                    f"Current step id is {step.id}; the model tried to update {action.step_id}."
+                ),
+            )
             return
 
-        if result.success:
+        step.add_evidence(action.evidence, tool_name="plan_step_update")
+        if action.status == "completed":
             step.mark("completed")
-            event_type = TraceEvent.PLAN_STEP_COMPLETED
-        else:
-            step.mark("blocked")
-            event_type = TraceEvent.PLAN_STEP_BLOCKED
+            self._trace_plan_step_event(turn, step, TraceEvent.PLAN_STEP_COMPLETED)
+            return None
 
+        step.block(action.reason or action.evidence)
+        self._trace_plan_step_event(turn, step, TraceEvent.PLAN_STEP_BLOCKED)
+        return self._block_turn(_format_plan_step_blocked_message(step), turn)
+
+    def _block_plan_step_after_tool_failure(
+        self,
+        turn: TurnState,
+        step: PlanStep,
+        tool_call_record: ToolCallRecord,
+        result: ToolResult,
+        observation: str,
+        output_metadata: dict,
+    ) -> str:
+        self._record_plan_tool_evidence(step, tool_call_record, observation, output_metadata)
+        reason = _format_tool_failure_reason(result)
+        step.block(reason)
+        self._trace_plan_step_event(
+            turn,
+            step,
+            TraceEvent.PLAN_STEP_BLOCKED,
+            tool_name=result.tool_name,
+            error=result.error,
+        )
+        return self._block_turn(_format_plan_step_blocked_message(step), turn)
+
+    def _trace_plan_step_event(
+        self,
+        turn: TurnState,
+        step: PlanStep,
+        event_type: str,
+        *,
+        tool_name: str | None = None,
+        error: str | None = None,
+    ) -> None:
         self._trace(
             event_type,
             {
                 "turn_id": turn.turn_id,
                 "step": step.to_dict(),
-                "plan": plan.to_dict(),
-                "tool_name": result.tool_name,
-                "error": result.error,
+                "plan": turn.active_plan.to_dict() if turn.active_plan else None,
+                "tool_name": tool_name,
+                "error": error,
             },
         )
 
@@ -1000,6 +1144,17 @@ class Agent:
             self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
         return message
 
+    def _block_turn(self, message: str, turn: TurnState) -> str:
+        self.state.errors.append(message)
+        self.state.final_answer = message
+        self.memory.add_assistant_message(message)
+        self.state.messages = self.memory.recent()
+        turn.block(message)
+        self._clear_active_plan_for_turn(turn)
+        self._trace(TraceEvent.TURN_FAILED, {"turn_id": turn.turn_id, "message": message, "status": "blocked"})
+        self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
+        return message
+
     def _fail_action_protocol_turn(self, exc: LLMActionError, turn: TurnState) -> str:
         message = _format_action_protocol_failure(str(exc), exc.raw_response)
         return self._fail_turn(message, turn)
@@ -1093,6 +1248,19 @@ def _permission_denied_result(request: PermissionRequest, record: PermissionDeci
             "permission_decision": record.to_dict(),
         },
     )
+
+
+def _format_tool_failure_reason(result: ToolResult) -> str:
+    if result.error:
+        return f"Tool {result.tool_name} failed with {result.error}."
+    if result.exit_code is not None:
+        return f"Tool {result.tool_name} failed with exit code {result.exit_code}."
+    return f"Tool {result.tool_name} failed."
+
+
+def _format_plan_step_blocked_message(step: PlanStep) -> str:
+    reason = step.blocked_reason or "Step blocked."
+    return f"Plan step blocked: {step.title}. {reason}"
 
 
 def _format_indented_preview(text: str, max_chars: int) -> str:

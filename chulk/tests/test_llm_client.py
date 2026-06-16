@@ -119,8 +119,10 @@ def test_openai_responses_client_uses_strict_action_schema():
     assert response_format["type"] == "json_schema"
     assert response_format["strict"] is True
     assert "plan" in schema["properties"]["type"]["enum"]
+    assert "plan_step_update" in schema["properties"]["type"]["enum"]
     assert "arguments_json" in schema["properties"]
     assert "plan_json" in schema["properties"]
+    assert "step_update_json" in schema["properties"]
     assert "arguments" not in schema["properties"]
 
 

@@ -1035,6 +1035,23 @@ def test_agent_run_planned_turn_forces_plan_for_one_turn():
                     "plan_json": json.dumps(plan_payload),
                 }
             ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The design step is complete.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
             json.dumps({"type": "final_answer", "content": "Plan approved and completed."}),
         ]
     )
@@ -1081,6 +1098,23 @@ def test_agent_approve_plan_resumes_turn_and_tracks_plan_steps(tmp_path):
                     "arguments_json": json.dumps({"expression": "2 + 2"}),
                 }
             ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The calculator returned 4.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
             json.dumps({"type": "final_answer", "content": "The result is 4."}),
         ]
     )
@@ -1102,13 +1136,256 @@ def test_agent_approve_plan_resumes_turn_and_tracks_plan_steps(tmp_path):
     assert turn.plan_approved is True
     assert turn.active_plan is not None
     assert turn.active_plan.steps[0].status == "completed"
-    assert turn.model_request_count == 3
+    assert turn.model_request_count == 4
     assert turn.tool_call_count == 1
     assert "Planning: approved for this turn." in llm.requests[1][0]["content"]
+    assert turn.tool_calls[0].plan_step_id == "1"
+    assert turn.active_plan.steps[0].evidence
+    assert "calculator returned 4" in turn.active_plan.steps[0].evidence[-1].content
     assert "plan_approved" in event_types
     assert "plan_step_started" in event_types
     assert "plan_step_completed" in event_types
     assert "turn_finished" in event_types
+
+
+def test_agent_executes_multiple_plan_steps_with_dependencies():
+    plan_payload = {
+        "summary": "Calculate two values.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Calculate four",
+                "description": "Use the calculator for 2 + 2.",
+                "status": "pending",
+                "acceptance_criteria": ["Calculator result for 2 + 2 is known."],
+                "retry_limit": 0,
+            },
+            {
+                "id": "2",
+                "title": "Calculate six",
+                "description": "Use the calculator for 3 + 3.",
+                "status": "pending",
+                "depends_on": ["1"],
+                "acceptance_criteria": ["Calculator result for 3 + 3 is known."],
+                "retry_limit": 0,
+            },
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "calculator",
+                    "arguments_json": json.dumps({"expression": "2 + 2"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "2 + 2 returned 4.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "calculator",
+                    "arguments_json": json.dumps({"expression": "3 + 3"}),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "2",
+                            "status": "completed",
+                            "evidence": "3 + 3 returned 6.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "The results are 4 and 6."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry)
+
+    agent.run_planned_turn("calculate two values")
+    response = agent.approve_plan()
+    turn = agent.state.turns[0]
+
+    assert response == "The results are 4 and 6."
+    assert turn.active_plan is not None
+    assert [step.status for step in turn.active_plan.steps] == ["completed", "completed"]
+    assert [call.plan_step_id for call in turn.tool_calls] == ["1", "2"]
+    assert turn.active_plan.steps[1].depends_on == ["1"]
+    assert turn.active_plan.steps[0].evidence[-1].content == "2 + 2 returned 4."
+    assert turn.active_plan.steps[1].evidence[-1].content == "3 + 3 returned 6."
+
+
+def test_agent_rejects_premature_final_answer_until_plan_steps_complete():
+    plan_payload = {
+        "summary": "Complete one tracked step.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Confirm work",
+                "description": "Record explicit step completion.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Done too early."}),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The tracked step is complete.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Done after completion."}),
+        ]
+    )
+    agent = Agent(llm)
+
+    agent.run_planned_turn("track one step")
+    response = agent.approve_plan()
+    turn = agent.state.turns[0]
+
+    assert response == "Done after completion."
+    assert turn.plan_execution_feedback_count == 1
+    assert any(observation.tool_name == "plan_execution_feedback" for observation in turn.observations)
+    assert turn.active_plan is not None
+    assert turn.active_plan.status() == "completed"
+
+
+def test_agent_blocks_plan_immediately_when_step_tool_fails(tmp_path):
+    def failing_tool(_arguments):
+        return ToolResult(
+            tool_name="fail_tool",
+            success=False,
+            observation="The tool failed deliberately.",
+            error="deliberate_failure",
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="fail_tool",
+            description="Always fail.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=failing_tool,
+        )
+    )
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    plan_payload = {
+        "summary": "Try a failing tool.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Run failing tool",
+                "description": "Call a tool that fails.",
+                "status": "pending",
+            },
+            {
+                "id": "2",
+                "title": "Never run",
+                "description": "This step depends on the failed step.",
+                "status": "pending",
+                "depends_on": ["1"],
+            },
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "fail_tool",
+                    "arguments_json": "{}",
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Should not be used."}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    agent.run_planned_turn("run the failing plan")
+    response = agent.approve_plan()
+    turn = agent.state.turns[0]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["type"] for event in events]
+
+    assert response == "Plan step blocked: Run failing tool. Tool fail_tool failed with deliberate_failure."
+    assert turn.status == "blocked"
+    assert agent.state.active_plan is None
+    assert turn.active_plan is not None
+    assert [step.status for step in turn.active_plan.steps] == ["blocked", "pending"]
+    assert turn.active_plan.steps[0].blocked_reason == "Tool fail_tool failed with deliberate_failure."
+    assert turn.tool_call_count == 1
+    assert turn.model_request_count == 2
+    assert "plan_step_blocked" in event_types
+    assert llm.responses == [json.dumps({"type": "final_answer", "content": "Should not be used."})]
 
 
 def test_agent_reject_plan_finishes_without_tools(tmp_path):

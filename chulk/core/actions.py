@@ -39,15 +39,26 @@ class PlanAction:
     plan: Plan
 
 
-AgentAction = FinalAnswerAction | ToolCallAction | PlanAction
+@dataclass(frozen=True)
+class PlanStepUpdateAction:
+    """A model assertion that a plan step is complete or blocked."""
+
+    type: Literal["plan_step_update"]
+    step_id: str
+    status: Literal["completed", "blocked"]
+    evidence: str
+    reason: str | None = None
+
+
+AgentAction = FinalAnswerAction | ToolCallAction | PlanAction | PlanStepUpdateAction
 
 STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "type": {
             "type": "string",
-            "enum": ["final_answer", "tool_call", "plan"],
-            "description": "Whether the assistant is answering directly, proposing a plan, or requesting a tool call.",
+            "enum": ["final_answer", "tool_call", "plan", "plan_step_update"],
+            "description": "Whether the assistant is answering directly, proposing a plan, updating a plan step, or requesting a tool call.",
         },
         "content": {
             "type": ["string", "null"],
@@ -61,18 +72,25 @@ STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Tool arguments encoded as a JSON object string when type is tool_call; "
-                "use {} when type is final_answer or plan."
+                "use {} when type is final_answer, plan, or plan_step_update."
             ),
         },
         "plan_json": {
             "type": "string",
             "description": (
                 "Plan encoded as a JSON object string when type is plan; "
-                "use {} when type is final_answer or tool_call."
+                "use {} when type is final_answer, tool_call, or plan_step_update."
+            ),
+        },
+        "step_update_json": {
+            "type": "string",
+            "description": (
+                "Plan step update encoded as a JSON object string when type is plan_step_update; "
+                "use {} for all other action types."
             ),
         },
     },
-    "required": ["type", "content", "tool_name", "arguments_json", "plan_json"],
+    "required": ["type", "content", "tool_name", "arguments_json", "plan_json", "step_update_json"],
     "additionalProperties": False,
 }
 
@@ -86,8 +104,8 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ActionParseError("final_answer.content must be a non-empty string")
-        if _has_tool_call_fields(payload):
-            raise ActionParseError("final_answer must not include tool call fields")
+        if _has_tool_call_fields(payload) or _has_step_update_fields(payload):
+            raise ActionParseError("final_answer must not include tool call fields or plan step update fields")
         return FinalAnswerAction(type="final_answer", content=content)
 
     if action_type == "tool_call":
@@ -100,7 +118,10 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
     if action_type == "plan":
         return PlanAction(type="plan", plan=_coerce_plan(payload))
 
-    raise ActionParseError("model response type must be final_answer, tool_call, or plan")
+    if action_type == "plan_step_update":
+        return _coerce_plan_step_update(payload)
+
+    raise ActionParseError("model response type must be final_answer, tool_call, plan, or plan_step_update")
 
 
 def _has_tool_call_fields(payload: dict[str, Any]) -> bool:
@@ -123,6 +144,20 @@ def _has_tool_call_fields(payload: dict[str, Any]) -> bool:
     except json.JSONDecodeError:
         return True
     return bool(arguments)
+
+
+def _has_step_update_fields(payload: dict[str, Any]) -> bool:
+    raw_step_update_json = payload.get("step_update_json")
+    if raw_step_update_json in (None, "", "{}"):
+        return False
+    if not isinstance(raw_step_update_json, str):
+        return True
+
+    try:
+        step_update = json.loads(raw_step_update_json)
+    except json.JSONDecodeError:
+        return True
+    return bool(step_update)
 
 
 def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:
@@ -168,6 +203,47 @@ def _coerce_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     return arguments
 
 
+def _coerce_plan_step_update(payload: dict[str, Any]) -> PlanStepUpdateAction:
+    """Normalize provider-specific plan step update transports."""
+    if "step_update" in payload:
+        update_payload = payload.get("step_update")
+    else:
+        raw_step_update_json = payload.get("step_update_json", "{}")
+        if not isinstance(raw_step_update_json, str):
+            raise ActionParseError("plan_step_update.step_update_json must be a string")
+        try:
+            update_payload = json.loads(raw_step_update_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ActionParseError("plan_step_update.step_update_json must contain a JSON object") from exc
+
+    if not isinstance(update_payload, dict):
+        raise ActionParseError("plan_step_update payload must be an object")
+
+    step_id = update_payload.get("step_id")
+    status = update_payload.get("status")
+    evidence = update_payload.get("evidence")
+    reason = update_payload.get("reason")
+
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise ActionParseError("plan_step_update.step_id must be a non-empty string")
+    if status not in {"completed", "blocked"}:
+        raise ActionParseError("plan_step_update.status must be completed or blocked")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ActionParseError("plan_step_update.evidence must be a non-empty string")
+    if reason is not None and not isinstance(reason, str):
+        raise ActionParseError("plan_step_update.reason must be a string or null")
+    if status == "blocked" and (not isinstance(reason, str) or not reason.strip()):
+        raise ActionParseError("plan_step_update.reason must be a non-empty string when status is blocked")
+
+    return PlanStepUpdateAction(
+        type="plan_step_update",
+        step_id=step_id.strip(),
+        status=status,
+        evidence=evidence.strip(),
+        reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
+    )
+
+
 def _coerce_plan(payload: dict[str, Any]) -> Plan:
     """Normalize provider-specific plan transports into a Plan object."""
     if "plan" in payload:
@@ -201,6 +277,12 @@ def _coerce_plan(payload: dict[str, Any]) -> Plan:
         title = raw_step.get("title")
         description = raw_step.get("description")
         status = raw_step.get("status", "pending")
+        depends_on = _coerce_string_list(raw_step.get("depends_on", []), field_name="plan step depends_on")
+        acceptance_criteria = _coerce_string_list(
+            raw_step.get("acceptance_criteria", []),
+            field_name="plan step acceptance_criteria",
+        )
+        retry_limit = _coerce_retry_limit(raw_step.get("retry_limit", 0))
 
         if not isinstance(step_id, str) or not step_id.strip():
             step_id = str(index)
@@ -218,7 +300,37 @@ def _coerce_plan(payload: dict[str, Any]) -> Plan:
                 title=title.strip(),
                 description=description.strip(),
                 status=status,
+                depends_on=depends_on,
+                acceptance_criteria=acceptance_criteria,
+                retry_limit=retry_limit,
             )
         )
 
-    return Plan(summary=summary.strip(), steps=steps)
+    try:
+        return Plan(summary=summary.strip(), steps=steps)
+    except ValueError as exc:
+        raise ActionParseError(str(exc)) from exc
+
+
+def _coerce_string_list(value: Any, *, field_name: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ActionParseError(f"{field_name} must be a list of strings")
+
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ActionParseError(f"{field_name} must contain only non-empty strings")
+        clean_item = item.strip()
+        if clean_item not in result:
+            result.append(clean_item)
+    return result
+
+
+def _coerce_retry_limit(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ActionParseError("plan step retry_limit must be an integer")
+    if value < 0:
+        raise ActionParseError("plan step retry_limit cannot be negative")
+    return 0

@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from chulk.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
+from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
 
 
-def format_action_trace(action: FinalAnswerAction | PlanAction | ToolCallAction) -> dict:
+def format_action_trace(action: FinalAnswerAction | PlanAction | PlanStepUpdateAction | ToolCallAction) -> dict:
     """Return a trace-safe payload for a parsed action."""
     if isinstance(action, FinalAnswerAction):
         return {"type": action.type}
     if isinstance(action, PlanAction):
         return {"type": action.type, "plan": action.plan.to_dict()}
+    if isinstance(action, PlanStepUpdateAction):
+        return {
+            "type": action.type,
+            "step_id": action.step_id,
+            "status": action.status,
+            "evidence": action.evidence,
+            "reason": action.reason,
+        }
     return {"type": action.type, "tool_name": action.tool_name, "arguments": action.arguments}
 
 

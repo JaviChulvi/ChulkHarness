@@ -447,6 +447,8 @@ def _progress_message(
             plan = payload.get("plan", {})
             steps = plan.get("steps", []) if isinstance(plan, dict) else []
             return label + f"model proposed plan - {len(steps)} step(s){_elapsed_suffix(elapsed_seconds)}"
+        if action_type == "plan_step_update":
+            return label + f"model updated plan step - {payload.get('step_id', '?')}{_elapsed_suffix(elapsed_seconds)}"
         if action_type == "final_answer":
             return label + f"model returned final answer{_elapsed_suffix(elapsed_seconds)}"
     if event_type == TraceEvent.PLAN_CREATED:

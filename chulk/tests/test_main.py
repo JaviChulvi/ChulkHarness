@@ -337,6 +337,23 @@ def test_main_plan_prefix_approve_flow_with_tools(monkeypatch, tmp_path, capsys)
                         "arguments_json": json.dumps({"expression": "2 + 2"}),
                     }
                 ),
+                json.dumps(
+                    {
+                        "type": "plan_step_update",
+                        "content": None,
+                        "tool_name": None,
+                        "arguments_json": "{}",
+                        "plan_json": "{}",
+                        "step_update_json": json.dumps(
+                            {
+                                "step_id": "1",
+                                "status": "completed",
+                                "evidence": "The calculator returned 4.",
+                                "reason": None,
+                            }
+                        ),
+                    }
+                ),
                 json.dumps({"type": "final_answer", "content": "The result is 4."}),
             ]
 
@@ -390,6 +407,23 @@ def test_main_plan_prefix_creates_one_shot_pending_plan(monkeypatch, tmp_path, c
                                         "status": "pending",
                                     }
                                 ],
+                            }
+                        ),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "plan_step_update",
+                        "content": None,
+                        "tool_name": None,
+                        "arguments_json": "{}",
+                        "plan_json": "{}",
+                        "step_update_json": json.dumps(
+                            {
+                                "step_id": "1",
+                                "status": "completed",
+                                "evidence": "The dispatcher design is recorded.",
+                                "reason": None,
                             }
                         ),
                     }

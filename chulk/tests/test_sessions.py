@@ -105,6 +105,7 @@ def test_session_store_restores_pending_plan_turn(tmp_path):
                 id="1",
                 title="Edit runtime",
                 description="Update the runtime code.",
+                acceptance_criteria=["Runtime is updated."],
             )
         ],
     )
@@ -118,6 +119,37 @@ def test_session_store_restores_pending_plan_turn(tmp_path):
     assert restored_turn.active_plan is not None
     assert restored_turn.active_plan.summary == "Change the code."
     assert restored_turn.active_plan.steps[0].title == "Edit runtime"
+    assert restored_turn.active_plan.steps[0].acceptance_criteria == ["Runtime is updated."]
+
+
+def test_session_store_preserves_blocked_plan_status(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    store.create_conversation("conversation-1", provider="test", model="mock")
+
+    plan = Plan(
+        summary="Run risky work.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Run tool",
+                description="Run a tool that can fail.",
+            )
+        ],
+    )
+    plan.approve()
+    plan.steps[0].block("Tool failed with deliberate_failure.")
+    turn = TurnState(user_message="run this", turn_id="turn-1", active_plan=plan, plan_approved=True)
+    turn.block("Plan step blocked: Run tool. Tool failed with deliberate_failure.")
+
+    store.save_turn_snapshot("conversation-1", turn.to_dict())
+    restored_turn = store.load_turns("conversation-1")[0]
+    conversation = store.get_conversation("conversation-1")
+
+    assert conversation.status == "blocked"
+    assert restored_turn.status == "blocked"
+    assert restored_turn.active_plan is not None
+    assert restored_turn.active_plan.status() == "blocked"
+    assert restored_turn.active_plan.steps[0].blocked_reason == "Tool failed with deliberate_failure."
 
 
 def test_create_agent_resumes_short_term_history(monkeypatch, tmp_path):
@@ -248,7 +280,28 @@ def test_create_agent_resumes_pending_plan_and_approves(monkeypatch, tmp_path):
 
     first_agent.run_planned_turn("plan a change")
 
-    resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "approved work complete"})])
+    resumed_llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The small change was completed.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "approved work complete"}),
+        ]
+    )
     resumed_agent = create_agent(config, lambda _config: resumed_llm, conversation_id=first_agent.state.conversation_id)
     response = resumed_agent.approve_plan()
 

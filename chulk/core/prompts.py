@@ -17,13 +17,16 @@ When tools are available, call a tool only when it materially helps answer the u
 JSON_ACTION_PROMPT = """You must respond with exactly one JSON object and no extra prose.
 
 Direct answer format:
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}"}
+{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}
 
 Plan format:
-{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\"}]}"}
+{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\",\\\"depends_on\\\":[],\\\"acceptance_criteria\\\":[\\\"...\\\"],\\\"retry_limit\\\":0}]}", "step_update_json": "{}"}
 
 Tool call format:
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
+{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}", "step_update_json": "{}"}
+
+Plan step update format:
+{"type": "plan_step_update", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{\\\"step_id\\\":\\\"1\\\",\\\"status\\\":\\\"completed\\\",\\\"evidence\\\":\\\"...\\\",\\\"reason\\\":null}"}
 
 Use a final_answer when you can answer without a tool. Use a tool_call when you need a listed tool.
 If you intend to use a tool, the type must be tool_call; never put tool_name or arguments_json on a final_answer.
@@ -31,21 +34,27 @@ If you intend to answer the user, the type must be final_answer, tool_name must 
 For tool calls, arguments_json must be a JSON-encoded object string containing the tool arguments.
 For tool calls, use only argument fields from the listed tool schema.
 Use a plan only when the Planning section explicitly tells you to propose a plan.
-For plans, plan_json must be a JSON-encoded object string with summary and steps.
-After an observation is provided, use it to produce the next tool_call or final_answer.
+For plans, plan_json must be a JSON-encoded object string with summary and executable steps.
+Each plan step should include depends_on, acceptance_criteria, and retry_limit 0.
+When an approved plan is active, work only on the current executable step.
+After tool evidence satisfies that step's acceptance criteria, return plan_step_update instead of final_answer.
+Use final_answer only after the approved plan is completed.
+After an observation is provided, use it to produce the next tool_call, plan_step_update, or final_answer.
 Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.
 If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final_answer.
 """
 
 JSON_REPAIR_PROMPT = """Your previous response could not be parsed as ChulkHarness action JSON.
 Return exactly one valid JSON object using one of these shapes:
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}"}
-{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\"}]}"}
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}"}
+{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}
+{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\",\\\"depends_on\\\":[],\\\"acceptance_criteria\\\":[\\\"...\\\"],\\\"retry_limit\\\":0}]}", "step_update_json": "{}"}
+{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}", "step_update_json": "{}"}
+{"type": "plan_step_update", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{\\\"step_id\\\":\\\"1\\\",\\\"status\\\":\\\"completed\\\",\\\"evidence\\\":\\\"...\\\",\\\"reason\\\":null}"}
 Do not include Markdown fences, comments, or prose outside the JSON object.
 If your previous response included tool_name or tool arguments, return a tool_call action.
 If your previous response was a direct answer, return a final_answer action with tool_name null and arguments_json "{}".
 If an observation reported invalid_arguments, remove unsupported fields and use only the listed schema fields.
+If plan execution feedback says a plan is incomplete, continue the current step or return a plan_step_update.
 """
 
 REFLECTION_PROMPT = """You are ChulkHarness's final-answer reviewer.
@@ -120,6 +129,8 @@ def format_planning_for_prompt(
                 "Do not call shell, write, memory-mutation, import/export, or other mutating tools before approval.",
                 "After reconnaissance, return a plan action. Do not execute implementation steps until the user approves the plan.",
                 "Keep the plan concrete, short, and executable, with specific files/modules when they are known.",
+                "For each plan step, include depends_on, acceptance_criteria, and retry_limit 0.",
+                "Use dependencies only when a step truly cannot start until an earlier step is completed.",
                 "The approval plan must be an implementation plan. Do not make read/list/search/explore/inspect steps the plan.",
                 "Because the user explicitly requested /plan, do not answer directly. Return a plan action after any needed reconnaissance.",
             ]
@@ -130,6 +141,9 @@ def format_planning_for_prompt(
             [
                 "Planning: approved for this turn.",
                 "Follow the approved plan while executing this turn.",
+                "Only work on the current executable step. Use tools until its acceptance criteria are satisfied.",
+                "When the current step is satisfied, return a plan_step_update action for that step.",
+                "Do not return a final_answer until every plan step is completed.",
                 active_plan.to_prompt(),
             ]
         )
