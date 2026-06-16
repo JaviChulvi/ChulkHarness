@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from chulk.config import Config, load_config
-from chulk.core import Agent
+from chulk.core import Agent, TraceEvent
 from chulk.llm import LLMClient
 from chulk.runtime import create_agent as create_runtime_agent
 
@@ -49,9 +49,26 @@ class AgentHandle:
     def skill_registry(self):
         return self.runtime.skill_registry
 
-    def run(self, message: str) -> str:
-        """Run one normal agent turn."""
-        return self.runtime.run_turn(message)
+    def run(self, message: str, *, on_delta: Callable[[str], None] | None = None) -> str:
+        """Run one normal agent turn, optionally receiving streamed answer deltas."""
+        if on_delta is None:
+            return self.runtime.run_turn(message)
+
+        previous_callback = self.runtime.event_callback
+
+        def callback(event_type: str, payload: dict) -> None:
+            if previous_callback is not None:
+                previous_callback(event_type, payload)
+            if event_type == TraceEvent.MODEL_STREAM_DELTA:
+                text = payload.get("text")
+                if isinstance(text, str) and text:
+                    on_delta(text)
+
+        self.runtime.event_callback = callback
+        try:
+            return self.runtime.run_turn(message)
+        finally:
+            self.runtime.event_callback = previous_callback
 
     def __call__(self, message: str) -> str:
         return self.run(message)

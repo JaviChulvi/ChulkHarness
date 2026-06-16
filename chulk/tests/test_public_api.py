@@ -4,7 +4,7 @@ import json
 
 from chulk import Agent, Skills, Tool, Tools, agent, skills, tool, tools
 from chulk.config import load_config
-from chulk.llm import FallbackChain, LLMClient, LLMError
+from chulk.llm import FallbackChain, LLMCapabilities, LLMClient, LLMError
 from chulk.presets import SoftwareEngineer, software_engineer
 from chulk.presets.software_engineer import DEFAULT_AGENT_PLAYBOOK, SOFTWARE_ENGINEER_SYSTEM_PROMPT
 
@@ -19,6 +19,10 @@ class FakeLLMClient(LLMClient):
         if len(self.responses) == 1:
             return self.responses[0]
         return self.responses.pop(0)
+
+
+class StreamingFakeLLMClient(FakeLLMClient):
+    capabilities = LLMCapabilities(supports_streaming=True)
 
 
 class FailingLLMClient(LLMClient):
@@ -62,6 +66,23 @@ def test_public_agent_with_preset_injects_default_agent_playbook(tmp_path):
     handle = Agent(config=config, preset=SoftwareEngineer(), llm=PromptAwareLLM(), tools=[], skills=[])
 
     assert handle.run("hello") == "preset prompt loaded"
+
+
+def test_public_agent_run_accepts_stream_delta_callback(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    handle = Agent(
+        config=config,
+        llm=StreamingFakeLLMClient([json.dumps({"type": "final_answer", "content": "streamed callback"})]),
+        tools=[],
+        skills=[],
+    )
+    deltas: list[str] = []
+
+    response = handle.run("hello", on_delta=deltas.append)
+
+    assert response == "streamed callback"
+    assert "".join(deltas) == "streamed callback"
+    assert handle.state.final_answer == "streamed callback"
 
 
 def test_public_agent_runs_decorated_tool(tmp_path):

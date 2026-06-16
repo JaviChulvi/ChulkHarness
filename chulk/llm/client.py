@@ -1,6 +1,13 @@
 """Compatibility imports for LLM provider clients and shared interfaces."""
 
-from chulk.llm.base import LLMActionError, LLMActionResult, LLMClient, LLMConfigurationError, LLMError
+from chulk.llm.base import (
+    LLMActionError,
+    LLMActionResult,
+    LLMClient,
+    LLMConfigurationError,
+    LLMError,
+    LLMStreamChunk,
+)
 from chulk.llm.capabilities import LLMCapabilities, LLMModelCapabilities, resolve_model_capabilities
 from chulk.llm.factory import (
     LLM_PROVIDER_REGISTRY,
@@ -25,6 +32,7 @@ __all__ = [
     "LLMModelCapabilities",
     "LLMProvider",
     "LLM_PROVIDER_REGISTRY",
+    "LLMStreamChunk",
     "LocalOpenAICompatibleClient",
     "OpenAIResponsesClient",
     "create_llm_client",

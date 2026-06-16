@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from chulk.core.actions import STRICT_AGENT_ACTION_JSON_SCHEMA
-from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError
+from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError, LLMStreamChunk
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 
@@ -13,7 +14,7 @@ from chulk.llm.messages import split_instructions
 OPENAI_CAPABILITIES = LLMCapabilities(
     supports_structured_output=True,
     supports_json_mode=False,
-    supports_streaming=False,
+    supports_streaming=True,
     api_style="responses",
 )
 
@@ -58,15 +59,7 @@ class OpenAIResponsesClient(LLMClient):
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using OpenAI's Responses API."""
-        instructions, response_input = split_instructions(messages)
-        request = {
-            "model": self.model,
-            "instructions": instructions or None,
-            "input": response_input,
-        }
-        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
-        if output_limit is not None:
-            request["max_output_tokens"] = output_limit
+        request = self._text_request(messages, max_output_tokens=max_output_tokens)
         try:
             response = self._client.responses.create(**request)
         except Exception as exc:
@@ -76,6 +69,43 @@ class OpenAIResponsesClient(LLMClient):
         if isinstance(output_text, str) and output_text:
             return output_text
         raise LLMError("OpenAI response did not include output_text")
+
+    def stream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        """Yield a text response using OpenAI's Responses API streaming events."""
+        request = self._text_request(messages, max_output_tokens=max_output_tokens)
+        request["stream"] = True
+        try:
+            stream = self._client.responses.create(**request)
+        except Exception as exc:
+            raise LLMError(f"OpenAI streaming request failed: {exc}") from exc
+
+        saw_text = False
+        completed = False
+        for event in stream:
+            event_type = _event_value(event, "type")
+            if event_type == "response.output_text.delta":
+                delta = _event_value(event, "delta")
+                if isinstance(delta, str) and delta:
+                    saw_text = True
+                    yield LLMStreamChunk(type="text_delta", text=delta, metadata={"event_type": event_type})
+                continue
+            if event_type == "response.completed":
+                completed = True
+                continue
+            if event_type == "error":
+                raise LLMError(f"OpenAI streaming request failed: {_event_error_message(event)}")
+
+        if not saw_text:
+            raise LLMError("OpenAI streaming response did not include output text")
+        if completed:
+            yield LLMStreamChunk(type="completed", metadata={"event_type": "response.completed"})
+        else:
+            yield LLMStreamChunk(type="completed", metadata={"event_type": "stream.closed"})
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response using OpenAI Structured Outputs."""
@@ -106,6 +136,18 @@ class OpenAIResponsesClient(LLMClient):
             return output_text
         raise LLMError("OpenAI structured action response did not include output_text")
 
+    def _text_request(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> dict[str, Any]:
+        instructions, response_input = split_instructions(messages)
+        request: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
+        return request
+
 
 def _validate_max_output_tokens(value: int | None) -> int | None:
     if value is None:
@@ -121,3 +163,21 @@ def _request_max_output_tokens(model_limit: int | None, request_limit: int | Non
     if request_limit is None:
         return model_limit
     return min(model_limit, _validate_max_output_tokens(request_limit) or model_limit)
+
+
+def _event_value(event: object, key: str) -> object:
+    if isinstance(event, dict):
+        return event.get(key)
+    return getattr(event, key, None)
+
+
+def _event_error_message(event: object) -> str:
+    error = _event_value(event, "error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    message = _event_value(event, "message")
+    if isinstance(message, str) and message:
+        return message
+    return str(error or event)

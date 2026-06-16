@@ -3,9 +3,9 @@
 import json
 from pathlib import Path
 
-from chulk.core import Agent, ObservationRecord, ToolCallRecord, TurnState
+from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnState
 from chulk.core.context import ContextBudget
-from chulk.llm import LLMClient
+from chulk.llm import LLMCapabilities, LLMClient
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
@@ -22,6 +22,10 @@ class RecordingLLMClient(LLMClient):
     def complete(self, messages: list[dict[str, str]]) -> str:
         self.requests.append(messages)
         return self.responses.pop(0)
+
+
+class StreamingRecordingLLMClient(RecordingLLMClient):
+    capabilities = LLMCapabilities(supports_streaming=True)
 
 
 class OutputLimitRecordingLLMClient(LLMClient):
@@ -103,6 +107,35 @@ def test_agent_sends_user_message_and_stores_response():
     ]
     assert llm.requests[0][0]["role"] == "system"
     assert llm.requests[0][-1] == {"role": "user", "content": "hello"}
+
+
+def test_agent_streams_validated_final_answer_when_provider_supports_streaming():
+    llm = StreamingRecordingLLMClient([json.dumps({"type": "final_answer", "content": "Hello streamed world"})])
+    events: list[tuple[str, dict]] = []
+    agent = Agent(llm, event_callback=lambda event_type, payload: events.append((event_type, payload)))
+
+    response = agent.run_turn("hello")
+
+    assert response == "Hello streamed world"
+    assert agent.state.final_answer == "Hello streamed world"
+    stream_events = [event for event in events if event[0].startswith("model_stream_")]
+    assert [event[0] for event in stream_events] == [
+        TraceEvent.MODEL_STREAM_STARTED,
+        TraceEvent.MODEL_STREAM_DELTA,
+        TraceEvent.MODEL_STREAM_COMPLETED,
+    ]
+    assert "".join(event[1].get("text", "") for event in stream_events) == "Hello streamed world"
+
+
+def test_agent_does_not_stream_final_answer_when_provider_lacks_streaming_capability():
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "Hi Javier"})])
+    events: list[tuple[str, dict]] = []
+    agent = Agent(llm, event_callback=lambda event_type, payload: events.append((event_type, payload)))
+
+    response = agent.run_turn("hello")
+
+    assert response == "Hi Javier"
+    assert not [event for event in events if event[0].startswith("model_stream_")]
 
 
 def test_agent_includes_recent_conversation_history():

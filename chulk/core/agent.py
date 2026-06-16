@@ -660,6 +660,7 @@ class Agent:
         )
 
     def _complete_final_answer(self, content: str, turn: TurnState) -> str:
+        self._emit_final_answer_stream(content, turn)
         self.memory.add_assistant_message(content)
         self.state.final_answer = content
         self.state.messages = self.memory.recent()
@@ -668,6 +669,53 @@ class Agent:
         self._trace(TraceEvent.FINAL_ANSWER, {"turn_id": turn.turn_id, "content": content})
         self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
         return content
+
+    def _emit_final_answer_stream(self, content: str, turn: TurnState) -> None:
+        if not content or not self._final_answer_streaming_enabled():
+            return
+        payload = {
+            "turn_id": turn.turn_id,
+            "source": "validated_final_answer",
+            "content_length": len(content),
+        }
+        self._trace(TraceEvent.MODEL_STREAM_STARTED, payload)
+        streamed_length = 0
+        try:
+            for index, text in enumerate(_stream_text_chunks(content), start=1):
+                streamed_length += len(text)
+                self._trace(
+                    TraceEvent.MODEL_STREAM_DELTA,
+                    {
+                        "turn_id": turn.turn_id,
+                        "source": "validated_final_answer",
+                        "chunk_index": index,
+                        "text": text,
+                    },
+                )
+        except Exception as exc:
+            self._trace(
+                TraceEvent.MODEL_STREAM_FAILED,
+                {
+                    "turn_id": turn.turn_id,
+                    "source": "validated_final_answer",
+                    "error": str(exc),
+                    "streamed_length": streamed_length,
+                },
+            )
+            raise
+        self._trace(
+            TraceEvent.MODEL_STREAM_COMPLETED,
+            {
+                "turn_id": turn.turn_id,
+                "source": "validated_final_answer",
+                "streamed_length": streamed_length,
+            },
+        )
+
+    def _final_answer_streaming_enabled(self) -> bool:
+        provider = getattr(self.llm_client, "last_success_provider", None) or self.llm_client
+        capabilities = getattr(provider, "capabilities", None)
+        return bool(getattr(capabilities, "supports_streaming", False))
 
     def _final_answer_needs_revision(self, proposed_answer: str, turn: TurnState) -> bool:
         if self.max_reflection_attempts == 0 or turn.reflection_count >= self.max_reflection_attempts:
@@ -1330,6 +1378,11 @@ def _compact_summary_line(value: str, *, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
+
+
+def _stream_text_chunks(text: str, *, max_chars: int = 80):
+    for start in range(0, len(text), max_chars):
+        yield text[start : start + max_chars]
 
 
 def _redact_summary_text(value: str) -> str:

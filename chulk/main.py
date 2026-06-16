@@ -241,6 +241,7 @@ def run_chat_loop(
             continue
 
         try:
+            progress_reporter.reset_stream_state()
             assistant_response = command_context.agent.run_turn(user_message)
         except LLMError as exc:
             output_func(terminal.error(f"error: {exc}"))
@@ -251,7 +252,8 @@ def run_chat_loop(
         finally:
             progress_reporter.close()
 
-        output_func(terminal.assistant_message(assistant_response))
+        if not progress_reporter.streamed_answer:
+            output_func(terminal.assistant_message(assistant_response))
 
 
 def _load_prompt_history(

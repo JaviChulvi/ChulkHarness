@@ -5,9 +5,13 @@ from types import SimpleNamespace
 
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
+    FallbackChain,
     LLM_PROVIDER_REGISTRY,
+    LLMCapabilities,
     LLMClient,
     LLMConfigurationError,
+    LLMError,
+    LLMStreamChunk,
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
@@ -16,18 +20,21 @@ from chulk.llm import (
 
 
 class FakeResponsesResource:
-    def __init__(self, output_text: str = "model answer") -> None:
+    def __init__(self, output_text: str = "model answer", stream_events: list | None = None) -> None:
         self.output_text = output_text
+        self.stream_events = stream_events or []
         self.kwargs = None
 
     def create(self, **kwargs):
         self.kwargs = kwargs
+        if kwargs.get("stream"):
+            return iter(self.stream_events)
         return SimpleNamespace(output_text=self.output_text)
 
 
 class FakeOpenAIClient:
-    def __init__(self, output_text: str = "model answer") -> None:
-        self.responses = FakeResponsesResource(output_text)
+    def __init__(self, output_text: str = "model answer", stream_events: list | None = None) -> None:
+        self.responses = FakeResponsesResource(output_text, stream_events=stream_events)
 
 
 class FakeChatCompletionsResource:
@@ -66,6 +73,27 @@ class ScriptedLLMClient(LLMClient):
         return self.responses.pop(0)
 
 
+class ScriptedStreamingLLMClient(LLMClient):
+    capabilities = LLMCapabilities(supports_streaming=True)
+
+    def __init__(self, chunks: list[LLMStreamChunk]) -> None:
+        self.chunks = chunks
+        self.requests: list[list[dict[str, str]]] = []
+
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        self.requests.append(messages)
+        return "".join(chunk.text for chunk in self.chunks if chunk.type == "text_delta")
+
+    def stream_complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None):
+        self.requests.append(messages)
+        yield from self.chunks
+
+
+class FailingLLMClient(LLMClient):
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        raise LLMError("provider unavailable")
+
+
 def test_openai_responses_client_sends_instructions_and_input():
     fake_client = FakeOpenAIClient()
     client = OpenAIResponsesClient(model="test-model", client=fake_client)
@@ -89,6 +117,61 @@ def test_openai_responses_client_sends_instructions_and_input():
             {"role": "user", "content": "Continue"},
         ],
     }
+
+
+def test_base_stream_complete_falls_back_to_one_shot_completion():
+    client = ScriptedLLMClient(["plain answer"])
+
+    chunks = list(client.stream_complete([{"role": "user", "content": "Hello"}]))
+
+    assert chunks == [
+        LLMStreamChunk(type="text_delta", text="plain answer"),
+        LLMStreamChunk(type="completed"),
+    ]
+
+
+def test_openai_responses_client_streams_text_deltas():
+    fake_client = FakeOpenAIClient(
+        stream_events=[
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.output_text.delta", delta="hello "),
+            SimpleNamespace(type="response.output_text.delta", delta="world"),
+            SimpleNamespace(type="response.completed"),
+        ]
+    )
+    client = OpenAIResponsesClient(model="test-model", client=fake_client)
+
+    chunks = list(client.stream_complete([{"role": "user", "content": "Hello"}]))
+
+    assert [chunk.text for chunk in chunks if chunk.type == "text_delta"] == ["hello ", "world"]
+    assert chunks[-1].type == "completed"
+    assert fake_client.responses.kwargs == {
+        "model": "test-model",
+        "instructions": None,
+        "input": [{"role": "user", "content": "Hello"}],
+        "stream": True,
+    }
+
+
+def test_fallback_chain_streams_from_first_successful_provider():
+    fallback = FallbackChain(
+        [
+            FailingLLMClient(),
+            ScriptedStreamingLLMClient(
+                [
+                    LLMStreamChunk(type="text_delta", text="fallback "),
+                    LLMStreamChunk(type="text_delta", text="worked"),
+                    LLMStreamChunk(type="completed"),
+                ]
+            ),
+        ]
+    )
+
+    chunks = list(fallback.stream_complete([{"role": "user", "content": "Hello"}]))
+
+    assert "".join(chunk.text for chunk in chunks if chunk.type == "text_delta") == "fallback worked"
+    assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
+    assert fallback.last_success_provider is fallback.providers[1]
 
 
 def test_openai_responses_client_requires_api_key_without_injected_client():

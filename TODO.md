@@ -1170,6 +1170,9 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 
 - [ ] Add reflection loop after model actions.
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
+- [x] Add streaming model output.
+- [ ] Add token usage and cost tracking.
+- [ ] Add provider-native tool calling as an optional mode.
 - [x] Add true multi-step task execution on top of approved plans.
 - [x] Add per-tool permissions.
 - [x] Add CLI permission prompts for individual risky tool calls.
@@ -1339,7 +1342,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 ### Providers And Runtime
 
 - [ ] Add provider-native tool calling as an optional mode.
-- [ ] Add streaming model output.
+- [x] Add streaming model output.
 - [ ] Add model switching mid-session.
 - [ ] Add model reasoning-effort profiles where providers support them.
 - [ ] Add configurable model/provider profiles.
@@ -1353,6 +1356,45 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add multimodal input support for images and screenshots.
 - [ ] Add local model capability detection.
 - [ ] Add OpenTelemetry-style trace export.
+
+### Selected Next Provider Runtime Plans
+
+#### Feature 19: Streaming model output
+
+- [x] Goal: stream assistant text by default in the CLI and public API when the active provider supports it, while preserving Chulk's inspectable action loop.
+- [x] Scope v1 to final-answer/text streaming; keep `complete_action(...)` non-streaming so structured plan, tool-call, and step-update parsing remains deterministic.
+- [x] Add a provider-agnostic streaming interface in `LLMClient`, using typed chunks for text deltas, completion, and provider metadata.
+- [x] Implement streaming first for OpenAI Responses API when supported; add chat-completions streaming for DeepSeek/local only if the existing OpenAI-compatible clients expose compatible chunks cleanly.
+- [x] Add `supports_streaming` capability checks and automatically fall back to normal non-streaming completion when a provider does not support streaming.
+- [x] Make normal CLI turns use streaming by default with no separate `--stream` flag; keep quiet/non-interactive output stable by only streaming the answer text where the terminal can render it cleanly.
+- [x] Add agent/CLI progress events for stream start, text delta, stream complete, and stream failure.
+- [x] Keep full final text in conversation memory, turn state, traces, and session persistence exactly as non-streamed responses do today.
+- [x] Add public API support without forcing terminal behavior: `AgentHandle.run(...)` uses streaming internally when available and accepts `on_delta` for callers that want chunks.
+- [x] Tests: fake streaming provider, default CLI streamed text rendering, public `run(...)` default streaming behavior, fallback to non-streaming provider, trace/session final text persistence, provider capability gating.
+
+#### Feature 22: Token usage and cost tracking
+
+- [ ] Goal: record actual provider usage when available and estimated usage otherwise, then surface per-turn and per-session totals.
+- [ ] Add `LLMUsage` and `LLMCost` dataclasses for prompt tokens, completion tokens, total tokens, cache tokens when available, estimated flag, currency, and cost amount.
+- [ ] Extend model response plumbing so providers can return text plus usage metadata without breaking the existing `complete(...) -> str` compatibility path.
+- [ ] Keep deterministic local estimates from `chulk/core/context.py` as fallback usage when providers omit token usage.
+- [ ] Add model pricing metadata in one explicit provider/runtime module, with unknown prices producing token-only reporting rather than fake costs.
+- [ ] Record usage and cost in trace events, turn state, session model-request rows, `/context` or `/status`, and CLI turn summary.
+- [ ] Include fallback-chain attempt usage separately from successful final usage, so failed provider attempts are visible but not confused with final response usage.
+- [ ] Add config/env controls to disable cost display or select pricing source later, but keep v1 static and local.
+- [ ] Tests: provider usage extraction for OpenAI/DeepSeek-style fake responses, estimated fallback, cost math, trace/session persistence, CLI summary totals, unknown-price behavior.
+
+#### Feature 23: Provider-native tool calling as an optional mode
+
+- [ ] Goal: optionally let capable providers use native tool-calling transports while preserving Chulk's internal `AgentAction` dataclasses, permission gates, traces, and tool registry.
+- [ ] Add an explicit config flag such as `CHULK_TOOL_CALL_MODE=chulk-json|provider-native`, defaulting to current `chulk-json`.
+- [ ] Extend provider capabilities with native tool-call support and the expected transport style.
+- [ ] Convert Chulk `Tool` schemas into provider-native tool declarations at the LLM boundary only; do not let provider-specific tool details leak into `Agent`.
+- [ ] Normalize native provider tool-call outputs into existing `ToolCallAction`, `FinalAnswerAction`, `PlanAction`, and `PlanStepUpdateAction` where applicable.
+- [ ] Keep plan creation and plan-step updates on the Chulk JSON action protocol unless a provider-native equivalent can be normalized without losing state.
+- [ ] Enforce the same Python-side schema validation, permission policy, tool-call limits, plan-step gating, and observation formatting after native tool calls are normalized.
+- [ ] Trace the requested transport mode, raw provider tool-call metadata, normalized action, and any fallback to Chulk JSON mode.
+- [ ] Tests: native tool declaration shaping, native tool-call normalization, permission denial with native calls, fallback to JSON mode for unsupported providers, and no behavior change when the flag is unset.
 
 ### Review, Evals, And Quality
 

@@ -6,7 +6,7 @@ import sqlite3
 
 from chulk import __version__
 from chulk.config import load_config
-from chulk.llm import DeepSeekProvider, FallbackChain, LLMClient, LocalProvider, OpenAIProvider
+from chulk.llm import DeepSeekProvider, FallbackChain, LLMCapabilities, LLMClient, LocalProvider, OpenAIProvider
 from chulk.llm.capabilities import LLMModelCapabilities, register_model_capabilities
 from chulk.main import create_cli_llm, main
 from chulk.sessions import SQLiteSessionStore
@@ -173,6 +173,32 @@ def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsy
     assert "model       2 request(s)" in output
     assert "tools       calculator x1" in output
     assert "The result is 4." in output
+
+
+def test_main_streams_final_answer_by_default_for_streaming_provider(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["hello", "/q"])
+
+    class StreamingFakeLLM(LLMClient):
+        capabilities = LLMCapabilities(supports_streaming=True)
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return json.dumps({"type": "final_answer", "content": "streamed default answer"})
+
+    def factory(_config):
+        return StreamingFakeLLM()
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "chulk\n  streamed default answer" in output
+    assert output.count("streamed default answer") == 1
 
 
 def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, capsys):

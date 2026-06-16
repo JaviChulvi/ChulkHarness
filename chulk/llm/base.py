@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 import json
-from typing import Any
+from typing import Any, Literal
 
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
 from chulk.core.prompts import JSON_REPAIR_PROMPT
@@ -45,12 +46,42 @@ class LLMActionResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    """Provider-agnostic streamed text chunk."""
+
+    type: Literal["text_delta", "completed"]
+    text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class LLMClient:
     """Small provider-agnostic LLM client interface."""
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a normal text response."""
         raise NotImplementedError
+
+    def stream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        """Yield a normal text response as chunks.
+
+        Providers without native streaming use a one-shot compatibility stream.
+        """
+        try:
+            if max_output_tokens is None:
+                text = self.complete(messages)
+            else:
+                text = self.complete(messages, max_output_tokens=max_output_tokens)
+        except TypeError:
+            text = self.complete(messages)
+        if text:
+            yield LLMStreamChunk(type="text_delta", text=text)
+        yield LLMStreamChunk(type="completed")
 
     def complete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """Return a structured JSON response."""

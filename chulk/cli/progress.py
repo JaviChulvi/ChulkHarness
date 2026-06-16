@@ -86,6 +86,7 @@ class ProgressReporter:
         agent: Agent | None = None,
         settings: ProgressSettings | None = None,
         spinner: Spinner | None = None,
+        stream_output_func: Callable[[str], None] | None = None,
         previous_callback: Callable[[str, dict], None] | None = None,
     ) -> None:
         self.terminal = terminal
@@ -94,11 +95,14 @@ class ProgressReporter:
         self.agent = agent
         self.settings = settings or ProgressSettings()
         self.spinner = spinner or Spinner(terminal)
+        self.stream_output_func = stream_output_func or _write_stdout
         self.previous_callback = previous_callback
         self.turn_started_at: float | None = None
         self.model_started_at: float | None = None
         self.tool_started_at: dict[int, float] = {}
         self.current_activity: str | None = None
+        self.streamed_answer: bool = False
+        self._stream_open: bool = False
 
     def callback(self, event_type: str, payload: dict) -> None:
         """Handle one agent event."""
@@ -114,6 +118,9 @@ class ProgressReporter:
             self.tool_started_at[_tool_key(payload)] = now
 
         self._stop_spinner_if_needed(event_type)
+
+        if self._handle_stream_event(event_type, payload):
+            return
 
         if self.settings.quiet:
             return
@@ -135,6 +142,13 @@ class ProgressReporter:
 
     def close(self) -> None:
         self.spinner.stop()
+        if self._stream_open:
+            self.stream_output_func("\n")
+            self._stream_open = False
+
+    def reset_stream_state(self) -> None:
+        self.streamed_answer = False
+        self._stream_open = False
 
     def _elapsed(self, now: float) -> float | None:
         if self.turn_started_at is None:
@@ -171,6 +185,10 @@ class ProgressReporter:
         if event_type in {
             TraceEvent.MODEL_RESPONSE,
             TraceEvent.MODEL_RESPONSE_PARSED,
+            TraceEvent.MODEL_STREAM_STARTED,
+            TraceEvent.MODEL_STREAM_DELTA,
+            TraceEvent.MODEL_STREAM_COMPLETED,
+            TraceEvent.MODEL_STREAM_FAILED,
             TraceEvent.PLAN_CREATED,
             TraceEvent.PLAN_APPROVED,
             TraceEvent.PLAN_REJECTED,
@@ -182,7 +200,39 @@ class ProgressReporter:
         }:
             self.spinner.stop()
 
+    def _handle_stream_event(self, event_type: str, payload: dict) -> bool:
+        if event_type not in {
+            TraceEvent.MODEL_STREAM_STARTED,
+            TraceEvent.MODEL_STREAM_DELTA,
+            TraceEvent.MODEL_STREAM_COMPLETED,
+            TraceEvent.MODEL_STREAM_FAILED,
+        }:
+            return False
+        if self.settings.quiet:
+            return True
+        if event_type == TraceEvent.MODEL_STREAM_STARTED:
+            self.streamed_answer = True
+            self._stream_open = True
+            self.stream_output_func(self.terminal.accent("chulk") + "\n  ")
+            return True
+        if event_type == TraceEvent.MODEL_STREAM_DELTA:
+            text = payload.get("text")
+            if isinstance(text, str) and text:
+                self.stream_output_func(text.replace("\n", "\n  "))
+            return True
+        if event_type in {TraceEvent.MODEL_STREAM_COMPLETED, TraceEvent.MODEL_STREAM_FAILED}:
+            if self._stream_open:
+                self.stream_output_func("\n")
+                self._stream_open = False
+            return True
+        return True
+
 
 def _tool_key(payload: dict) -> int:
     iteration = payload.get("iteration")
     return iteration if isinstance(iteration, int) else -1
+
+
+def _write_stdout(text: str) -> None:
+    sys.stdout.write(text)
+    sys.stdout.flush()
