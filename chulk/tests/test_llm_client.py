@@ -1,17 +1,22 @@
 """Tests for LLM client behavior."""
 
+from decimal import Decimal
 import json
 from types import SimpleNamespace
 
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
     FallbackChain,
+    LLMActionError,
     LLM_PROVIDER_REGISTRY,
     LLMCapabilities,
     LLMClient,
     LLMConfigurationError,
+    LLMCost,
     LLMError,
+    LLMResponse,
     LLMStreamChunk,
+    LLMUsage,
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
@@ -20,26 +25,28 @@ from chulk.llm import (
 
 
 class FakeResponsesResource:
-    def __init__(self, output_text: str = "model answer", stream_events: list | None = None) -> None:
+    def __init__(self, output_text: str = "model answer", stream_events: list | None = None, usage=None) -> None:
         self.output_text = output_text
         self.stream_events = stream_events or []
+        self.usage = usage
         self.kwargs = None
 
     def create(self, **kwargs):
         self.kwargs = kwargs
         if kwargs.get("stream"):
             return iter(self.stream_events)
-        return SimpleNamespace(output_text=self.output_text)
+        return SimpleNamespace(output_text=self.output_text, usage=self.usage)
 
 
 class FakeOpenAIClient:
-    def __init__(self, output_text: str = "model answer", stream_events: list | None = None) -> None:
-        self.responses = FakeResponsesResource(output_text, stream_events=stream_events)
+    def __init__(self, output_text: str = "model answer", stream_events: list | None = None, usage=None) -> None:
+        self.responses = FakeResponsesResource(output_text, stream_events=stream_events, usage=usage)
 
 
 class FakeChatCompletionsResource:
-    def __init__(self, content: str = "deepseek answer") -> None:
+    def __init__(self, content: str = "deepseek answer", usage=None) -> None:
         self.content = content
+        self.usage = usage
         self.kwargs = None
 
     def create(self, **kwargs):
@@ -49,13 +56,14 @@ class FakeChatCompletionsResource:
                 SimpleNamespace(
                     message=SimpleNamespace(content=self.content),
                 )
-            ]
+            ],
+            usage=self.usage,
         )
 
 
 class FakeDeepSeekClient:
-    def __init__(self, content: str = "deepseek answer") -> None:
-        self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content))
+    def __init__(self, content: str = "deepseek answer", usage=None) -> None:
+        self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content, usage=usage))
 
 
 class FakeLocalClient:
@@ -94,6 +102,38 @@ class FailingLLMClient(LLMClient):
         raise LLMError("provider unavailable")
 
 
+class UsageFailingLLMClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+    def complete_response(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> LLMResponse:
+        usage = LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15, source="provider")
+        cost = LLMCost(
+            amount=Decimal("0.000012"),
+            pricing_known=True,
+            estimated=False,
+            provider=self.provider,
+            model=self.model,
+        )
+        raise LLMActionError("provider charged then failed", usage=usage, cost=cost)
+
+
+class UsageSuccessfulLLMClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+    def complete_response(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> LLMResponse:
+        usage = LLMUsage(input_tokens=20, output_tokens=10, total_tokens=30, source="provider")
+        cost = LLMCost(
+            amount=Decimal("0.000024"),
+            pricing_known=True,
+            estimated=False,
+            provider=self.provider,
+            model=self.model,
+        )
+        return LLMResponse(content="fallback answer", usage=usage, cost=cost, provider=self.provider, model=self.model)
+
+
 def test_openai_responses_client_sends_instructions_and_input():
     fake_client = FakeOpenAIClient()
     client = OpenAIResponsesClient(model="test-model", client=fake_client)
@@ -124,10 +164,27 @@ def test_base_stream_complete_falls_back_to_one_shot_completion():
 
     chunks = list(client.stream_complete([{"role": "user", "content": "Hello"}]))
 
-    assert chunks == [
-        LLMStreamChunk(type="text_delta", text="plain answer"),
-        LLMStreamChunk(type="completed"),
-    ]
+    assert chunks[0] == LLMStreamChunk(type="text_delta", text="plain answer")
+    assert chunks[1].type == "completed"
+    assert chunks[1].usage is not None
+    assert chunks[1].usage.estimated is True
+    assert chunks[1].cost is not None
+    assert chunks[1].cost.pricing_known is False
+
+
+def test_base_complete_response_estimates_usage_and_preserves_complete_compatibility():
+    client = ScriptedLLMClient(["plain answer", "plain answer"])
+
+    assert client.complete([{"role": "user", "content": "Hello"}]) == "plain answer"
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.content == "plain answer"
+    assert response.usage is not None
+    assert response.usage.estimated is True
+    assert response.usage.input_tokens > 0
+    assert response.usage.output_tokens > 0
+    assert response.cost is not None
+    assert response.cost.pricing_known is False
 
 
 def test_openai_responses_client_streams_text_deltas():
@@ -153,6 +210,47 @@ def test_openai_responses_client_streams_text_deltas():
     }
 
 
+def test_openai_responses_client_extracts_usage_and_cost():
+    usage = SimpleNamespace(
+        input_tokens=1000,
+        output_tokens=200,
+        total_tokens=1200,
+        input_tokens_details=SimpleNamespace(cached_tokens=100),
+    )
+    fake_client = FakeOpenAIClient(usage=usage)
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.content == "model answer"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 1000
+    assert response.usage.cached_input_tokens == 100
+    assert response.usage.cache_miss_input_tokens == 900
+    assert response.cost is not None
+    assert response.cost.to_dict()["amount"] == "0.00069"
+    assert response.cost.pricing_known is True
+    assert response.cost.estimated is False
+
+
+def test_unknown_model_reports_usage_without_cost():
+    usage = SimpleNamespace(
+        input_tokens=1000,
+        output_tokens=200,
+        total_tokens=1200,
+        input_tokens_details=SimpleNamespace(cached_tokens=100),
+    )
+    fake_client = FakeOpenAIClient(usage=usage)
+    client = OpenAIResponsesClient(model="unknown-model", client=fake_client)
+
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.usage is not None
+    assert response.cost is not None
+    assert response.cost.pricing_known is False
+    assert response.cost.amount is None
+
+
 def test_fallback_chain_streams_from_first_successful_provider():
     fallback = FallbackChain(
         [
@@ -172,6 +270,39 @@ def test_fallback_chain_streams_from_first_successful_provider():
     assert "".join(chunk.text for chunk in chunks if chunk.type == "text_delta") == "fallback worked"
     assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
     assert fallback.last_success_provider is fallback.providers[1]
+
+
+def test_fallback_chain_records_attempt_usage_and_cost_separately():
+    fallback = FallbackChain([UsageFailingLLMClient(), UsageSuccessfulLLMClient()])
+
+    response = fallback.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.content == "fallback answer"
+    assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
+    assert fallback.last_attempts[0].usage is not None
+    assert fallback.last_attempts[0].usage.total_tokens == 15
+    assert fallback.last_attempts[0].cost is not None
+    assert fallback.last_attempts[0].cost.amount == Decimal("0.000012")
+    assert fallback.last_attempts[1].usage is response.usage
+
+
+def test_fallback_chain_keeps_action_attempts_across_json_repair():
+    provider = ScriptedLLMClient(
+        [
+            "plain prose",
+            json.dumps({"type": "final_answer", "content": "repaired"}),
+        ]
+    )
+    fallback = FallbackChain([provider])
+
+    result = fallback.complete_action([{"role": "user", "content": "Hello"}], max_repair_attempts=1)
+
+    assert result.action.content == "repaired"
+    assert result.repair_attempts == 1
+    assert len(fallback.last_attempts) == 2
+    assert [attempt.success for attempt in fallback.last_attempts] == [True, True]
+    assert result.usage is not None
+    assert result.usage.total_tokens > fallback.last_attempts[-1].usage.total_tokens
 
 
 def test_openai_responses_client_requires_api_key_without_injected_client():
@@ -254,6 +385,44 @@ def test_deepseek_client_sends_chat_completion_messages():
         ],
         "stream": False,
     }
+
+
+def test_deepseek_client_extracts_cache_usage_and_cost():
+    usage = SimpleNamespace(
+        prompt_tokens=3000,
+        completion_tokens=500,
+        total_tokens=3500,
+        prompt_cache_hit_tokens=1000,
+        prompt_cache_miss_tokens=2000,
+    )
+    fake_client = FakeDeepSeekClient(usage=usage)
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 3000
+    assert response.usage.cache_hit_input_tokens == 1000
+    assert response.usage.cache_miss_input_tokens == 2000
+    assert response.usage.cache_split_estimated is False
+    assert response.cost is not None
+    assert response.cost.to_dict()["amount"] == "0.0004228"
+    assert response.cost.pricing_known is True
+
+
+def test_deepseek_missing_cache_split_treats_prompt_as_estimated_miss():
+    usage = SimpleNamespace(prompt_tokens=3000, completion_tokens=500, total_tokens=3500)
+    fake_client = FakeDeepSeekClient(usage=usage)
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.usage is not None
+    assert response.usage.cache_hit_input_tokens == 0
+    assert response.usage.cache_miss_input_tokens == 3000
+    assert response.usage.cache_split_estimated is True
+    assert response.cost is not None
+    assert response.cost.estimated is True
 
 
 def test_deepseek_client_requires_api_key_without_injected_client():

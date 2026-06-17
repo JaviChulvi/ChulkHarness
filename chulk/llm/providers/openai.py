@@ -9,6 +9,8 @@ from chulk.core.actions import STRICT_AGENT_ACTION_JSON_SCHEMA
 from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError, LLMStreamChunk
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
+from chulk.llm.pricing import estimate_cost
+from chulk.llm.usage import LLMResponse, normalize_openai_usage
 
 
 OPENAI_CAPABILITIES = LLMCapabilities(
@@ -23,6 +25,7 @@ class OpenAIResponsesClient(LLMClient):
     """LLM client backed by the OpenAI Responses API."""
 
     capabilities = OPENAI_CAPABILITIES
+    provider = "openai"
 
     def __init__(
         self,
@@ -59,6 +62,15 @@ class OpenAIResponsesClient(LLMClient):
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using OpenAI's Responses API."""
+        return self.complete_response(messages, max_output_tokens=max_output_tokens).content
+
+    def complete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return a text response plus OpenAI usage metadata."""
         request = self._text_request(messages, max_output_tokens=max_output_tokens)
         try:
             response = self._client.responses.create(**request)
@@ -67,7 +79,7 @@ class OpenAIResponsesClient(LLMClient):
 
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
-            return output_text
+            return self._response_from_provider(messages, output_text, getattr(response, "usage", None))
         raise LLMError("OpenAI response did not include output_text")
 
     def stream_complete(
@@ -86,6 +98,7 @@ class OpenAIResponsesClient(LLMClient):
 
         saw_text = False
         completed = False
+        usage = None
         for event in stream:
             event_type = _event_value(event, "type")
             if event_type == "response.output_text.delta":
@@ -96,6 +109,8 @@ class OpenAIResponsesClient(LLMClient):
                 continue
             if event_type == "response.completed":
                 completed = True
+                completed_response = _event_value(event, "response")
+                usage = normalize_openai_usage(_event_value(completed_response, "usage"))
                 continue
             if event_type == "error":
                 raise LLMError(f"OpenAI streaming request failed: {_event_error_message(event)}")
@@ -103,12 +118,27 @@ class OpenAIResponsesClient(LLMClient):
         if not saw_text:
             raise LLMError("OpenAI streaming response did not include output text")
         if completed:
-            yield LLMStreamChunk(type="completed", metadata={"event_type": "response.completed"})
+            cost = estimate_cost("openai", self.model, usage) if usage is not None else None
+            yield LLMStreamChunk(
+                type="completed",
+                metadata={"event_type": "response.completed"},
+                usage=usage,
+                cost=cost,
+            )
         else:
             yield LLMStreamChunk(type="completed", metadata={"event_type": "stream.closed"})
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response using OpenAI Structured Outputs."""
+        return self._complete_action_response_once(messages, max_output_tokens=max_output_tokens).content
+
+    def _complete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return one raw action response plus OpenAI usage metadata."""
         instructions, response_input = split_instructions(messages)
         request = {
             "model": self.model,
@@ -133,7 +163,7 @@ class OpenAIResponsesClient(LLMClient):
 
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
-            return output_text
+            return self._response_from_provider(messages, output_text, getattr(response, "usage", None))
         raise LLMError("OpenAI structured action response did not include output_text")
 
     def _text_request(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> dict[str, Any]:
@@ -147,6 +177,18 @@ class OpenAIResponsesClient(LLMClient):
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
         return request
+
+    def _response_from_provider(self, messages: list[dict[str, str]], content: str, usage_payload: object) -> LLMResponse:
+        usage = normalize_openai_usage(usage_payload)
+        if usage is None:
+            return self._response_with_estimated_usage(messages, content)
+        return LLMResponse(
+            content=content,
+            usage=usage,
+            cost=estimate_cost("openai", self.model, usage),
+            provider="openai",
+            model=self.model,
+        )
 
 
 def _validate_max_output_tokens(value: int | None) -> int | None:

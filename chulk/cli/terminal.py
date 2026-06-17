@@ -7,6 +7,7 @@ terminal presence while keeping the harness easy to inspect.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -98,6 +99,7 @@ class TerminalUI:
             f"  turns     {len(agent.state.turns)}",
             f"  plan      {'pending' if agent.has_pending_plan() else 'none'}",
             f"  context   {_context_status(agent.state.last_context_report, getattr(agent, 'context_budget', None))}",
+            f"  usage     {_usage_summary_text(agent.state.last_usage_report)}",
         ]
         return "\n".join(lines)
 
@@ -235,6 +237,7 @@ class TerminalUI:
             self.heading("Turn Summary"),
             f"  worked for  {_format_duration(_turn_duration(turn))}",
             f"  model       {turn.get('model_request_count', 0)} request(s)",
+            f"  usage       {_usage_summary_text(turn.get('model_usage_totals'))}",
             f"  tools       {_format_tool_counts(tool_counts)}",
             f"  memory      {len(loaded_memories)} loaded",
             f"  skills      {', '.join(skills) if skills else 'none'}",
@@ -322,6 +325,45 @@ def _context_summary_text(report) -> str:
         input_budget = budget.get("input_token_budget")
         budget_text = f"budget {_format_count(int(input_budget or 0))}"
     return f"{tokens} est tokens, {omitted} omitted, {budget_text}"
+
+
+def _usage_summary_text(payload) -> str:
+    if not isinstance(payload, dict):
+        return "not recorded"
+    usage = payload.get("usage")
+    cost = payload.get("cost")
+    if not isinstance(usage, dict):
+        return "not recorded"
+
+    total = int(usage.get("total_tokens") or 0)
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    estimate_suffix = " est" if usage.get("estimated") else ""
+    text = (
+        f"{_format_count(total)} tokens"
+        f" ({_format_count(input_tokens)} in, {_format_count(output_tokens)} out{estimate_suffix})"
+    )
+    if isinstance(cost, dict):
+        amount = cost.get("amount")
+        if cost.get("pricing_known") and amount is not None:
+            cost_prefix = "~" if cost.get("estimated") else ""
+            return f"{text}, {cost_prefix}{_format_usd_amount(amount)}"
+        return f"{text}, cost unknown"
+    return text
+
+
+def _format_usd_amount(value: object) -> str:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return "$0.000000"
+    text = format(amount.quantize(Decimal("0.000000000001")), "f").rstrip("0")
+    if "." not in text:
+        text = f"{text}.000000"
+    else:
+        whole, fractional = text.split(".", 1)
+        text = f"{whole}.{fractional.ljust(6, '0')}"
+    return f"${text}"
 
 
 def _context_budget_text(budget, over_budget_tokens: int) -> str:

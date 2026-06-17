@@ -1,11 +1,12 @@
 """Tests for the Phase 1 agent loop."""
 
+from decimal import Decimal
 import json
 from pathlib import Path
 
 from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnState
 from chulk.core.context import ContextBudget
-from chulk.llm import LLMCapabilities, LLMClient
+from chulk.llm import FallbackChain, LLMActionError, LLMCapabilities, LLMClient, LLMCost, LLMResponse, LLMUsage
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
@@ -28,6 +29,11 @@ class StreamingRecordingLLMClient(RecordingLLMClient):
     capabilities = LLMCapabilities(supports_streaming=True)
 
 
+class PricedRecordingLLMClient(RecordingLLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+
 class OutputLimitRecordingLLMClient(LLMClient):
     def __init__(self) -> None:
         self.action_kwargs: list[dict] = []
@@ -35,6 +41,32 @@ class OutputLimitRecordingLLMClient(LLMClient):
     def _complete_action_once(self, messages: list[dict[str, str]], **kwargs) -> str:
         self.action_kwargs.append(kwargs)
         return json.dumps({"type": "final_answer", "content": "ok"})
+
+
+class ChargedFailureActionLLMClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+    def _complete_action_response_once(self, messages: list[dict[str, str]], **kwargs) -> LLMResponse:
+        usage = LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+        cost = LLMCost(amount=Decimal("0.000012"), pricing_known=True, provider=self.provider, model=self.model)
+        raise LLMActionError("provider charged then failed", usage=usage, cost=cost)
+
+
+class ChargedSuccessActionLLMClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+    def _complete_action_response_once(self, messages: list[dict[str, str]], **kwargs) -> LLMResponse:
+        usage = LLMUsage(input_tokens=20, output_tokens=10, total_tokens=30)
+        cost = LLMCost(amount=Decimal("0.000024"), pricing_known=True, provider=self.provider, model=self.model)
+        return LLMResponse(
+            content=json.dumps({"type": "final_answer", "content": "fallback ok"}),
+            usage=usage,
+            cost=cost,
+            provider=self.provider,
+            model=self.model,
+        )
 
 
 def create_test_skill_registry(tmp_path):
@@ -379,6 +411,50 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert "estimated_tokens" in trace_text
 
 
+def test_agent_records_model_usage_and_cost_in_state_and_trace(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "usage-session")
+    llm = PricedRecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
+    agent = Agent(llm, trace_logger=trace_logger)
+
+    response = agent.run_turn("hello")
+
+    turn = agent.state.turns[0]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    response_payload = next(event["payload"] for event in events if event["type"] == TraceEvent.MODEL_RESPONSE)
+    finished_payload = next(event["payload"] for event in events if event["type"] == TraceEvent.TURN_FINISHED)
+
+    assert response == "ok"
+    assert len(turn.model_usage_reports) == 1
+    assert turn.model_usage_totals["request_count"] == 1
+    assert turn.model_usage_totals["usage"]["estimated"] is True
+    assert turn.model_usage_totals["usage"]["total_tokens"] > 0
+    assert turn.model_usage_totals["cost"]["pricing_known"] is True
+    assert turn.model_usage_totals["cost"]["amount"] is not None
+    assert agent.state.last_usage_report == turn.model_usage_totals
+    assert response_payload["usage"]["estimated"] is True
+    assert "total_tokens" in response_payload["usage"]
+    assert response_payload["cost"]["pricing_known"] is True
+    assert finished_payload["turn"]["model_usage_totals"]["request_count"] == 1
+    assert finished_payload["agent_state"]["last_usage_report"]["request_count"] == 1
+    assert finished_payload["agent_state"]["last_usage_report"]["cost"]["pricing_known"] is True
+
+
+def test_agent_usage_totals_include_charged_failed_fallback_attempts():
+    agent = Agent(FallbackChain([ChargedFailureActionLLMClient(), ChargedSuccessActionLLMClient()]))
+
+    response = agent.run_turn("hello")
+
+    turn = agent.state.turns[0]
+    assert response == "fallback ok"
+    assert turn.model_usage_totals["usage"]["input_tokens"] == 30
+    assert turn.model_usage_totals["usage"]["output_tokens"] == 15
+    assert turn.model_usage_totals["usage"]["total_tokens"] == 45
+    assert turn.model_usage_totals["cost"]["amount"] == "0.000036"
+    assert len(turn.model_usage_reports[0]["fallback_attempts"]) == 2
+    assert turn.model_usage_reports[0]["fallback_attempts"][0]["success"] is False
+    assert turn.model_usage_reports[0]["fallback_attempts"][0]["usage"]["total_tokens"] == 15
+
+
 def test_agent_summarizes_omitted_history_before_action_request():
     llm = RecordingLLMClient(
         [
@@ -409,6 +485,7 @@ def test_agent_summarizes_omitted_history_before_action_request():
     assert agent.memory.summary_message_count == 2
     assert isinstance(report, dict)
     assert report["omitted_message_count"] == 0
+    assert agent.state.turns[0].model_usage_totals["request_count"] == 2
 
 
 def test_agent_does_not_pass_remaining_context_as_output_limit():

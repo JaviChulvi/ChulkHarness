@@ -163,6 +163,8 @@ def test_create_agent_resumes_short_term_history(monkeypatch, tmp_path):
     second_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "used resumed history"})])
     second_agent = create_agent(config, lambda _config: second_llm, conversation_id=first_agent.state.conversation_id)
 
+    assert second_agent.state.last_usage_report is not None
+    assert second_agent.state.last_usage_report["request_count"] == 1
     second_agent.run_turn("what detail did I mention?")
 
     resumed_prompt_messages = second_llm.requests[0]
@@ -228,6 +230,8 @@ def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp
             json.dumps({"type": "final_answer", "content": "The result is 4."}),
         ]
     )
+    llm.provider = "openai"
+    llm.model = "gpt-4.1-mini"
     agent = create_agent(config, lambda _config: llm)
 
     agent.run_turn("what is 2 + 2?")
@@ -235,17 +239,26 @@ def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp
     with sqlite3.connect(config.store_path) as conn:
         conn.row_factory = sqlite3.Row
         request_count = conn.execute("SELECT count(*) AS count FROM conversation_model_requests").fetchone()["count"]
-        request_json = conn.execute(
-            "SELECT request_json FROM conversation_model_requests ORDER BY request_index LIMIT 1"
-        ).fetchone()["request_json"]
+        model_request = conn.execute(
+            "SELECT request_json, usage_json, cost_json FROM conversation_model_requests ORDER BY request_index LIMIT 1"
+        ).fetchone()
         tool_call = conn.execute("SELECT * FROM conversation_tool_calls").fetchone()
         observation = conn.execute("SELECT * FROM conversation_observations").fetchone()
         turn = conn.execute("SELECT * FROM conversation_turns").fetchone()
 
     assert request_count == 2
-    request_payload = json.loads(request_json)
+    request_payload = json.loads(model_request["request_json"])
+    usage_payload = json.loads(model_request["usage_json"])
+    cost_payload = json.loads(model_request["cost_json"])
+    turn_payload = json.loads(turn["turn_json"])
     assert request_payload["context_report"]["estimated_tokens"] > 0
     assert "max_output_tokens" not in request_payload
+    assert usage_payload["estimated"] is True
+    assert usage_payload["total_tokens"] > 0
+    assert cost_payload["pricing_known"] is True
+    assert cost_payload["amount"] is not None
+    assert turn_payload["model_usage_totals"]["request_count"] == 2
+    assert turn_payload["model_usage_totals"]["cost"]["pricing_known"] is True
     assert tool_call["tool_name"] == "calculator"
     assert tool_call["success"] == 1
     assert "4" in observation["content"]

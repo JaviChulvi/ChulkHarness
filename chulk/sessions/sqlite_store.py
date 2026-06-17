@@ -117,6 +117,8 @@ class SQLiteSessionStore:
                     available_tool_names TEXT NOT NULL DEFAULT '[]',
                     request_json TEXT NOT NULL,
                     raw_response TEXT,
+                    usage_json TEXT,
+                    cost_json TEXT,
                     created_at TEXT NOT NULL,
                     response_created_at TEXT,
                     UNIQUE (conversation_id, turn_id, request_index),
@@ -124,6 +126,8 @@ class SQLiteSessionStore:
                 )
                 """
             )
+            _ensure_column(conn, "conversation_model_requests", "usage_json", "TEXT")
+            _ensure_column(conn, "conversation_model_requests", "cost_json", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_tool_calls (
@@ -504,12 +508,21 @@ class SQLiteSessionStore:
             conn.execute(
                 """
                 UPDATE conversation_model_requests
-                SET raw_response = ?, response_created_at = ?
+                SET raw_response = ?, usage_json = ?, cost_json = ?, response_created_at = ?
                 WHERE conversation_id = ?
                   AND ((turn_id = ?) OR (turn_id IS NULL AND ? IS NULL))
                   AND request_index = ?
                 """,
-                (payload.get("content"), _utc_now(), conversation_id, turn_id, turn_id, request_index),
+                (
+                    payload.get("content"),
+                    json.dumps(payload.get("usage"), sort_keys=True) if isinstance(payload.get("usage"), dict) else None,
+                    json.dumps(payload.get("cost"), sort_keys=True) if isinstance(payload.get("cost"), dict) else None,
+                    _utc_now(),
+                    conversation_id,
+                    turn_id,
+                    turn_id,
+                    request_index,
+                ),
             )
 
     def save_tool_call(self, conversation_id: str, payload: dict[str, Any]) -> None:
@@ -686,6 +699,8 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         reflection_count=int(payload.get("reflection_count") or 0),
         reflections=_safe_dict_list(payload.get("reflections")),
         context_reports=_safe_dict_list(payload.get("context_reports")),
+        model_usage_reports=_safe_dict_list(payload.get("model_usage_reports")),
+        model_usage_totals=_safe_json_dict(payload.get("model_usage_totals")),
         plan_execution_feedback_count=int(payload.get("plan_execution_feedback_count") or 0),
     )
     turn.tool_calls = [_tool_call_from_dict(item) for item in _safe_dict_list(payload.get("tool_calls"))]
@@ -858,6 +873,12 @@ def _safe_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _utc_now() -> str:

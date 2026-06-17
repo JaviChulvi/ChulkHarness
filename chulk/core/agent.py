@@ -24,7 +24,8 @@ from chulk.core.reflection import (
 )
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
-from chulk.llm import LLMActionError, LLMClient, LLMError
+from chulk.llm import LLMCost, LLMActionError, LLMClient, LLMError, LLMUsage
+from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import ToolRegistry
@@ -246,6 +247,12 @@ class Agent:
                 self.state.json_repair_attempts += exc.repair_attempts
                 self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
                 turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
+                usage_payload, cost_payload = self._record_model_accounting(
+                    turn,
+                    request_index=turn.model_request_count,
+                    usage=exc.usage,
+                    cost=exc.cost,
+                )
                 if exc.raw_response:
                     self._trace(
                         TraceEvent.MODEL_RESPONSE,
@@ -256,6 +263,8 @@ class Agent:
                             "repair_attempts": exc.repair_attempts,
                             "repair_errors": exc.errors,
                             "parse_failed": True,
+                            "usage": usage_payload,
+                            "cost": cost_payload,
                         },
                     )
                 return self._fail_action_protocol_turn(exc, turn)
@@ -276,6 +285,13 @@ class Agent:
                         ],
                     },
                 )
+            usage_payload, cost_payload = self._record_model_accounting(
+                turn,
+                request_index=turn.model_request_count,
+                usage=action_result.usage,
+                cost=action_result.cost,
+                fallback_attempts=fallback_attempts,
+            )
             self._trace(
                 TraceEvent.MODEL_RESPONSE,
                 {
@@ -284,6 +300,8 @@ class Agent:
                     "content": action_result.raw_response,
                     "repair_attempts": action_result.repair_attempts,
                     "repair_errors": action_result.errors,
+                    "usage": usage_payload,
+                    "cost": cost_payload,
                 },
             )
             self._trace(TraceEvent.PARSED_ACTION, format_action_trace(action))
@@ -546,7 +564,8 @@ class Agent:
         request_payload["summary_source_message_count"] = len(messages)
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
         try:
-            raw_summary = self.llm_client.complete(summary_messages)
+            response = self.llm_client.complete_response(summary_messages)
+            raw_summary = response.content
         except LLMError as exc:
             self._trace(
                 TraceEvent.MODEL_RESPONSE,
@@ -560,6 +579,15 @@ class Agent:
             )
             return _fallback_context_summary(self.memory.conversation_summary, messages), True, str(exc)
 
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        usage_payload, cost_payload = self._record_model_accounting(
+            turn,
+            request_index=request_index,
+            usage=response.usage,
+            cost=response.cost,
+            fallback_attempts=fallback_attempts,
+            purpose="context_summary",
+        )
         self._trace(
             TraceEvent.MODEL_RESPONSE,
             {
@@ -567,6 +595,8 @@ class Agent:
                 "request_index": request_index,
                 "content": raw_summary,
                 "purpose": "context_summary",
+                "usage": usage_payload,
+                "cost": cost_payload,
             },
         )
         clean_summary = _clean_summary(raw_summary)
@@ -762,7 +792,8 @@ class Agent:
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
 
         try:
-            raw_response = self.llm_client.complete(messages)
+            response = self.llm_client.complete_response(messages)
+            raw_response = response.content
         except LLMError as exc:
             return self._fail_open_reflection(
                 turn,
@@ -773,6 +804,15 @@ class Agent:
                 request_index=request_index,
             )
 
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        usage_payload, cost_payload = self._record_model_accounting(
+            turn,
+            request_index=request_index,
+            usage=response.usage,
+            cost=response.cost,
+            fallback_attempts=fallback_attempts,
+            purpose="reflection",
+        )
         self._trace(
             TraceEvent.MODEL_RESPONSE,
             {
@@ -781,6 +821,8 @@ class Agent:
                 "content": raw_response,
                 "purpose": "reflection",
                 "reflection_attempt": attempt,
+                "usage": usage_payload,
+                "cost": cost_payload,
             },
         )
         try:
@@ -1207,6 +1249,36 @@ class Agent:
         message = _format_action_protocol_failure(str(exc), exc.raw_response)
         return self._fail_turn(message, turn)
 
+    def _record_model_accounting(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        usage: LLMUsage | None,
+        cost: LLMCost | None,
+        fallback_attempts: object = None,
+        purpose: str = "agent_action",
+    ) -> tuple[dict | None, dict | None]:
+        usage_payload = usage.to_dict() if usage is not None else None
+        cost_payload = cost.to_dict() if cost is not None else None
+        attempt_payloads = _fallback_attempt_payloads(fallback_attempts)
+        if usage_payload is None and cost_payload is None and not attempt_payloads:
+            return None, None
+
+        report = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "purpose": purpose,
+            "usage": usage_payload,
+            "cost": cost_payload,
+        }
+        if attempt_payloads:
+            report["fallback_attempts"] = attempt_payloads
+        turn.model_usage_reports.append(report)
+        turn.model_usage_totals = _aggregate_model_usage_reports(turn.model_usage_reports)
+        self.state.last_usage_report = turn.model_usage_totals
+        return usage_payload, cost_payload
+
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
         payload = payload or {}
         if self.trace_logger is not None:
@@ -1230,6 +1302,7 @@ class Agent:
                 "active_plan": self.state.active_plan.to_dict() if self.state.active_plan else None,
                 "pending_plan_turn_id": self.state.pending_plan_turn_id,
                 "last_context_report": self.state.last_context_report,
+                "last_usage_report": self.state.last_usage_report,
                 "conversation_summary": self.state.conversation_summary,
             },
         }
@@ -1249,6 +1322,51 @@ class Agent:
         if self.trace_logger is None:
             return None
         return self.trace_logger.write_artifact(name, content)
+
+
+def _fallback_attempt_payloads(fallback_attempts: object) -> list[dict]:
+    if not fallback_attempts:
+        return []
+    payloads: list[dict] = []
+    if not isinstance(fallback_attempts, list):
+        return payloads
+    for attempt in fallback_attempts:
+        if hasattr(attempt, "to_dict"):
+            payload = attempt.to_dict()
+        elif isinstance(attempt, dict):
+            payload = dict(attempt)
+        else:
+            payload = {"attempt": str(attempt)}
+        payloads.append(payload)
+    return payloads
+
+
+def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
+    request_usages: list[LLMUsage | None] = []
+    request_costs: list[LLMCost | None] = []
+    failed_attempt_usages: list[LLMUsage | None] = []
+    failed_attempt_costs: list[LLMCost | None] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        request_usages.append(usage_from_dict(report.get("usage")))
+        request_costs.append(cost_from_dict(report.get("cost")))
+        attempts = report.get("fallback_attempts")
+        if not isinstance(attempts, list):
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict) or attempt.get("success") is not False:
+                continue
+            failed_attempt_usages.append(usage_from_dict(attempt.get("usage")))
+            failed_attempt_costs.append(cost_from_dict(attempt.get("cost")))
+
+    usage = aggregate_usage([*request_usages, *failed_attempt_usages], source="turn_total")
+    cost = aggregate_cost([*request_costs, *failed_attempt_costs])
+    return {
+        "request_count": len([report for report in reports if isinstance(report, dict)]),
+        "usage": usage.to_dict() if usage is not None else None,
+        "cost": cost.to_dict() if cost is not None else None,
+    }
 
 
 def _dedupe_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:

@@ -141,6 +141,8 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
     state.final_answer = latest_turn.final_answer
     if latest_turn.context_reports:
         state.last_context_report = latest_turn.context_reports[-1]
+    if latest_turn.model_usage_totals:
+        state.last_usage_report = latest_turn.model_usage_totals
     for turn in reversed(state.turns):
         if turn.status == "waiting_for_approval" and turn.active_plan is not None and not turn.plan_approved:
             state.active_plan = turn.active_plan

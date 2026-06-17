@@ -7,6 +7,8 @@ from typing import Any
 from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import chat_messages
+from chulk.llm.pricing import estimate_cost
+from chulk.llm.usage import LLMResponse, normalize_deepseek_usage
 
 
 DEEPSEEK_CAPABILITIES = LLMCapabilities(
@@ -21,6 +23,7 @@ class DeepSeekChatCompletionsClient(LLMClient):
     """LLM client backed by DeepSeek's OpenAI-compatible Chat Completions API."""
 
     capabilities = DEEPSEEK_CAPABILITIES
+    provider = "deepseek"
 
     def __init__(
         self,
@@ -58,6 +61,15 @@ class DeepSeekChatCompletionsClient(LLMClient):
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using DeepSeek chat completions."""
+        return self.complete_response(messages, max_output_tokens=max_output_tokens).content
+
+    def complete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return a text response plus DeepSeek usage metadata."""
         request = {
             "model": self.model,
             "messages": chat_messages(messages),
@@ -74,11 +86,20 @@ class DeepSeekChatCompletionsClient(LLMClient):
             raise LLMError("DeepSeek response did not include message content") from exc
 
         if isinstance(content, str) and content:
-            return content
+            return self._response_from_provider(messages, content, getattr(response, "usage", None))
         raise LLMError("DeepSeek response content was empty")
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response using DeepSeek JSON Output mode."""
+        return self._complete_action_response_once(messages, max_output_tokens=max_output_tokens).content
+
+    def _complete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return one raw action response plus DeepSeek usage metadata."""
         request = {
             "model": self.model,
             "messages": chat_messages(messages),
@@ -96,5 +117,17 @@ class DeepSeekChatCompletionsClient(LLMClient):
             raise LLMError("DeepSeek structured action response did not include message content") from exc
 
         if isinstance(content, str) and content:
-            return content
+            return self._response_from_provider(messages, content, getattr(response, "usage", None))
         raise LLMError("DeepSeek structured action response content was empty")
+
+    def _response_from_provider(self, messages: list[dict[str, str]], content: str, usage_payload: object) -> LLMResponse:
+        usage = normalize_deepseek_usage(usage_payload)
+        if usage is None:
+            return self._response_with_estimated_usage(messages, content)
+        return LLMResponse(
+            content=content,
+            usage=usage,
+            cost=estimate_cost("deepseek", self.model, usage),
+            provider="deepseek",
+            model=self.model,
+        )

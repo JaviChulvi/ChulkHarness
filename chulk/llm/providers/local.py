@@ -7,6 +7,7 @@ from typing import Any
 from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import local_chat_messages
+from chulk.llm.usage import LLMResponse
 
 
 DEFAULT_LOCAL_BASE_URL = "http://localhost:1234/v1"
@@ -59,6 +60,15 @@ class LocalOpenAICompatibleClient(LLMClient):
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using a local OpenAI-compatible chat endpoint."""
+        return self.complete_response(messages, max_output_tokens=max_output_tokens).content
+
+    def complete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return a text response with estimated token usage."""
         request = {
             "model": self.model,
             "messages": local_chat_messages(messages),
@@ -75,7 +85,7 @@ class LocalOpenAICompatibleClient(LLMClient):
             raise LLMError("Local LLM response did not include message content") from exc
 
         if isinstance(content, str) and content:
-            return content
+            return self._response_with_estimated_usage(messages, content)
         raise LLMError("Local LLM response content was empty")
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:

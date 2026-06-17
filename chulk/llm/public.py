@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from chulk.llm.base import LLMClient, LLMError, LLMStreamChunk
+from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk
 from chulk.llm.factory import create_llm_client
+from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 if TYPE_CHECKING:
     from chulk.config import Config
@@ -106,6 +107,8 @@ class ProviderAttempt:
     success: bool
     latency_seconds: float
     error: str | None = None
+    usage: LLMUsage | None = None
+    cost: LLMCost | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -114,6 +117,8 @@ class ProviderAttempt:
             "success": self.success,
             "latency_seconds": self.latency_seconds,
             "error": self.error,
+            "usage": self.usage.to_dict() if self.usage is not None else None,
+            "cost": self.cost.to_dict() if self.cost is not None else None,
         }
 
 
@@ -126,6 +131,7 @@ class FallbackChain(LLMClient):
     attempts: list[ProviderAttempt] = field(default_factory=list)
     last_attempts: list[ProviderAttempt] = field(default_factory=list)
     last_success_provider: LLMClient | None = field(default=None, init=False, repr=False)
+    _action_attempts: list[ProviderAttempt] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -145,7 +151,36 @@ class FallbackChain(LLMClient):
         return FallbackChain(bound, strategy=self.strategy)
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        return self._try_providers(lambda provider: _complete(provider, messages, max_output_tokens=max_output_tokens))
+        return self.complete_response(messages, max_output_tokens=max_output_tokens).content
+
+    def complete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        return self._try_provider_responses(
+            lambda provider: _complete_response(provider, messages, max_output_tokens=max_output_tokens)
+        )
+
+    def complete_action(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_repair_attempts: int = 2,
+        max_output_tokens: int | None = None,
+    ) -> LLMActionResult:
+        self._action_attempts = []
+        try:
+            return super().complete_action(
+                messages,
+                max_repair_attempts=max_repair_attempts,
+                max_output_tokens=max_output_tokens,
+            )
+        finally:
+            if self._action_attempts is not None:
+                self.last_attempts = self._action_attempts
+                self._action_attempts = None
 
     def stream_complete(
         self,
@@ -156,11 +191,19 @@ class FallbackChain(LLMClient):
         yield from self._stream_providers(messages, max_output_tokens=max_output_tokens)
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        return self._try_providers(
-            lambda provider: _complete_action_once(provider, messages, max_output_tokens=max_output_tokens)
+        return self._complete_action_response_once(messages, max_output_tokens=max_output_tokens).content
+
+    def _complete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        return self._try_provider_responses(
+            lambda provider: _complete_action_response_once(provider, messages, max_output_tokens=max_output_tokens)
         )
 
-    def _try_providers(self, call) -> str:
+    def _try_provider_responses(self, call) -> LLMResponse:
         self.last_attempts = []
         self.last_success_provider = None
         errors: list[str] = []
@@ -168,19 +211,31 @@ class FallbackChain(LLMClient):
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
             try:
-                response = call(provider)
+                response: LLMResponse = call(provider)
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
-                attempt = ProviderAttempt(provider_name, model, False, latency, error=error)
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    latency,
+                    error=error,
+                    usage=getattr(exc, "usage", None),
+                    cost=getattr(exc, "cost", None),
+                )
                 self.last_attempts.append(attempt)
                 self.attempts.append(attempt)
+                if self._action_attempts is not None:
+                    self._action_attempts.append(attempt)
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
-            attempt = ProviderAttempt(provider_name, model, True, latency)
+            attempt = ProviderAttempt(provider_name, model, True, latency, usage=response.usage, cost=response.cost)
             self.last_attempts.append(attempt)
             self.attempts.append(attempt)
+            if self._action_attempts is not None:
+                self._action_attempts.append(attempt)
             self.last_success_provider = provider
             return response
         detail = "; ".join(errors) if errors else "no providers were available"
@@ -199,15 +254,29 @@ class FallbackChain(LLMClient):
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
             emitted_text = False
+            usage: LLMUsage | None = None
+            cost: LLMCost | None = None
             try:
                 for chunk in _stream_complete(provider, messages, max_output_tokens=max_output_tokens):
                     if chunk.type == "text_delta" and chunk.text:
                         emitted_text = True
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                    if chunk.cost is not None:
+                        cost = chunk.cost
                     yield chunk
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
-                attempt = ProviderAttempt(provider_name, model, False, latency, error=error)
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    latency,
+                    error=error,
+                    usage=getattr(exc, "usage", None),
+                    cost=getattr(exc, "cost", None),
+                )
                 self.last_attempts.append(attempt)
                 self.attempts.append(attempt)
                 if emitted_text:
@@ -215,7 +284,7 @@ class FallbackChain(LLMClient):
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
-            attempt = ProviderAttempt(provider_name, model, True, latency)
+            attempt = ProviderAttempt(provider_name, model, True, latency, usage=usage, cost=cost)
             self.last_attempts.append(attempt)
             self.attempts.append(attempt)
             self.last_success_provider = provider
@@ -224,13 +293,13 @@ class FallbackChain(LLMClient):
         raise LLMError(f"All fallback providers failed: {detail}")
 
 
-def _complete(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> str:
+def _complete_response(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> LLMResponse:
     try:
         if max_output_tokens is None:
-            return provider.complete(messages)
-        return provider.complete(messages, max_output_tokens=max_output_tokens)
+            return provider.complete_response(messages)
+        return provider.complete_response(messages, max_output_tokens=max_output_tokens)
     except TypeError:
-        return provider.complete(messages)
+        return provider.complete_response(messages)
 
 
 def _stream_complete(
@@ -248,10 +317,15 @@ def _stream_complete(
         yield from provider.stream_complete(messages)
 
 
-def _complete_action_once(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> str:
+def _complete_action_response_once(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_output_tokens: int | None,
+) -> LLMResponse:
     if max_output_tokens is None:
-        return provider._complete_action_once(messages)
-    return provider._complete_action_once(messages, max_output_tokens=max_output_tokens)
+        return provider._complete_action_response_once(messages)
+    return provider._complete_action_response_once(messages, max_output_tokens=max_output_tokens)
 
 
 def _provider_identity(provider: object) -> tuple[str, str | None]:

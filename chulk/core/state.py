@@ -297,6 +297,8 @@ class TurnState:
     reflection_count: int = 0
     reflections: list[dict] = field(default_factory=list)
     context_reports: list[dict] = field(default_factory=list)
+    model_usage_reports: list[dict] = field(default_factory=list)
+    model_usage_totals: dict = field(default_factory=dict)
     plan_execution_feedback_count: int = 0
 
     def complete(self, final_answer: str) -> None:
@@ -359,6 +361,8 @@ class TurnState:
             "reflection_count": self.reflection_count,
             "reflections": self.reflections,
             "context_reports": self.context_reports,
+            "model_usage_reports": self.model_usage_reports,
+            "model_usage_totals": self.model_usage_totals,
             "plan_execution_feedback_count": self.plan_execution_feedback_count,
         }
 
@@ -383,6 +387,7 @@ class AgentState:
     active_plan: Plan | None = None
     pending_plan_turn_id: str | None = None
     last_context_report: dict | None = None
+    last_usage_report: dict | None = None
     conversation_summary: str | None = None
 
     def to_dict(self) -> dict:
@@ -403,6 +408,7 @@ class AgentState:
             "active_plan": self.active_plan.to_dict() if self.active_plan else None,
             "pending_plan_turn_id": self.pending_plan_turn_id,
             "last_context_report": self.last_context_report,
+            "last_usage_report": self.last_usage_report,
             "conversation_summary": self.conversation_summary,
         }
 

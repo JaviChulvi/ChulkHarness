@@ -781,7 +781,7 @@ Logging tasks:
 - [x] Log tool errors.
 - [x] Log final answers.
 - [ ] Log timing information.
-- [ ] Log token usage if available.
+- [x] Log token usage if available.
 
 Trace event examples:
 
@@ -1171,7 +1171,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add reflection loop after model actions.
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
 - [x] Add streaming model output.
-- [ ] Add token usage and cost tracking.
+- [x] Add token usage and cost tracking.
 - [ ] Add provider-native tool calling as an optional mode.
 - [x] Add true multi-step task execution on top of approved plans.
 - [x] Add per-tool permissions.
@@ -1346,8 +1346,8 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add model switching mid-session.
 - [ ] Add model reasoning-effort profiles where providers support them.
 - [ ] Add configurable model/provider profiles.
-- [ ] Add token usage logging.
-- [ ] Add cost tracking per provider and model.
+- [x] Add token usage logging.
+- [x] Add cost tracking per provider and model.
 - [ ] Add provider health checks.
 - [ ] Add invalid-model diagnostics.
 - [ ] Add rate-limit handling.
@@ -1374,15 +1374,15 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 
 #### Feature 22: Token usage and cost tracking
 
-- [ ] Goal: record actual provider usage when available and estimated usage otherwise, then surface per-turn and per-session totals.
-- [ ] Add `LLMUsage` and `LLMCost` dataclasses for prompt tokens, completion tokens, total tokens, cache tokens when available, estimated flag, currency, and cost amount.
-- [ ] Extend model response plumbing so providers can return text plus usage metadata without breaking the existing `complete(...) -> str` compatibility path.
-- [ ] Keep deterministic local estimates from `chulk/core/context.py` as fallback usage when providers omit token usage.
-- [ ] Add model pricing metadata in one explicit provider/runtime module, with unknown prices producing token-only reporting rather than fake costs.
-- [ ] Record usage and cost in trace events, turn state, session model-request rows, `/context` or `/status`, and CLI turn summary.
-- [ ] Include fallback-chain attempt usage separately from successful final usage, so failed provider attempts are visible but not confused with final response usage.
+- [x] Goal: record actual provider usage when available and estimated usage otherwise, then surface per-turn and per-session totals.
+- [x] Add `LLMUsage` and `LLMCost` dataclasses for prompt tokens, completion tokens, total tokens, cache tokens when available, estimated flag, currency, and cost amount.
+- [x] Extend model response plumbing so providers can return text plus usage metadata without breaking the existing `complete(...) -> str` compatibility path.
+- [x] Keep deterministic local estimates from `chulk/core/context.py` as fallback usage when providers omit token usage.
+- [x] Add model pricing metadata in one explicit provider/runtime module, with unknown prices producing token-only reporting rather than fake costs.
+- [x] Record usage and cost in trace events, turn state, session model-request rows, `/context` or `/status`, and CLI turn summary.
+- [x] Include fallback-chain attempt usage separately from successful final usage, so failed provider attempts are visible but not confused with final response usage.
 - [ ] Add config/env controls to disable cost display or select pricing source later, but keep v1 static and local.
-- [ ] Tests: provider usage extraction for OpenAI/DeepSeek-style fake responses, estimated fallback, cost math, trace/session persistence, CLI summary totals, unknown-price behavior.
+- [x] Tests: provider usage extraction for OpenAI/DeepSeek-style fake responses, estimated fallback, cost math, trace/session persistence, CLI summary totals, unknown-price behavior.
 
 #### Feature 23: Provider-native tool calling as an optional mode
 
