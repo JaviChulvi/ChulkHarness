@@ -3,10 +3,19 @@
 import json
 import re
 import sqlite3
+from types import SimpleNamespace
 
 from chulk import __version__
 from chulk.config import load_config
-from chulk.llm import DeepSeekProvider, FallbackChain, LLMCapabilities, LLMClient, LocalProvider, OpenAIProvider
+from chulk.llm import (
+    DeepSeekProvider,
+    FallbackChain,
+    LLMCapabilities,
+    LLMClient,
+    LocalProvider,
+    OpenAIProvider,
+    OpenAIResponsesClient,
+)
 from chulk.llm.capabilities import LLMModelCapabilities, register_model_capabilities
 from chulk.main import create_cli_llm, main
 from chulk.sessions import SQLiteSessionStore
@@ -847,6 +856,64 @@ def test_main_e2e_records_turn_state_for_tool_call(monkeypatch, tmp_path, capsys
     assert turn["tool_calls"][0]["success"] is True
     assert turn["observations"][0]["tool_name"] == "calculator"
     assert finished_payload["agent_state"]["turn_count"] == 1
+
+
+def test_main_e2e_uses_openai_native_tool_calling(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["what is 2 + 2?", "/q"])
+
+    class FakeResponses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return SimpleNamespace(
+                    output_text="",
+                    output=[
+                        SimpleNamespace(
+                            type="function_call",
+                            name="calculator",
+                            arguments=json.dumps({"expression": "2 + 2"}),
+                            call_id="call_calc",
+                        )
+                    ],
+                    usage=SimpleNamespace(input_tokens=100, output_tokens=10, total_tokens=110),
+                )
+            return SimpleNamespace(
+                output_text="The result is 4.",
+                output=[],
+                usage=SimpleNamespace(input_tokens=120, output_tokens=8, total_tokens=128),
+            )
+
+    class FakeOpenAI:
+        def __init__(self) -> None:
+            self.responses = FakeResponses()
+
+    fake_openai = FakeOpenAI()
+
+    def factory(_config):
+        return OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_openai)
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+    first_call = fake_openai.responses.calls[0]
+    tool_names = {tool["name"] for tool in first_call["tools"]}
+
+    assert exit_code == 0
+    assert "The result is 4." in output
+    assert "tools       calculator x1" in output
+    assert len(fake_openai.responses.calls) == 2
+    assert first_call["tool_choice"] == "auto"
+    assert "tools" in first_call
+    assert "text" not in first_call
+    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
 
 
 def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_path, capsys):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from chulk.core.prompts import (
     JSON_ACTION_PROMPT,
+    NATIVE_ACTION_PROMPT,
     format_conversation_summary_for_prompt,
     format_memories_for_prompt,
     format_planning_for_prompt,
@@ -38,6 +39,7 @@ def build_agent_messages(
     active_plan: Plan | None = None,
     plan_approved: bool = False,
     require_plan: bool = False,
+    native_action_protocol: bool = False,
     context_budget: ContextBudget | None = None,
 ) -> list[dict[str, str]]:
     """Build the model input from prompt, tools, and short-term history."""
@@ -54,6 +56,7 @@ def build_agent_messages(
         active_plan=active_plan,
         plan_approved=plan_approved,
         require_plan=require_plan,
+        native_action_protocol=native_action_protocol,
         context_budget=context_budget,
     ).messages
 
@@ -72,6 +75,7 @@ def build_agent_prompt(
     active_plan: Plan | None = None,
     plan_approved: bool = False,
     require_plan: bool = False,
+    native_action_protocol: bool = False,
     context_budget: ContextBudget | None = None,
 ) -> AgentPrompt:
     """Build model input and a context report from prompt, tools, and history."""
@@ -94,6 +98,7 @@ def build_agent_prompt(
     )
     tool_rules = format_tool_call_rules(max_tool_calls_per_turn)
     tools_prompt = format_tools_for_prompt(tool_descriptions)
+    action_protocol = NATIVE_ACTION_PROMPT if native_action_protocol else JSON_ACTION_PROMPT
     system_parts = [
         ("system_prompt", "Base system prompt", system_prompt, {}),
         (
@@ -128,7 +133,12 @@ def build_agent_prompt(
             {"tool_names": [tool.name for tool in tool_registry.list_tools()]},
         ),
         ("tool_rules", "Tool-call rules", tool_rules, {"max_tool_calls_per_turn": max_tool_calls_per_turn}),
-        ("action_protocol", "Action protocol", JSON_ACTION_PROMPT, {}),
+        (
+            "action_protocol",
+            "Action protocol",
+            action_protocol,
+            {"native_tool_calling": native_action_protocol},
+        ),
     ]
     system_sections = [
         ContextSection.from_text(

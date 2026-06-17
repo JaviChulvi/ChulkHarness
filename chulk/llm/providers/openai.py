@@ -10,6 +10,15 @@ from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError, LLMStream
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
+from chulk.llm.tools import (
+    action_payload_json,
+    native_final_answer_payload,
+    native_tool_action_payload,
+    openai_response_tools,
+    parse_native_arguments,
+    public_value,
+    with_json_action_prompt,
+)
 from chulk.llm.usage import LLMResponse, normalize_openai_usage
 
 
@@ -17,6 +26,7 @@ OPENAI_CAPABILITIES = LLMCapabilities(
     supports_structured_output=True,
     supports_json_mode=False,
     supports_streaming=True,
+    supports_native_tool_calling=True,
     api_style="responses",
 )
 
@@ -137,8 +147,36 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
     ) -> LLMResponse:
         """Return one raw action response plus OpenAI usage metadata."""
+        if tools is not None:
+            try:
+                return self._complete_native_action_response_once(
+                    messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                )
+            except LLMError as exc:
+                fallback = self._complete_json_action_response_once(
+                    with_json_action_prompt(messages),
+                    max_output_tokens=max_output_tokens,
+                )
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return self._complete_json_action_response_once(messages, max_output_tokens=max_output_tokens)
+
+    def _complete_json_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
         instructions, response_input = split_instructions(messages)
         request = {
             "model": self.model,
@@ -163,8 +201,43 @@ class OpenAIResponsesClient(LLMClient):
 
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
-            return self._response_from_provider(messages, output_text, getattr(response, "usage", None))
+            result = self._response_from_provider(messages, output_text, getattr(response, "usage", None))
+            result.metadata.update({"action_transport": "chulk_json"})
+            return result
         raise LLMError("OpenAI structured action response did not include output_text")
+
+    def _complete_native_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tools: list[object],
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        instructions, response_input = split_instructions(messages)
+        request = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+            "tools": openai_response_tools(tools),
+            "tool_choice": "auto",
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
+        try:
+            response = self._client.responses.create(**request)
+        except Exception as exc:
+            raise LLMError(f"OpenAI native tool action request failed: {exc}") from exc
+
+        content, raw_tool_call = _normalize_openai_native_action_response(response)
+        result = self._response_from_provider(messages, content, getattr(response, "usage", None))
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": raw_tool_call,
+            }
+        )
+        return result
 
     def _text_request(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> dict[str, Any]:
         instructions, response_input = split_instructions(messages)
@@ -223,3 +296,23 @@ def _event_error_message(event: object) -> str:
     if isinstance(message, str) and message:
         return message
     return str(error or event)
+
+
+def _normalize_openai_native_action_response(response: object) -> tuple[str, dict | None]:
+    output = _event_value(response, "output")
+    if isinstance(output, list):
+        for item in output:
+            item_type = _event_value(item, "type")
+            if item_type != "function_call":
+                continue
+            name = _event_value(item, "name")
+            if not isinstance(name, str) or not name:
+                raise LLMError("OpenAI native tool call did not include a function name")
+            arguments = parse_native_arguments(_event_value(item, "arguments"))
+            payload = native_tool_action_payload(name, arguments)
+            return action_payload_json(payload), public_value(item)
+
+    output_text = _event_value(response, "output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return action_payload_json(native_final_answer_payload(output_text.strip())), None
+    raise LLMError("OpenAI native action response did not include a function call or output_text")

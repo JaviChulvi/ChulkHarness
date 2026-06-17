@@ -242,6 +242,7 @@ class Agent:
                 action_result = self.llm_client.complete_action(
                     messages,
                     max_repair_attempts=self.max_json_repair_attempts,
+                    tools=self.tool_registry.list_tools(),
                 )
             except LLMActionError as exc:
                 self.state.json_repair_attempts += exc.repair_attempts
@@ -302,6 +303,7 @@ class Agent:
                     "repair_errors": action_result.errors,
                     "usage": usage_payload,
                     "cost": cost_payload,
+                    "metadata": action_result.metadata,
                 },
             )
             self._trace(TraceEvent.PARSED_ACTION, format_action_trace(action))
@@ -488,6 +490,7 @@ class Agent:
             active_plan=turn.active_plan,
             plan_approved=turn.plan_approved,
             require_plan=require_plan,
+            native_action_protocol=self._native_tool_calling_enabled(),
             context_budget=self.context_budget,
         )
 
@@ -746,6 +749,12 @@ class Agent:
         provider = getattr(self.llm_client, "last_success_provider", None) or self.llm_client
         capabilities = getattr(provider, "capabilities", None)
         return bool(getattr(capabilities, "supports_streaming", False))
+
+    def _native_tool_calling_enabled(self) -> bool:
+        providers = getattr(self.llm_client, "providers", None)
+        if isinstance(providers, list):
+            return any(_client_supports_native_tool_calling(provider) for provider in providers)
+        return _client_supports_native_tool_calling(self.llm_client)
 
     def _final_answer_needs_revision(self, proposed_answer: str, turn: TurnState) -> bool:
         if self.max_reflection_attempts == 0 or turn.reflection_count >= self.max_reflection_attempts:
@@ -1367,6 +1376,11 @@ def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
         "usage": usage.to_dict() if usage is not None else None,
         "cost": cost.to_dict() if cost is not None else None,
     }
+
+
+def _client_supports_native_tool_calling(client: object) -> bool:
+    capabilities = getattr(client, "capabilities", None)
+    return bool(getattr(capabilities, "supports_native_tool_calling", False))
 
 
 def _dedupe_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:

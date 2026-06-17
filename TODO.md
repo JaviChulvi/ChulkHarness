@@ -722,7 +722,7 @@ Tool-call loop limits:
 
 Future formats:
 
-- [ ] Consider provider-native tool calling after the custom protocol is understood.
+- [x] Use provider-native tool calling by default after the custom protocol is understood.
 - [ ] Consider JSON Schema validation.
 - [ ] Consider Pydantic models for action parsing.
 - [ ] Consider multiple tool calls in one model response later.
@@ -1128,7 +1128,7 @@ Goal: experiment with richer agent behavior after the core mechanics are underst
 - [ ] Add skill router using an LLM classifier.
 - [ ] Add embedding-based skill selection.
 - [ ] Add hybrid skill ranking.
-- [ ] Add provider-native tool calling as an optional mode.
+- [x] Add provider-native tool calling as the default action transport.
 
 Done when:
 
@@ -1172,7 +1172,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
 - [x] Add streaming model output.
 - [x] Add token usage and cost tracking.
-- [ ] Add provider-native tool calling as an optional mode.
+- [x] Add provider-native tool calling as the default action transport.
 - [x] Add true multi-step task execution on top of approved plans.
 - [x] Add per-tool permissions.
 - [x] Add CLI permission prompts for individual risky tool calls.
@@ -1341,7 +1341,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 
 ### Providers And Runtime
 
-- [ ] Add provider-native tool calling as an optional mode.
+- [x] Add provider-native tool calling as the default action transport.
 - [x] Add streaming model output.
 - [ ] Add model switching mid-session.
 - [ ] Add model reasoning-effort profiles where providers support them.
@@ -1384,17 +1384,17 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add config/env controls to disable cost display or select pricing source later, but keep v1 static and local.
 - [x] Tests: provider usage extraction for OpenAI/DeepSeek-style fake responses, estimated fallback, cost math, trace/session persistence, CLI summary totals, unknown-price behavior.
 
-#### Feature 23: Provider-native tool calling as an optional mode
+#### Feature 23: Provider-native tool calling as the default action transport
 
-- [ ] Goal: optionally let capable providers use native tool-calling transports while preserving Chulk's internal `AgentAction` dataclasses, permission gates, traces, and tool registry.
-- [ ] Add an explicit config flag such as `CHULK_TOOL_CALL_MODE=chulk-json|provider-native`, defaulting to current `chulk-json`.
-- [ ] Extend provider capabilities with native tool-call support and the expected transport style.
-- [ ] Convert Chulk `Tool` schemas into provider-native tool declarations at the LLM boundary only; do not let provider-specific tool details leak into `Agent`.
-- [ ] Normalize native provider tool-call outputs into existing `ToolCallAction`, `FinalAnswerAction`, `PlanAction`, and `PlanStepUpdateAction` where applicable.
-- [ ] Keep plan creation and plan-step updates on the Chulk JSON action protocol unless a provider-native equivalent can be normalized without losing state.
-- [ ] Enforce the same Python-side schema validation, permission policy, tool-call limits, plan-step gating, and observation formatting after native tool calls are normalized.
-- [ ] Trace the requested transport mode, raw provider tool-call metadata, normalized action, and any fallback to Chulk JSON mode.
-- [ ] Tests: native tool declaration shaping, native tool-call normalization, permission denial with native calls, fallback to JSON mode for unsupported providers, and no behavior change when the flag is unset.
+- [x] Goal: let providers use native tool-calling transports by default while preserving Chulk's internal `AgentAction` dataclasses, permission gates, traces, and tool registry.
+- [x] Default OpenAI, DeepSeek, and local OpenAI-compatible action requests to provider-native tool calling; keep Chulk JSON as automatic fallback when a provider rejects native tools.
+- [x] Extend provider capabilities with native tool-call support and the expected transport style.
+- [x] Convert Chulk `Tool` schemas into provider-native tool declarations at the LLM boundary only; do not let provider-specific tool details leak into `Agent`.
+- [x] Normalize native provider tool-call outputs into existing `ToolCallAction`, `FinalAnswerAction`, `PlanAction`, and `PlanStepUpdateAction` where applicable.
+- [x] Represent plan creation and plan-step updates as Chulk synthetic native tools so approved-plan state stays normalized.
+- [x] Enforce the same Python-side schema validation, permission policy, tool-call limits, plan-step gating, and observation formatting after native tool calls are normalized.
+- [x] Trace the requested transport mode, raw provider tool-call metadata, normalized action, and any fallback to Chulk JSON mode.
+- [x] Tests: native tool declaration shaping, native tool-call normalization, native prompt selection, local fallback to JSON mode, and provider capability defaults.
 
 ### Review, Evals, And Quality
 

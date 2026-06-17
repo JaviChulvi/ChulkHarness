@@ -7,6 +7,15 @@ from typing import Any
 from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import local_chat_messages
+from chulk.llm.tools import (
+    action_payload_json,
+    chat_completion_tools,
+    native_final_answer_payload,
+    native_tool_action_payload,
+    parse_native_arguments,
+    public_value,
+    with_json_action_prompt,
+)
 from chulk.llm.usage import LLMResponse
 
 
@@ -17,6 +26,7 @@ LOCAL_CAPABILITIES = LLMCapabilities(
     supports_structured_output=False,
     supports_json_mode=False,
     supports_streaming=False,
+    supports_native_tool_calling=True,
     api_style="chat_completions",
 )
 
@@ -92,8 +102,91 @@ class LocalOpenAICompatibleClient(LLMClient):
         """Return one raw action response from the local model."""
         return self.complete(messages)
 
+    def _complete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+    ) -> LLMResponse:
+        """Return one raw action response, using native local tool calls by default."""
+        if tools is not None:
+            try:
+                return self._complete_native_action_response_once(messages, tools=tools)
+            except LLMError as exc:
+                fallback = self._complete_json_action_response_once(with_json_action_prompt(messages))
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return self._complete_json_action_response_once(messages)
+
+    def _complete_json_action_response_once(self, messages: list[dict[str, str]]) -> LLMResponse:
+        content = self.complete(messages)
+        response = self._response_with_estimated_usage(messages, content)
+        response.metadata.update({"action_transport": "chulk_json"})
+        return response
+
+    def _complete_native_action_response_once(self, messages: list[dict[str, str]], *, tools: list[object]) -> LLMResponse:
+        request = {
+            "model": self.model,
+            "messages": local_chat_messages(messages),
+            "stream": False,
+            "tools": chat_completion_tools(tools),
+            "tool_choice": "auto",
+        }
+        try:
+            response = self._client.chat.completions.create(**request)
+        except Exception as exc:
+            raise LLMError(f"Local native tool action request failed: {exc}") from exc
+
+        message = _response_message(response)
+        content, raw_tool_call = _normalize_chat_native_action_message(message)
+        result = self._response_with_estimated_usage(messages, content)
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": raw_tool_call,
+            }
+        )
+        return result
+
 
 def _validate_base_url(value: str) -> str:
     if not value.strip():
         raise ValueError("base_url must be non-empty")
     return value.strip()
+
+
+def _response_message(response: object) -> object:
+    try:
+        return response.choices[0].message
+    except (AttributeError, IndexError) as exc:
+        raise LLMError("Local LLM response did not include message content") from exc
+
+
+def _normalize_chat_native_action_message(message: object) -> tuple[str, dict | None]:
+    tool_calls = _value(message, "tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        tool_call = tool_calls[0]
+        function = _value(tool_call, "function")
+        name = _value(function, "name")
+        if not isinstance(name, str) or not name:
+            raise LLMError("Native tool call did not include a function name")
+        arguments = parse_native_arguments(_value(function, "arguments"))
+        payload = native_tool_action_payload(name, arguments)
+        return action_payload_json(payload), public_value(tool_call)
+
+    content = _value(message, "content")
+    if isinstance(content, str) and content.strip():
+        return action_payload_json(native_final_answer_payload(content.strip())), None
+    raise LLMError("Native action response did not include a tool call or content")
+
+
+def _value(source: object, key: str) -> object:
+    if isinstance(source, dict):
+        return source.get(key)
+    return getattr(source, key, None)

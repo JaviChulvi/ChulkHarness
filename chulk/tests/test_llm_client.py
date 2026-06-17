@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 from types import SimpleNamespace
 
+from chulk.core.actions import PlanAction, ToolCallAction
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
     FallbackChain,
@@ -22,39 +23,78 @@ from chulk.llm import (
     create_llm_client,
     resolve_model_capabilities,
 )
+from chulk.llm.tools import PLAN_TOOL_NAME
 
 
 class FakeResponsesResource:
-    def __init__(self, output_text: str = "model answer", stream_events: list | None = None, usage=None) -> None:
+    def __init__(
+        self,
+        output_text: str = "model answer",
+        stream_events: list | None = None,
+        usage=None,
+        output: list | None = None,
+        fail_with_tools: bool = False,
+    ) -> None:
         self.output_text = output_text
         self.stream_events = stream_events or []
         self.usage = usage
+        self.output = output
+        self.fail_with_tools = fail_with_tools
         self.kwargs = None
+        self.calls: list[dict] = []
 
     def create(self, **kwargs):
         self.kwargs = kwargs
+        self.calls.append(kwargs)
+        if kwargs.get("tools") and self.fail_with_tools:
+            raise RuntimeError("tools unsupported")
         if kwargs.get("stream"):
             return iter(self.stream_events)
-        return SimpleNamespace(output_text=self.output_text, usage=self.usage)
+        return SimpleNamespace(output_text=self.output_text, usage=self.usage, output=self.output)
 
 
 class FakeOpenAIClient:
-    def __init__(self, output_text: str = "model answer", stream_events: list | None = None, usage=None) -> None:
-        self.responses = FakeResponsesResource(output_text, stream_events=stream_events, usage=usage)
+    def __init__(
+        self,
+        output_text: str = "model answer",
+        stream_events: list | None = None,
+        usage=None,
+        output: list | None = None,
+        fail_with_tools: bool = False,
+    ) -> None:
+        self.responses = FakeResponsesResource(
+            output_text,
+            stream_events=stream_events,
+            usage=usage,
+            output=output,
+            fail_with_tools=fail_with_tools,
+        )
 
 
 class FakeChatCompletionsResource:
-    def __init__(self, content: str = "deepseek answer", usage=None) -> None:
+    def __init__(
+        self,
+        content: str | None = "deepseek answer",
+        usage=None,
+        tool_calls: list | None = None,
+        fail_with_tools: bool = False,
+    ) -> None:
         self.content = content
         self.usage = usage
+        self.tool_calls = tool_calls
+        self.fail_with_tools = fail_with_tools
         self.kwargs = None
+        self.calls: list[dict] = []
 
     def create(self, **kwargs):
         self.kwargs = kwargs
+        self.calls.append(kwargs)
+        if kwargs.get("tools") and self.fail_with_tools:
+            raise RuntimeError("tools unsupported")
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    message=SimpleNamespace(content=self.content),
+                    message=SimpleNamespace(content=self.content, tool_calls=self.tool_calls),
                 )
             ],
             usage=self.usage,
@@ -62,13 +102,37 @@ class FakeChatCompletionsResource:
 
 
 class FakeDeepSeekClient:
-    def __init__(self, content: str = "deepseek answer", usage=None) -> None:
-        self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content, usage=usage))
+    def __init__(
+        self,
+        content: str | None = "deepseek answer",
+        usage=None,
+        tool_calls: list | None = None,
+        fail_with_tools: bool = False,
+    ) -> None:
+        self.chat = SimpleNamespace(
+            completions=FakeChatCompletionsResource(
+                content,
+                usage=usage,
+                tool_calls=tool_calls,
+                fail_with_tools=fail_with_tools,
+            )
+        )
 
 
 class FakeLocalClient:
-    def __init__(self, content: str = "local answer") -> None:
-        self.chat = SimpleNamespace(completions=FakeChatCompletionsResource(content))
+    def __init__(
+        self,
+        content: str | None = "local answer",
+        tool_calls: list | None = None,
+        fail_with_tools: bool = False,
+    ) -> None:
+        self.chat = SimpleNamespace(
+            completions=FakeChatCompletionsResource(
+                content,
+                tool_calls=tool_calls,
+                fail_with_tools=fail_with_tools,
+            )
+        )
 
 
 class ScriptedLLMClient(LLMClient):
@@ -132,6 +196,19 @@ class UsageSuccessfulLLMClient(LLMClient):
             model=self.model,
         )
         return LLMResponse(content="fallback answer", usage=usage, cost=cost, provider=self.provider, model=self.model)
+
+
+def fake_calculator_tool():
+    return SimpleNamespace(
+        name="calculator",
+        description="Evaluate arithmetic.",
+        args_schema={
+            "type": "object",
+            "properties": {"expression": {"type": "string"}},
+            "required": ["expression"],
+            "additionalProperties": False,
+        },
+    )
 
 
 def test_openai_responses_client_sends_instructions_and_input():
@@ -231,6 +308,77 @@ def test_openai_responses_client_extracts_usage_and_cost():
     assert response.cost.to_dict()["amount"] == "0.00069"
     assert response.cost.pricing_known is True
     assert response.cost.estimated is False
+
+
+def test_openai_responses_client_uses_native_tool_calls_when_tools_are_provided():
+    fake_client = FakeOpenAIClient(
+        output_text="",
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                name="calculator",
+                arguments=json.dumps({"expression": "1 + 1"}),
+                call_id="call_1",
+            )
+        ],
+    )
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "what is 1+1?"}], tools=[fake_calculator_tool()])
+
+    assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
+    assert fake_client.responses.kwargs["tool_choice"] == "auto"
+    assert "tools" in fake_client.responses.kwargs
+    assert "text" not in fake_client.responses.kwargs
+    tool_names = {tool["name"] for tool in fake_client.responses.kwargs["tools"]}
+    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert result.metadata["action_transport"] == "provider_native"
+    assert result.metadata["provider_tool_call"]["call_id"] == "call_1"
+
+
+def test_openai_responses_native_final_text_becomes_final_answer():
+    fake_client = FakeOpenAIClient(output_text="native final")
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "hello"}], tools=[fake_calculator_tool()])
+
+    assert result.action.content == "native final"
+    assert result.metadata["action_transport"] == "provider_native"
+
+
+def test_openai_responses_native_plan_tool_becomes_plan_action():
+    fake_client = FakeOpenAIClient(
+        output_text="",
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                name=PLAN_TOOL_NAME,
+                arguments=json.dumps(
+                    {
+                        "summary": "Make a change.",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "title": "Edit file",
+                                "description": "Update the file.",
+                                "status": "pending",
+                                "depends_on": [],
+                                "acceptance_criteria": ["File is updated."],
+                                "retry_limit": 0,
+                            }
+                        ],
+                    }
+                ),
+            )
+        ],
+    )
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "plan this"}], tools=[])
+
+    assert isinstance(result.action, PlanAction)
+    assert result.action.plan.summary == "Make a change."
+    assert result.action.plan.steps[0].title == "Edit file"
 
 
 def test_unknown_model_reports_usage_without_cost():
@@ -385,6 +533,41 @@ def test_deepseek_client_sends_chat_completion_messages():
         ],
         "stream": False,
     }
+
+
+def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
+    fake_client = FakeDeepSeekClient(
+        content=None,
+        tool_calls=[
+            SimpleNamespace(
+                id="call_1",
+                type="function",
+                function=SimpleNamespace(name="calculator", arguments=json.dumps({"expression": "2 + 2"})),
+            )
+        ],
+    )
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "what is 2+2?"}], tools=[fake_calculator_tool()])
+
+    assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "2 + 2"})
+    assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert "tools" in fake_client.chat.completions.kwargs
+    assert "response_format" not in fake_client.chat.completions.kwargs
+    tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
+    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert result.metadata["action_transport"] == "provider_native"
+    assert result.metadata["provider_tool_call"]["id"] == "call_1"
+
+
+def test_deepseek_native_final_text_becomes_final_answer():
+    fake_client = FakeDeepSeekClient(content="native final")
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "hello"}], tools=[fake_calculator_tool()])
+
+    assert result.action.content == "native final"
+    assert result.metadata["action_transport"] == "provider_native"
 
 
 def test_deepseek_client_extracts_cache_usage_and_cost():
@@ -595,6 +778,48 @@ def test_local_client_actions_use_plain_chat_completion_contract():
     ]
 
 
+def test_local_client_uses_native_tool_calls_when_tools_are_provided():
+    fake_client = FakeLocalClient(
+        content=None,
+        tool_calls=[
+            SimpleNamespace(
+                id="call_local",
+                type="function",
+                function=SimpleNamespace(name="calculator", arguments=json.dumps({"expression": "3 + 4"})),
+            )
+        ],
+    )
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "what is 3+4?"}], tools=[fake_calculator_tool()])
+
+    assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "3 + 4"})
+    assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert "tools" in fake_client.chat.completions.kwargs
+    tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
+    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert result.metadata["action_transport"] == "provider_native"
+    assert result.metadata["provider_tool_call"]["id"] == "call_local"
+
+
+def test_local_client_falls_back_to_json_when_native_tools_are_rejected():
+    fake_client = FakeLocalClient(
+        json.dumps({"type": "final_answer", "content": "fallback answer", "tool_name": None, "arguments_json": "{}"}),
+        fail_with_tools=True,
+    )
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "hello"}], tools=[fake_calculator_tool()])
+
+    assert result.action.content == "fallback answer"
+    assert result.metadata["action_transport"] == "chulk_json_fallback"
+    assert "tools unsupported" in result.metadata["native_tool_call_error"]
+    assert len(fake_client.chat.completions.calls) == 2
+    assert "tools" in fake_client.chat.completions.calls[0]
+    assert "tools" not in fake_client.chat.completions.calls[1]
+    assert "You must respond with exactly one JSON object" in fake_client.chat.completions.calls[1]["messages"][0]["content"]
+
+
 def test_llm_client_repairs_invalid_action_json():
     client = ScriptedLLMClient(
         [
@@ -649,10 +874,13 @@ def test_llm_provider_registry_exposes_provider_capabilities():
 
     assert openai_provider.capabilities.supports_structured_output is True
     assert openai_provider.capabilities.api_style == "responses"
+    assert openai_provider.capabilities.supports_native_tool_calling is True
     assert deepseek_provider.capabilities.supports_json_mode is True
     assert deepseek_provider.capabilities.api_style == "chat_completions"
+    assert deepseek_provider.capabilities.supports_native_tool_calling is True
     assert local_provider.capabilities.api_style == "chat_completions"
     assert local_provider.capabilities.supports_structured_output is False
+    assert local_provider.capabilities.supports_native_tool_calling is True
 
 
 def test_resolve_model_capabilities_returns_context_window_and_reserve():

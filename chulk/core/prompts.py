@@ -44,6 +44,21 @@ Some tool observations may contain bounded head/tail previews plus local artifac
 If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final_answer.
 """
 
+NATIVE_ACTION_PROMPT = """Use the provider-native tool-calling interface for actions.
+
+Use normal assistant text only for a direct final answer to the user.
+When you need a listed Chulk tool, call that tool through the native tool interface.
+For tool calls, use only argument fields from the listed tool schema.
+When the Planning section tells you to propose a plan, call chulk_propose_plan.
+For plans, provide a summary and executable steps with depends_on, acceptance_criteria, and retry_limit 0.
+When an approved plan is active, work only on the current executable step.
+After tool evidence satisfies that step's acceptance criteria, call chulk_plan_step_update instead of answering directly.
+Use a final answer only after the approved plan is completed.
+After an observation is provided, use it to produce the next native tool call, plan step update, or final answer.
+Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.
+If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final answer.
+"""
+
 JSON_REPAIR_PROMPT = """Your previous response could not be parsed as ChulkHarness action JSON.
 Return exactly one valid JSON object using one of these shapes:
 {"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}

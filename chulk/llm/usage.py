@@ -90,6 +90,7 @@ class LLMResponse:
     cost: LLMCost | None = None
     provider: str | None = None
     model: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_openai_usage(usage: object) -> LLMUsage | None:

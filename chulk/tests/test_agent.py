@@ -5,8 +5,18 @@ import json
 from pathlib import Path
 
 from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnState
+from chulk.core.actions import FinalAnswerAction
 from chulk.core.context import ContextBudget
-from chulk.llm import FallbackChain, LLMActionError, LLMCapabilities, LLMClient, LLMCost, LLMResponse, LLMUsage
+from chulk.llm import (
+    FallbackChain,
+    LLMActionError,
+    LLMActionResult,
+    LLMCapabilities,
+    LLMClient,
+    LLMCost,
+    LLMResponse,
+    LLMUsage,
+)
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
@@ -27,6 +37,30 @@ class RecordingLLMClient(LLMClient):
 
 class StreamingRecordingLLMClient(RecordingLLMClient):
     capabilities = LLMCapabilities(supports_streaming=True)
+
+
+class NativeActionRecordingLLMClient(LLMClient):
+    capabilities = LLMCapabilities(supports_native_tool_calling=True)
+
+    def __init__(self) -> None:
+        self.requests: list[list[dict[str, str]]] = []
+        self.tool_batches: list[list[object] | None] = []
+
+    def complete_action(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_repair_attempts: int = 2,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+    ) -> LLMActionResult:
+        self.requests.append(messages)
+        self.tool_batches.append(tools)
+        return LLMActionResult(
+            action=FinalAnswerAction(type="final_answer", content="native ok"),
+            raw_response='{"type":"final_answer","content":"native ok"}',
+            metadata={"action_transport": "provider_native"},
+        )
 
 
 class PricedRecordingLLMClient(RecordingLLMClient):
@@ -390,6 +424,22 @@ def test_agent_prompt_shows_available_tools():
     assert "calculator" in system_prompt
     assert "Tool-call limit" in system_prompt
     assert "at most 4 tool calls" in system_prompt
+
+
+def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported():
+    llm = NativeActionRecordingLLMClient()
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_turn("what is 1 + 1?")
+
+    system_prompt = llm.requests[0][0]["content"]
+    assert response == "native ok"
+    assert "provider-native tool-calling interface" in system_prompt
+    assert "You must respond with exactly one JSON object" not in system_prompt
+    assert llm.tool_batches[0] is not None
+    assert [tool.name for tool in llm.tool_batches[0]] == ["calculator"]
 
 
 def test_agent_records_context_report_in_state_and_trace(tmp_path):

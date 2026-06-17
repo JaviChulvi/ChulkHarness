@@ -39,6 +39,7 @@ class LLMCapabilities:
     supports_structured_output: bool = False
     supports_json_mode: bool = False
     supports_streaming: bool = False
+    supports_native_tool_calling: bool = False
     api_style: Literal["responses", "chat_completions"] = "chat_completions"
 
 
