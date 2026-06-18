@@ -703,7 +703,7 @@ def agent(
     preset: AgentPreset | None = None,
     llm: LLMClient | Any | None = None,
     tools: Iterable[object] | None = None,
-    skills: Iterable[object] | None = None,
+    skills: object | Iterable[object] | None = None,
     system_prompt: str | None = None,
     conversation_id: str | None = None,
     permission_callback: PermissionCallback | None = None,

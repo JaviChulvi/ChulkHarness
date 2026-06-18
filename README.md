@@ -250,6 +250,29 @@ a = Agent(
 print(a.run("Find where the CLI is wired and suggest a small cleanup."))
 ```
 
+Use codebase skills per agent. Chulk looks in `<project_root>/skills` by default, and `Skills.only(...)` keeps automatic skill selection scoped to that agent:
+
+```python
+from chulk import Agent, Skills
+from chulk.config import load_config
+
+a = Agent(
+    config=load_config({"CHULK_PROJECT_ROOT": str(repo_root)}),
+    skills=Skills.only("code-review", "pytest"),
+)
+
+print(a.run("Review the failing test and suggest the smallest fix."))
+```
+
+Use `Skills.pin(...)` only for skills that should be loaded into every turn:
+
+```python
+a = Agent(
+    config=load_config({"CHULK_PROJECT_ROOT": str(repo_root)}),
+    skills=[Skills.only("code-review", "pytest"), Skills.pin("team-style")],
+)
+```
+
 Expose one of your own Python functions as a tool:
 
 ```python

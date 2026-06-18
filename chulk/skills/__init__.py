@@ -35,6 +35,20 @@ class SkillDirectoryRef:
         return None
 
 
+@dataclass(frozen=True)
+class SkillAllowlistRef:
+    """Names of catalog skills that may be selected for one agent."""
+
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SkillPinRef:
+    """Names of catalog skills that should always be loaded for one agent."""
+
+    names: tuple[str, ...]
+
+
 def path(skill_path: str | Path) -> SkillRef:
     """Pin one skill from a SKILL.md path or a directory containing SKILL.md."""
     return SkillRef(skill_path=Path(skill_path))
@@ -45,6 +59,16 @@ def from_dir(skills_dir: str | Path) -> SkillDirectoryRef:
     return SkillDirectoryRef(Path(skills_dir))
 
 
+def only(*names: str) -> SkillAllowlistRef:
+    """Allow automatic selection only from these catalog skill names."""
+    return SkillAllowlistRef(tuple(names))
+
+
+def pin(*names: str) -> SkillPinRef:
+    """Always load these catalog skill names for the agent."""
+    return SkillPinRef(tuple(names))
+
+
 files = SkillRef(name="files")
 shell = SkillRef(name="shell")
 memory = SkillRef(name="memory")
@@ -52,13 +76,17 @@ memory = SkillRef(name="memory")
 
 __all__ = [
     "Skill",
+    "SkillAllowlistRef",
     "SkillDirectoryRef",
+    "SkillPinRef",
     "SkillRef",
     "SkillRegistry",
     "SkillSelection",
     "files",
     "from_dir",
     "memory",
+    "only",
     "path",
+    "pin",
     "shell",
 ]

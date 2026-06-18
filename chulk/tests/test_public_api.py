@@ -86,6 +86,12 @@ class HostedMCPRecordingLLM(LLMClient):
         )
 
 
+def write_skill(root, name: str, content: str) -> None:
+    skill_dir = root / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+
 def test_public_api_exports_capitalized_aliases():
     assert Agent is agent
     assert Tool is tool
@@ -96,6 +102,8 @@ def test_public_api_exports_capitalized_aliases():
     assert PermissionDecisionRecord is ToolsPermissionDecisionRecord
     assert PermissionRequest is ToolsPermissionRequest
     assert ToolPermissionLevel is ToolsToolPermissionLevel
+    assert callable(Skills.only)
+    assert callable(Skills.pin)
 
 
 def test_runtime_create_agent_type_hints_resolve():
@@ -670,6 +678,127 @@ def test_public_agent_can_pin_skill(tmp_path):
 
     assert handle.run("hello") == "files pinned"
     assert handle.state.loaded_skill_names == ["files"]
+
+
+def test_public_agent_can_allowlist_skills_by_catalog_name(tmp_path):
+    write_skill(tmp_path, "review", "# Review Skill\n\nUse this skill when reviewing code.\n")
+    write_skill(tmp_path, "sql", "# SQL Skill\n\nUse this skill when analyzing database queries.\n")
+    write_skill(tmp_path, "other", "# Other Skill\n\nUse this skill when other work is needed.\n")
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "other ignored"}),
+            json.dumps({"type": "final_answer", "content": "review loaded"}),
+        ]
+    )
+
+    handle = Agent(config=config, llm=llm, tools=[], skills=Skills.only("review", "sql"))
+
+    assert [skill.name for skill in handle.skill_registry.list_skills()] == ["review", "sql"]
+    assert handle.run("other work") == "other ignored"
+    assert handle.state.loaded_skill_names == []
+    assert "Skill: other" not in llm.requests[0][0]["content"]
+
+    assert handle.run("review this code") == "review loaded"
+    assert handle.state.loaded_skill_names == ["review"]
+    assert "Skill: review" in llm.requests[1][0]["content"]
+    assert "Skill: other" not in llm.requests[1][0]["content"]
+
+
+def test_public_agent_pin_is_additive_to_allowlist(tmp_path):
+    write_skill(tmp_path, "review", "# Review Skill\n\nUse this skill when review work is needed.\n")
+    write_skill(tmp_path, "sql", "# SQL Skill\n\nUse this skill when SQL work is needed.\n")
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "review pinned"})])
+
+    handle = Agent(config=config, llm=llm, tools=[], skills=[Skills.only("sql"), Skills.pin("review")])
+
+    assert [skill.name for skill in handle.skill_registry.list_skills()] == ["review", "sql"]
+    assert handle.run("hello") == "review pinned"
+    assert handle.state.loaded_skill_names == ["review"]
+    assert "Skill: review" in llm.requests[0][0]["content"]
+
+
+def test_public_agent_keeps_raw_string_skill_pins(tmp_path):
+    write_skill(tmp_path, "review", "# Review Skill\n\nUse this skill when review work is needed.\n")
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "raw pin"})])
+
+    handle = Agent(config=config, llm=llm, tools=[], skills=["review"])
+
+    assert handle.run("hello") == "raw pin"
+    assert handle.state.loaded_skill_names == ["review"]
+
+
+def test_public_agent_warns_and_skips_missing_skill_names(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+
+    with pytest.warns(UserWarning) as warning_records:
+        handle = Agent(
+            config=config,
+            llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "missing skipped"})]),
+            tools=[],
+            skills=[Skills.only("missing-only"), Skills.pin("missing-pin"), "missing-raw"],
+        )
+
+    messages = [str(record.message) for record in warning_records]
+    assert "Skill 'missing-only' requested by allowlist configuration is not registered; skipping." in messages
+    assert "Skill 'missing-pin' requested by pin configuration is not registered; skipping." in messages
+    assert "Skill 'missing-raw' requested by pin configuration is not registered; skipping." in messages
+    assert handle.skill_registry.list_skills() == []
+    trace_text = handle.trace_path.read_text(encoding="utf-8")
+    assert "skill_config_warning" in trace_text
+    assert "missing-only" in trace_text
+    assert "missing-pin" in trace_text
+    assert "missing-raw" in trace_text
+
+
+def test_public_agent_empty_skills_disables_catalog_skills(tmp_path):
+    write_skill(tmp_path, "review", "# Review Skill\n\nUse this skill when review work is needed.\n")
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "no skills"})])
+
+    handle = Agent(config=config, llm=llm, tools=[], skills=[])
+
+    assert handle.skill_registry.list_skills() == []
+    assert handle.run("review this code") == "no skills"
+    assert handle.state.loaded_skill_names == []
+    assert "Skill: review" not in llm.requests[0][0]["content"]
+
+
+def test_public_agent_keeps_path_and_directory_skill_refs(tmp_path):
+    write_skill(tmp_path, "review", "# Review Skill\n\nUse this skill when reviewing code.\n")
+    path_skill_dir = tmp_path / "path-skills" / "path-review"
+    path_skill_dir.mkdir(parents=True)
+    (path_skill_dir / "SKILL.md").write_text(
+        "# Path Review Skill\n\nUse this skill when path review work is needed.\n",
+        encoding="utf-8",
+    )
+    extra_root = tmp_path / "extra-skills"
+    extra_skill_dir = extra_root / "custom"
+    extra_skill_dir.mkdir(parents=True)
+    (extra_skill_dir / "SKILL.md").write_text(
+        "# Custom Skill\n\nUse this skill when custom work is needed.\n",
+        encoding="utf-8",
+    )
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "path pinned"}),
+            json.dumps({"type": "final_answer", "content": "directory selected"}),
+        ]
+    )
+
+    pinned_handle = Agent(config=config, llm=llm, tools=[], skills=[Skills.path(path_skill_dir)])
+
+    assert pinned_handle.run("hello") == "path pinned"
+    assert pinned_handle.state.loaded_skill_names == ["path-review"]
+
+    directory_handle = Agent(config=config, llm=llm, tools=[], skills=[Skills.from_dir(extra_root)])
+
+    assert [skill.name for skill in directory_handle.skill_registry.list_skills()] == ["custom", "review"]
+    assert directory_handle.run("custom work") == "directory selected"
+    assert directory_handle.state.loaded_skill_names == ["custom"]
 
 
 def test_fallback_chain_tries_next_provider_and_traces_attempts(tmp_path):

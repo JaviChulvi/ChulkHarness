@@ -7,6 +7,7 @@ Run them from the repository root:
 
 ```bash
 python examples/01_basic_agent.py
+python examples/13_per_agent_skills.py
 ```
 
 Most examples call a live model. By default they use `openai`, so set:
@@ -40,3 +41,4 @@ Git.
 - `10_mcp_programmatic.py` configures an MCP server in code.
 - `11_software_engineer_preset.py` uses the coding-agent preset.
 - `12_local_provider.py` targets a local OpenAI-compatible provider.
+- `13_per_agent_skills.py` creates a temporary project with a `skills/` catalog, scopes selectable skills with `Skills.only(...)`, and pins one always-loaded skill with `Skills.pin(...)`.

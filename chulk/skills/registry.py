@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -170,6 +171,15 @@ class SkillRegistry:
             self.register(skill)
             registered.append(skill)
         return registered
+
+    def clear(self) -> None:
+        """Remove all registered skill metadata."""
+        self._skills = {}
+
+    def restrict_to(self, names: Iterable[str]) -> None:
+        """Keep only registered skill metadata with the given names."""
+        allowed_names = {_normalize_skill_name(name) for name in names}
+        self._skills = {name: skill for name, skill in self._skills.items() if name in allowed_names}
 
     def list_skills(self) -> list[Skill]:
         """Return registered skill metadata sorted by name."""

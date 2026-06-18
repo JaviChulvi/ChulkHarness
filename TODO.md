@@ -1278,7 +1278,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add hybrid keyword, embedding, and LLM skill ranking.
 - [ ] Add skill watcher for changed `SKILL.md` files.
 - [ ] Add skill install/list/remove commands.
-- [ ] Add skill allowlists per agent preset.
+- [x] Add skill allowlists per agent.
 - [ ] Add skill dependency checks.
 - [ ] Add skill environment gating.
 - [ ] Add skill metadata linting.
