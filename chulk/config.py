@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from chulk.llm import supported_llm_providers
+from chulk.mcp import MCPServerConfig, load_mcp_servers
 from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
 
 
@@ -43,8 +44,10 @@ class Config:
     skills_dir: Path
     store_path: Path
     traces_dir: Path
+    mcp_config_path: Path
     llm_provider: str
     model: str
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
@@ -135,12 +138,16 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
 
     default_model = _default_model_for_provider(llm_provider)
     model = env.get("CHULK_MODEL") or default_model
+    mcp_config_path = Path(env.get("CHULK_MCP_CONFIG") or project_root / ".chulk" / "mcp.json").resolve()
+    mcp_servers = load_mcp_servers(mcp_config_path, env)
 
     return Config(
         project_root=project_root,
         skills_dir=project_root / "skills",
         store_path=project_root / "chulk" / "store.sqlite",
         traces_dir=project_root / "traces",
+        mcp_config_path=mcp_config_path,
+        mcp_servers=mcp_servers,
         llm_provider=llm_provider,
         model=model,
         openai_api_key=env.get("OPENAI_API_KEY") or None,

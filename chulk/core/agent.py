@@ -26,6 +26,7 @@ from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRe
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
 from chulk.llm import LLMCost, LLMActionError, LLMClient, LLMError, LLMUsage
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
+from chulk.mcp import MCPServerConfig
 from chulk.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import ToolRegistry
@@ -33,6 +34,7 @@ from chulk.tools.permissions import (
     PermissionDecision,
     PermissionDecisionRecord,
     PermissionRequest,
+    ToolPermissionLevel,
     ToolPermissionPolicy,
 )
 from chulk.tools.registry import ToolResult
@@ -73,6 +75,8 @@ class Agent:
         context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         pinned_skill_names: list[str] | None = None,
+        mcp_servers: list[MCPServerConfig] | tuple[MCPServerConfig, ...] | None = None,
+        mcp_bridge_tool_names: list[str] | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -112,6 +116,8 @@ class Agent:
         self.permission_callback = permission_callback
         self.event_callback = event_callback
         self.pinned_skill_names = pinned_skill_names or []
+        self.mcp_servers = tuple(mcp_servers or ())
+        self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -243,6 +249,11 @@ class Agent:
                     messages,
                     max_repair_attempts=self.max_json_repair_attempts,
                     tools=self.tool_registry.list_tools(),
+                    hosted_mcp_servers=self.mcp_servers,
+                    mcp_approval_callback=lambda approval_request: self._resolve_hosted_mcp_approval(
+                        approval_request,
+                        turn,
+                    ),
                 )
             except LLMActionError as exc:
                 self.state.json_repair_attempts += exc.repair_attempts
@@ -691,6 +702,46 @@ class Agent:
             policy_name=record.policy_name,
             requires_confirmation=request.requires_confirmation,
         )
+
+    def _resolve_hosted_mcp_approval(self, approval_request: dict, turn: TurnState) -> bool:
+        server_label = str(approval_request.get("server_label") or "unknown")
+        tool_name = str(approval_request.get("name") or approval_request.get("tool_name") or "unknown")
+        arguments = {
+            "server_label": server_label,
+            "tool_name": tool_name,
+            "arguments": approval_request.get("arguments"),
+            "approval_request_id": approval_request.get("approval_request_id") or approval_request.get("id"),
+        }
+        request = PermissionRequest(
+            tool_name=f"mcp:{server_label}:{tool_name}",
+            permission_level=ToolPermissionLevel.EXTERNAL_SERVICE,
+            arguments=arguments,
+            requires_confirmation=True,
+            policy_name=self.permission_policy.name,
+            reason="hosted MCP tool call requires approval",
+        )
+        self._trace(
+            TraceEvent.MCP_APPROVAL_REQUESTED,
+            {
+                "turn_id": turn.turn_id,
+                "request": request.to_dict(),
+                "provider_request": approval_request,
+            },
+        )
+        self._trace(TraceEvent.TOOL_PERMISSION_REQUESTED, {"turn_id": turn.turn_id, "request": request.to_dict()})
+        record = self.permission_policy.decide(request)
+        if record.decision == PermissionDecision.ASK:
+            record = self._resolve_permission_approval(request, record)
+        self._trace(TraceEvent.TOOL_PERMISSION_DECIDED, {"turn_id": turn.turn_id, "decision": record.to_dict()})
+        self._trace(
+            TraceEvent.MCP_APPROVAL_DECIDED,
+            {
+                "turn_id": turn.turn_id,
+                "decision": record.to_dict(),
+                "approval_request_id": arguments["approval_request_id"],
+            },
+        )
+        return record.decision == PermissionDecision.ALLOW
 
     def _complete_final_answer(self, content: str, turn: TurnState) -> str:
         self._emit_final_answer_stream(content, turn)

@@ -1,5 +1,7 @@
 """Tests for configuration loading."""
 
+import json
+
 from chulk.config import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_LOCAL_BASE_URL,
@@ -37,6 +39,8 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.max_tool_stderr_chars == DEFAULT_MAX_TOOL_STDERR_CHARS
     assert config.max_reflection_attempts == DEFAULT_MAX_REFLECTION_ATTEMPTS
     assert config.permission_profile == DEFAULT_PERMISSION_PROFILE
+    assert config.mcp_config_path == tmp_path / ".chulk" / "mcp.json"
+    assert config.mcp_servers == ()
 
 
 def test_load_config_reads_dotenv(tmp_path):
@@ -79,6 +83,51 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.max_tool_stderr_chars == 300
     assert config.max_reflection_attempts == 1
     assert config.permission_profile == "read-only"
+
+
+def test_load_config_reads_mcp_config_from_default_path(tmp_path):
+    mcp_dir = tmp_path / ".chulk"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "transport": "streamable_http",
+                        "server_url": "https://mcp.example.com",
+                        "server_description": "Docs server",
+                        "allowed_tools": ["search"],
+                        "authorization_env": "DOCS_MCP_TOKEN",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "DOCS_MCP_TOKEN": "secret-token",
+        }
+    )
+
+    assert config.mcp_config_path == tmp_path / ".chulk" / "mcp.json"
+    assert len(config.mcp_servers) == 1
+    server = config.mcp_servers[0]
+    assert server.label == "docs"
+    assert server.allowed_tools == ("search",)
+    assert server.authorization == "secret-token"
+
+
+def test_load_config_reads_mcp_config_override(tmp_path):
+    mcp_config = tmp_path / "custom-mcp.json"
+    mcp_config.write_text(json.dumps({"servers": []}), encoding="utf-8")
+
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_MCP_CONFIG": str(mcp_config)})
+
+    assert config.mcp_config_path == mcp_config
 
 
 def test_environment_overrides_dotenv(tmp_path):

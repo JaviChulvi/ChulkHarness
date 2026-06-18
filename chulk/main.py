@@ -64,6 +64,8 @@ def format_config(config: Config) -> str:
         "skills_dir": config.skills_dir,
         "store_path": config.store_path,
         "traces_dir": config.traces_dir,
+        "mcp_config_path": config.mcp_config_path,
+        "mcp_servers": f"{len(config.mcp_servers)} configured",
         "llm_provider": config.llm_provider,
         "model": config.model,
         "llm_fallback_providers": _format_fallback_providers(config),

@@ -1146,7 +1146,7 @@ Optional future directions:
 - [ ] REST API for chat.
 - [ ] WebSocket streaming.
 - [ ] Plugin system.
-- [ ] MCP-like tool interface.
+- [x] MCP-like tool interface.
 - [ ] Vector database.
 - [ ] Multi-agent mode.
 - [ ] Local LLM support.
@@ -1178,7 +1178,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [x] Add CLI permission prompts for individual risky tool calls.
 - [ ] Add local code review mode.
 - [ ] Add optional web/search tool.
-- [ ] Add MCP client support.
+- [x] Add MCP client support.
 - [ ] Add subagents.
 - [ ] Add lifecycle hooks and automations.
 
@@ -1310,7 +1310,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add worktree-isolated automations.
 - [ ] Add task flow definitions for durable multi-step jobs.
 - [ ] Add external harness bridge, ACP-style.
-- [ ] Add Chulk as an MCP client.
+- [x] Add Chulk as an MCP client.
 - [ ] Add Chulk as an MCP server exposing sessions, memory, and tools.
 
 ### Interfaces And Product Surfaces
@@ -1337,7 +1337,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [ ] Add `/memories` command.
 - [ ] Add `/skills` command.
 - [ ] Add `/hooks` command.
-- [ ] Add `/mcp` command.
+- [x] Add `/mcp` command.
 
 ### Providers And Runtime
 
@@ -1395,6 +1395,19 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 - [x] Enforce the same Python-side schema validation, permission policy, tool-call limits, plan-step gating, and observation formatting after native tool calls are normalized.
 - [x] Trace the requested transport mode, raw provider tool-call metadata, normalized action, and any fallback to Chulk JSON mode.
 - [x] Tests: native tool declaration shaping, native tool-call normalization, native prompt selection, local fallback to JSON mode, and provider capability defaults.
+
+#### Feature 24: Hybrid native MCP support
+
+- [x] Goal: let Chulk use remote Streamable HTTP MCP servers while preserving provider-native tool transports and the existing permission/trace path.
+- [x] Add `.chulk/mcp.json` loading with `CHULK_MCP_CONFIG`, explicit server dataclasses, duplicate-label validation, unsupported transport rejection, allowed tools, and env-var auth resolution.
+- [x] Add hosted MCP request shaping for OpenAI Responses using native `{"type": "mcp"}` tools.
+- [x] Add Chulk-managed MCP bridge tools for DeepSeek and local OpenAI-compatible providers, exposed as normal `mcp_<server>_<tool>` function tools.
+- [x] Keep bridge MCP calls behind `external_service` permissions and require confirmation by default.
+- [x] Normalize OpenAI hosted MCP approval requests into existing Chulk permission prompts, then continue Responses calls with `previous_response_id` and `mcp_approval_response`.
+- [x] Trace MCP config load, bridge discovery, hosted approval requests, hosted approval decisions, and bridge calls through existing tool events.
+- [x] Add `/mcp`, `/status`, and `--show-config` reporting for configured servers, provider path, redacted auth status, allowed tools, and bridge tools.
+- [x] Keep stdio MCP, resources/prompts, OpenAI connectors, and Chulk-as-MCP-server out of v1.
+- [x] Tests: config validation, hosted OpenAI request shape, hosted approval continuation, DeepSeek/local bridge declaration shape, bridge execution/error formatting, permission denial safety, CLI `/mcp`, runtime hosted-vs-bridge selection, and manual CLI smokes.
 
 ### Review, Evals, And Quality
 

@@ -21,17 +21,25 @@ def provider_action_tools(tools: list[object] | None) -> list[dict[str, Any]]:
     return declarations
 
 
-def openai_response_tools(tools: list[object] | None) -> list[dict[str, Any]]:
+def openai_response_tools(
+    tools: list[object] | None,
+    *,
+    hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+) -> list[dict[str, Any]]:
     """Return Responses API tool declarations."""
-    return [
+    hosted_mcp_servers = hosted_mcp_servers or []
+    chulk_tools = _non_bridge_tools(tools) if hosted_mcp_servers else tools
+    declarations = [
         {
             "type": "function",
             "name": declaration["name"],
             "description": declaration["description"],
             "parameters": declaration["parameters"],
         }
-        for declaration in provider_action_tools(tools)
+        for declaration in provider_action_tools(chulk_tools)
     ]
+    declarations.extend(_hosted_mcp_tool(server) for server in hosted_mcp_servers)
+    return declarations
 
 
 def chat_completion_tools(tools: list[object] | None) -> list[dict[str, Any]]:
@@ -163,6 +171,26 @@ def _tool_declaration(tool: object) -> dict[str, Any]:
         "description": str(getattr(tool, "description", "")),
         "parameters": deepcopy(getattr(tool, "args_schema", {}) or {}),
     }
+
+
+def _non_bridge_tools(tools: list[object] | None) -> list[object]:
+    return [
+        tool
+        for tool in tools or []
+        if not isinstance(getattr(tool, "metadata", None), dict) or not getattr(tool, "metadata", {}).get("mcp_bridge")
+    ]
+
+
+def _hosted_mcp_tool(server: object) -> dict[str, Any]:
+    if hasattr(server, "to_openai_tool"):
+        tool = server.to_openai_tool()  # type: ignore[no-any-return, attr-defined]
+    elif isinstance(server, dict):
+        tool = dict(server)
+    else:
+        raise TypeError(f"Unsupported hosted MCP server definition: {server!r}")
+    if tool.get("type") != "mcp":
+        raise ValueError("Hosted MCP tool definitions must have type 'mcp'")
+    return tool
 
 
 def _plan_tool_declaration() -> dict[str, Any]:

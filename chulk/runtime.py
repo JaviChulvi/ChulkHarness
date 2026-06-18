@@ -12,6 +12,7 @@ from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
+from chulk.mcp import create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
@@ -93,6 +94,23 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+    tool_registry, mcp_bridge_tool_names = _create_tool_registry(config, memory_store, tool_specs)
+    if config.mcp_servers:
+        trace_logger.log(
+            "mcp_config_loaded",
+            {
+                "config_path": str(config.mcp_config_path),
+                "servers": [server.to_dict() for server in config.mcp_servers],
+                "provider_path": _mcp_provider_path(config),
+            },
+        )
+        trace_logger.log(
+            "mcp_tool_discovery_completed",
+            {
+                "bridge_tool_names": mcp_bridge_tool_names,
+                "bridge_required": _mcp_bridge_required(config),
+            },
+        )
     agent = Agent(
         client,
         state=state,
@@ -100,7 +118,7 @@ def create_agent(
         memory_store=memory_store,
         skill_registry=skill_registry,
         trace_logger=trace_logger,
-        tool_registry=_create_tool_registry(config, memory_store, tool_specs),
+        tool_registry=tool_registry,
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         max_skills_per_turn=config.max_skills_per_turn,
         max_skill_content_chars=config.max_skill_content_chars,
@@ -114,6 +132,8 @@ def create_agent(
         event_callback=session_recorder.callback,
         pinned_skill_names=pinned_skill_names,
         system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
+        mcp_servers=config.mcp_servers,
+        mcp_bridge_tool_names=mcp_bridge_tool_names,
     )
     agent.session_store = session_store
     agent.session_recorder = session_recorder
@@ -169,13 +189,14 @@ def _create_tool_registry(
     config: Config,
     memory_store: SQLiteMemoryStore,
     tool_specs: Iterable[object] | None,
-) -> ToolRegistry:
+) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
-        return create_default_tool_registry(
+        registry = create_default_tool_registry(
             config.project_root,
             config.shell_timeout_seconds,
             memory_store=memory_store,
         )
+        return _register_mcp_bridge_tools(config, registry)
 
     context = RuntimeToolContext(
         project_root=config.project_root,
@@ -186,7 +207,34 @@ def _create_tool_registry(
     for spec in tool_specs:
         tool = _resolve_tool_spec(spec, context)
         registry.register(tool)
-    return registry
+    return _register_mcp_bridge_tools(config, registry)
+
+
+def _register_mcp_bridge_tools(config: Config, registry: ToolRegistry) -> tuple[ToolRegistry, list[str]]:
+    if not config.mcp_servers or not _mcp_bridge_required(config):
+        return registry, []
+    bridge_tools = create_mcp_bridge_tools(config.mcp_servers)
+    bridge_tool_names: list[str] = []
+    for tool in bridge_tools:
+        registry.register(tool)
+        bridge_tool_names.append(tool.name)
+    return registry, bridge_tool_names
+
+
+def _mcp_bridge_required(config: Config) -> bool:
+    provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
+    return any(provider != "openai" for provider in provider_path)
+
+
+def _mcp_provider_path(config: Config) -> str:
+    if not config.mcp_servers:
+        return "none"
+    provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
+    has_hosted = any(provider == "openai" for provider in provider_path)
+    has_bridge = any(provider != "openai" for provider in provider_path)
+    if has_hosted and has_bridge:
+        return "hosted+bridge"
+    return "hosted" if has_hosted else "bridge"
 
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:

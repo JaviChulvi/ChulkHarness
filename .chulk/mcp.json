@@ -1,0 +1,16 @@
+{
+  "servers": [
+    {
+      "label": "deepwiki",
+      "transport": "streamable_http",
+      "server_url": "https://mcp.deepwiki.com/mcp",
+      "server_description": "DeepWiki public GitHub repository documentation and Q&A",
+      "allowed_tools": [
+        "read_wiki_structure",
+        "read_wiki_contents",
+        "ask_question"
+      ],
+      "approval": "always"
+    }
+  ]
+}

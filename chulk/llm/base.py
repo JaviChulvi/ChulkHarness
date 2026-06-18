@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import json
 from typing import Any, Literal
@@ -123,6 +123,8 @@ class LLMClient:
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
         """Return a validated agent action using provider-native structure when available."""
         if max_repair_attempts < 0:
@@ -136,12 +138,19 @@ class LLMClient:
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
             if max_output_tokens is None:
-                response = self._complete_action_response_once(action_messages, tools=tools)
+                response = self._complete_action_response_once(
+                    action_messages,
+                    tools=tools,
+                    hosted_mcp_servers=hosted_mcp_servers,
+                    mcp_approval_callback=mcp_approval_callback,
+                )
             else:
                 response = self._complete_action_response_once(
                     action_messages,
                     max_output_tokens=max_output_tokens,
                     tools=tools,
+                    hosted_mcp_servers=hosted_mcp_servers,
+                    mcp_approval_callback=mcp_approval_callback,
                 )
             raw_response = response.content
             usage_records.append(response.usage)
@@ -187,6 +196,8 @@ class LLMClient:
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Return one raw action response attempt plus metadata."""
         try:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -170,6 +170,8 @@ class FallbackChain(LLMClient):
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMActionResult:
         self._action_attempts = []
         try:
@@ -178,6 +180,8 @@ class FallbackChain(LLMClient):
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+                mcp_approval_callback=mcp_approval_callback,
             )
         finally:
             if self._action_attempts is not None:
@@ -201,6 +205,8 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMResponse:
         return self._try_provider_responses(
             lambda provider: _complete_action_response_once(
@@ -208,6 +214,8 @@ class FallbackChain(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
+                mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
             )
         )
 
@@ -331,10 +339,28 @@ def _complete_action_response_once(
     *,
     max_output_tokens: int | None,
     tools: list[object] | None,
+    hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+    mcp_approval_callback: Callable[[dict], bool] | None = None,
 ) -> LLMResponse:
     if max_output_tokens is None:
-        return provider._complete_action_response_once(messages, tools=tools)
-    return provider._complete_action_response_once(messages, max_output_tokens=max_output_tokens, tools=tools)
+        return provider._complete_action_response_once(
+            messages,
+            tools=tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            mcp_approval_callback=mcp_approval_callback,
+        )
+    return provider._complete_action_response_once(
+        messages,
+        max_output_tokens=max_output_tokens,
+        tools=tools,
+        hosted_mcp_servers=hosted_mcp_servers,
+        mcp_approval_callback=mcp_approval_callback,
+    )
+
+
+def _supports_hosted_mcp(provider: object) -> bool:
+    capabilities = getattr(provider, "capabilities", None)
+    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
 
 
 def _provider_identity(provider: object) -> tuple[str, str | None]:

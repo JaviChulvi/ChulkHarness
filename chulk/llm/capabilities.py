@@ -40,6 +40,7 @@ class LLMCapabilities:
     supports_json_mode: bool = False
     supports_streaming: bool = False
     supports_native_tool_calling: bool = False
+    supports_hosted_mcp_tools: bool = False
     api_style: Literal["responses", "chat_completions"] = "chat_completions"
 
 

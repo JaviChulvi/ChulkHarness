@@ -17,6 +17,9 @@ dev = [
 openai = [
   "openai>=1.109.0",
 ]
+mcp = [
+  "mcp>=1.27,<2",
+]
 
 [project.scripts]
 chulk = "chulk.main:main"

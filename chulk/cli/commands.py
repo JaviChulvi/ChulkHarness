@@ -53,6 +53,12 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
     if normalized_command == "/tools":
         context.output_func(context.terminal.tools(context.agent))
         return True
+    if normalized_command == "/mcp":
+        if context.config is None:
+            context.output_func(context.terminal.warning("mcp unavailable: no config object"))
+        else:
+            context.output_func(context.terminal.mcp(context.config, context.agent))
+        return True
     if normalized_command == "/sessions":
         if context.session_store is None:
             context.output_func(context.terminal.warning("sessions unavailable: no session store"))

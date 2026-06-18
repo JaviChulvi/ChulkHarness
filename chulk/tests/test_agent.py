@@ -17,6 +17,7 @@ from chulk.llm import (
     LLMResponse,
     LLMUsage,
 )
+from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
@@ -53,6 +54,7 @@ class NativeActionRecordingLLMClient(LLMClient):
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        **kwargs,
     ) -> LLMActionResult:
         self.requests.append(messages)
         self.tool_batches.append(tools)
@@ -101,6 +103,29 @@ class ChargedSuccessActionLLMClient(LLMClient):
             provider=self.provider,
             model=self.model,
         )
+
+
+class RecordingMCPClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def list_tools(self):
+        return [
+            {
+                "name": "search_docs",
+                "description": "Search docs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+    def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        return ToolResult("mcp_docs_search_docs", True, "called")
 
 
 def create_test_skill_registry(tmp_path):
@@ -761,6 +786,40 @@ def test_agent_blocks_confirmation_tool_without_permission_callback(tmp_path):
     assert any(message["role"] == "observation" and "permission policy" in message["content"] for message in llm.requests[1])
     assert "tool_permission_requested" in event_types
     assert "tool_permission_decided" in event_types
+
+
+def test_agent_denied_mcp_bridge_permission_does_not_call_server(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "mcp_docs_search_docs", "arguments": {"query": "MCP"}}),
+            json.dumps({"type": "final_answer", "content": "I did not call the MCP server."}),
+        ]
+    )
+    mcp_client = RecordingMCPClient()
+    registry = ToolRegistry()
+    bridge_tool = create_mcp_bridge_tools(
+        [MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")],
+        client_factory=lambda _server: mcp_client,
+    )[0]
+    registry.register(bridge_tool)
+    approvals = []
+
+    def deny(request, record):
+        approvals.append((request.tool_name, record.decision))
+        return PermissionDecision.DENY
+
+    agent = Agent(llm, tool_registry=registry, permission_callback=deny, trace_logger=trace_logger)
+
+    response = agent.run_turn("search docs")
+
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    assert response == "I did not call the MCP server."
+    assert mcp_client.calls == []
+    assert approvals == [("mcp_docs_search_docs", PermissionDecision.ASK)]
+    assert agent.state.turns[0].tool_calls[0].error == "permission_denied"
+    assert any(event["type"] == TraceEvent.TOOL_PERMISSION_REQUESTED for event in events)
+    assert any(event["type"] == TraceEvent.TOOL_PERMISSION_DECIDED for event in events)
 
 
 def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):

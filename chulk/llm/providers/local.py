@@ -108,6 +108,8 @@ class LocalOpenAICompatibleClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: object | None = None,
     ) -> LLMResponse:
         """Return one raw action response, using native local tool calls by default."""
         if tools is not None:

@@ -16,6 +16,7 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 - Provider fallback chains that still satisfy the shared `LLMClient` contract.
 - Structured model responses for tool calls and final answers.
 - Explicit plan approval mode before tool execution.
+- Hybrid MCP client support through hosted OpenAI MCP tools or Chulk-managed bridge tools.
 - Trace logs that show messages, selected context, tool calls, observations, and errors.
 
 ## Design Principles
@@ -31,7 +32,9 @@ It is designed for developers who want a clear, inspectable agent runtime withou
 
 This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 workflows for plan mode plus session resume in place. It also exposes a small programmable API so the same runtime used by the CLI can be embedded with `from chulk import Agent`. The roadmap lives in [TODO.md](TODO.md).
 
-The LLM layer is provider-swappable. OpenAI uses native Structured Outputs for the agent action envelope, while DeepSeek uses JSON Output mode plus Chulk-side validation. Both paths normalize into the same internal action types before the agent loop sees them.
+The LLM layer is provider-swappable. OpenAI, DeepSeek, and local OpenAI-compatible providers use native tool-calling transports by default, with Chulk JSON as a fallback where needed. Provider responses normalize into the same internal action types before the agent loop sees them.
+
+MCP client support uses a hybrid path. OpenAI Responses receives hosted MCP server definitions as native `{"type": "mcp"}` tools. DeepSeek and local providers receive Chulk-managed MCP bridge tools because their native API surface is function tools. Bridge calls are normal Chulk `Tool`s with `external_service` permission, so approval prompts and traces stay on the existing path.
 
 The default `SoftwareEngineer` preset keeps its operating guidance in `chulk/presets/AGENT.md` and injects that playbook into the base system prompt. This keeps durable agent behavior separate from per-turn skills, memory, and tool schemas.
 
@@ -86,6 +89,9 @@ chulk/
     providers/
       openai.py
       deepseek.py
+  mcp/
+    bridge.py
+    config.py
   memory/
     constants.py
     extraction.py
@@ -133,7 +139,7 @@ conda env create -f environment.yml
 conda activate chulk
 ```
 
-That installs ChulkHarness in editable mode with development and OpenAI dependencies.
+That installs ChulkHarness in editable mode with development, OpenAI, and MCP dependencies.
 
 If the environment already exists, update it with:
 
@@ -144,7 +150,7 @@ conda env update -f environment.yml --prune
 If the `chulk` command was installed before a package-layout change, refresh the editable install:
 
 ```bash
-python -m pip install -e ".[dev,openai]"
+python -m pip install -e ".[dev,openai,mcp]"
 ```
 
 Create your local environment file:
@@ -194,6 +200,26 @@ CHULK_LLM_FALLBACK_PROVIDERS=openai:gpt-4.1-mini
 At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds. The `local` provider can also appear in fallback chains, for example `CHULK_LLM_FALLBACK_PROVIDERS=local:google/gemma-4-12b-qat,openai:gpt-4.1-mini`.
 
 Choose the tool permission profile with `CHULK_PERMISSION_PROFILE`. Built-in profiles are `read-only`, `workspace-write` (default), `trusted-local`, and `full-access`. The default allows read, write, and memory tools, but asks before shell, network, external-service, or destructive tool calls.
+
+Configure remote Streamable HTTP MCP servers in `.chulk/mcp.json`:
+
+```json
+{
+  "servers": [
+    {
+      "label": "docs",
+      "transport": "streamable_http",
+      "server_url": "https://mcp.example.com",
+      "server_description": "Documentation search",
+      "allowed_tools": ["search_docs"],
+      "authorization_env": "DOCS_MCP_TOKEN",
+      "approval": "always"
+    }
+  ]
+}
+```
+
+Use `CHULK_MCP_CONFIG=/path/to/mcp.json` to override the default path. Put secret values in environment variables, not in `mcp.json`; Chulk resolves `authorization_env` at startup and redacts auth fields in config displays and traces. Use `/mcp` to inspect configured servers, provider path, auth status, allowed tools, and discovered bridge tools.
 
 ## Programmable API
 
@@ -295,6 +321,7 @@ Useful interactive commands:
 - `/status`
 - `/context`
 - `/tools`
+- `/mcp`
 - `/sessions`
 - `/resume <conversation_id>`
 - `/history`
@@ -335,7 +362,7 @@ Conda is the recommended setup for this project. If you prefer `venv`, install t
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e ".[dev,openai]"
+pip install -e ".[dev,openai,mcp]"
 ```
 
 ## Common Commands
@@ -387,6 +414,7 @@ CHULK_MODEL=
 CHULK_LLM_FALLBACK_PROVIDERS=
 CHULK_PERMISSION_PROFILE=workspace-write
 CHULK_PROJECT_ROOT=
+CHULK_MCP_CONFIG=
 CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
 CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
 CHULK_LOCAL_API_KEY=
@@ -410,7 +438,7 @@ Use `apply_patch` for normal file edits. It applies unified diffs atomically ins
 
 ## Development Roadmap
 
-The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, explicit plan approval mode, session persistence, and compact context summaries. The next larger milestones are reflection, deeper multi-step behavior, richer skill routing, and optional provider-native tool calling:
+The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, explicit plan approval mode, session persistence, compact context summaries, usage/cost tracking, provider-native tool calling, and hybrid MCP client support. The next larger milestones are reflection, richer skill routing, local review workflows, optional web/search, subagents, and lifecycle hooks:
 
 - Phase 1: Minimal chat agent.
 - Phase 2: Tool registry and tool-call loop.

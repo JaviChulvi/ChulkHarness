@@ -24,6 +24,7 @@ from chulk.llm import (
     resolve_model_capabilities,
 )
 from chulk.llm.tools import PLAN_TOOL_NAME
+from chulk.mcp import MCPServerConfig
 
 
 class FakeResponsesResource:
@@ -33,12 +34,14 @@ class FakeResponsesResource:
         stream_events: list | None = None,
         usage=None,
         output: list | None = None,
+        responses: list | None = None,
         fail_with_tools: bool = False,
     ) -> None:
         self.output_text = output_text
         self.stream_events = stream_events or []
         self.usage = usage
         self.output = output
+        self.responses = list(responses or [])
         self.fail_with_tools = fail_with_tools
         self.kwargs = None
         self.calls: list[dict] = []
@@ -50,7 +53,9 @@ class FakeResponsesResource:
             raise RuntimeError("tools unsupported")
         if kwargs.get("stream"):
             return iter(self.stream_events)
-        return SimpleNamespace(output_text=self.output_text, usage=self.usage, output=self.output)
+        if self.responses:
+            return self.responses.pop(0)
+        return SimpleNamespace(id="resp_static", output_text=self.output_text, usage=self.usage, output=self.output)
 
 
 class FakeOpenAIClient:
@@ -60,6 +65,7 @@ class FakeOpenAIClient:
         stream_events: list | None = None,
         usage=None,
         output: list | None = None,
+        responses: list | None = None,
         fail_with_tools: bool = False,
     ) -> None:
         self.responses = FakeResponsesResource(
@@ -67,6 +73,7 @@ class FakeOpenAIClient:
             stream_events=stream_events,
             usage=usage,
             output=output,
+            responses=responses,
             fail_with_tools=fail_with_tools,
         )
 
@@ -211,6 +218,20 @@ def fake_calculator_tool():
     )
 
 
+def fake_mcp_bridge_tool():
+    return SimpleNamespace(
+        name="mcp_docs_search_docs",
+        description="Bridge docs search.",
+        args_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        metadata={"mcp_bridge": True},
+    )
+
+
 def test_openai_responses_client_sends_instructions_and_input():
     fake_client = FakeOpenAIClient()
     client = OpenAIResponsesClient(model="test-model", client=fake_client)
@@ -334,6 +355,130 @@ def test_openai_responses_client_uses_native_tool_calls_when_tools_are_provided(
     assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["call_id"] == "call_1"
+
+
+def test_openai_responses_client_sends_hosted_mcp_tools_and_filters_bridge_tools():
+    fake_client = FakeOpenAIClient(output_text="native final")
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        server_description="Docs MCP",
+        allowed_tools=("search_docs",),
+        authorization="secret-token",
+    )
+
+    result = client.complete_action(
+        [{"role": "user", "content": "search docs"}],
+        tools=[fake_calculator_tool(), fake_mcp_bridge_tool()],
+        hosted_mcp_servers=[server],
+    )
+
+    assert result.action.content == "native final"
+    request_tools = fake_client.responses.kwargs["tools"]
+    function_tool_names = {tool["name"] for tool in request_tools if tool["type"] == "function"}
+    assert "calculator" in function_tool_names
+    assert "mcp_docs_search_docs" not in function_tool_names
+    assert {
+        "type": "mcp",
+        "server_label": "docs",
+        "server_url": "https://mcp.example.com",
+        "require_approval": "always",
+        "server_description": "Docs MCP",
+        "allowed_tools": ["search_docs"],
+        "authorization": "secret-token",
+    } in request_tools
+
+
+def test_openai_responses_client_continues_after_mcp_approval_request():
+    fake_client = FakeOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            ),
+            SimpleNamespace(id="resp_2", output_text="approved answer", usage=None, output=[]),
+        ]
+    )
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    approvals = []
+
+    result = client.complete_action(
+        [{"role": "user", "content": "search docs"}],
+        tools=[],
+        hosted_mcp_servers=[
+            MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")
+        ],
+        mcp_approval_callback=lambda approval: approvals.append(approval) or True,
+    )
+
+    assert result.action.content == "approved answer"
+    assert approvals[0]["server_label"] == "docs"
+    assert approvals[0]["name"] == "search_docs"
+    assert len(fake_client.responses.calls) == 2
+    continuation = fake_client.responses.calls[1]
+    assert continuation["previous_response_id"] == "resp_1"
+    assert continuation["input"] == [
+        {
+            "type": "mcp_approval_response",
+            "approval_request_id": "approval_1",
+            "approve": True,
+        }
+    ]
+    assert result.metadata["provider_mcp_approval"] == [
+        {
+            "approval_request_id": "approval_1",
+            "server_label": "docs",
+            "name": "search_docs",
+            "approved": True,
+        }
+    ]
+
+
+def test_openai_hosted_mcp_approval_requires_callback():
+    fake_client = FakeOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            )
+        ]
+    )
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    try:
+        client.complete_action(
+            [{"role": "user", "content": "search docs"}],
+            tools=[],
+            hosted_mcp_servers=[
+                MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")
+            ],
+        )
+    except LLMError as exc:
+        assert "permission callback" in str(exc)
+    else:
+        raise AssertionError("Expected hosted MCP approval without callback to fail")
 
 
 def test_openai_responses_native_final_text_becomes_final_answer():
@@ -558,6 +703,33 @@ def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
     assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["id"] == "call_1"
+
+
+def test_deepseek_client_receives_mcp_bridge_tools_as_function_tools():
+    fake_client = FakeDeepSeekClient(
+        content=None,
+        tool_calls=[
+            SimpleNamespace(
+                id="call_mcp",
+                type="function",
+                function=SimpleNamespace(
+                    name="mcp_docs_search_docs",
+                    arguments=json.dumps({"query": "MCP"}),
+                ),
+            )
+        ],
+    )
+    client = DeepSeekChatCompletionsClient(model="deepseek-v4-flash", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "search docs"}], tools=[fake_mcp_bridge_tool()])
+
+    assert result.action == ToolCallAction(
+        type="tool_call",
+        tool_name="mcp_docs_search_docs",
+        arguments={"query": "MCP"},
+    )
+    tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
+    assert "mcp_docs_search_docs" in tool_names
 
 
 def test_deepseek_native_final_text_becomes_final_answer():
@@ -802,6 +974,33 @@ def test_local_client_uses_native_tool_calls_when_tools_are_provided():
     assert result.metadata["provider_tool_call"]["id"] == "call_local"
 
 
+def test_local_client_receives_mcp_bridge_tools_as_function_tools():
+    fake_client = FakeLocalClient(
+        content=None,
+        tool_calls=[
+            SimpleNamespace(
+                id="call_local_mcp",
+                type="function",
+                function=SimpleNamespace(
+                    name="mcp_docs_search_docs",
+                    arguments=json.dumps({"query": "local MCP"}),
+                ),
+            )
+        ],
+    )
+    client = LocalOpenAICompatibleClient(model="google/gemma-4-12b-qat", client=fake_client)
+
+    result = client.complete_action([{"role": "user", "content": "search docs"}], tools=[fake_mcp_bridge_tool()])
+
+    assert result.action == ToolCallAction(
+        type="tool_call",
+        tool_name="mcp_docs_search_docs",
+        arguments={"query": "local MCP"},
+    )
+    tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
+    assert "mcp_docs_search_docs" in tool_names
+
+
 def test_local_client_falls_back_to_json_when_native_tools_are_rejected():
     fake_client = FakeLocalClient(
         json.dumps({"type": "final_answer", "content": "fallback answer", "tool_name": None, "arguments_json": "{}"}),
@@ -875,12 +1074,15 @@ def test_llm_provider_registry_exposes_provider_capabilities():
     assert openai_provider.capabilities.supports_structured_output is True
     assert openai_provider.capabilities.api_style == "responses"
     assert openai_provider.capabilities.supports_native_tool_calling is True
+    assert openai_provider.capabilities.supports_hosted_mcp_tools is True
     assert deepseek_provider.capabilities.supports_json_mode is True
     assert deepseek_provider.capabilities.api_style == "chat_completions"
     assert deepseek_provider.capabilities.supports_native_tool_calling is True
+    assert deepseek_provider.capabilities.supports_hosted_mcp_tools is False
     assert local_provider.capabilities.api_style == "chat_completions"
     assert local_provider.capabilities.supports_structured_output is False
     assert local_provider.capabilities.supports_native_tool_calling is True
+    assert local_provider.capabilities.supports_hosted_mcp_tools is False
 
 
 def test_resolve_model_capabilities_returns_context_window_and_reserve():

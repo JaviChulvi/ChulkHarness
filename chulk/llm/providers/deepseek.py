@@ -109,6 +109,8 @@ class DeepSeekChatCompletionsClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: object | None = None,
     ) -> LLMResponse:
         """Return one raw action response plus DeepSeek usage metadata."""
         if tools is not None:

@@ -55,6 +55,7 @@ class TerminalUI:
             self._row("project", _short_path(config.project_root)),
             self._row("permissions", config.permission_profile),
             self._row("tools", str(len(agent.tool_registry.list_tools()))),
+            self._row("mcp", _mcp_status_text(config, agent)),
             self._row("trace", _short_path(trace_path) if trace_path else "disabled"),
         ]
         return "\n".join([self.accent(top), *rows, self.accent(bottom)])
@@ -66,6 +67,7 @@ class TerminalUI:
             ("/status", "show provider, model, project, tools, and trace"),
             ("/context", "show latest prompt context report"),
             ("/tools", "list registered tools"),
+            ("/mcp", "show configured MCP servers and provider path"),
             ("/sessions", "list recent persisted sessions"),
             ("/resume <id>", "resume a persisted session"),
             ("/history", "show recent persisted messages"),
@@ -96,6 +98,7 @@ class TerminalUI:
             f"  memory    {_short_path(config.store_path)}",
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
             f"  tools     {len(agent.tool_registry.list_tools())}",
+            f"  mcp       {_mcp_status_text(config, agent)}",
             f"  turns     {len(agent.state.turns)}",
             f"  plan      {'pending' if agent.has_pending_plan() else 'none'}",
             f"  context   {_context_status(agent.state.last_context_report, getattr(agent, 'context_budget', None))}",
@@ -148,6 +151,28 @@ class TerminalUI:
         lines = [self.heading("Tools")]
         for tool in agent.tool_registry.list_tools():
             lines.append(f"  {self.accent(tool.name):<24} {tool.description}")
+        return "\n".join(lines)
+
+    def mcp(self, config: Config, agent: Agent) -> str:
+        """Return configured MCP server and bridge status."""
+        lines = [self.heading("MCP")]
+        lines.append(f"  config    {_short_path(config.mcp_config_path)}")
+        lines.append(f"  path      {_mcp_provider_path(config)}")
+        if not config.mcp_servers:
+            lines.append("  servers   none")
+            return "\n".join(lines)
+
+        lines.append(f"  servers   {len(config.mcp_servers)} configured")
+        for server in config.mcp_servers:
+            auth = _mcp_auth_status(server)
+            allowed = ", ".join(server.allowed_tools) if server.allowed_tools else "all"
+            lines.append(
+                f"  {self.accent(server.label):<18} {server.transport} "
+                f"{_compact(server.server_url, 46)} auth {auth} approval {server.approval}"
+            )
+            lines.append(f"    allowed  {allowed}")
+        bridge_names = getattr(agent, "mcp_bridge_tool_names", [])
+        lines.append(f"  bridge    {', '.join(bridge_names) if bridge_names else 'none'}")
         return "\n".join(lines)
 
     def sessions(self, records: list[ConversationRecord]) -> str:
@@ -312,6 +337,36 @@ def _context_status(report, budget=None) -> str:
     omitted = int(report.get("omitted_message_count") or 0)
     suffix = f", {omitted} omitted" if omitted else ""
     return f"{_format_count(tokens)} est tokens{suffix}"
+
+
+def _mcp_status_text(config: Config, agent: Agent) -> str:
+    count = len(config.mcp_servers)
+    if count == 0:
+        return "none"
+    bridge_count = len(getattr(agent, "mcp_bridge_tool_names", []) or [])
+    bridge_suffix = f", {bridge_count} bridge tool(s)" if bridge_count else ""
+    return f"{count} server(s), {_mcp_provider_path(config)}{bridge_suffix}"
+
+
+def _mcp_provider_path(config: Config) -> str:
+    if not config.mcp_servers:
+        return "none"
+    providers = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
+    has_hosted = any(provider == "openai" for provider in providers)
+    has_bridge = any(provider != "openai" for provider in providers)
+    if has_hosted and has_bridge:
+        return "hosted+bridge"
+    return "hosted" if has_hosted else "bridge"
+
+
+def _mcp_auth_status(server: object) -> str:
+    auth_env = getattr(server, "authorization_env", None)
+    authorization = getattr(server, "authorization", None)
+    if auth_env and authorization:
+        return f"{auth_env}:set"
+    if auth_env:
+        return f"{auth_env}:missing"
+    return "none"
 
 
 def _context_summary_text(report) -> str:

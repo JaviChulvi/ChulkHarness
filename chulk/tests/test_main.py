@@ -114,7 +114,7 @@ def test_main_uses_hulk_green_output(monkeypatch, tmp_path, capsys):
 
 def test_main_handles_interactive_slash_commands(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    inputs = iter(["/help", "/status", "/tools", "/trace", "/q"])
+    inputs = iter(["/help", "/status", "/tools", "/mcp", "/trace", "/q"])
 
     exit_code = main(
         [],
@@ -132,8 +132,49 @@ def test_main_handles_interactive_slash_commands(monkeypatch, tmp_path, capsys):
     assert "permissions" in output
     assert "Tools" in output
     assert "calculator" in output
+    assert "MCP" in output
     assert "Trace" in output
     assert "bye" in output
+
+
+def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatch, tmp_path, capsys):
+    mcp_dir = tmp_path / ".chulk"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "transport": "streamable_http",
+                        "server_url": "https://mcp.example.com",
+                        "allowed_tools": ["search_docs"],
+                        "authorization_env": "DOCS_MCP_TOKEN",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("DOCS_MCP_TOKEN", "super-secret-token")
+    inputs = iter(["/mcp", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=fake_factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "MCP" in output
+    assert "docs" in output
+    assert "path      hosted" in output
+    assert "DOCS_MCP_TOKEN:set" in output
+    assert "search_docs" in output
+    assert "super-secret-token" not in output
 
 
 def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsys):

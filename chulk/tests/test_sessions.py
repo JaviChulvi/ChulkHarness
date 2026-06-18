@@ -4,12 +4,14 @@ import json
 import sqlite3
 
 import chulk.main as main_module
+import chulk.runtime as runtime_module
 from chulk.config import load_config
 from chulk.core.context import ContextBudget
 from chulk.core.state import Plan, PlanStep, TurnState
 from chulk.llm import LLMClient
 from chulk.main import create_agent, main
 from chulk.sessions import SQLiteSessionStore
+from chulk.tools import Tool, ToolResult
 
 
 class FakeLLMClient(LLMClient):
@@ -212,6 +214,60 @@ def test_create_agent_requires_model_token_capabilities(monkeypatch, tmp_path):
         assert "No token capability metadata configured for openai/unknown-model" in str(exc)
     else:
         raise AssertionError("Expected unknown model capability metadata to fail")
+
+
+def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch, tmp_path):
+    (tmp_path / ".chulk").mkdir()
+    (tmp_path / ".chulk" / "mcp.json").write_text(
+        json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_LLM_PROVIDER", "local")
+    calls = []
+
+    def fake_create_bridge_tools(servers):
+        calls.append([server.label for server in servers])
+        return [
+            Tool(
+                name="mcp_docs_search_docs",
+                description="Bridge docs search.",
+                args_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                callable=lambda _arguments: ToolResult("mcp_docs_search_docs", True, "ok"),
+                requires_confirmation=True,
+            )
+        ]
+
+    monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", fake_create_bridge_tools)
+    config = load_config()
+
+    agent = create_agent(config, lambda _config: FakeLLMClient(), tool_specs=[])
+
+    events = [json.loads(line) for line in agent.trace_logger.path.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["docs"]]
+    assert agent.mcp_bridge_tool_names == ["mcp_docs_search_docs"]
+    assert agent.tool_registry.get("mcp_docs_search_docs").requires_confirmation is True
+    assert [event["type"] for event in events] == ["mcp_config_loaded", "mcp_tool_discovery_completed"]
+    assert events[0]["payload"]["provider_path"] == "bridge"
+    assert events[1]["payload"]["bridge_required"] is True
+
+
+def test_create_agent_uses_hosted_mcp_without_bridge_for_openai_only(monkeypatch, tmp_path):
+    (tmp_path / ".chulk").mkdir()
+    (tmp_path / ".chulk" / "mcp.json").write_text(
+        json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", lambda servers: calls.append(servers) or [])
+    config = load_config()
+
+    agent = create_agent(config, lambda _config: FakeLLMClient(), tool_specs=[])
+
+    assert calls == []
+    assert [server.label for server in agent.mcp_servers] == ["docs"]
+    assert agent.mcp_bridge_tool_names == []
 
 
 def test_agent_persists_model_tool_observation_and_final_answer(monkeypatch, tmp_path):

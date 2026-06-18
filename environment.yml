@@ -5,4 +5,4 @@ dependencies:
   - python=3.12
   - pip>=24
   - pip:
-      - -e .[dev,openai]
+      - -e .[dev,openai,mcp]
