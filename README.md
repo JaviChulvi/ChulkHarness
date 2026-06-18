@@ -224,6 +224,7 @@ Use `CHULK_MCP_CONFIG=/path/to/mcp.json` to override the default path. Put secre
 ## Programmable API
 
 Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
+See `examples/README.md` for runnable SDK scripts that cover basic agents, tools, permissions, events, planning, async usage, MCP, presets, and local providers.
 
 Create the default coding agent:
 
