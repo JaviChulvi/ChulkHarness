@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
+import os
 import json
 from pathlib import Path
 import re
@@ -95,6 +96,49 @@ def load_mcp_servers(path: Path, env: Mapping[str, str] | None = None) -> tuple[
     return tuple(servers)
 
 
+def build_mcp_server_config(
+    *,
+    label: str,
+    server_url: str,
+    server_description: str = "",
+    allowed_tools: Iterable[str] | None = (),
+    authorization: str | None = None,
+    authorization_env: str | None = None,
+    approval: str = "always",
+    defer_loading: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> MCPServerConfig:
+    """Build one programmatic MCP server config using file-config validation rules."""
+    raw: dict[str, Any] = {
+        "label": label,
+        "server_url": server_url,
+        "server_description": server_description,
+        "allowed_tools": _raw_allowed_tools(allowed_tools),
+        "approval": approval,
+        "defer_loading": defer_loading,
+    }
+    if authorization_env is not None:
+        raw["authorization_env"] = authorization_env
+
+    if authorization is not None:
+        if not isinstance(authorization, str) or not authorization.strip():
+            raise MCPConfigError(f"MCP server {label} authorization must be a non-empty string")
+        parsed = _parse_server({key: value for key, value in raw.items() if key != "authorization_env"}, {}, index=1)
+        return replace(
+            parsed,
+            authorization_env=_clean_authorization_env(authorization_env, label=parsed.label),
+            authorization=authorization.strip(),
+        )
+
+    return _parse_server(raw, os.environ if env is None else env, index=1)
+
+
+def _raw_allowed_tools(allowed_tools: Iterable[str] | None) -> object:
+    if allowed_tools is None or isinstance(allowed_tools, str):
+        return allowed_tools
+    return list(allowed_tools)
+
+
 def _parse_server(raw: dict[str, Any], env: Mapping[str, str], *, index: int) -> MCPServerConfig:
     label = _string_field(raw, "label", index=index)
     if not LABEL_RE.fullmatch(label):
@@ -151,6 +195,14 @@ def _parse_server(raw: dict[str, Any], env: Mapping[str, str], *, index: int) ->
         approval=approval,
         defer_loading=defer_loading,
     )
+
+
+def _clean_authorization_env(value: str | None, *, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise MCPConfigError(f"MCP server {label} authorization_env must be a non-empty string")
+    return value.strip()
 
 
 def _string_field(raw: dict[str, Any], field_name: str, *, index: int) -> str:

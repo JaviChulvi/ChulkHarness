@@ -145,11 +145,13 @@ def _validate_schema(
                     )
 
     additional = schema.get("additionalProperties")
-    if additional is not None and not isinstance(additional, bool):
+    if isinstance(additional, dict):
+        _validate_schema(_child_path(path, "additionalProperties"), additional, issues)
+    elif additional is not None and not isinstance(additional, bool):
         issues.append(
             ToolValidationIssue(
                 path=_child_path(path, "additionalProperties"),
-                message="additionalProperties must be boolean",
+                message="additionalProperties must be boolean or object",
             )
         )
 
@@ -227,13 +229,15 @@ def _validate_object(path: str, value: dict[str, Any], schema: dict[str, Any], i
         if field_name not in value:
             issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Missing required argument"))
 
-    if not additional_allowed:
+    if additional_allowed is False:
         for field_name in sorted(set(value) - set(properties)):
             issues.append(ToolValidationIssue(path=_child_path(path, field_name), message="Unknown argument"))
 
     for field_name, item in value.items():
         field_schema = properties.get(field_name)
         if field_schema is None:
+            if isinstance(additional_allowed, dict):
+                _validate_value(_child_path(path, field_name), item, additional_allowed, issues)
             continue
         _validate_value(_child_path(path, field_name), item, field_schema, issues)
 

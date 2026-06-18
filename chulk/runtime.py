@@ -17,7 +17,12 @@ from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolRegistry, create_default_tool_registry
-from chulk.tools.permissions import permission_policy_for_profile
+from chulk.tools.permissions import (
+    PermissionDecision,
+    PermissionDecisionRecord,
+    PermissionRequest,
+    permission_policy_for_profile,
+)
 from chulk.tracing import JSONLTraceLogger
 
 
@@ -46,6 +51,12 @@ def create_agent(
     tool_specs: Iterable[object] | None = None,
     skill_specs: Iterable[object] | None = None,
     system_prompt: str | None = None,
+    permission_callback: Callable[
+        [PermissionRequest, PermissionDecisionRecord],
+        PermissionDecision | bool,
+    ]
+    | None = None,
+    mcp_servers: Iterable[object] | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -94,21 +105,25 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
-    tool_registry, mcp_bridge_tool_names = _create_tool_registry(config, memory_store, tool_specs)
-    if config.mcp_servers:
+    active_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
+    tool_registry, mcp_bridge_tool_names = _create_tool_registry(config, memory_store, tool_specs, active_mcp_servers)
+    if active_mcp_servers:
         trace_logger.log(
             "mcp_config_loaded",
             {
                 "config_path": str(config.mcp_config_path),
-                "servers": [server.to_dict() for server in config.mcp_servers],
-                "provider_path": _mcp_provider_path(config),
+                "servers": [
+                    server.to_dict() if hasattr(server, "to_dict") else {"server": str(server)}
+                    for server in active_mcp_servers
+                ],
+                "provider_path": _mcp_provider_path(config, active_mcp_servers),
             },
         )
         trace_logger.log(
             "mcp_tool_discovery_completed",
             {
                 "bridge_tool_names": mcp_bridge_tool_names,
-                "bridge_required": _mcp_bridge_required(config),
+                "bridge_required": _mcp_bridge_required(config, active_mcp_servers),
             },
         )
     agent = Agent(
@@ -128,11 +143,12 @@ def create_agent(
         max_tool_stderr_chars=config.max_tool_stderr_chars,
         max_reflection_attempts=config.max_reflection_attempts,
         permission_policy=permission_policy_for_profile(config.permission_profile),
+        permission_callback=permission_callback,
         context_budget=context_budget,
         event_callback=session_recorder.callback,
         pinned_skill_names=pinned_skill_names,
         system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
-        mcp_servers=config.mcp_servers,
+        mcp_servers=active_mcp_servers,
         mcp_bridge_tool_names=mcp_bridge_tool_names,
     )
     agent.session_store = session_store
@@ -189,6 +205,7 @@ def _create_tool_registry(
     config: Config,
     memory_store: SQLiteMemoryStore,
     tool_specs: Iterable[object] | None,
+    mcp_servers: Iterable[object],
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -196,7 +213,7 @@ def _create_tool_registry(
             config.shell_timeout_seconds,
             memory_store=memory_store,
         )
-        return _register_mcp_bridge_tools(config, registry)
+        return _register_mcp_bridge_tools(config, registry, mcp_servers)
 
     context = RuntimeToolContext(
         project_root=config.project_root,
@@ -207,13 +224,18 @@ def _create_tool_registry(
     for spec in tool_specs:
         tool = _resolve_tool_spec(spec, context)
         registry.register(tool)
-    return _register_mcp_bridge_tools(config, registry)
+    return _register_mcp_bridge_tools(config, registry, mcp_servers)
 
 
-def _register_mcp_bridge_tools(config: Config, registry: ToolRegistry) -> tuple[ToolRegistry, list[str]]:
-    if not config.mcp_servers or not _mcp_bridge_required(config):
+def _register_mcp_bridge_tools(
+    config: Config,
+    registry: ToolRegistry,
+    mcp_servers: Iterable[object],
+) -> tuple[ToolRegistry, list[str]]:
+    servers = tuple(mcp_servers)
+    if not servers or not _mcp_bridge_required(config, servers):
         return registry, []
-    bridge_tools = create_mcp_bridge_tools(config.mcp_servers)
+    bridge_tools = create_mcp_bridge_tools(servers)
     bridge_tool_names: list[str] = []
     for tool in bridge_tools:
         registry.register(tool)
@@ -221,13 +243,15 @@ def _register_mcp_bridge_tools(config: Config, registry: ToolRegistry) -> tuple[
     return registry, bridge_tool_names
 
 
-def _mcp_bridge_required(config: Config) -> bool:
+def _mcp_bridge_required(config: Config, mcp_servers: Iterable[object]) -> bool:
+    if not tuple(mcp_servers):
+        return False
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
     return any(provider != "openai" for provider in provider_path)
 
 
-def _mcp_provider_path(config: Config) -> str:
-    if not config.mcp_servers:
+def _mcp_provider_path(config: Config, mcp_servers: Iterable[object]) -> str:
+    if not tuple(mcp_servers):
         return "none"
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
     has_hosted = any(provider == "openai" for provider in provider_path)

@@ -194,6 +194,53 @@ def test_registry_reports_multiple_argument_validation_errors():
     ]
 
 
+def test_registry_validates_additional_properties_schema():
+    calls = []
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="scores",
+            description="Validate dynamic score map.",
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "values": {
+                        "type": "object",
+                        "additionalProperties": {"type": "integer"},
+                    },
+                    "states": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string", "enum": ["active", "paused"]},
+                        },
+                    },
+                },
+                "required": ["values", "states"],
+                "additionalProperties": False,
+            },
+            callable=lambda arguments: calls.append(arguments) or ToolResult("scores", True, "ok"),
+        )
+    )
+
+    result = registry.run("scores", {"values": {"a": 1, "b": "2"}, "states": [{"north": "unknown"}]})
+
+    assert not result.success
+    assert result.error == "invalid_arguments"
+    assert calls == []
+    assert "values.b: value has the wrong type" in result.observation
+    assert "states[0].north: value is not one of the allowed options" in result.observation
+    assert result.metadata["validation_errors"] == [
+        {"path": "values.b", "message": "value has the wrong type", "expected": "integer", "actual": "string"},
+        {
+            "path": "states[0].north",
+            "message": "value is not one of the allowed options",
+            "expected": "active, paused",
+            "actual": "'unknown'",
+        },
+    ]
+
+
 def test_registry_rejects_invalid_tool_schema_at_registration():
     registry = ToolRegistry()
 
@@ -218,7 +265,7 @@ def test_registry_rejects_invalid_tool_schema_at_registration():
 
     assert "Invalid schema for tool broken_schema" in message
     assert "required field missing is not declared in properties" in message
-    assert "additionalProperties must be boolean" in message
+    assert "additionalProperties must be boolean or object" in message
 
 
 def test_registry_catches_tool_exceptions():
