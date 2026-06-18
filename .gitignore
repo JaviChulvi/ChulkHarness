@@ -36,6 +36,7 @@ coverage.xml
 # Local databases and runtime state
 *.sqlite
 *.sqlite3
+examples/runtime/
 chulk/store.sqlite
 logs/
 traces/

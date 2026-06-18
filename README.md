@@ -224,6 +224,7 @@ Use `CHULK_MCP_CONFIG=/path/to/mcp.json` to override the default path. Put secre
 ## Programmable API
 
 Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
+See `examples/README.md` for runnable SDK scripts that cover basic agents, tools, permissions, events, planning, async usage, MCP, presets, and local providers.
 
 Create the default coding agent:
 
@@ -303,7 +304,46 @@ print(a.plan("Add a small public API example to the README."))
 print(a.approve())
 ```
 
-The public handle wraps the same explicit `chulk.core.Agent` used by the CLI. It supports `run(...)`, `plan(...)`, `approve()`, `reject()`, `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry`.
+Use structured SDK results and event hooks when embedding Chulk in an app:
+
+```python
+from chulk import Agent, AgentConfig, AgentEvent, MCP, Tools
+from chulk.tools import PermissionDecision
+
+def on_event(event: AgentEvent) -> None:
+    if event.type == "tool_call_started":
+        print(event.payload["tool_name"])
+
+a = Agent(
+    config=AgentConfig(
+        project_root=".",
+        provider="local",
+        model="google/gemma-4-12b-qat",
+        local_base_url="http://localhost:1234/v1",
+        local_api_key="local",
+    ),
+    tools=[Tools.read_file, Tools.search_files, Tools.run_cmd],
+    mcp=[MCP.streamable_http(label="docs", server_url="https://mcp.example.com")],
+    permission_callback=lambda request, record: PermissionDecision.ALLOW,
+    on_event=on_event,
+)
+
+result = a.run_result("Inspect the CLI and summarize the command flow.")
+print(result.content)
+print(result.usage)
+print(result.trace_path)
+```
+
+For async app code, use the async wrapper around the same synchronous runtime:
+
+```python
+from chulk import AsyncAgent
+
+a = AsyncAgent(tools=[], skills=[])
+result = await a.run_result("Say hello from an async context.")
+```
+
+The public handle wraps the same explicit `chulk.core.Agent` used by the CLI. It supports `run(...)`, `run_result(...)`, `plan(...)`, `plan_result(...)`, `approve()`, `approve_result()`, `reject()`, `reject_result()`, `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry`.
 
 Run the current CLI:
 
