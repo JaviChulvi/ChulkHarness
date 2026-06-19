@@ -10,7 +10,7 @@ from collections.abc import Callable
 import re
 
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
-from chulk.core.context import AgentPrompt, ContextBudget
+from chulk.core.context import AgentPrompt, ContextBudget, TurnContextSection
 from chulk.core.events import TraceEvent
 from chulk.core.observations import format_tool_observation
 from chulk.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
@@ -37,7 +37,7 @@ from chulk.tools.permissions import (
     ToolPermissionLevel,
     ToolPermissionPolicy,
 )
-from chulk.tools.registry import ToolResult
+from chulk.tools.registry import ToolExecutionContext, ToolResult
 from chulk.tracing import JSONLTraceLogger
 
 
@@ -118,17 +118,35 @@ class Agent:
         self.pinned_skill_names = pinned_skill_names or []
         self.mcp_servers = tuple(mcp_servers or ())
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
+        self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
         self.state.conversation_summary = self.memory.conversation_summary
 
-    def run_turn(self, user_message: str) -> str:
+    def run_turn(
+        self,
+        user_message: str,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
         """Run one user turn and return the assistant response."""
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
-        return self._run_user_turn(clean_message, require_plan=False)
+        return self._run_user_turn(
+            clean_message,
+            require_plan=False,
+            context_sections=context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+        )
 
     def run_planned_turn(self, user_message: str) -> str:
         """Run one user turn that must propose a plan before tool execution."""
@@ -137,19 +155,48 @@ class Agent:
             raise ValueError("user_message cannot be empty")
         return self._run_user_turn(clean_message, require_plan=True)
 
-    def _run_user_turn(self, clean_message: str, *, require_plan: bool) -> str:
+    def _run_user_turn(
+        self,
+        clean_message: str,
+        *,
+        require_plan: bool,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
         if self.has_pending_plan():
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
 
+        turn_context_sections = _coerce_turn_context_sections(context_sections)
+        execution_context = _coerce_tool_execution_context(tool_context)
         turn = TurnState(
             user_message=clean_message,
             available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
+            context_sections=turn_context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata or {},
+            tool_context_metadata=execution_context.metadata if execution_context else {},
         )
+        self._tool_contexts[turn.turn_id] = execution_context
         self.state.current_turn_id = turn.turn_id
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
         self._trace(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+        if turn_context_sections or prompt_profile or locale:
+            self._trace(
+                TraceEvent.TURN_CONTEXT_SELECTED,
+                {
+                    "turn_id": turn.turn_id,
+                    "context_section_ids": [section.id for section in turn_context_sections],
+                    "context_sections": [section.to_dict() for section in turn_context_sections],
+                    "prompt_profile": prompt_profile,
+                    "locale": locale,
+                },
+            )
 
         self._extract_long_term_memories(clean_message)
         self._select_long_term_memories(clean_message)
@@ -412,7 +459,11 @@ class Agent:
                 }
                 self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
                 permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
-                result = permission_result or self.tool_registry.run(action.tool_name, action.arguments)
+                result = permission_result or self.tool_registry.run(
+                    action.tool_name,
+                    action.arguments,
+                    context=self._tool_context_for_turn(turn),
+                )
                 tool_call_record.finish(result)
                 state_tool_call = {
                     "tool_name": action.tool_name,
@@ -497,6 +548,9 @@ class Agent:
             tool_registry=self.tool_registry,
             max_skill_content_chars=self.max_skill_content_chars,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
+            context_sections=turn.context_sections,
+            prompt_profile=turn.prompt_profile,
+            locale=turn.locale,
             planning_enabled=require_plan or turn.active_plan is not None,
             active_plan=turn.active_plan,
             plan_approved=turn.plan_approved,
@@ -1346,6 +1400,13 @@ class Agent:
         if self.event_callback is not None:
             self.event_callback(event_type, payload)
 
+    def _tool_context_for_turn(self, turn: TurnState) -> ToolExecutionContext | None:
+        if turn.turn_id in self._tool_contexts:
+            return self._tool_contexts[turn.turn_id]
+        if turn.tool_context_metadata:
+            return ToolExecutionContext(metadata=turn.tool_context_metadata)
+        return None
+
     def _state_snapshot(self, turn: TurnState) -> dict:
         return {
             "turn": turn.to_dict(),
@@ -1427,6 +1488,43 @@ def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
         "usage": usage.to_dict() if usage is not None else None,
         "cost": cost.to_dict() if cost is not None else None,
     }
+
+
+def _coerce_turn_context_sections(values: list[TurnContextSection | dict | str] | None) -> list[TurnContextSection]:
+    if not values:
+        return []
+    sections: list[TurnContextSection] = []
+    for index, value in enumerate(values, start=1):
+        if isinstance(value, TurnContextSection):
+            sections.append(value)
+            continue
+        if isinstance(value, str):
+            sections.append(TurnContextSection(id=f"context-{index}", content=value))
+            continue
+        if isinstance(value, dict):
+            content = value.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            section_id = value.get("id") or value.get("source_id") or f"context-{index}"
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            sections.append(
+                TurnContextSection(
+                    id=str(section_id),
+                    title=value.get("title") if isinstance(value.get("title"), str) else None,
+                    source=value.get("source") if isinstance(value.get("source"), str) else None,
+                    content=content,
+                    metadata=metadata,
+                )
+            )
+    return sections
+
+
+def _coerce_tool_execution_context(value: ToolExecutionContext | dict | None) -> ToolExecutionContext | None:
+    if value is None:
+        return None
+    if isinstance(value, ToolExecutionContext):
+        return value
+    return ToolExecutionContext(metadata=value)
 
 
 def _client_supports_native_tool_calling(client: object) -> bool:

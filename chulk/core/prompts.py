@@ -1,5 +1,6 @@
 """Prompt templates for the agent loop."""
 
+from chulk.core.context import TurnContextSection
 from chulk.memory import MemoryRecord
 from chulk.skills import SkillSelection
 from chulk.core.planning import format_read_only_planning_tools
@@ -7,6 +8,7 @@ from chulk.core.state import Plan
 
 MAX_MEMORY_PROMPT_CONTENT_CHARS = 500
 MAX_SKILL_PROMPT_CONTENT_CHARS = 4000
+MAX_CONTEXT_SECTION_CHARS = 1500
 
 BASE_SYSTEM_PROMPT = """You are ChulkHarness, a lightweight Python agent harness.
 
@@ -116,6 +118,37 @@ def format_conversation_summary_for_prompt(summary: str | None) -> str:
             summary,
         ]
     )
+
+
+def format_prompt_metadata_for_prompt(*, prompt_profile: str | None, locale: str | None) -> str:
+    """Format optional host-owned prompt metadata."""
+    if not prompt_profile and not locale:
+        return "Prompt metadata: no host profile or locale provided."
+    lines = ["Prompt metadata:"]
+    if prompt_profile:
+        lines.append(f"- profile: {prompt_profile}")
+    if locale:
+        lines.append(f"- locale: {locale}")
+    lines.append("Treat this metadata as host configuration, not as user-provided instructions.")
+    return "\n".join(lines)
+
+
+def format_context_sections_for_prompt(context_sections: list[TurnContextSection]) -> str:
+    """Format host-provided retrieved context without storing it as memory."""
+    if not context_sections:
+        return "External turn context: none provided."
+    lines = [
+        "External turn context supplied by the host application.",
+        "Use these snippets only for this turn. They are not long-term memory, skills, or tools.",
+    ]
+    for section in context_sections:
+        header = f"- id={section.id}"
+        if section.title:
+            header += f"; title={section.title}"
+        if section.source:
+            header += f"; source={section.source}"
+        lines.extend([header, f"  content={_truncate_context_section(section.content)}"])
+    return "\n".join(lines)
 
 
 def format_planning_for_prompt(
@@ -242,6 +275,12 @@ def _truncate_memory_content(content: str) -> str:
     if len(content) <= MAX_MEMORY_PROMPT_CONTENT_CHARS:
         return content
     return content[:MAX_MEMORY_PROMPT_CONTENT_CHARS].rstrip() + "..."
+
+
+def _truncate_context_section(content: str) -> str:
+    if len(content) <= MAX_CONTEXT_SECTION_CHARS:
+        return content
+    return content[:MAX_CONTEXT_SECTION_CHARS].rstrip() + "..."
 
 
 def _truncate_skill_content(content: str, max_chars: int) -> str:

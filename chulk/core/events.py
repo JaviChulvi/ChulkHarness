@@ -8,6 +8,7 @@ class TraceEvent:
 
     TURN_STARTED = "turn_started"
     USER_MESSAGE = "user_message"
+    TURN_CONTEXT_SELECTED = "turn_context_selected"
     MEMORY_EXTRACTION_COMPLETED = "memory_extraction_completed"
     MEMORY_SEARCH_STARTED = "memory_search_started"
     MEMORY_SEARCH_COMPLETED = "memory_search_completed"

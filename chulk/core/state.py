@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from chulk.tools.registry import ToolResult
+from chulk.core.context import TurnContextSection
 
 
 PLAN_STEP_STATUSES = {"pending", "in_progress", "completed", "blocked"}
@@ -283,6 +284,11 @@ class TurnState:
     model_request_count: int = 0
     tool_call_count: int = 0
     available_tool_names: list[str] = field(default_factory=list)
+    context_sections: list[TurnContextSection] = field(default_factory=list)
+    prompt_profile: str | None = None
+    locale: str | None = None
+    extension_metadata: dict = field(default_factory=dict)
+    tool_context_metadata: dict = field(default_factory=dict)
     loaded_memory_ids: list[str] = field(default_factory=list)
     extracted_memory_ids: list[str] = field(default_factory=list)
     loaded_skill_names: list[str] = field(default_factory=list)
@@ -347,6 +353,12 @@ class TurnState:
             "model_request_count": self.model_request_count,
             "tool_call_count": self.tool_call_count,
             "available_tool_names": self.available_tool_names,
+            "context_sections": [section.to_dict() for section in self.context_sections],
+            "context_section_ids": [section.id for section in self.context_sections],
+            "prompt_profile": self.prompt_profile,
+            "locale": self.locale,
+            "extension_metadata": self.extension_metadata,
+            "tool_context_metadata": self.tool_context_metadata,
             "loaded_memory_ids": self.loaded_memory_ids,
             "extracted_memory_ids": self.extracted_memory_ids,
             "loaded_skill_names": self.loaded_skill_names,

@@ -4,7 +4,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
-from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnState
+from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction
 from chulk.core.context import ContextBudget
 from chulk.llm import (
@@ -484,6 +484,46 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert any(section["name"] == "history" for section in report["sections"])
     assert "context_report" in trace_text
     assert "estimated_tokens" in trace_text
+
+
+def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-session")
+
+    class ContextAwareLLM(RecordingLLMClient):
+        def complete(self, messages):
+            system_prompt = messages[0]["content"]
+            assert "Quarterly planning source" in system_prompt
+            assert "profile: polp-search" in system_prompt
+            assert "locale: es-ES" in system_prompt
+            return json.dumps({"type": "final_answer", "content": "used source"})
+
+    agent = Agent(ContextAwareLLM([]), trace_logger=trace_logger)
+
+    response = agent.run_turn(
+        "answer from source",
+        context_sections=[
+            TurnContextSection(
+                id="src-42",
+                title="Quarterly planning source",
+                content="Q3 launch is blocked by data migration.",
+            )
+        ],
+        prompt_profile="polp-search",
+        locale="es-ES",
+        extension_metadata={"confidence": 0.81},
+    )
+
+    turn = agent.state.turns[0]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+
+    assert response == "used source"
+    assert turn.context_sections[0].id == "src-42"
+    assert turn.prompt_profile == "polp-search"
+    assert turn.locale == "es-ES"
+    assert turn.extension_metadata == {"confidence": 0.81}
+    assert any(event["type"] == TraceEvent.TURN_CONTEXT_SELECTED for event in events)
+    assert turn.context_reports[0]["sections"][1]["name"] == "prompt_metadata"
+    assert any(section["name"] == "external_context" for section in turn.context_reports[0]["sections"])
 
 
 def test_agent_records_model_usage_and_cost_in_state_and_trace(tmp_path):

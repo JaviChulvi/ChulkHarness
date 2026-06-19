@@ -11,6 +11,7 @@ __all__ = [
     "PlanStepEvidence",
     "ToolCallRecord",
     "TraceEvent",
+    "TurnContextSection",
     "TurnState",
 ]
 
@@ -36,4 +37,8 @@ def __getattr__(name: str) -> Any:
         from chulk.core.events import TraceEvent
 
         return TraceEvent
+    if name == "TurnContextSection":
+        from chulk.core.context import TurnContextSection
+
+        return TurnContextSection
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

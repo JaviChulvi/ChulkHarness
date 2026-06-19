@@ -6,8 +6,10 @@ from chulk.core.prompts import (
     JSON_ACTION_PROMPT,
     NATIVE_ACTION_PROMPT,
     format_conversation_summary_for_prompt,
+    format_context_sections_for_prompt,
     format_memories_for_prompt,
     format_planning_for_prompt,
+    format_prompt_metadata_for_prompt,
     format_skills_for_prompt,
     format_tool_call_rules,
     format_tools_for_prompt,
@@ -16,6 +18,7 @@ from chulk.core.context import (
     AgentPrompt,
     ContextBudget,
     ContextSection,
+    TurnContextSection,
     build_context_report,
     select_messages_for_budget,
 )
@@ -35,6 +38,9 @@ def build_agent_messages(
     tool_registry: ToolRegistry,
     max_skill_content_chars: int,
     max_tool_calls_per_turn: int,
+    context_sections: list[TurnContextSection] | None = None,
+    prompt_profile: str | None = None,
+    locale: str | None = None,
     planning_enabled: bool = False,
     active_plan: Plan | None = None,
     plan_approved: bool = False,
@@ -52,6 +58,9 @@ def build_agent_messages(
         tool_registry=tool_registry,
         max_skill_content_chars=max_skill_content_chars,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
+        context_sections=context_sections,
+        prompt_profile=prompt_profile,
+        locale=locale,
         planning_enabled=planning_enabled,
         active_plan=active_plan,
         plan_approved=plan_approved,
@@ -71,6 +80,9 @@ def build_agent_prompt(
     tool_registry: ToolRegistry,
     max_skill_content_chars: int,
     max_tool_calls_per_turn: int,
+    context_sections: list[TurnContextSection] | None = None,
+    prompt_profile: str | None = None,
+    locale: str | None = None,
     planning_enabled: bool = False,
     active_plan: Plan | None = None,
     plan_approved: bool = False,
@@ -89,6 +101,9 @@ def build_agent_prompt(
         max_chars_per_skill=max_skill_content_chars,
     )
     conversation_summary_prompt = format_conversation_summary_for_prompt(memory.conversation_summary)
+    prompt_metadata_prompt = format_prompt_metadata_for_prompt(prompt_profile=prompt_profile, locale=locale)
+    turn_context_sections = context_sections or []
+    external_context_prompt = format_context_sections_for_prompt(turn_context_sections)
     planning_prompt = format_planning_for_prompt(
         planning_enabled=planning_enabled,
         active_plan=active_plan,
@@ -101,6 +116,18 @@ def build_agent_prompt(
     action_protocol = NATIVE_ACTION_PROMPT if native_action_protocol else JSON_ACTION_PROMPT
     system_parts = [
         ("system_prompt", "Base system prompt", system_prompt, {}),
+        (
+            "prompt_metadata",
+            "Prompt metadata",
+            prompt_metadata_prompt,
+            {"prompt_profile": prompt_profile, "locale": locale},
+        ),
+        (
+            "external_context",
+            "External turn context",
+            external_context_prompt,
+            {"context_section_ids": [section.id for section in turn_context_sections]},
+        ),
         (
             "memories",
             "Selected memories",
@@ -174,6 +201,8 @@ def _section_item_count(name: str, content: str, metadata: dict) -> int:
         return len(metadata.get("profile_memory_ids", [])) + len(metadata.get("relevant_memory_ids", []))
     if name == "skills":
         return len(metadata.get("skill_names", []))
+    if name == "external_context":
+        return len(metadata.get("context_section_ids", []))
     if name == "tools":
         return len(metadata.get("tool_names", []))
     return 1 if content else 0

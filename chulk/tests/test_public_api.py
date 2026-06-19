@@ -254,6 +254,31 @@ def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
     assert result_dict["plan"] is None
 
 
+def test_public_agent_run_accepts_adapter_context(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+
+    class ContextAwareLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            system_prompt = messages[0]["content"]
+            assert "Employee handbook" in system_prompt
+            assert "locale: es-ES" in system_prompt
+            return json.dumps({"type": "final_answer", "content": "context accepted"})
+
+    handle = Agent(config=config, llm=ContextAwareLLM(), tools=[], skills=[])
+
+    response = handle.run(
+        "answer from docs",
+        context_sections=[{"id": "doc-1", "title": "Employee handbook", "content": "Use PTO before year end."}],
+        prompt_profile="polp-search",
+        locale="es-ES",
+        extension_metadata={"confidence": 0.9},
+    )
+
+    assert response == "context accepted"
+    assert handle.state.turns[0].context_sections[0].id == "doc-1"
+    assert handle.state.turns[0].extension_metadata == {"confidence": 0.9}
+
+
 def test_public_agent_runs_decorated_tool(tmp_path):
     config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
 

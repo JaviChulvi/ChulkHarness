@@ -17,10 +17,12 @@ from chulk.config import (
     LLMFallbackProviderConfig,
     load_config,
 )
+from chulk.core.context import TurnContextSection
 from chulk.core import Agent, TraceEvent
 from chulk.llm import LLMClient
 from chulk.mcp import MCPServerConfig, build_mcp_server_config
 from chulk.runtime import create_agent as create_runtime_agent
+from chulk.tools import ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 
 
@@ -375,9 +377,29 @@ class AgentHandle:
     def skill_registry(self):
         return self.runtime.skill_registry
 
-    def run(self, message: str, *, on_delta: DeltaCallback | None = None, on_event: EventCallback | None = None) -> str:
+    def run(
+        self,
+        message: str,
+        *,
+        on_delta: DeltaCallback | None = None,
+        on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
         """Run one normal agent turn, optionally receiving streamed answer deltas."""
-        return self.run_result(message, on_delta=on_delta, on_event=on_event).content
+        return self.run_result(
+            message,
+            on_delta=on_delta,
+            on_event=on_event,
+            context_sections=context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+        ).content
 
     def run_result(
         self,
@@ -385,9 +407,25 @@ class AgentHandle:
         *,
         on_delta: DeltaCallback | None = None,
         on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
     ) -> RunResult:
         """Run one normal agent turn and return structured SDK metadata."""
-        content = self._with_callbacks(lambda: self.runtime.run_turn(message), on_delta=on_delta, on_event=on_event)
+        content = self._with_callbacks(
+            lambda: self.runtime.run_turn(
+                message,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            ),
+            on_delta=on_delta,
+            on_event=on_event,
+        )
         return self._run_result(content)
 
     def __call__(self, message: str) -> str:

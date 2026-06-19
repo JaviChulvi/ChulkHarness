@@ -6,7 +6,7 @@ import sqlite3
 import chulk.main as main_module
 import chulk.runtime as runtime_module
 from chulk.config import load_config
-from chulk.core.context import ContextBudget
+from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.state import Plan, PlanStep, TurnState
 from chulk.llm import LLMClient
 from chulk.main import create_agent, main
@@ -72,6 +72,38 @@ def test_session_store_saves_messages_and_turn_snapshots(tmp_path):
     assert turns[0].final_answer == "hi back"
     assert turns[0].reflection_count == 1
     assert turns[0].reflections[0]["approved"] is True
+
+
+def test_session_store_round_trips_turn_context_metadata(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    store.create_conversation("conversation-1", provider="test", model="mock")
+    turn = TurnState(
+        user_message="hello",
+        turn_id="turn-context",
+        context_sections=[
+            TurnContextSection(
+                id="src-1",
+                title="Source",
+                source="drive://src-1",
+                content="Source text.",
+                metadata={"score": 0.92},
+            )
+        ],
+        prompt_profile="polp-search",
+        locale="es-ES",
+        extension_metadata={"confidence": 0.8},
+        tool_context_metadata={"org_id": "org-1"},
+    )
+    store.save_turn_snapshot("conversation-1", turn.to_dict())
+
+    restored_turn = store.load_turns("conversation-1")[0]
+
+    assert restored_turn.context_sections[0].id == "src-1"
+    assert restored_turn.context_sections[0].metadata == {"score": 0.92}
+    assert restored_turn.prompt_profile == "polp-search"
+    assert restored_turn.locale == "es-ES"
+    assert restored_turn.extension_metadata == {"confidence": 0.8}
+    assert restored_turn.tool_context_metadata == {"org_id": "org-1"}
 
 
 def test_session_store_saves_summary_and_loads_unsummarized_messages(tmp_path):
