@@ -10,6 +10,7 @@ from typing import Protocol
 from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
+from chulk.core.events import AgentEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
 from chulk.mcp import create_mcp_bridge_tools
@@ -57,6 +58,9 @@ def create_agent(
     ]
     | None = None,
     mcp_servers: Iterable[object] | None = None,
+    event_sink: Callable[[AgentEvent], None] | None = None,
+    redaction_callback: Callable[[str, str, dict], str] | None = None,
+    redaction_fail_closed: bool = False,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -146,6 +150,9 @@ def create_agent(
         permission_callback=permission_callback,
         context_budget=context_budget,
         event_callback=session_recorder.callback,
+        event_sink=event_sink,
+        redaction_callback=redaction_callback,
+        redaction_fail_closed=redaction_fail_closed,
         pinned_skill_names=pinned_skill_names,
         system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
         mcp_servers=active_mcp_servers,

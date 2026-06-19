@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """Typed event wrapper for host adapters."""
+
+    type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
 
 class TraceEvent:
     """String constants for trace and progress events."""
 
     TURN_STARTED = "turn_started"
     USER_MESSAGE = "user_message"
+    TURN_CONTEXT_SELECTED = "turn_context_selected"
     MEMORY_EXTRACTION_COMPLETED = "memory_extraction_completed"
     MEMORY_SEARCH_STARTED = "memory_search_started"
     MEMORY_SEARCH_COMPLETED = "memory_search_completed"

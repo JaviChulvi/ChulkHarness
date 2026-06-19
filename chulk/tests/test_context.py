@@ -2,7 +2,7 @@
 
 import json
 
-from chulk.core.context import ContextBudget, estimate_tokens
+from chulk.core.context import ContextBudget, TurnContextSection, estimate_tokens
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.memory import ConversationMemory
 from chulk.tools import ToolRegistry, calculator_tool
@@ -43,6 +43,44 @@ def test_build_agent_prompt_reports_named_sections():
     assert "tools" in section_names
     assert "history" in section_names
     assert "observations" in section_names
+
+
+def test_build_agent_prompt_injects_external_context_and_prompt_metadata():
+    memory = ConversationMemory()
+    memory.add_user_message("answer from sources")
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        context_sections=[
+            TurnContextSection(
+                id="src-1",
+                title="Handbook",
+                source="drive://handbook",
+                content="The handbook says onboarding takes three days.",
+            )
+        ],
+        prompt_profile="polp-search",
+        locale="es-ES",
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    external = next(section for section in report["sections"] if section["name"] == "external_context")
+    metadata = next(section for section in report["sections"] if section["name"] == "prompt_metadata")
+
+    assert "External turn context supplied by the host application" in system_prompt
+    assert "The handbook says onboarding takes three days." in system_prompt
+    assert "profile: polp-search" in system_prompt
+    assert "locale: es-ES" in system_prompt
+    assert external["metadata"]["context_section_ids"] == ["src-1"]
+    assert metadata["metadata"]["prompt_profile"] == "polp-search"
+    assert metadata["metadata"]["locale"] == "es-ES"
 
 
 def test_build_agent_prompt_injects_conversation_summary_section():

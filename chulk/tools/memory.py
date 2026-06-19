@@ -39,6 +39,7 @@ def save_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: save_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -58,6 +59,7 @@ def search_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: search_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
@@ -76,6 +78,7 @@ def list_memories_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: list_memories(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
@@ -91,6 +94,7 @@ def delete_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: delete_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -119,6 +123,7 @@ def update_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: update_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -137,6 +142,7 @@ def summarize_memories_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: summarize_memories(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
@@ -152,6 +158,7 @@ def archive_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: archive_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -167,6 +174,7 @@ def restore_memory_tool(memory_store: SQLiteMemoryStore) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: restore_memory(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -177,6 +185,7 @@ def compact_memories_tool(memory_store: SQLiteMemoryStore) -> Tool:
         description="Archive near-duplicate active memories, keeping the strongest record.",
         args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         callable=lambda arguments: compact_memories(arguments, memory_store),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -198,6 +207,7 @@ def import_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
             "additionalProperties": False,
         },
         callable=lambda arguments: import_memories(arguments, memory_store, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 
@@ -220,6 +230,7 @@ def export_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
             "additionalProperties": False,
         },
         callable=lambda arguments: export_memories(arguments, memory_store, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
 

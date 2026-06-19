@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from chulk.core.context import TurnContextSection
 from chulk.core.state import ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
 from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
 
@@ -687,6 +688,11 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         model_request_count=int(payload.get("model_request_count") or 0),
         tool_call_count=int(payload.get("tool_call_count") or 0),
         available_tool_names=_safe_string_list(payload.get("available_tool_names")),
+        context_sections=[_context_section_from_dict(item) for item in _safe_dict_list(payload.get("context_sections"))],
+        prompt_profile=payload.get("prompt_profile"),
+        locale=payload.get("locale"),
+        extension_metadata=_safe_json_object(payload.get("extension_metadata")),
+        tool_context_metadata=_safe_json_object(payload.get("tool_context_metadata")),
         loaded_memory_ids=_safe_string_list(payload.get("loaded_memory_ids")),
         extracted_memory_ids=_safe_string_list(payload.get("extracted_memory_ids")),
         loaded_skill_names=_safe_string_list(payload.get("loaded_skill_names")),
@@ -748,6 +754,16 @@ def _plan_from_dict(payload: Any) -> Plan | None:
     return plan
 
 
+def _context_section_from_dict(payload: dict[str, Any]) -> TurnContextSection:
+    return TurnContextSection(
+        id=str(payload.get("id") or ""),
+        title=payload.get("title"),
+        source=payload.get("source"),
+        content=str(payload.get("content") or ""),
+        metadata=_safe_json_object(payload.get("metadata")),
+    )
+
+
 def _tool_call_from_dict(payload: dict[str, Any]) -> ToolCallRecord:
     return ToolCallRecord(
         tool_name=str(payload.get("tool_name") or ""),
@@ -760,6 +776,7 @@ def _tool_call_from_dict(payload: dict[str, Any]) -> ToolCallRecord:
         resolved_tool_name=payload.get("resolved_tool_name"),
         success=payload.get("success"),
         error=payload.get("error"),
+        failure_kind=payload.get("failure_kind"),
         metadata=_safe_json_object(payload.get("metadata")),
     )
 

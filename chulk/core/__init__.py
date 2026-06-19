@@ -4,6 +4,7 @@ from typing import Any
 
 __all__ = [
     "Agent",
+    "AgentEvent",
     "AgentState",
     "ObservationRecord",
     "Plan",
@@ -11,6 +12,7 @@ __all__ = [
     "PlanStepEvidence",
     "ToolCallRecord",
     "TraceEvent",
+    "TurnContextSection",
     "TurnState",
 ]
 
@@ -32,8 +34,12 @@ def __getattr__(name: str) -> Any:
             "ToolCallRecord": ToolCallRecord,
             "TurnState": TurnState,
         }[name]
-    if name == "TraceEvent":
-        from chulk.core.events import TraceEvent
+    if name in {"AgentEvent", "TraceEvent"}:
+        from chulk.core.events import AgentEvent, TraceEvent
 
-        return TraceEvent
+        return {"AgentEvent": AgentEvent, "TraceEvent": TraceEvent}[name]
+    if name == "TurnContextSection":
+        from chulk.core.context import TurnContextSection
+
+        return TurnContextSection
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

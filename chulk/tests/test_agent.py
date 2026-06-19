@@ -1,10 +1,11 @@
 """Tests for the Phase 1 agent loop."""
 
+import asyncio
 from decimal import Decimal
 import json
 from pathlib import Path
 
-from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnState
+from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction
 from chulk.core.context import ContextBudget
 from chulk.llm import (
@@ -20,7 +21,18 @@ from chulk.llm import (
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
-from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
+from chulk.tools import (
+    Tool,
+    ToolExecutionContext,
+    ToolFailureKind,
+    ToolRegistry,
+    apply_patch_tool,
+    calculator_tool,
+    list_files_tool,
+    read_file_tool,
+    shell_tool,
+    write_file_tool,
+)
 from chulk.tools.permissions import PermissionDecision, ToolPermissionPolicy
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
@@ -486,6 +498,46 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert "estimated_tokens" in trace_text
 
 
+def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-session")
+
+    class ContextAwareLLM(RecordingLLMClient):
+        def complete(self, messages):
+            system_prompt = messages[0]["content"]
+            assert "Quarterly planning source" in system_prompt
+            assert "profile: polp-search" in system_prompt
+            assert "locale: es-ES" in system_prompt
+            return json.dumps({"type": "final_answer", "content": "used source"})
+
+    agent = Agent(ContextAwareLLM([]), trace_logger=trace_logger)
+
+    response = agent.run_turn(
+        "answer from source",
+        context_sections=[
+            TurnContextSection(
+                id="src-42",
+                title="Quarterly planning source",
+                content="Q3 launch is blocked by data migration.",
+            )
+        ],
+        prompt_profile="polp-search",
+        locale="es-ES",
+        extension_metadata={"confidence": 0.81},
+    )
+
+    turn = agent.state.turns[0]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+
+    assert response == "used source"
+    assert turn.context_sections[0].id == "src-42"
+    assert turn.prompt_profile == "polp-search"
+    assert turn.locale == "es-ES"
+    assert turn.extension_metadata == {"confidence": 0.81}
+    assert any(event["type"] == TraceEvent.TURN_CONTEXT_SELECTED for event in events)
+    assert turn.context_reports[0]["sections"][1]["name"] == "prompt_metadata"
+    assert any(section["name"] == "external_context" for section in turn.context_reports[0]["sections"])
+
+
 def test_agent_records_model_usage_and_cost_in_state_and_trace(tmp_path):
     trace_logger = JSONLTraceLogger(tmp_path / "traces", "usage-session")
     llm = PricedRecordingLLMClient([json.dumps({"type": "final_answer", "content": "ok"})])
@@ -781,6 +833,7 @@ def test_agent_blocks_confirmation_tool_without_permission_callback(tmp_path):
     assert calls == []
     assert turn.tool_calls[0].success is False
     assert turn.tool_calls[0].error == "permission_denied"
+    assert turn.tool_calls[0].failure_kind == ToolFailureKind.USER_BLOCKED
     assert turn.tool_calls[0].metadata["permission_decision"]["decision"] == "deny"
     assert "permission policy" in turn.observations[0].content
     assert any(message["role"] == "observation" and "permission policy" in message["content"] for message in llm.requests[1])
@@ -859,6 +912,79 @@ def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):
     assert calls == [{"value": "run"}]
     assert approvals == [("dangerous", PermissionDecision.ASK)]
     assert agent.state.turns[0].tool_calls[0].success is True
+
+
+def test_agent_async_turn_awaits_tool_and_passes_context():
+    calls = []
+
+    async def lookup(arguments, context):
+        calls.append((arguments, context.metadata["org_id"]))
+        return ToolResult("lookup", True, f"found {arguments['query']}")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            callable=lookup,
+            accepts_context=True,
+        )
+    )
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "lookup", "arguments": {"query": "policy"}}),
+            json.dumps({"type": "final_answer", "content": "policy found"}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = asyncio.run(
+        agent.run_turn_async(
+            "lookup policy",
+            tool_context=ToolExecutionContext(metadata={"org_id": "org-1"}),
+        )
+    )
+
+    turn = agent.state.turns[0]
+    assert response == "policy found"
+    assert calls == [({"query": "policy"}, "org-1")]
+    assert turn.tool_calls[0].success is True
+    assert "found policy" in turn.observations[0].content
+
+
+def test_agent_sync_turn_classifies_async_tool_misuse():
+    async def lookup(_arguments):
+        return ToolResult("lookup", True, "unused")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=lookup,
+        )
+    )
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "lookup", "arguments": {}}),
+            json.dumps({"type": "final_answer", "content": "async not run"}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_turn("lookup")
+
+    turn = agent.state.turns[0]
+    assert response == "async not run"
+    assert turn.tool_calls[0].success is False
+    assert turn.tool_calls[0].failure_kind == ToolFailureKind.ASYNC_REQUIRED
 
 
 def test_agent_traces_tool_call_lifecycle(tmp_path):
