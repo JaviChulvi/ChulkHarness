@@ -26,7 +26,7 @@ from chulk.tools.memory import (
     summarize_memories_tool,
     update_memory_tool,
 )
-from chulk.tools.registry import Tool, ToolResult
+from chulk.tools.registry import Tool, ToolExecutionContext, ToolFailureKind, ToolResult
 from chulk.tools.shell import shell_tool
 
 
@@ -58,6 +58,19 @@ def tool(
 
         def invoke(arguments: dict[str, Any]) -> ToolResult:
             result = func(**arguments)
+            if inspect.isawaitable(result):
+                async def await_result():
+                    resolved = await result
+                    if isinstance(resolved, ToolResult):
+                        return resolved
+                    return ToolResult(
+                        tool_name=tool_name,
+                        success=True,
+                        observation=_observation_from_result(resolved),
+                        metadata={"result_type": type(resolved).__name__},
+                    )
+
+                return await_result()  # type: ignore[return-value]
             if isinstance(result, ToolResult):
                 return result
             return ToolResult(

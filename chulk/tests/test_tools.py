@@ -1,5 +1,6 @@
 """Tests for built-in tools and registry behavior."""
 
+import asyncio
 from pathlib import Path
 import sys
 
@@ -14,7 +15,7 @@ from chulk.tools.permissions import (
     normalize_permission_level,
     permission_policy_for_profile,
 )
-from chulk.tools.registry import ToolResult
+from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResult
 from chulk.tools.shell import run_shell_command
 
 
@@ -113,6 +114,64 @@ def test_registry_logs_tool_calls():
             "observation": "1 + 1 = 2",
         }
     ]
+
+
+def test_registry_runs_async_tool_with_context():
+    calls = []
+    registry = ToolRegistry()
+
+    async def lookup(arguments, context):
+        calls.append((arguments, context.metadata["org_id"]))
+        return ToolResult("lookup", True, f"found {arguments['query']}")
+
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            callable=lookup,
+            accepts_context=True,
+        )
+    )
+
+    result = asyncio.run(
+        registry.run_async(
+            "lookup",
+            {"query": "handbook"},
+            context=ToolExecutionContext(metadata={"org_id": "org-1"}),
+        )
+    )
+
+    assert result.success
+    assert result.observation == "found handbook"
+    assert calls == [({"query": "handbook"}, "org-1")]
+
+
+def test_registry_sync_runner_rejects_async_tool():
+    registry = ToolRegistry()
+
+    async def lookup(_arguments):
+        return ToolResult("lookup", True, "unused")
+
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=lookup,
+        )
+    )
+
+    result = registry.run("lookup", {})
+
+    assert not result.success
+    assert result.error == ToolFailureKind.ASYNC_REQUIRED
+    assert result.failure_kind == ToolFailureKind.ASYNC_REQUIRED
 
 
 def _permission_test_tool(

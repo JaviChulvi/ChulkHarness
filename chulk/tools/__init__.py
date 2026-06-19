@@ -16,7 +16,7 @@ from chulk.tools.memory import (
     summarize_memories_tool,
     update_memory_tool,
 )
-from chulk.tools.registry import Tool, ToolRegistry, ToolResult
+from chulk.tools.registry import Tool, ToolExecutionContext, ToolFailureKind, ToolRegistry, ToolResult
 from chulk.tools.permissions import (
     DEFAULT_PERMISSION_PROFILE,
     PermissionDecision,
@@ -59,6 +59,8 @@ __all__ = [
     "ToolPermissionLevel",
     "ToolPermissionPolicy",
     "ToolRef",
+    "ToolExecutionContext",
+    "ToolFailureKind",
     "ToolRegistry",
     "ToolResult",
     "PermissionDecision",
