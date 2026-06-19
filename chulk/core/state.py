@@ -229,6 +229,7 @@ class ToolCallRecord:
     resolved_tool_name: str | None = None
     success: bool | None = None
     error: str | None = None
+    failure_kind: str | None = None
     metadata: dict = field(default_factory=dict)
 
     def finish(self, result: ToolResult) -> None:
@@ -236,6 +237,7 @@ class ToolCallRecord:
         self.resolved_tool_name = result.tool_name
         self.success = result.success
         self.error = result.error
+        self.failure_kind = result.failure_kind
         self.metadata = result.metadata
 
     def to_dict(self) -> dict:
@@ -250,6 +252,7 @@ class ToolCallRecord:
             "resolved_tool_name": self.resolved_tool_name,
             "success": self.success,
             "error": self.error,
+            "failure_kind": self.failure_kind,
             "metadata": self.metadata,
         }
 

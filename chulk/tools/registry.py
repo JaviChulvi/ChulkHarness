@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -225,7 +226,10 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            result = self._call_tool(tool, arguments, context)
+            if tool.run_in_executor:
+                result = await asyncio.to_thread(self._call_tool, tool, arguments, context)
+            else:
+                result = self._call_tool(tool, arguments, context)
             if inspect.isawaitable(result):
                 result = await result
             result = self._coerce_result(tool, result)
@@ -241,9 +245,9 @@ class ToolRegistry:
                     "args_schema": tool.args_schema,
                 },
             )
-        except BaseException as exc:
-            if isinstance(exc, KeyboardInterrupt):
-                raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             failure_kind = ToolFailureKind.CANCELLED if type(exc).__name__ == "CancelledError" else ToolFailureKind.ENVIRONMENT
             result = ToolResult(
                 tool_name=tool.name,

@@ -114,6 +114,7 @@ def read_file_tool(project_root: Path) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: read_file(arguments, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
@@ -144,6 +145,7 @@ def write_file_tool(project_root: Path) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: write_file(arguments, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.WRITE,
     )
 
@@ -169,6 +171,7 @@ def apply_patch_tool(project_root: Path) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: apply_patch(arguments, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.WRITE,
         metadata={"preferred_for": "file_edits"},
     )
@@ -203,6 +206,7 @@ def list_files_tool(project_root: Path) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: list_files(arguments, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
@@ -240,6 +244,7 @@ def search_files_tool(project_root: Path) -> Tool:
             "additionalProperties": False,
         },
         callable=lambda arguments: search_files(arguments, project_root),
+        run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 

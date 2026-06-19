@@ -117,18 +117,6 @@ def build_agent_prompt(
     system_parts = [
         ("system_prompt", "Base system prompt", system_prompt, {}),
         (
-            "prompt_metadata",
-            "Prompt metadata",
-            prompt_metadata_prompt,
-            {"prompt_profile": prompt_profile, "locale": locale},
-        ),
-        (
-            "external_context",
-            "External turn context",
-            external_context_prompt,
-            {"context_section_ids": [section.id for section in turn_context_sections]},
-        ),
-        (
             "memories",
             "Selected memories",
             memory_prompt,
@@ -167,6 +155,27 @@ def build_agent_prompt(
             {"native_tool_calling": native_action_protocol},
         ),
     ]
+    if prompt_profile or locale:
+        system_parts.insert(
+            1,
+            (
+                "prompt_metadata",
+                "Prompt metadata",
+                prompt_metadata_prompt,
+                {"prompt_profile": prompt_profile, "locale": locale},
+            ),
+        )
+    if turn_context_sections:
+        insert_index = 2 if prompt_profile or locale else 1
+        system_parts.insert(
+            insert_index,
+            (
+                "external_context",
+                "External turn context",
+                external_context_prompt,
+                {"context_section_ids": [section.id for section in turn_context_sections]},
+            ),
+        )
     system_sections = [
         ContextSection.from_text(
             name,

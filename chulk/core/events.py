@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    """Typed event wrapper for host adapters."""
+
+    type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
 
 class TraceEvent:
     """String constants for trace and progress events."""

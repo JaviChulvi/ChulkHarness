@@ -96,6 +96,7 @@ class RunResult:
     loaded_memory_ids: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     plan: PlanSnapshot | None = None
+    extension_metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +114,7 @@ class RunResult:
             "loaded_memory_ids": list(self.loaded_memory_ids),
             "errors": list(self.errors),
             "plan": self.plan.to_dict() if self.plan is not None else None,
+            "extension_metadata": self.extension_metadata,
         }
 
 
@@ -535,6 +537,7 @@ class AgentHandle:
             loaded_memory_ids=list(turn.loaded_memory_ids) if turn is not None else list(self.runtime.state.loaded_memory_ids),
             errors=list(turn.errors) if turn is not None else list(self.runtime.state.errors),
             plan=_plan_snapshot(turn.active_plan if turn is not None else self.runtime.state.active_plan),
+            extension_metadata=turn.extension_metadata if turn is not None else {},
         )
 
     def _no_pending_plan_result(self, content: str) -> RunResult:
@@ -598,8 +601,24 @@ class AsyncAgentHandle:
         *,
         on_delta: DeltaCallback | None = None,
         on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
-        return await asyncio.to_thread(self.handle.run, message, on_delta=on_delta, on_event=on_event)
+        return (
+            await self.run_result(
+                message,
+                on_delta=on_delta,
+                on_event=on_event,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            )
+        ).content
 
     async def run_result(
         self,
@@ -607,8 +626,29 @@ class AsyncAgentHandle:
         *,
         on_delta: DeltaCallback | None = None,
         on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
     ) -> RunResult:
-        return await asyncio.to_thread(self.handle.run_result, message, on_delta=on_delta, on_event=on_event)
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.run_turn_async(
+                message,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            )
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        return self.handle._run_result(content)
 
     async def plan(self, message: str) -> str:
         return await asyncio.to_thread(self.handle.plan, message)
@@ -623,7 +663,7 @@ class AsyncAgentHandle:
         return await asyncio.to_thread(self.handle.plan_result, message, on_delta=on_delta, on_event=on_event)
 
     async def approve(self) -> str:
-        return await asyncio.to_thread(self.handle.approve)
+        return (await self.approve_result()).content
 
     async def approve_result(
         self,
@@ -631,7 +671,19 @@ class AsyncAgentHandle:
         on_delta: DeltaCallback | None = None,
         on_event: EventCallback | None = None,
     ) -> RunResult:
-        return await asyncio.to_thread(self.handle.approve_result, on_delta=on_delta, on_event=on_event)
+        has_pending_plan = self.runtime.has_pending_plan()
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.approve_plan_async()
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        if not has_pending_plan:
+            return self.handle._no_pending_plan_result(content)
+        return self.handle._run_result(content)
 
     async def reject(self) -> str:
         return await asyncio.to_thread(self.handle.reject)
@@ -657,6 +709,8 @@ def agent(
     permission_callback: PermissionCallback | None = None,
     on_event: EventCallback | None = None,
     mcp: Iterable[MCPServerConfig] | None = None,
+    redaction_callback: Callable[[str, str, dict], str] | None = None,
+    redaction_fail_closed: bool = False,
 ) -> AgentHandle:
     """Create a configured Chulk agent handle."""
     runtime_config = _coerce_config(config)
@@ -672,6 +726,8 @@ def agent(
         system_prompt=selected_prompt,
         permission_callback=permission_callback,
         mcp_servers=tuple(mcp) if mcp is not None else None,
+        redaction_callback=redaction_callback,
+        redaction_fail_closed=redaction_fail_closed,
     )
     return AgentHandle(runtime, on_event=on_event)
 

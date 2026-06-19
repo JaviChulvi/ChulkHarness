@@ -1,12 +1,17 @@
 """Tests for the public Chulk API."""
 
+import asyncio
+import gc
 from dataclasses import dataclass
 from enum import Enum
 import json
-from typing import Annotated, Literal
+import time
+import warnings
+from typing import Annotated, Literal, get_type_hints
 
 import pytest
 
+import chulk.runtime as runtime_module
 from chulk import (
     Agent,
     AgentConfig,
@@ -39,6 +44,7 @@ from chulk.tools import (
     PermissionDecision as ToolsPermissionDecision,
     PermissionDecisionRecord as ToolsPermissionDecisionRecord,
     PermissionRequest as ToolsPermissionRequest,
+    ToolFailureKind,
     ToolRegistry,
     ToolPermissionLevel as ToolsToolPermissionLevel,
 )
@@ -90,6 +96,12 @@ def test_public_api_exports_capitalized_aliases():
     assert PermissionDecisionRecord is ToolsPermissionDecisionRecord
     assert PermissionRequest is ToolsPermissionRequest
     assert ToolPermissionLevel is ToolsToolPermissionLevel
+
+
+def test_runtime_create_agent_type_hints_resolve():
+    hints = get_type_hints(runtime_module.create_agent)
+
+    assert "event_sink" in hints
 
 
 def test_public_chat_agent_disables_default_tools_and_skills(tmp_path):
@@ -277,6 +289,199 @@ def test_public_agent_run_accepts_adapter_context(tmp_path):
     assert response == "context accepted"
     assert handle.state.turns[0].context_sections[0].id == "doc-1"
     assert handle.state.turns[0].extension_metadata == {"confidence": 0.9}
+
+
+def test_public_agent_run_result_exposes_extension_metadata(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    handle = Agent(
+        config=config,
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "structured"})]),
+        tools=[],
+        skills=[],
+    )
+
+    result = handle.run_result("hello", extension_metadata={"confidence": 0.7})
+
+    assert result.content == "structured"
+    assert result.status == "completed"
+    assert result.extension_metadata == {"confidence": 0.7}
+    assert result.tool_calls == []
+    assert result.observations == []
+
+
+def test_public_agent_redacts_streamed_and_final_output(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    events: list[AgentEvent] = []
+
+    def redact(_event_type: str, text: str, _metadata: dict) -> str:
+        return text.replace("SECRET", "[redacted]")
+
+    handle = Agent(
+        config=config,
+        llm=StreamingFakeLLMClient([json.dumps({"type": "final_answer", "content": "SECRET answer"})]),
+        tools=[],
+        skills=[],
+        on_event=events.append,
+        redaction_callback=redact,
+    )
+    deltas = []
+
+    response = handle.run("hello", on_delta=deltas.append)
+
+    assert response == "[redacted] answer"
+    assert "".join(deltas) == "[redacted] answer"
+    assert any(event.type == "final_answer" and event.payload["content"] == "[redacted] answer" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_public_async_agent_awaits_decorated_tool(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+
+    @Tool
+    async def async_label(label: str) -> str:
+        """Return a label asynchronously."""
+        return f"async: {label}"
+
+    llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "async_label",
+                    "arguments_json": json.dumps({"label": "public"}),
+                    "plan_json": "{}",
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "async done"}),
+        ]
+    )
+    handle = AsyncAgent(config=config, llm=llm, tools=[async_label], skills=[])
+
+    result = await handle.run_result("use async")
+
+    assert result.content == "async done"
+    assert result.tool_calls[0]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_public_async_agent_does_not_block_event_loop_for_llm(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    events = []
+
+    class BlockingLLM(LLMClient):
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            events.append("llm-start")
+            time.sleep(0.1)
+            events.append("llm-end")
+            return json.dumps({"type": "final_answer", "content": "async response"})
+
+    async def tick() -> None:
+        await asyncio.sleep(0.01)
+        events.append("tick")
+
+    handle = AsyncAgent(config=config, llm=BlockingLLM(), tools=[], skills=[])
+
+    result, _ = await asyncio.gather(handle.run_result("hello"), tick())
+
+    assert result.content == "async response"
+    assert events.index("tick") < events.index("llm-end")
+
+
+@pytest.mark.asyncio
+async def test_public_async_agent_approve_awaits_decorated_tool(tmp_path):
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    calls = []
+
+    @Tool
+    async def async_label(label: str) -> str:
+        """Return a label asynchronously."""
+        calls.append(label)
+        return f"async: {label}"
+
+    llm = FakeLLMClient(
+        [
+            _plan_response(_plan_payload("Run async approval tool")),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "async_label",
+                    "arguments_json": json.dumps({"label": "approved"}),
+                    "plan_json": "{}",
+                    "step_update_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {"step_id": "1", "status": "completed", "evidence": "Async tool completed."}
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "async approval done"}),
+        ]
+    )
+    handle = AsyncAgent(config=config, llm=llm, tools=[async_label], skills=[])
+
+    plan_result = await handle.plan_result("plan async approval")
+    result = await handle.approve_result()
+
+    assert plan_result.status == "waiting_for_approval"
+    assert result.content == "async approval done"
+    assert result.status == "completed"
+    assert calls == ["approved"]
+    assert result.tool_calls[0]["success"] is True
+    assert result.tool_calls[0]["failure_kind"] is None
+
+
+def test_public_decorated_async_tool_sync_rejection_closes_coroutine():
+    @Tool
+    async def async_label(label: str) -> str:
+        """Return a label asynchronously."""
+        return f"async: {label}"
+
+    registry = ToolRegistry()
+    registry.register(async_label)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        result = registry.run("async_label", {"label": "sync"})
+        gc.collect()
+
+    assert not result.success
+    assert result.failure_kind == ToolFailureKind.ASYNC_REQUIRED
+    assert not any("was never awaited" in str(warning.message) for warning in caught)
+
+
+def test_public_decorated_sync_tool_returning_awaitable_sync_rejection_closes_coroutine():
+    async def inner_label() -> str:
+        return "async result"
+
+    @Tool
+    def deferred_label() -> str:
+        """Return an awaitable from a sync tool."""
+        return inner_label()
+
+    registry = ToolRegistry()
+    registry.register(deferred_label)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        result = registry.run("deferred_label", {})
+        gc.collect()
+
+    assert not result.success
+    assert result.failure_kind == ToolFailureKind.ASYNC_REQUIRED
+    assert not any("was never awaited" in str(warning.message) for warning in caught)
+    async_result = asyncio.run(registry.run_async("deferred_label", {}))
+    assert async_result.success
+    assert async_result.observation == "async result"
 
 
 def test_public_agent_runs_decorated_tool(tmp_path):

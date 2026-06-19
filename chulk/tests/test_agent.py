@@ -1,5 +1,6 @@
 """Tests for the Phase 1 agent loop."""
 
+import asyncio
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -20,7 +21,18 @@ from chulk.llm import (
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
 from chulk.skills import SkillRegistry
-from chulk.tools import Tool, ToolRegistry, apply_patch_tool, calculator_tool, list_files_tool, read_file_tool, shell_tool, write_file_tool
+from chulk.tools import (
+    Tool,
+    ToolExecutionContext,
+    ToolFailureKind,
+    ToolRegistry,
+    apply_patch_tool,
+    calculator_tool,
+    list_files_tool,
+    read_file_tool,
+    shell_tool,
+    write_file_tool,
+)
 from chulk.tools.permissions import PermissionDecision, ToolPermissionPolicy
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
@@ -821,6 +833,7 @@ def test_agent_blocks_confirmation_tool_without_permission_callback(tmp_path):
     assert calls == []
     assert turn.tool_calls[0].success is False
     assert turn.tool_calls[0].error == "permission_denied"
+    assert turn.tool_calls[0].failure_kind == ToolFailureKind.USER_BLOCKED
     assert turn.tool_calls[0].metadata["permission_decision"]["decision"] == "deny"
     assert "permission policy" in turn.observations[0].content
     assert any(message["role"] == "observation" and "permission policy" in message["content"] for message in llm.requests[1])
@@ -899,6 +912,79 @@ def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):
     assert calls == [{"value": "run"}]
     assert approvals == [("dangerous", PermissionDecision.ASK)]
     assert agent.state.turns[0].tool_calls[0].success is True
+
+
+def test_agent_async_turn_awaits_tool_and_passes_context():
+    calls = []
+
+    async def lookup(arguments, context):
+        calls.append((arguments, context.metadata["org_id"]))
+        return ToolResult("lookup", True, f"found {arguments['query']}")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            callable=lookup,
+            accepts_context=True,
+        )
+    )
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "lookup", "arguments": {"query": "policy"}}),
+            json.dumps({"type": "final_answer", "content": "policy found"}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = asyncio.run(
+        agent.run_turn_async(
+            "lookup policy",
+            tool_context=ToolExecutionContext(metadata={"org_id": "org-1"}),
+        )
+    )
+
+    turn = agent.state.turns[0]
+    assert response == "policy found"
+    assert calls == [({"query": "policy"}, "org-1")]
+    assert turn.tool_calls[0].success is True
+    assert "found policy" in turn.observations[0].content
+
+
+def test_agent_sync_turn_classifies_async_tool_misuse():
+    async def lookup(_arguments):
+        return ToolResult("lookup", True, "unused")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="lookup",
+            description="Async lookup.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=lookup,
+        )
+    )
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "lookup", "arguments": {}}),
+            json.dumps({"type": "final_answer", "content": "async not run"}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_turn("lookup")
+
+    turn = agent.state.turns[0]
+    assert response == "async not run"
+    assert turn.tool_calls[0].success is False
+    assert turn.tool_calls[0].failure_kind == ToolFailureKind.ASYNC_REQUIRED
 
 
 def test_agent_traces_tool_call_lifecycle(tmp_path):

@@ -51,6 +51,7 @@ def shell_tool(project_root: Path, timeout_seconds: int = 10) -> Tool:
         },
         callable=lambda arguments: run_shell_command(arguments, project_root, timeout_seconds),
         timeout_seconds=timeout_seconds,
+        run_in_executor=True,
         requires_confirmation=True,
         permission_level=ToolPermissionLevel.SHELL,
     )

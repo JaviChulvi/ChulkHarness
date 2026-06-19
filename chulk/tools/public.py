@@ -56,35 +56,21 @@ def tool(
         tool_description = description or _description_from_callable(func)
         args_schema = _schema_from_callable(func)
 
+        async def invoke_async(arguments: dict[str, Any]) -> ToolResult:
+            result = await func(**arguments)
+            return _coerce_tool_result(tool_name, result)
+
         def invoke(arguments: dict[str, Any]) -> ToolResult:
             result = func(**arguments)
             if inspect.isawaitable(result):
-                async def await_result():
-                    resolved = await result
-                    if isinstance(resolved, ToolResult):
-                        return resolved
-                    return ToolResult(
-                        tool_name=tool_name,
-                        success=True,
-                        observation=_observation_from_result(resolved),
-                        metadata={"result_type": type(resolved).__name__},
-                    )
-
-                return await_result()  # type: ignore[return-value]
-            if isinstance(result, ToolResult):
-                return result
-            return ToolResult(
-                tool_name=tool_name,
-                success=True,
-                observation=_observation_from_result(result),
-                metadata={"result_type": type(result).__name__},
-            )
+                return _AwaitableToolResult(tool_name, result)  # type: ignore[return-value]
+            return _coerce_tool_result(tool_name, result)
 
         return Tool(
             name=tool_name,
             description=tool_description,
             args_schema=args_schema,
-            callable=invoke,
+            callable=invoke_async if inspect.iscoroutinefunction(func) else invoke,
             permission_level=permission_level,
             requires_confirmation=requires_confirmation,
         )
@@ -92,6 +78,47 @@ def tool(
     if fn is None:
         return decorator
     return decorator(fn)
+
+
+def _coerce_tool_result(tool_name: str, result: Any) -> ToolResult:
+    if isinstance(result, ToolResult):
+        return result
+    return ToolResult(
+        tool_name=tool_name,
+        success=True,
+        observation=_observation_from_result(result),
+        metadata={"result_type": type(result).__name__},
+    )
+
+
+class _AwaitableToolResult:
+    def __init__(self, tool_name: str, awaitable: Any) -> None:
+        self._tool_name = tool_name
+        self._awaitable = awaitable
+        self._runner: Any = None
+
+    def __await__(self):
+        if self._runner is None:
+            self._runner = self._run()
+        return self._runner.__await__()
+
+    async def _run(self) -> ToolResult:
+        try:
+            resolved = await self._awaitable
+            return _coerce_tool_result(self._tool_name, resolved)
+        finally:
+            self._close_inner()
+
+    def close(self) -> None:
+        close_runner = getattr(self._runner, "close", None)
+        if callable(close_runner):
+            close_runner()
+        self._close_inner()
+
+    def _close_inner(self) -> None:
+        close_inner = getattr(self._awaitable, "close", None)
+        if callable(close_inner):
+            close_inner()
 
 
 def default_software_engineer(*, include_memory: bool = True) -> list[ToolRef]:

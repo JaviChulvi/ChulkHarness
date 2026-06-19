@@ -2,7 +2,9 @@
 
 import asyncio
 from pathlib import Path
+import shlex
 import sys
+import threading
 
 from chulk.memory import SQLiteMemoryStore
 from chulk.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
@@ -150,6 +152,88 @@ def test_registry_runs_async_tool_with_context():
     assert result.success
     assert result.observation == "found handbook"
     assert calls == [({"query": "handbook"}, "org-1")]
+
+
+def test_registry_run_async_offloads_executor_tool():
+    registry = ToolRegistry()
+    started = threading.Event()
+    finish = threading.Event()
+
+    def blocking(_arguments):
+        started.set()
+        finish.wait(timeout=0.5)
+        return ToolResult("blocking", True, "done")
+
+    registry.register(
+        Tool(
+            name="blocking",
+            description="Blocking sync tool.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=blocking,
+            run_in_executor=True,
+        )
+    )
+
+    async def run_probe():
+        task = asyncio.create_task(registry.run_async("blocking", {}))
+        assert await asyncio.to_thread(started.wait, 1)
+        assert not task.done()
+        finish.set()
+        return await asyncio.wait_for(task, timeout=1)
+
+    result = asyncio.run(run_probe())
+
+    assert result.success
+    assert result.observation == "done"
+
+
+def test_default_run_cmd_yields_event_loop_when_run_async(tmp_path):
+    registry = create_default_tool_registry(tmp_path)
+    command = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(0.3)\""
+
+    async def run_probe():
+        command_task = asyncio.create_task(
+            registry.run_async("run_cmd", {"command": command, "timeout_seconds": 1})
+        )
+
+        async def heartbeat():
+            await asyncio.sleep(0.05)
+            return command_task.done()
+
+        done_before_heartbeat = await asyncio.wait_for(heartbeat(), timeout=1)
+        result = await asyncio.wait_for(command_task, timeout=2)
+        return done_before_heartbeat, result
+
+    done_before_heartbeat, result = asyncio.run(run_probe())
+
+    assert done_before_heartbeat is False
+    assert result.success
+
+
+def test_registry_run_async_propagates_cancellation():
+    registry = ToolRegistry()
+
+    async def cancelled(_arguments):
+        raise asyncio.CancelledError()
+
+    registry.register(
+        Tool(
+            name="cancelled",
+            description="Cancelled async tool.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=cancelled,
+        )
+    )
+
+    async def run_cancelled():
+        await registry.run_async("cancelled", {})
+
+    try:
+        asyncio.run(run_cancelled())
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("Expected async tool cancellation to propagate")
 
 
 def test_registry_sync_runner_rejects_async_tool():
@@ -629,6 +713,34 @@ def test_default_tool_registry_contains_memory_tools_when_store_is_provided(tmp_
         "import_memories",
         "export_memories",
     } <= names
+
+
+def test_default_io_tools_run_in_executor(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    registry = create_default_tool_registry(tmp_path, memory_store=memory_store)
+    tools = {tool.name: tool for tool in registry.list_tools()}
+
+    assert tools["calculator"].run_in_executor is False
+    for name in {
+        "run_cmd",
+        "read_file",
+        "apply_patch",
+        "write_file",
+        "list_files",
+        "search_files",
+        "save_memory",
+        "search_memory",
+        "list_memories",
+        "delete_memory",
+        "update_memory",
+        "summarize_memories",
+        "archive_memory",
+        "restore_memory",
+        "compact_memories",
+        "import_memories",
+        "export_memories",
+    }:
+        assert tools[name].run_in_executor is True
 
 
 def test_memory_tools_save_search_update_and_delete(tmp_path):

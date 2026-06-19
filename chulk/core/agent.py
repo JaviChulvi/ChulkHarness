@@ -6,12 +6,13 @@ user message -> prompt -> model action -> optional tool call -> observation -> f
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import re
 
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
 from chulk.core.context import AgentPrompt, ContextBudget, TurnContextSection
-from chulk.core.events import TraceEvent
+from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.observations import format_tool_observation
 from chulk.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
 from chulk.core.prompt_builder import build_agent_prompt
@@ -37,7 +38,7 @@ from chulk.tools.permissions import (
     ToolPermissionLevel,
     ToolPermissionPolicy,
 )
-from chulk.tools.registry import ToolExecutionContext, ToolResult
+from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResult
 from chulk.tracing import JSONLTraceLogger
 
 
@@ -74,6 +75,9 @@ class Agent:
         permission_callback: Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool] | None = None,
         context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
+        event_sink: Callable[[AgentEvent], None] | None = None,
+        redaction_callback: Callable[[str, str, dict], str] | None = None,
+        redaction_fail_closed: bool = False,
         pinned_skill_names: list[str] | None = None,
         mcp_servers: list[MCPServerConfig] | tuple[MCPServerConfig, ...] | None = None,
         mcp_bridge_tool_names: list[str] | None = None,
@@ -115,6 +119,9 @@ class Agent:
         self.permission_policy = permission_policy or ToolPermissionPolicy()
         self.permission_callback = permission_callback
         self.event_callback = event_callback
+        self.event_sink = event_sink
+        self.redaction_callback = redaction_callback
+        self.redaction_fail_closed = redaction_fail_closed
         self.pinned_skill_names = pinned_skill_names or []
         self.mcp_servers = tuple(mcp_servers or ())
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
@@ -148,6 +155,30 @@ class Agent:
             tool_context=tool_context,
         )
 
+    async def run_turn_async(
+        self,
+        user_message: str,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
+        """Run one user turn and await async tools in the current event loop."""
+        clean_message = user_message.strip()
+        if not clean_message:
+            raise ValueError("user_message cannot be empty")
+        return await self._run_user_turn_async(
+            clean_message,
+            require_plan=False,
+            context_sections=context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+        )
+
     def run_planned_turn(self, user_message: str) -> str:
         """Run one user turn that must propose a plan before tool execution."""
         clean_message = user_message.strip()
@@ -167,6 +198,53 @@ class Agent:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
+        turn_or_response = self._start_user_turn(
+            clean_message,
+            context_sections=context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+        )
+        if isinstance(turn_or_response, str):
+            return turn_or_response
+        return self._run_action_loop(turn_or_response, require_plan=require_plan)
+
+    async def _run_user_turn_async(
+        self,
+        clean_message: str,
+        *,
+        require_plan: bool,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
+        """Start a user turn and run it with async tool execution."""
+        turn_or_response = self._start_user_turn(
+            clean_message,
+            context_sections=context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+        )
+        if isinstance(turn_or_response, str):
+            return turn_or_response
+        return await self._run_action_loop_async(turn_or_response, require_plan=require_plan)
+
+    def _start_user_turn(
+        self,
+        clean_message: str,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+        tool_context: ToolExecutionContext | dict | None,
+    ) -> TurnState | str:
+        """Create and trace a user turn before model/tool execution."""
         if self.has_pending_plan():
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
 
@@ -207,7 +285,7 @@ class Agent:
         self.memory.add_user_message(clean_message)
         self._trace(TraceEvent.USER_MESSAGE, {"turn_id": turn.turn_id, "content": clean_message})
 
-        return self._run_action_loop(turn, require_plan=require_plan)
+        return turn
 
     def has_pending_plan(self) -> bool:
         """Return True when a turn is paused on a plan awaiting approval."""
@@ -216,6 +294,20 @@ class Agent:
 
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
+        turn_or_response = self._approve_pending_plan()
+        if isinstance(turn_or_response, str):
+            return turn_or_response
+        return self._run_action_loop(turn_or_response, require_plan=False)
+
+    async def approve_plan_async(self) -> str:
+        """Approve the pending plan and continue it with async tool execution."""
+        turn_or_response = self._approve_pending_plan()
+        if isinstance(turn_or_response, str):
+            return turn_or_response
+        return await self._run_action_loop_async(turn_or_response, require_plan=False)
+
+    def _approve_pending_plan(self) -> TurnState | str:
+        """Mark the pending plan approved and return its paused turn."""
         turn = self._pending_plan_turn()
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
@@ -229,7 +321,7 @@ class Agent:
             TraceEvent.PLAN_APPROVED,
             {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
         )
-        return self._run_action_loop(turn, require_plan=False)
+        return turn
 
     def reject_plan(self) -> str:
         """Reject the pending plan without executing tools."""
@@ -533,6 +625,277 @@ class Agent:
                         )
                         return blocked_response
 
+    async def _run_action_loop_async(self, turn: TurnState, *, require_plan: bool) -> str:
+        """Run model/tool iterations, awaiting async tool calls."""
+        while True:
+            blocked_response = self._prepare_plan_execution_step(turn, require_plan=require_plan)
+            if blocked_response is not None:
+                return blocked_response
+
+            prompt = self._build_prompt(turn, require_plan=require_plan)
+            prompt = await self._compact_context_if_needed_async(prompt, turn, require_plan=require_plan)
+            messages = prompt.messages
+            context_report = prompt.context_report.to_dict()
+            turn.context_reports.append(context_report)
+            self.state.last_context_report = context_report
+            turn.model_request_count += 1
+            self._trace(
+                TraceEvent.MODEL_REQUEST_STARTED,
+                format_model_request_trace(
+                    messages,
+                    max_prompt_chars=self.trace_max_prompt_chars,
+                    request_index=turn.model_request_count,
+                    turn_id=turn.turn_id,
+                    loaded_memory_ids=self.state.loaded_memory_ids,
+                    loaded_skill_names=self.state.loaded_skill_names,
+                    available_tool_names=turn.available_tool_names,
+                    context_report=context_report,
+                ),
+            )
+            try:
+                action_result = await asyncio.to_thread(
+                    self.llm_client.complete_action,
+                    messages,
+                    max_repair_attempts=self.max_json_repair_attempts,
+                    tools=self.tool_registry.list_tools(),
+                    hosted_mcp_servers=self.mcp_servers,
+                    mcp_approval_callback=lambda approval_request: self._resolve_hosted_mcp_approval(
+                        approval_request,
+                        turn,
+                    ),
+                )
+            except LLMActionError as exc:
+                self.state.json_repair_attempts += exc.repair_attempts
+                self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
+                turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
+                usage_payload, cost_payload = self._record_model_accounting(
+                    turn,
+                    request_index=turn.model_request_count,
+                    usage=exc.usage,
+                    cost=exc.cost,
+                )
+                if exc.raw_response:
+                    self._trace(
+                        TraceEvent.MODEL_RESPONSE,
+                        {
+                            "turn_id": turn.turn_id,
+                            "request_index": turn.model_request_count,
+                            "content": exc.raw_response,
+                            "repair_attempts": exc.repair_attempts,
+                            "repair_errors": exc.errors,
+                            "parse_failed": True,
+                            "usage": usage_payload,
+                            "cost": cost_payload,
+                        },
+                    )
+                return self._fail_action_protocol_turn(exc, turn)
+
+            action = action_result.action
+            self.state.json_repair_attempts += action_result.repair_attempts
+            self.state.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
+            turn.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
+            fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+            if fallback_attempts:
+                self._trace(
+                    TraceEvent.LLM_FALLBACK_ATTEMPTS,
+                    {
+                        "turn_id": turn.turn_id,
+                        "request_index": turn.model_request_count,
+                        "attempts": [
+                            attempt.to_dict() if hasattr(attempt, "to_dict") else {"attempt": str(attempt)}
+                            for attempt in fallback_attempts
+                        ],
+                    },
+                )
+            usage_payload, cost_payload = self._record_model_accounting(
+                turn,
+                request_index=turn.model_request_count,
+                usage=action_result.usage,
+                cost=action_result.cost,
+                fallback_attempts=fallback_attempts,
+            )
+            self._trace(
+                TraceEvent.MODEL_RESPONSE,
+                {
+                    "turn_id": turn.turn_id,
+                    "request_index": turn.model_request_count,
+                    "content": action_result.raw_response,
+                    "repair_attempts": action_result.repair_attempts,
+                    "repair_errors": action_result.errors,
+                    "usage": usage_payload,
+                    "cost": cost_payload,
+                    "metadata": action_result.metadata,
+                },
+            )
+            self._trace(TraceEvent.PARSED_ACTION, format_action_trace(action))
+            self._trace(TraceEvent.MODEL_RESPONSE_PARSED, format_action_trace(action))
+
+            if isinstance(action, PlanAction):
+                return self._handle_plan_action(action, turn, require_plan=require_plan)
+
+            if isinstance(action, PlanStepUpdateAction):
+                step_update_response = self._handle_plan_step_update(action, turn, require_plan=require_plan)
+                if step_update_response is not None:
+                    return step_update_response
+                continue
+
+            if isinstance(action, FinalAnswerAction):
+                if require_plan:
+                    if turn.planning_feedback_count >= 2:
+                        return self._fail_turn("Planning failed because the model answered directly instead of returning a plan.", turn)
+                    self._request_plan_revision(
+                        turn,
+                        feedback=(
+                            "Planning feedback: the user explicitly requested /plan, so do not answer directly. "
+                            "Use read-only reconnaissance tools if codebase context is needed, then return a plan action "
+                            "with concrete implementation steps that can be approved or rejected."
+                        ),
+                    )
+                    return await self._run_action_loop_async(turn, require_plan=True)
+
+                if self._approved_plan_incomplete(turn):
+                    if turn.plan_execution_feedback_count >= 1:
+                        return self._fail_turn(
+                            "Plan execution failed because the model returned a final answer before completing the approved plan.",
+                            turn,
+                        )
+                    self._request_plan_execution_feedback(
+                        turn,
+                        feedback=(
+                            "Plan execution feedback: the approved plan is not complete. "
+                            "Continue the current executable step with a tool call, or return a plan_step_update "
+                            "if the step's acceptance criteria are already satisfied. Do not return final_answer yet."
+                        ),
+                    )
+                    return await self._run_action_loop_async(turn, require_plan=False)
+
+                if await self._final_answer_needs_revision_async(action.content, turn):
+                    return await self._run_action_loop_async(turn, require_plan=False)
+
+                return self._complete_final_answer(action.content, turn)
+
+            if isinstance(action, ToolCallAction):
+                if require_plan:
+                    if action.tool_name not in READ_ONLY_PLANNING_TOOL_NAMES:
+                        allowed_tools = format_read_only_planning_tools()
+                        return self._fail_turn(
+                            "Planning can only use read-only reconnaissance tools before approval. "
+                            f"Allowed planning tools: {allowed_tools}. "
+                            "Return a plan action or retry with one of the allowed tools.",
+                            turn,
+                        )
+                    phase = "planning"
+                else:
+                    phase = "execution"
+
+                if self._tool_call_count_for_phase(turn, phase) >= self.max_tool_calls_per_turn:
+                    if require_plan and phase == "planning" and not turn.planning_tool_limit_feedback_sent:
+                        turn.planning_tool_limit_feedback_sent = True
+                        self._request_plan_revision(
+                            turn,
+                            feedback=(
+                                "Planning feedback: the read-only reconnaissance tool budget is exhausted. "
+                                "Do not call more tools. Return a plan action now using the context already gathered. "
+                                "The plan must name concrete files/modules to change, behaviors to add, and tests to update."
+                            ),
+                        )
+                        return await self._run_action_loop_async(turn, require_plan=True)
+                    return self._fail_turn(
+                        f"Tool call limit reached ({self.max_tool_calls_per_turn}) "
+                        f"during {phase} before a final answer.",
+                        turn,
+                    )
+                turn.tool_call_count += 1
+                plan_step = None if require_plan else self._active_plan_step_for_tool(turn)
+                tool_call_record = ToolCallRecord(
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    iteration=turn.tool_call_count,
+                    phase=phase,
+                    plan_step_id=plan_step.id if plan_step else None,
+                )
+                turn.tool_calls.append(tool_call_record)
+                tool_call_payload = {
+                    **tool_call_record.to_dict(),
+                    "turn_id": turn.turn_id,
+                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                }
+                self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
+                permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
+                result = permission_result or await self.tool_registry.run_async(
+                    action.tool_name,
+                    action.arguments,
+                    context=self._tool_context_for_turn(turn),
+                )
+                tool_call_record.finish(result)
+                state_tool_call = {
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments,
+                    "phase": phase,
+                    "success": result.success,
+                }
+                if tool_call_record.plan_step_id is not None:
+                    state_tool_call["plan_step_id"] = tool_call_record.plan_step_id
+                self.state.tool_calls.append(state_tool_call)
+                self._trace(
+                    TraceEvent.TOOL_CALL,
+                    {
+                        "turn_id": turn.turn_id,
+                        "tool_name": action.tool_name,
+                        "arguments": action.arguments,
+                        "phase": phase,
+                        "plan_step_id": tool_call_record.plan_step_id,
+                        "success": result.success,
+                        "error": result.error,
+                    },
+                )
+                completion_payload = {
+                    **tool_call_record.to_dict(),
+                    "turn_id": turn.turn_id,
+                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                }
+                self._trace(
+                    TraceEvent.TOOL_CALL_COMPLETED if result.success else TraceEvent.TOOL_CALL_FAILED,
+                    completion_payload,
+                )
+                observation, output_metadata = self._format_tool_observation(action.tool_name, result)
+                self.state.observations.append(
+                    {
+                        "tool_name": action.tool_name,
+                        "observation": observation,
+                        "output_metadata": output_metadata,
+                    }
+                )
+                observation_record = ObservationRecord(
+                    tool_name=action.tool_name,
+                    content=observation,
+                    output_metadata=output_metadata,
+                )
+                turn.observations.append(observation_record)
+                self.memory.add_observation(observation)
+                self._trace(
+                    TraceEvent.TOOL_OBSERVATION,
+                    {
+                        "turn_id": turn.turn_id,
+                        "tool_name": action.tool_name,
+                        "observation": observation,
+                        "output_metadata": output_metadata,
+                    },
+                )
+                if plan_step is not None:
+                    if result.success:
+                        self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
+                    else:
+                        blocked_response = self._block_plan_step_after_tool_failure(
+                            turn,
+                            plan_step,
+                            tool_call_record,
+                            result,
+                            observation,
+                            output_metadata,
+                        )
+                        return blocked_response
+
     def _build_messages(self, turn: TurnState, *, require_plan: bool) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
         return self._build_prompt(turn, require_plan=require_plan).messages
@@ -570,6 +933,41 @@ class Agent:
                 return current_prompt
 
             summary, fallback, error = self._summarize_context_messages(messages_to_summarize, turn)
+            removed_count = self.memory.remove_messages(omitted_messages)
+            summarized_message_count = len(pending_messages) + removed_count
+            self.memory.update_conversation_summary(summary, summarized_message_count=summarized_message_count)
+            self.state.conversation_summary = self.memory.conversation_summary
+            self._trace(
+                TraceEvent.CONTEXT_SUMMARY_CREATED,
+                {
+                    "turn_id": turn.turn_id,
+                    "summary": self.memory.conversation_summary,
+                    "source_message_count": self.memory.summary_message_count,
+                    "summarized_message_count": summarized_message_count,
+                    "fallback": fallback,
+                    "error": error,
+                },
+            )
+            current_prompt = self._build_prompt(turn, require_plan=require_plan)
+        return current_prompt
+
+    async def _compact_context_if_needed_async(
+        self,
+        prompt: AgentPrompt,
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> AgentPrompt:
+        """Summarize old raw messages without blocking the event loop."""
+        current_prompt = prompt
+        for _ in range(SUMMARY_COMPACTION_PASSES):
+            pending_messages = self.memory.consume_pending_summary_messages()
+            omitted_messages = current_prompt.omitted_messages
+            messages_to_summarize = _dedupe_messages([*pending_messages, *omitted_messages])
+            if not messages_to_summarize:
+                return current_prompt
+
+            summary, fallback, error = await self._summarize_context_messages_async(messages_to_summarize, turn)
             removed_count = self.memory.remove_messages(omitted_messages)
             summarized_message_count = len(pending_messages) + removed_count
             self.memory.update_conversation_summary(summary, summarized_message_count=summarized_message_count)
@@ -633,6 +1031,90 @@ class Agent:
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
         try:
             response = self.llm_client.complete_response(summary_messages)
+            raw_summary = response.content
+        except LLMError as exc:
+            self._trace(
+                TraceEvent.MODEL_RESPONSE,
+                {
+                    "turn_id": turn.turn_id,
+                    "request_index": request_index,
+                    "content": "",
+                    "purpose": "context_summary",
+                    "error": str(exc),
+                },
+            )
+            return _fallback_context_summary(self.memory.conversation_summary, messages), True, str(exc)
+
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        usage_payload, cost_payload = self._record_model_accounting(
+            turn,
+            request_index=request_index,
+            usage=response.usage,
+            cost=response.cost,
+            fallback_attempts=fallback_attempts,
+            purpose="context_summary",
+        )
+        self._trace(
+            TraceEvent.MODEL_RESPONSE,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "content": raw_summary,
+                "purpose": "context_summary",
+                "usage": usage_payload,
+                "cost": cost_payload,
+            },
+        )
+        clean_summary = _clean_summary(raw_summary)
+        if not clean_summary:
+            return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
+        return clean_summary, False, None
+
+    async def _summarize_context_messages_async(
+        self,
+        messages: list[dict[str, str]],
+        turn: TurnState,
+    ) -> tuple[str, bool, str | None]:
+        """Return an updated compact summary without blocking the event loop."""
+        summary_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You update a compact, task-local conversation summary for an agent harness. "
+                    "Preserve decisions, constraints, files or tools used, important results, plan status, "
+                    "failed attempts, and next actions. Do not store secrets or API keys. "
+                    "Keep the summary concise and useful for continuing the current task."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _format_context_summary_request(
+                    previous_summary=self.memory.conversation_summary,
+                    messages=messages,
+                ),
+            },
+        ]
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        request_payload = format_model_request_trace(
+            summary_messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report={
+                "purpose": "context_summary",
+                "source_message_count": len(messages),
+                "existing_summary": self.memory.conversation_summary is not None,
+            },
+        )
+        request_payload["purpose"] = "context_summary"
+        request_payload["summary_source_message_count"] = len(messages)
+        self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+        try:
+            response = await asyncio.to_thread(self.llm_client.complete_response, summary_messages)
             raw_summary = response.content
         except LLMError as exc:
             self._trace(
@@ -798,6 +1280,13 @@ class Agent:
         return record.decision == PermissionDecision.ALLOW
 
     def _complete_final_answer(self, content: str, turn: TurnState) -> str:
+        content, redaction_metadata = self._redact_text(
+            TraceEvent.FINAL_ANSWER,
+            content,
+            {"turn_id": turn.turn_id, "field": "content"},
+        )
+        if redaction_metadata.get("redacted") or redaction_metadata.get("redaction_error"):
+            turn.extension_metadata["final_answer_redaction"] = redaction_metadata
         self._emit_final_answer_stream(content, turn)
         self.memory.add_assistant_message(content)
         self.state.final_answer = content
@@ -872,6 +1361,17 @@ class Agent:
         self._request_reflection_revision(turn, proposed_answer, reflection)
         return True
 
+    async def _final_answer_needs_revision_async(self, proposed_answer: str, turn: TurnState) -> bool:
+        if self.max_reflection_attempts == 0 or turn.reflection_count >= self.max_reflection_attempts:
+            return False
+
+        reflection = await self._reflect_before_final_answer_async(proposed_answer, turn)
+        if reflection.approved:
+            return False
+
+        self._request_reflection_revision(turn, proposed_answer, reflection)
+        return True
+
     def _reflect_before_final_answer(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
         turn.reflection_count += 1
         attempt = turn.reflection_count
@@ -907,6 +1407,94 @@ class Agent:
 
         try:
             response = self.llm_client.complete_response(messages)
+            raw_response = response.content
+        except LLMError as exc:
+            return self._fail_open_reflection(
+                turn,
+                proposed_answer,
+                attempt=attempt,
+                error=str(exc),
+                raw_response=None,
+                request_index=request_index,
+            )
+
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        usage_payload, cost_payload = self._record_model_accounting(
+            turn,
+            request_index=request_index,
+            usage=response.usage,
+            cost=response.cost,
+            fallback_attempts=fallback_attempts,
+            purpose="reflection",
+        )
+        self._trace(
+            TraceEvent.MODEL_RESPONSE,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "content": raw_response,
+                "purpose": "reflection",
+                "reflection_attempt": attempt,
+                "usage": usage_payload,
+                "cost": cost_payload,
+            },
+        )
+        try:
+            reflection = parse_reflection_response(raw_response)
+        except ReflectionParseError as exc:
+            return self._fail_open_reflection(
+                turn,
+                proposed_answer,
+                attempt=attempt,
+                error=str(exc),
+                raw_response=raw_response,
+                request_index=request_index,
+            )
+
+        record = {
+            **reflection.to_dict(),
+            "attempt": attempt,
+            "proposed_answer": proposed_answer,
+        }
+        turn.reflections.append(record)
+        self._trace(TraceEvent.REFLECTION_COMPLETED, {"turn_id": turn.turn_id, **record})
+        return reflection
+
+    async def _reflect_before_final_answer_async(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
+        turn.reflection_count += 1
+        attempt = turn.reflection_count
+        messages = build_reflection_messages(turn, proposed_answer)
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        context_report = {
+            "purpose": "reflection",
+            "reflection_attempt": attempt,
+            "proposed_answer_chars": len(proposed_answer),
+        }
+        self._trace(
+            TraceEvent.REFLECTION_STARTED,
+            {
+                "turn_id": turn.turn_id,
+                "reflection_attempt": attempt,
+                "proposed_answer": proposed_answer,
+            },
+        )
+        request_payload = format_model_request_trace(
+            messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report=context_report,
+        )
+        request_payload["purpose"] = "reflection"
+        request_payload["reflection_attempt"] = attempt
+        self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+
+        try:
+            response = await asyncio.to_thread(self.llm_client.complete_response, messages)
             raw_response = response.content
         except LLMError as exc:
             return self._fail_open_reflection(
@@ -1394,11 +1982,65 @@ class Agent:
         return usage_payload, cost_payload
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
-        payload = payload or {}
+        payload = self._redact_event_payload(event_type, payload or {})
         if self.trace_logger is not None:
             self.trace_logger.log(event_type, payload)
         if self.event_callback is not None:
             self.event_callback(event_type, payload)
+        if self.event_sink is not None:
+            self.event_sink(AgentEvent(event_type, payload))
+
+    def _redact_text(self, event_type: str, text: str, metadata: dict) -> tuple[str, dict]:
+        if self.redaction_callback is None:
+            return text, {"redacted": False}
+        try:
+            redacted = self.redaction_callback(event_type, text, metadata)
+        except Exception as exc:
+            if self.redaction_fail_closed:
+                return "[redaction failed]", {
+                    "redacted": True,
+                    "redaction_error": str(exc),
+                    "fail_closed": True,
+                }
+            return text, {
+                "redacted": False,
+                "redaction_error": str(exc),
+                "fail_closed": False,
+            }
+        if not isinstance(redacted, str):
+            redacted = str(redacted)
+        return redacted, {"redacted": redacted != text}
+
+    def _redact_event_payload(self, event_type: str, payload: dict) -> dict:
+        if self.redaction_callback is None:
+            return payload
+
+        redacted_any = False
+        error: str | None = None
+
+        def redact_value(value: object, path: str) -> object:
+            nonlocal redacted_any, error
+            if isinstance(value, str):
+                redacted, metadata = self._redact_text(event_type, value, {"path": path})
+                redacted_any = redacted_any or bool(metadata.get("redacted"))
+                if metadata.get("redaction_error"):
+                    error = str(metadata["redaction_error"])
+                    redacted_any = redacted_any or bool(metadata.get("fail_closed"))
+                return redacted
+            if isinstance(value, dict):
+                return {key: redact_value(item, f"{path}.{key}") for key, item in value.items()}
+            if isinstance(value, list):
+                return [redact_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
+            return value
+
+        redacted_payload = redact_value(payload, "payload")
+        if not isinstance(redacted_payload, dict):
+            return payload
+        if redacted_any:
+            redacted_payload["_redacted"] = True
+        if error is not None:
+            redacted_payload["_redaction_error"] = error
+        return redacted_payload
 
     def _tool_context_for_turn(self, turn: TurnState) -> ToolExecutionContext | None:
         if turn.turn_id in self._tool_contexts:
@@ -1437,6 +2079,13 @@ class Agent:
             max_stderr_chars=self.max_tool_stderr_chars,
             artifact_writer=self._write_tool_output_artifact,
         )
+        observation, redaction_metadata = self._redact_text(
+            TraceEvent.TOOL_OBSERVATION,
+            observation,
+            {"requested_tool_name": requested_tool_name, "resolved_tool_name": result.tool_name},
+        )
+        if redaction_metadata.get("redacted") or redaction_metadata.get("redaction_error"):
+            metadata["redaction"] = redaction_metadata
         return observation, metadata
 
     def _write_tool_output_artifact(self, name: str, content: str) -> dict | None:
@@ -1572,6 +2221,7 @@ def _permission_denied_result(request: PermissionRequest, record: PermissionDeci
             "Do not claim the tool ran. Either request approval, choose an allowed tool, or explain the limitation."
         ),
         error="permission_denied",
+        failure_kind=ToolFailureKind.USER_BLOCKED,
         metadata={
             "permission_request": request.to_dict(),
             "permission_decision": record.to_dict(),

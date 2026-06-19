@@ -776,6 +776,7 @@ def _tool_call_from_dict(payload: dict[str, Any]) -> ToolCallRecord:
         resolved_tool_name=payload.get("resolved_tool_name"),
         success=payload.get("success"),
         error=payload.get("error"),
+        failure_kind=payload.get("failure_kind"),
         metadata=_safe_json_object(payload.get("metadata")),
     )
 
