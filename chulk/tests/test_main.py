@@ -813,9 +813,17 @@ def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp
     class SkillAwareFakeLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
             system_prompt = messages[0]["content"]
+            xml_sections_present = (
+                system_prompt.startswith("<chulk_prompt>")
+                and "<available_skills>" in system_prompt
+                and "</available_skills>" in system_prompt
+                and "<skills>" in system_prompt
+                and "</skills>" in system_prompt
+                and system_prompt.endswith("</chulk_prompt>")
+            )
             catalog_visible = "- shell: Use this skill when command execution is needed." in system_prompt
             skill_loaded = "Skill: shell" in system_prompt and "# Shell Skill" in system_prompt
-            if catalog_visible and skill_loaded:
+            if xml_sections_present and catalog_visible and skill_loaded:
                 return json.dumps({"type": "final_answer", "content": "shell skill listed and loaded"})
             return json.dumps({"type": "final_answer", "content": "missing skill"})
 

@@ -1,9 +1,11 @@
 """Tests for prompt context accounting and budgets."""
 
 import json
+import xml.etree.ElementTree as ET
 
 from chulk.core.context import ContextBudget, TurnContextSection, estimate_tokens
 from chulk.core.prompt_builder import build_agent_prompt
+from chulk.core.prompts import format_tools_for_prompt
 from chulk.memory import ConversationMemory
 from chulk.skills import Skill
 from chulk.tools import ToolRegistry, calculator_tool
@@ -13,6 +15,16 @@ def test_estimate_tokens_is_deterministic():
     assert estimate_tokens("") == 0
     assert estimate_tokens("abcd") == 1
     assert estimate_tokens("abcde") == 2
+
+
+def test_format_tools_for_prompt_treats_empty_json_catalog_as_no_tools():
+    prompt = format_tools_for_prompt("[]")
+    root = ET.fromstring(prompt)
+
+    assert root.tag == "available_tools"
+    assert root.find("status").text == "Available tools: none."
+    assert root.find("tool") is None
+    assert "callable actions" not in prompt
 
 
 def test_build_agent_prompt_reports_named_sections():
@@ -45,7 +57,13 @@ def test_build_agent_prompt_reports_named_sections():
     assert "tools" in section_names
     assert "history" in section_names
     assert "observations" in section_names
+    assert prompt.messages[0]["content"].startswith("<chulk_prompt>\n<system_prompt>\n<system_instructions>")
+    assert "<instruction_text>\nBase prompt.\n</instruction_text>" in prompt.messages[0]["content"]
+    assert prompt.messages[0]["content"].endswith("</chulk_prompt>")
     assert "Available skills: none." in prompt.messages[0]["content"]
+    xml_root = ET.fromstring(prompt.messages[0]["content"])
+    assert xml_root.tag == "chulk_prompt"
+    assert xml_root.find("tools/available_tools/tool/name").text == "calculator"
 
 
 def test_build_agent_prompt_lists_available_skill_metadata_without_loading_content(tmp_path):
@@ -75,6 +93,10 @@ def test_build_agent_prompt_lists_available_skill_metadata_without_loading_conte
     available_section = next(section for section in report["sections"] if section["name"] == "available_skills")
 
     assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
+    assert "<available_skills>" in system_prompt
+    assert "</available_skills>" in system_prompt
+    assert "<skills>" in system_prompt
+    assert "</skills>" in system_prompt
     assert "- review: Use this skill when reviewing code." in system_prompt
     assert "Loaded skills: none selected for this turn." in system_prompt
     assert "# Review Skill" not in system_prompt
@@ -113,8 +135,8 @@ def test_build_agent_prompt_injects_external_context_and_prompt_metadata():
 
     assert "External turn context supplied by the host application" in system_prompt
     assert "The handbook says onboarding takes three days." in system_prompt
-    assert "profile: polp-search" in system_prompt
-    assert "locale: es-ES" in system_prompt
+    assert "<profile>polp-search</profile>" in system_prompt
+    assert "<locale>es-ES</locale>" in system_prompt
     assert external["metadata"]["context_section_ids"] == ["src-1"]
     assert metadata["metadata"]["prompt_profile"] == "polp-search"
     assert metadata["metadata"]["locale"] == "es-ES"

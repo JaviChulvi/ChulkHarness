@@ -12,6 +12,7 @@ from chulk.core.prompts import (
     format_planning_for_prompt,
     format_prompt_metadata_for_prompt,
     format_skills_for_prompt,
+    format_system_instructions_for_prompt,
     format_tool_call_rules,
     format_tools_for_prompt,
 )
@@ -95,6 +96,7 @@ def build_agent_prompt(
     context_budget: ContextBudget | None = None,
 ) -> AgentPrompt:
     """Build model input and a context report from prompt, tools, and history."""
+    system_instructions_prompt = format_system_instructions_for_prompt(system_prompt)
     tool_descriptions = tool_registry.tool_descriptions_for_prompt()
     memory_prompt = format_memories_for_prompt(
         profile_memories=profile_memories,
@@ -121,7 +123,7 @@ def build_agent_prompt(
     tools_prompt = format_tools_for_prompt(tool_descriptions)
     action_protocol = NATIVE_ACTION_PROMPT if native_action_protocol else JSON_ACTION_PROMPT
     system_parts = [
-        ("system_prompt", "Base system prompt", system_prompt, {}),
+        ("system_prompt", "Base system prompt", system_instructions_prompt, {}),
         (
             "memories",
             "Selected memories",
@@ -198,7 +200,7 @@ def build_agent_prompt(
         )
         for name, label, content, metadata in system_parts
     ]
-    composed_system_prompt = "\n\n".join(content for _, _, content, _ in system_parts)
+    composed_system_prompt = _compose_xml_system_prompt(system_parts)
     system_message = {"role": "system", "content": composed_system_prompt}
     budget = context_budget or ContextBudget()
     history_messages, omitted_messages = select_messages_for_budget(
@@ -229,3 +231,21 @@ def _section_item_count(name: str, content: str, metadata: dict) -> int:
     if name == "tools":
         return len(metadata.get("tool_names", []))
     return 1 if content else 0
+
+
+def _compose_xml_system_prompt(system_parts: list[tuple[str, str, str, dict]]) -> str:
+    sections = ["<chulk_prompt>"]
+    for name, _label, content, _metadata in system_parts:
+        clean_content = content.strip()
+        sections.extend(
+            [
+                f"<{name}>",
+                clean_content,
+                f"</{name}>",
+                "",
+            ]
+        )
+    if sections[-1] == "":
+        sections.pop()
+    sections.append("</chulk_prompt>")
+    return "\n".join(sections)

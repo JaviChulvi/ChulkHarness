@@ -457,8 +457,15 @@ def test_agent_prompt_shows_available_tools():
     agent.run_turn("hello")
 
     system_prompt = llm.requests[0][0]["content"]
+    assert "<tools>" in system_prompt
+    assert "<available_tools>" in system_prompt
+    assert "<tool>" in system_prompt
+    assert "<name>calculator</name>" in system_prompt
+    assert "<arguments_schema_json>" in system_prompt
     assert "Available tools" in system_prompt
     assert "calculator" in system_prompt
+    assert "<tool_call_rules>" in system_prompt
+    assert "<max_tool_calls_per_turn>4</max_tool_calls_per_turn>" in system_prompt
     assert "Tool-call limit" in system_prompt
     assert "at most 4 tool calls" in system_prompt
 
@@ -505,8 +512,8 @@ def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
         def complete(self, messages):
             system_prompt = messages[0]["content"]
             assert "Quarterly planning source" in system_prompt
-            assert "profile: polp-search" in system_prompt
-            assert "locale: es-ES" in system_prompt
+            assert "<profile>polp-search</profile>" in system_prompt
+            assert "<locale>es-ES</locale>" in system_prompt
             return json.dumps({"type": "final_answer", "content": "used source"})
 
     agent = Agent(ContextAwareLLM([]), trace_logger=trace_logger)

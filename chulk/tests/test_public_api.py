@@ -118,16 +118,21 @@ def test_runtime_create_agent_type_hints_resolve():
 
 def test_public_chat_agent_disables_default_tools_and_skills(tmp_path):
     config = AgentConfig(project_root=tmp_path)
+    llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "chat only"})])
     handle = ChatAgent(
         config=config,
-        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "chat only"})]),
+        llm=llm,
     )
 
     result = handle.run_result("hello")
+    system_prompt = llm.requests[0][0]["content"]
 
     assert result.content == "chat only"
     assert handle.runtime.tool_registry.list_tools() == []
     assert handle.runtime.skill_registry.list_skills() == []
+    assert "Available tools: none." in system_prompt
+    assert "<tool>" not in system_prompt
+    assert "Available tools are callable actions for this turn." not in system_prompt
 
 
 def test_public_chat_agent_rejects_tool_configuration(tmp_path):
@@ -285,7 +290,7 @@ def test_public_agent_run_accepts_adapter_context(tmp_path):
         def complete(self, messages: list[dict[str, str]]) -> str:
             system_prompt = messages[0]["content"]
             assert "Employee handbook" in system_prompt
-            assert "locale: es-ES" in system_prompt
+            assert "<locale>es-ES</locale>" in system_prompt
             return json.dumps({"type": "final_answer", "content": "context accepted"})
 
     handle = Agent(config=config, llm=ContextAwareLLM(), tools=[], skills=[])
