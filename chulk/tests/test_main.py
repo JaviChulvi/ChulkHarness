@@ -734,7 +734,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert exit_code == 0
     assert "ChulkHarness configuration:" in output
     assert f"project_root: {tmp_path}" in output
-    assert f"skills_dir: {tmp_path / 'skills'}" in output
+    assert f"skills_dir: {tmp_path / '.chulk' / 'skills'}" in output
     assert "llm_provider: deepseek" in output
     assert "model: test-model" in output
     assert "llm_fallback_providers: openai:gpt-4.1-mini" in output
@@ -803,7 +803,7 @@ def test_main_runs_one_message_with_fake_llm(capsys):
 
 def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    skill_dir = tmp_path / "skills" / "shell"
+    skill_dir = tmp_path / ".chulk" / "skills" / "shell"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "# Shell Skill\n\nUse this skill when command execution is needed.\n",
@@ -831,7 +831,7 @@ def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_p
 def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CHULK_TRACE_MAX_PROMPT_CHARS", "100000")
-    skill_dir = tmp_path / "skills" / "shell"
+    skill_dir = tmp_path / ".chulk" / "skills" / "shell"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "# Shell Skill\n\nUse this skill when command execution is needed.\n",

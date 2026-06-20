@@ -34,6 +34,7 @@ exclude = ["chulkharness.egg-info*"]
 
 [tool.setuptools.package-data]
 "chulk.presets" = ["AGENT.md"]
+"chulk.skills" = ["bundled/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["chulk/tests"]

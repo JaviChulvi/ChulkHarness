@@ -17,10 +17,10 @@ chulk/
   memory/            # Short-term memory, SQLite memory, retrieval, extraction
   tools/             # Tool primitives, schema validation, and implementations
   cli/               # Terminal formatting, progress, and slash commands
-  skills/            # Skill registry code
+  skills/            # Skill registry code and bundled skill playbooks
   tracing/           # Trace/log primitives
   tests/             # Pytest tests
-skills/              # Root-level SKILL.md playbooks
+.chulk/              # SDK runtime state and project skill playbooks
 ```
 
 Use `TODO.md` as the implementation roadmap. Advance it in order unless the user explicitly asks for a different slice.
@@ -40,11 +40,11 @@ Use `TODO.md` as the implementation roadmap. Advance it in order unless the user
 - Drive interactive progress lines, timing, summaries, and spinner activity from `TraceEvent` names through `Agent.event_callback`.
 - Keep session-wide data in `AgentState` and per-message execution details in `TurnState` from `chulk/core/state.py`.
 - Record tool calls and observations with `ToolCallRecord` and `ObservationRecord` before writing trace snapshots.
-- Keep skill playbooks in root-level `skills/`, outside the Python package.
+- Keep bundled skill playbooks in `chulk/skills/bundled/`; keep SDK project skills in `.chulk/skills/`.
 - Keep side-effecting tools behind registries and safety checks.
 - Do not mix skills, tools, and memory:
   - Tool: callable action.
-  - Skill: procedural instructions loaded into context from root-level `skills/`.
+  - Skill: procedural instructions loaded into context from bundled and project skill directories.
   - Memory: stored user, project, preference, and prior-work facts in SQLite.
 - Treat memories tagged `persona`, `preference`, `style`, or `workflow` as profile context that can shape tone, level of detail, and task-solving style.
 - Do not store secrets in long-term memory.
@@ -93,7 +93,7 @@ CHULK_LLM_MAX_RETRIES=2
 
 Never commit real API keys, secrets, traces with secrets, or local SQLite state.
 
-The default memory database is `chulk/store.sqlite`; it is local runtime state and must stay ignored.
+The SDK default memory database is `.chulk/store.sqlite`; legacy/local CLI config may still use `chulk/store.sqlite`. Runtime state must stay ignored.
 
 ## Commands
 

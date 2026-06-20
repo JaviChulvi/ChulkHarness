@@ -41,4 +41,4 @@ Git.
 - `10_mcp_programmatic.py` configures an MCP server in code.
 - `11_software_engineer_preset.py` uses the coding-agent preset.
 - `12_local_provider.py` targets a local OpenAI-compatible provider.
-- `13_per_agent_skills.py` creates a temporary project with a `skills/` catalog, scopes selectable skills with `Skills.only(...)`, and pins one always-loaded skill with `Skills.pin(...)`.
+- `13_per_agent_skills.py` creates a temporary project with a `.chulk/skills/` catalog, scopes selectable skills with `Skills.only(...)`, and pins one always-loaded skill with `Skills.pin(...)`.

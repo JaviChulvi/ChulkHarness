@@ -41,7 +41,9 @@ class Config:
     """Runtime configuration loaded from environment variables."""
 
     project_root: Path
+    runtime_dir: Path
     skills_dir: Path
+    skills_dirs: tuple[Path, ...]
     store_path: Path
     traces_dir: Path
     mcp_config_path: Path
@@ -123,6 +125,13 @@ def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
     return parsed
 
 
+def _resolve_config_path(value: str | Path, *, base: Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
 def load_config(environ: Mapping[str, str] | None = None) -> Config:
     """Load local development configuration."""
     default_root = Path(__file__).resolve().parent.parent
@@ -138,12 +147,16 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
 
     default_model = _default_model_for_provider(llm_provider)
     model = env.get("CHULK_MODEL") or default_model
-    mcp_config_path = Path(env.get("CHULK_MCP_CONFIG") or project_root / ".chulk" / "mcp.json").resolve()
+    runtime_dir = _resolve_config_path(env.get("CHULK_RUNTIME_DIR") or ".chulk", base=project_root)
+    mcp_config_path = runtime_dir / "mcp.json"
     mcp_servers = load_mcp_servers(mcp_config_path, env)
+    skills_dir = runtime_dir / "skills"
 
     return Config(
         project_root=project_root,
-        skills_dir=project_root / "skills",
+        runtime_dir=runtime_dir,
+        skills_dir=skills_dir,
+        skills_dirs=_default_skills_dirs(skills_dir),
         store_path=project_root / "chulk" / "store.sqlite",
         traces_dir=project_root / "traces",
         mcp_config_path=mcp_config_path,
@@ -178,6 +191,15 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         ),
         permission_profile=normalize_permission_profile(env.get("CHULK_PERMISSION_PROFILE")),
     )
+
+
+def bundled_skills_dir() -> Path:
+    """Return the installed path for Chulk's bundled skill playbooks."""
+    return Path(__file__).resolve().parent / "skills" / "bundled"
+
+
+def _default_skills_dirs(project_skills_dir: Path) -> tuple[Path, ...]:
+    return (bundled_skills_dir(), project_skills_dir)
 
 
 def _default_model_for_provider(provider: str) -> str:

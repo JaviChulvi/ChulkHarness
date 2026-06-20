@@ -23,6 +23,9 @@ def test_load_config_uses_defaults(tmp_path):
     config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
 
     assert config.project_root == tmp_path
+    assert config.runtime_dir == tmp_path / ".chulk"
+    assert config.skills_dir == tmp_path / ".chulk" / "skills"
+    assert config.skills_dirs[-1] == tmp_path / ".chulk" / "skills"
     assert config.llm_provider == "openai"
     assert config.model == DEFAULT_MODEL
     assert config.llm_fallback_providers == ()
@@ -121,13 +124,39 @@ def test_load_config_reads_mcp_config_from_default_path(tmp_path):
     assert server.authorization == "secret-token"
 
 
-def test_load_config_reads_mcp_config_override(tmp_path):
-    mcp_config = tmp_path / "custom-mcp.json"
-    mcp_config.write_text(json.dumps({"servers": []}), encoding="utf-8")
+def test_load_config_resolves_relative_runtime_dir_against_project_root(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    launch_cwd = tmp_path / "launch-cwd"
+    project_root.mkdir()
+    launch_cwd.mkdir()
+    monkeypatch.chdir(launch_cwd)
 
-    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_MCP_CONFIG": str(mcp_config)})
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(project_root),
+            "CHULK_RUNTIME_DIR": "env-runtime",
+        }
+    )
 
-    assert config.mcp_config_path == mcp_config
+    assert config.runtime_dir == project_root / "env-runtime"
+    assert config.skills_dir == project_root / "env-runtime" / "skills"
+    assert config.skills_dirs[-1] == project_root / "env-runtime" / "skills"
+    assert config.mcp_config_path == project_root / "env-runtime" / "mcp.json"
+
+
+def test_load_config_resolves_dotenv_runtime_dir_against_project_root(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    launch_cwd = tmp_path / "launch-cwd"
+    project_root.mkdir()
+    launch_cwd.mkdir()
+    (project_root / ".env").write_text("CHULK_RUNTIME_DIR=dotenv-runtime\n", encoding="utf-8")
+    monkeypatch.chdir(launch_cwd)
+
+    config = load_config({"CHULK_PROJECT_ROOT": str(project_root)})
+
+    assert config.runtime_dir == project_root / "dotenv-runtime"
+    assert config.skills_dir == project_root / "dotenv-runtime" / "skills"
+    assert config.mcp_config_path == project_root / "dotenv-runtime" / "mcp.json"
 
 
 def test_environment_overrides_dotenv(tmp_path):

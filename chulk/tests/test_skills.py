@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from chulk.skills import Skill, SkillRegistry
+from chulk.skills import Skill, SkillRegistry, bundled_skills_dir
 
 
 def write_skill(skills_dir: Path, name: str, content: str) -> Path:
@@ -88,6 +88,25 @@ def test_skill_registry_respects_selection_limit(tmp_path):
     selections = registry.select_skills("run a command and edit a file")
 
     assert len(selections) == 1
+
+
+def test_skill_registry_loads_multiple_directories_with_project_override(tmp_path):
+    project_skills_dir = tmp_path / ".chulk" / "skills"
+    project_files_path = write_skill(
+        project_skills_dir,
+        "files",
+        "# Files Skill\n\nProject-specific file workflow.\n",
+    )
+
+    registry = SkillRegistry(
+        project_skills_dir,
+        skills_dirs=(bundled_skills_dir(), project_skills_dir),
+    )
+    registry.load_metadata()
+
+    assert {"files", "shell", "memory"} <= {skill.name for skill in registry.list_skills()}
+    assert registry.get_skill("files").path == project_files_path
+    assert registry.load_content("files").startswith("# Files Skill\n\nProject-specific")
 
 
 def test_skill_registry_missing_skill_file_raises(tmp_path):
