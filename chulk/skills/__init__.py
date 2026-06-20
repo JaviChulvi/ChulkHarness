@@ -6,6 +6,11 @@ from pathlib import Path
 from chulk.skills.registry import Skill, SkillRegistry, SkillSelection
 
 
+def bundled_skills_dir() -> Path:
+    """Return the installed directory containing Chulk's bundled skill playbooks."""
+    return Path(__file__).resolve().parent / "bundled"
+
+
 @dataclass(frozen=True)
 class SkillRef:
     """Reference to a skill that should be available and pinned for an agent."""
@@ -82,6 +87,7 @@ __all__ = [
     "SkillRef",
     "SkillRegistry",
     "SkillSelection",
+    "bundled_skills_dir",
     "files",
     "from_dir",
     "memory",

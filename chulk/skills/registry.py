@@ -121,6 +121,7 @@ class SkillRegistry:
         self,
         skills_dir: Path | str,
         *,
+        skills_dirs: Iterable[Path | str] | None = None,
         max_skills: int = DEFAULT_MAX_SKILLS,
         max_content_chars: int = DEFAULT_MAX_SKILL_CONTENT_CHARS,
     ) -> None:
@@ -129,23 +130,25 @@ class SkillRegistry:
         if max_content_chars < 1:
             raise ValueError("max_content_chars must be greater than zero")
         self.skills_dir = Path(skills_dir)
+        self.skills_dirs = (
+            tuple(Path(path) for path in skills_dirs)
+            if skills_dirs is not None
+            else (self.skills_dir,)
+        )
         self.max_skills = max_skills
         self.max_content_chars = max_content_chars
         self._skills: dict[str, Skill] = {}
 
     def load_metadata(self) -> None:
-        """Scan root-level skill folders and register metadata without loading prompt content."""
+        """Scan skill folders and register metadata without loading prompt content."""
         self._skills = {}
-        if not self.skills_dir.exists():
-            return
+        for skills_dir in self.skills_dirs:
+            self._register_directory(skills_dir, replace=True)
 
-        for skill_path in sorted(self.skills_dir.glob("*/SKILL.md")):
-            self.register(_skill_from_markdown(skill_path))
-
-    def register(self, skill: Skill) -> None:
+    def register(self, skill: Skill, *, replace: bool = False) -> None:
         """Register one skill metadata record."""
         clean_name = _normalize_skill_name(skill.name)
-        if clean_name in self._skills:
+        if clean_name in self._skills and not replace:
             raise ValueError(f"Skill already registered: {clean_name}")
         skill.name = clean_name
         skill.keywords = _normalize_keywords([skill.name, *skill.keywords, *DEFAULT_SKILL_KEYWORDS.get(skill.name, [])])
@@ -162,13 +165,16 @@ class SkillRegistry:
 
     def register_directory(self, skills_dir: Path | str) -> list[Skill]:
         """Register all skills under a directory of skill folders."""
+        return self._register_directory(skills_dir, replace=False)
+
+    def _register_directory(self, skills_dir: Path | str, *, replace: bool) -> list[Skill]:
         root = Path(skills_dir)
         registered: list[Skill] = []
         if not root.exists():
             return registered
         for skill_path in sorted(root.glob("*/SKILL.md")):
             skill = _skill_from_markdown(skill_path)
-            self.register(skill)
+            self.register(skill, replace=replace)
             registered.append(skill)
         return registered
 

@@ -65,17 +65,21 @@ chulk/
     terminal.py
   skills/
     registry.py
+    bundled/
+      shell/
+        SKILL.md
+      memory/
+        SKILL.md
+      files/
+        SKILL.md
   tracing/
     logger.py
   store.sqlite
   tests/
-skills/
-  shell/
-    SKILL.md
-  memory/
-    SKILL.md
-  files/
-    SKILL.md
+.chulk/
+  skills/
+    custom-skill/
+      SKILL.md
 ```
 
 Module responsibilities:
@@ -159,8 +163,9 @@ Module responsibilities:
   - [ ] Optionally store conversations, traces, and tool-call history later.
   - [ ] Treat as local development data, not source code.
 
-- [x] `skills/`
-  - [x] Store domain-specific procedural instructions.
+- [x] `chulk/skills/bundled/` and `.chulk/skills/`
+  - [x] Store built-in procedural instructions inside the package.
+  - [x] Store project/user procedural instructions under `.chulk/skills/`.
   - [x] Keep each skill in its own folder.
   - [x] Start with `shell`, `memory`, and `files`.
 
@@ -569,7 +574,7 @@ Skill dataclass:
 Skill registry:
 
 - [x] Create `SkillRegistry`.
-- [x] Scan `skills/` at startup.
+- [x] Scan bundled skills and `.chulk/skills` at startup.
 - [x] Load only skill metadata at startup.
 - [x] Do not load every full `SKILL.md` into context.
 - [x] Read each skill description from front matter or a short metadata file.
@@ -1166,7 +1171,176 @@ Optional future directions:
 
 Ideas from studying Codex-like coding agents, Hermes-style persistent agents, and OpenClaw-style personal automation harnesses. These are not committed milestones yet; use this backlog when choosing future Chulk features that fit the explicit, inspectable runtime.
 
-### Recommended Next Sequence
+### SDK Readiness Priority Sequence
+
+Feedback from the SDK/installability review changes the near-term priority. Before adding more shell-heavy, multi-agent, web, or marketplace features, make Chulk feel like a safe, installable Python SDK with predictable runtime state, packaged defaults, visible diagnostics, and traceable behavior.
+
+#### Phase A: Trust And Packaging
+
+- [ ] Add `LICENSE`.
+- [ ] Add `CHANGELOG.md`.
+- [ ] Add `SECURITY.md`.
+- [ ] Add GitHub Actions CI.
+- [ ] Run CI on Python 3.11, 3.12, and 3.13.
+- [ ] Add linting with `ruff`.
+- [ ] Add type checking with `mypy` or `pyright`.
+- [ ] Run `python -m pytest` in CI.
+- [ ] Run `python -m compileall chulk` in CI.
+- [ ] Build the package wheel in CI.
+- [ ] Install the built wheel in a clean virtual environment in CI.
+- [ ] Verify clean-wheel imports: `from chulk import Agent, AgentConfig, Tool, Tools, Skills`.
+- [ ] Verify built-in presets load from the installed wheel.
+- [ ] Verify built-in skills are discoverable from the installed wheel.
+- [ ] Verify examples import correctly from the installed wheel.
+- [ ] Decide and document the package/install name versus import name.
+- [ ] Publish a GitHub release after the first clean packaging pass.
+
+#### Phase B: SDK Defaults And Installability
+
+- [x] Split SDK concepts explicitly: `project_root` for file/tool operations, `runtime_dir` for state, and skill directories for bundled plus project skills.
+- [x] Make SDK `Agent()` default to `project_root=Path.cwd()`.
+- [x] Make SDK `Agent()` default runtime state to `Path.cwd() / ".chulk"` instead of the installed package or source tree.
+- [x] Make SDK `Agent()` resolve project root as explicit SDK config, then `CHULK_PROJECT_ROOT`, then `Path.cwd()`, with runtime state under `.chulk` by default.
+- [x] Keep CLI coding-agent defaults separate from SDK defaults.
+- [ ] Use this default runtime layout for user projects: `.chulk/store.sqlite`, `.chulk/traces/`, `.chulk/sessions/`, `.chulk/mcp.json`, and `.chulk/skills/`.
+- [x] Add `runtime_dir` to the internal `Config` model or otherwise make it visible in diagnostics.
+- [x] Default `store_path` to `.chulk/store.sqlite` for SDK usage.
+- [x] Default `traces_dir` to `.chulk/traces` for SDK usage.
+- [x] Default session state to the SDK runtime directory instead of package or source-tree paths.
+- [x] Default MCP config to `.chulk/mcp.json`.
+- [x] Move bundled skills into package data under `chulk/skills/bundled/`.
+- [x] Include bundled `files`, `shell`, and `memory` skill playbooks in the wheel.
+- [x] Support bundled skills plus project skills in one runtime.
+- [x] Support a project skills directory such as `.chulk/skills`.
+- [x] Add a multiple-skill-directory model or a simpler `include_builtin_skills=True` plus `skills_dir=".chulk/skills"` config.
+- [x] Add tests proving bundled skills work after wheel install outside the repo.
+- [x] Add tests proving runtime state is created under `.chulk/` outside the repo.
+- [x] Add tests proving SDK defaults do not write state under `site-packages` or the source checkout.
+- [x] Add `AgentConfig.local(project_root=".", runtime_dir=".chulk", permission_profile="read-only")` docs and examples.
+- [x] Update README runtime-state docs from `chulk/store.sqlite` and `traces/` to `.chulk/` for SDK usage.
+- [x] Keep repo-development and CLI docs explicit when they intentionally differ from SDK defaults.
+- [ ] Add an SDK quickstart that uses `pip install chulkharness`, `Agent`, `AgentConfig`, and `Tool`.
+
+#### Phase C: Public API Cleanup
+
+- [ ] Make `Agent` a real public facade class instead of a function alias.
+- [ ] Keep lowercase `agent(...)` as a backwards-compatible factory that returns an `Agent`.
+- [ ] Keep `AgentHandle` internal or clearly document it as the runtime handle behind the public facade.
+- [ ] Add `Agent.run(...)` and `Agent.run_result(...)` methods that delegate to the handle.
+- [ ] Add `Agent.plan(...)`, `plan_result(...)`, `approve(...)`, `approve_result(...)`, `reject(...)`, and `reject_result(...)` facade methods.
+- [ ] Add `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry` facade properties.
+- [ ] Add `Agent.close()`.
+- [ ] Add context-manager support: `with Agent(config=config) as agent: ...`.
+- [ ] Add async context-manager support for `AsyncAgent`.
+- [ ] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
+- [ ] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
+- [ ] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
+- [ ] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
+- [ ] Document the public API stability policy before 1.0.
+- [ ] Mark `chulk.core.*`, `chulk.runtime.*`, and undocumented trace payload fields as internal/unstable.
+- [ ] Consider public convenience constructors or aliases: `ChatAgent`, `CodingAgent`, `TrustedLocalAgent`, `Agent.safe()`, `Agent.workspace()`, and `Agent.trusted_local()`.
+
+#### Phase D: Safety Hardening
+
+- [x] Make SDK default permission profile `read-only` unless the user explicitly opts into writes.
+- [x] Keep CLI coding-agent default permission profile `workspace-write`.
+- [ ] Add explicit capability/tool-enabling API for files, shell, network, memory writes, and external services.
+- [ ] Add a `Capabilities` config object or equivalent structured tool capability surface.
+- [ ] Add custom permission profiles in config.
+- [ ] Add workspace root allowlists.
+- [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, build artifacts, and credentials.
+- [ ] Add command prefix rules: allow, prompt, and deny.
+- [ ] Add network allow/deny domain rules.
+- [ ] Add trusted command catalog for low-risk read-only commands.
+- [ ] Add approval prompts with approve once, deny once, always allow, and always deny choices.
+- [ ] Add audit records for every permission decision.
+- [ ] Add a sandbox backend interface before adding more shell-heavy automation.
+- [ ] Add `NoSandbox`.
+- [ ] Add `WorkspaceSandbox`.
+- [ ] Add `TempCopySandbox` for risky file operations.
+- [ ] Add `DockerSandbox`.
+- [ ] Add `BubblewrapSandbox` for Linux.
+- [ ] Route shell execution through the sandbox abstraction.
+- [ ] Route file reads and writes through the sandbox abstraction where applicable.
+- [ ] Add safer package-manager policy for installs and scripts.
+- [ ] Add fatal safety errors that stop the turn immediately.
+- [ ] Add prompt-injection warnings for web, browser, and external document inputs.
+- [ ] Warn when trace or runtime state is created inside a Git-tracked path.
+- [ ] Make `chulk doctor` detect whether `.chulk/`, `traces/`, `chulk/store.sqlite`, and `*.sqlite` are ignored.
+
+#### Phase E: Trace Productization
+
+- [ ] Treat traces as a public product surface, not only internal logs.
+- [ ] Add a trace schema version to every JSONL event.
+- [ ] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
+- [ ] Add a public trace reader: `Trace.from_jsonl(path)`.
+- [ ] Expose typed trace events with event type and timestamp.
+- [ ] Add `chulk trace inspect <path>`.
+- [ ] Add `chulk trace export <path> --format html`.
+- [ ] Add `chulk trace replay <path>`.
+- [ ] Add a minimal HTML trace export.
+- [ ] Include user request, prompt context, loaded memories, loaded skills, tool calls, tool outputs, permission decisions, final answer, errors, token usage, and cost usage in trace exports.
+- [ ] Log available tools in traces.
+- [ ] Log timing information in traces.
+- [ ] Add `session_started` and `session_finished` trace events.
+- [ ] Make it obvious why a tool was called where the model/action metadata supports it.
+- [ ] Make it obvious which memories were injected.
+- [ ] Add trace redaction tests.
+- [ ] Add artifact reader support for full truncated outputs saved under traces.
+- [ ] Add replay-friendly event coverage for regression tests.
+
+#### Phase F: Better App Embedding
+
+- [ ] Add typed dependency/context injection for tools, e.g. `ToolContext[Deps]`.
+- [ ] Allow `Agent(..., deps=...)` or an equivalent dependency object for app-owned state.
+- [ ] Extend the `@Tool` decorator to hide injected context from model-facing argument schemas.
+- [ ] Add optional output schemas or output models for tools.
+- [ ] Include structured output metadata in traces and model observations when configured.
+- [ ] Add tool-level timeout policy.
+- [ ] Add tool-level retry policy.
+- [ ] Add tool testing helpers such as `assert_tool_schema(...)` and `invoke_tool(...)`.
+- [ ] Continue supporting async tools through the public decorator.
+- [ ] Add native async runtime later with async LLM calls, async tools, cancellation, timeouts, streaming events, concurrent read-only tools, and cleanup hooks.
+- [ ] Add memory namespaces for user and workspace isolation.
+- [ ] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
+- [ ] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
+- [ ] Add a memory review queue with pending, approve, and reject APIs.
+- [ ] Add memory retention controls such as TTL and max item count.
+- [ ] Add memory provenance fields: source, conversation id, human approval, confidence, last accessed, and evidence snippets.
+- [ ] Add provider capability API exposed publicly as `agent.provider.capabilities` or equivalent.
+- [ ] Add provider health checks.
+- [ ] Add invalid-model diagnostics for missing API keys, bad model names, unavailable endpoints, and unsupported tool schemas.
+- [ ] Add `chulk doctor`.
+- [ ] Add `chulk init`.
+- [ ] Add `chulk init --sdk`, `--coding-agent`, and `--read-only`.
+- [ ] Make `chulk init` create `.chulk/mcp.json`, `.chulk/skills/`, `.env.example`, and update `.gitignore`.
+- [ ] Split docs by audience under `docs/`: index, quickstart, sdk, cli, tools, permissions, skills, memory, tracing, providers, mcp, safety, and release policy.
+- [ ] Add one end-to-end `examples/repo_review_bot/` killer example.
+- [ ] Include a sample trace export in the repo review example.
+- [ ] Add fake provider or fake LLM support for examples and CI.
+- [ ] Run examples with fake LLM in CI.
+- [ ] Add a small eval harness with deterministic evals for tool calling, memory retrieval, skill selection, plan approval, and safety refusal.
+- [ ] Add optional live-model evals separately from deterministic CI.
+- [ ] Improve plan mode as a public workflow primitive with richer `Plan` and `PlanStep` objects.
+- [ ] Add plan step fields for risk, tools, and acceptance criteria in the public object.
+- [ ] Add plan approval by selected step ids later.
+- [ ] Add step-level approval, rejection, and skip APIs later.
+- [ ] Make MCP SDK boundaries explicit in docs as external/untrusted tool boundaries.
+- [ ] Add public MCP builders such as `MCP.streamable_http(...)` with allowed tools and approval policy.
+- [ ] Add `chulk mcp test`.
+- [ ] Add `chulk mcp list-tools`.
+- [ ] Trace MCP calls as external tool calls with server label, tool name, redacted arguments, approval decision, and result size.
+- [ ] Formalize CLI/library separation in docs and package structure: `chulk.core`, `chulk.sdk`, `chulk.cli`, `chulk.tools`, `chulk.skills`, and `chulk.tracing`.
+
+#### Deprioritize Until SDK Readiness
+
+- [ ] Do not prioritize multi-agent mode before SDK defaults, packaging, public API cleanup, safety, and traces are stable.
+- [ ] Do not prioritize skill marketplace before packaged skills and project skills are reliable.
+- [ ] Do not prioritize full web UI before trace inspect/export and SDK event APIs exist.
+- [ ] Do not prioritize browser automation before sandboxing and external-input safety warnings exist.
+- [ ] Do not prioritize image generation, notebook tooling, document tooling, spreadsheet tooling, scheduled tasks, or subagents before the SDK readiness phases above.
+
+### Agent Behavior Sequence After SDK Readiness
 
 - [ ] Add reflection loop after model actions.
 - [ ] Add post-tool reflection after failed, risky, or ambiguous tool calls.
@@ -1399,7 +1573,7 @@ Ideas from studying Codex-like coding agents, Hermes-style persistent agents, an
 #### Feature 24: Hybrid native MCP support
 
 - [x] Goal: let Chulk use remote Streamable HTTP MCP servers while preserving provider-native tool transports and the existing permission/trace path.
-- [x] Add `.chulk/mcp.json` loading with `CHULK_MCP_CONFIG`, explicit server dataclasses, duplicate-label validation, unsupported transport rejection, allowed tools, and env-var auth resolution.
+- [x] Add `<runtime_dir>/mcp.json` loading with explicit server dataclasses, duplicate-label validation, unsupported transport rejection, allowed tools, and env-var auth resolution.
 - [x] Add hosted MCP request shaping for OpenAI Responses using native `{"type": "mcp"}` tools.
 - [x] Add Chulk-managed MCP bridge tools for DeepSeek and local OpenAI-compatible providers, exposed as normal `mcp_<server>_<tool>` function tools.
 - [x] Keep bridge MCP calls behind `external_service` permissions and require confirmation by default.

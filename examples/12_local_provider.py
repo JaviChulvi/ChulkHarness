@@ -19,6 +19,7 @@ def main() -> None:
         model=model,
         base_url=base_url,
         api_key=os.getenv("CHULK_LOCAL_API_KEY"),
+        permission_profile="read-only",
     )
     assistant = ChatAgent(config=config)
     result = assistant.run_result("Say hello from the local-provider SDK example.")

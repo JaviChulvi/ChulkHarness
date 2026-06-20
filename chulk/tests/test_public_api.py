@@ -5,6 +5,10 @@ import gc
 from dataclasses import dataclass
 from enum import Enum
 import json
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import time
 import warnings
 from typing import Annotated, Literal, get_type_hints
@@ -87,7 +91,7 @@ class HostedMCPRecordingLLM(LLMClient):
 
 
 def write_skill(root, name: str, content: str) -> None:
-    skill_dir = root / "skills" / name
+    skill_dir = root / ".chulk" / "skills" / name
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
@@ -227,7 +231,7 @@ def test_public_agent_dispatches_events_from_constructor_and_run(tmp_path):
 
 
 def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
-    skill_dir = tmp_path / "skills" / "files"
+    skill_dir = tmp_path / ".chulk" / "skills" / "files"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Files Skill\n\nUse this skill for file work.\n", encoding="utf-8")
     config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
@@ -662,7 +666,7 @@ def test_public_agent_can_approve_workspace_shell_tool(tmp_path):
 
 
 def test_public_agent_can_pin_skill(tmp_path):
-    skill_dir = tmp_path / "skills" / "files"
+    skill_dir = tmp_path / ".chulk" / "skills" / "files"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# Files Skill\n\nUse this skill for file work.\n", encoding="utf-8")
     config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
@@ -796,7 +800,13 @@ def test_public_agent_keeps_path_and_directory_skill_refs(tmp_path):
 
     directory_handle = Agent(config=config, llm=llm, tools=[], skills=[Skills.from_dir(extra_root)])
 
-    assert [skill.name for skill in directory_handle.skill_registry.list_skills()] == ["custom", "review"]
+    assert [skill.name for skill in directory_handle.skill_registry.list_skills()] == [
+        "custom",
+        "files",
+        "memory",
+        "review",
+        "shell",
+    ]
     assert directory_handle.run("custom work") == "directory selected"
     assert directory_handle.state.loaded_skill_names == ["custom"]
 
@@ -845,9 +855,105 @@ def test_public_agent_config_supports_programmatic_values_and_env_fallback(monke
     assert handle.runtime.context_budget.max_prompt_tokens == 131_072
 
 
+def test_public_agent_default_config_uses_cwd_runtime_and_read_only(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    handle = Agent(
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "default sdk"})]),
+        tools=[],
+        skills=[],
+    )
+    response = handle.run("hello")
+
+    assert response == "default sdk"
+    assert handle.runtime.state.conversation_id
+    assert handle.runtime.memory_store.db_path == tmp_path / ".chulk" / "store.sqlite"
+    assert handle.trace_path.parent == tmp_path / ".chulk" / "traces"
+    assert handle.runtime.permission_policy.name == "read-only"
+
+
+def test_public_agent_default_config_uses_project_root_env_override(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    project_root = tmp_path / "project"
+    launch_cwd.mkdir()
+    project_root.mkdir()
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(project_root))
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    handle = Agent(
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "env project"})]),
+        tools=[],
+        skills=[],
+    )
+    response = handle.run("hello")
+
+    assert response == "env project"
+    assert handle.runtime.memory_store.db_path == project_root / ".chulk" / "store.sqlite"
+    assert handle.trace_path.parent == project_root / ".chulk" / "traces"
+    assert handle.runtime.skill_registry.skills_dir == project_root / ".chulk" / "skills"
+
+
+def test_public_agent_config_uses_project_root_from_cwd_dotenv(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    project_root = tmp_path / "project"
+    launch_cwd.mkdir()
+    project_root.mkdir()
+    (launch_cwd / ".env").write_text(f"CHULK_PROJECT_ROOT={project_root}\n", encoding="utf-8")
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    config = AgentConfig().to_config()
+
+    assert config.project_root == project_root
+    assert config.runtime_dir == project_root / ".chulk"
+    assert config.store_path == project_root / ".chulk" / "store.sqlite"
+    assert config.skills_dir == project_root / ".chulk" / "skills"
+
+
+def test_public_agent_config_explicit_project_root_overrides_env(monkeypatch, tmp_path):
+    env_project = tmp_path / "env-project"
+    sdk_project = tmp_path / "sdk-project"
+    env_project.mkdir()
+    sdk_project.mkdir()
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(env_project))
+
+    config = AgentConfig(project_root=sdk_project).to_config()
+
+    assert config.project_root == sdk_project
+    assert config.runtime_dir == sdk_project / ".chulk"
+    assert config.store_path == sdk_project / ".chulk" / "store.sqlite"
+
+
+def test_public_agent_default_config_uses_runtime_dir_env_override(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+    monkeypatch.setenv("CHULK_RUNTIME_DIR", "env-runtime")
+
+    handle = Agent(
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "env runtime"})]),
+        tools=[],
+        skills=[],
+    )
+    response = handle.run("hello")
+
+    assert response == "env runtime"
+    assert handle.runtime.memory_store.db_path == tmp_path / "env-runtime" / "store.sqlite"
+    assert handle.trace_path.parent == tmp_path / "env-runtime" / "traces"
+
+
 def test_public_agent_config_from_env_and_runtime_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CHULK_LLM_PROVIDER", "local")
     monkeypatch.setenv("CHULK_MODEL", "env-model")
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
     runtime_dir = tmp_path / "runtime"
 
     config = AgentConfig.from_env(
@@ -857,11 +963,170 @@ def test_public_agent_config_from_env_and_runtime_dir(monkeypatch, tmp_path):
     ).to_config()
 
     assert config.project_root == tmp_path
+    assert config.runtime_dir == runtime_dir
     assert config.llm_provider == "local"
     assert config.model == "env-model"
     assert config.store_path == runtime_dir / "store.sqlite"
     assert config.traces_dir == runtime_dir / "traces"
-    assert config.skills_dir == tmp_path / "skills"
+    assert config.skills_dir == runtime_dir / "skills"
+    assert config.skills_dirs[-1] == runtime_dir / "skills"
+    assert config.permission_profile == "read-only"
+
+
+def test_public_agent_config_from_env_captures_cwd_before_later_cwd_change(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    later_cwd = tmp_path / "later-cwd"
+    launch_cwd.mkdir()
+    later_cwd.mkdir()
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    agent_config = AgentConfig.from_env()
+    monkeypatch.chdir(later_cwd)
+    config = agent_config.to_config()
+
+    assert config.project_root == launch_cwd
+    assert config.runtime_dir == launch_cwd / ".chulk"
+    assert config.store_path == launch_cwd / ".chulk" / "store.sqlite"
+    assert config.traces_dir == launch_cwd / ".chulk" / "traces"
+    assert config.skills_dir == launch_cwd / ".chulk" / "skills"
+
+
+def test_public_agent_config_from_env_captures_project_root_env_before_later_cwd_change(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    later_cwd = tmp_path / "later-cwd"
+    project_root = tmp_path / "project"
+    launch_cwd.mkdir()
+    later_cwd.mkdir()
+    project_root.mkdir()
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(project_root))
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    agent_config = AgentConfig.from_env()
+    monkeypatch.chdir(later_cwd)
+    config = agent_config.to_config()
+
+    assert config.project_root == project_root
+    assert config.runtime_dir == project_root / ".chulk"
+    assert config.store_path == project_root / ".chulk" / "store.sqlite"
+    assert config.skills_dir == project_root / ".chulk" / "skills"
+
+
+def test_public_agent_config_from_env_captures_project_root_dotenv_before_later_cwd_change(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    later_cwd = tmp_path / "later-cwd"
+    project_root = tmp_path / "project"
+    launch_cwd.mkdir()
+    later_cwd.mkdir()
+    project_root.mkdir()
+    (launch_cwd / ".env").write_text(f"CHULK_PROJECT_ROOT={project_root}\n", encoding="utf-8")
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    agent_config = AgentConfig.from_env()
+    monkeypatch.chdir(later_cwd)
+    config = agent_config.to_config()
+
+    assert config.project_root == project_root
+    assert config.runtime_dir == project_root / ".chulk"
+    assert config.store_path == project_root / ".chulk" / "store.sqlite"
+    assert config.skills_dir == project_root / ".chulk" / "skills"
+
+
+def test_public_agent_provider_constructor_captures_project_root_before_later_cwd_change(monkeypatch, tmp_path):
+    launch_cwd = tmp_path / "launch-cwd"
+    later_cwd = tmp_path / "later-cwd"
+    launch_cwd.mkdir()
+    later_cwd.mkdir()
+    monkeypatch.chdir(launch_cwd)
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    agent_config = AgentConfig.local(api_key="local")
+    monkeypatch.chdir(later_cwd)
+    config = agent_config.to_config()
+
+    assert config.project_root == launch_cwd
+    assert config.runtime_dir == launch_cwd / ".chulk"
+    assert config.local_api_key == "local"
+
+
+def test_public_agent_config_resolves_relative_runtime_dir_against_project_root(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+
+    config = AgentConfig(project_root=tmp_path).to_config()
+
+    assert config.project_root == tmp_path
+    assert config.runtime_dir == tmp_path / ".chulk"
+    assert config.store_path == tmp_path / ".chulk" / "store.sqlite"
+    assert config.traces_dir == tmp_path / ".chulk" / "traces"
+    assert config.skills_dir == tmp_path / ".chulk" / "skills"
+    assert config.mcp_config_path == tmp_path / ".chulk" / "mcp.json"
+    assert config.permission_profile == "read-only"
+
+
+def test_public_agent_config_uses_runtime_dir_env_without_sdk_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_RUNTIME_DIR", "env-runtime")
+
+    config = AgentConfig(project_root=tmp_path).to_config()
+
+    assert config.runtime_dir == tmp_path / "env-runtime"
+    assert config.store_path == tmp_path / "env-runtime" / "store.sqlite"
+    assert config.traces_dir == tmp_path / "env-runtime" / "traces"
+    assert config.skills_dir == tmp_path / "env-runtime" / "skills"
+    assert config.mcp_config_path == tmp_path / "env-runtime" / "mcp.json"
+
+
+def test_public_agent_config_uses_runtime_dir_dotenv_without_sdk_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHULK_RUNTIME_DIR", raising=False)
+    (tmp_path / ".env").write_text("CHULK_RUNTIME_DIR=dotenv-runtime\n", encoding="utf-8")
+
+    config = AgentConfig(project_root=tmp_path).to_config()
+
+    assert config.runtime_dir == tmp_path / "dotenv-runtime"
+    assert config.store_path == tmp_path / "dotenv-runtime" / "store.sqlite"
+    assert config.traces_dir == tmp_path / "dotenv-runtime" / "traces"
+    assert config.skills_dir == tmp_path / "dotenv-runtime" / "skills"
+    assert config.mcp_config_path == tmp_path / "dotenv-runtime" / "mcp.json"
+
+
+def test_public_agent_config_explicit_runtime_dir_overrides_env_and_dotenv(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_RUNTIME_DIR", "env-runtime")
+    (tmp_path / ".env").write_text("CHULK_RUNTIME_DIR=dotenv-runtime\n", encoding="utf-8")
+
+    config = AgentConfig(project_root=tmp_path, runtime_dir="sdk-runtime").to_config()
+
+    assert config.runtime_dir == tmp_path / "sdk-runtime"
+    assert config.store_path == tmp_path / "sdk-runtime" / "store.sqlite"
+    assert config.traces_dir == tmp_path / "sdk-runtime" / "traces"
+    assert config.skills_dir == tmp_path / "sdk-runtime" / "skills"
+    assert config.mcp_config_path == tmp_path / "sdk-runtime" / "mcp.json"
+
+
+def test_public_agent_config_uses_dotenv_permission_profile_without_sdk_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHULK_PERMISSION_PROFILE", raising=False)
+    (tmp_path / ".env").write_text("CHULK_PERMISSION_PROFILE=workspace-write\n", encoding="utf-8")
+
+    config = AgentConfig(project_root=tmp_path).to_config()
+
+    assert config.permission_profile == "workspace-write"
+
+
+def test_public_agent_config_explicit_permission_profile_overrides_env_and_dotenv(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
+    (tmp_path / ".env").write_text("CHULK_PERMISSION_PROFILE=full-access\n", encoding="utf-8")
+
+    config = AgentConfig(project_root=tmp_path, permission_profile="read-only").to_config()
+
+    assert config.permission_profile == "read-only"
 
 
 def test_public_agent_config_provider_constructors_ignore_cross_provider_env_model(monkeypatch, tmp_path):
@@ -1004,7 +1269,8 @@ def test_public_mcp_builder_accepts_none_allowed_tools():
 
 
 def test_public_mcp_empty_list_disables_configured_servers(monkeypatch, tmp_path):
-    mcp_dir = tmp_path / ".chulk"
+    runtime_dir = tmp_path / "runtime"
+    mcp_dir = runtime_dir
     mcp_dir.mkdir()
     (mcp_dir / "mcp.json").write_text(
         json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
@@ -1015,7 +1281,13 @@ def test_public_mcp_empty_list_disables_configured_servers(monkeypatch, tmp_path
         raise AssertionError("bridge discovery should be disabled")
 
     monkeypatch.setattr("chulk.runtime.create_mcp_bridge_tools", fail_if_called)
-    config = AgentConfig(project_root=tmp_path, provider="local", model="local-model", local_api_key="local")
+    config = AgentConfig(
+        project_root=tmp_path,
+        runtime_dir=runtime_dir,
+        provider="local",
+        model="local-model",
+        local_api_key="local",
+    )
     handle = Agent(
         config=config,
         llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "no mcp"})]),
@@ -1028,6 +1300,88 @@ def test_public_mcp_empty_list_disables_configured_servers(monkeypatch, tmp_path
 
     assert result.content == "no mcp"
     assert result.status == "completed"
+
+
+def test_wheel_install_exposes_sdk_defaults_and_bundled_skills(tmp_path):
+    wheelhouse = tmp_path / "wheelhouse"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--no-build-isolation",
+            ".",
+            "-w",
+            str(wheelhouse),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(wheelhouse.glob("chulkharness-*.whl"))
+
+    venv_dir = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+    python = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    subprocess.run(
+        [str(python), "-m", "pip", "install", str(wheel)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    app_dir = tmp_path / "my-app"
+    app_dir.mkdir()
+    script = textwrap.dedent(
+        """
+        import json
+        import os
+        from pathlib import Path
+
+        import chulk
+        from chulk import Agent, AgentConfig, Skills, Tool, Tools
+        from chulk.llm import LLMClient
+        from chulk.skills import SkillRegistry, bundled_skills_dir
+
+        class FakeLLM(LLMClient):
+            def complete(self, messages, *, max_output_tokens=None):
+                return json.dumps({"type": "final_answer", "content": "wheel ok"})
+
+        os.environ.pop("CHULK_RUNTIME_DIR", None)
+        os.environ.pop("CHULK_PERMISSION_PROFILE", None)
+
+        handle = Agent(llm=FakeLLM(), tools=[], skills=[])
+        result = handle.run_result("hello")
+        runtime_dir = Path.cwd() / ".chulk"
+        assert result.content == "wheel ok"
+        assert Path(result.trace_path).parent == runtime_dir / "traces"
+        assert (runtime_dir / "store.sqlite").exists()
+        assert handle.runtime.permission_policy.name == "read-only"
+
+        registry = SkillRegistry(runtime_dir / "skills", skills_dirs=(bundled_skills_dir(), runtime_dir / "skills"))
+        registry.load_metadata()
+        skill_names = {skill.name for skill in registry.list_skills()}
+        assert {"files", "shell", "memory"} <= skill_names
+
+        package_root = Path(chulk.__file__).resolve().parent
+        assert not (package_root / ".chulk").exists()
+        assert not (package_root / "store.sqlite").exists()
+        assert AgentConfig and Tool and Tools and Skills
+        print("ok")
+        """
+    )
+    completed = subprocess.run(
+        [str(python), "-c", script],
+        cwd=app_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "ok"
 
 
 @pytest.mark.parametrize(
@@ -1052,7 +1406,13 @@ def test_public_mcp_bridge_registers_for_non_openai_providers(monkeypatch, tmp_p
 
     monkeypatch.setattr("chulk.runtime.create_mcp_bridge_tools", fake_bridge)
     server = MCP.streamable_http(label="docs", server_url="https://mcp.example.com")
-    config = AgentConfig(project_root=tmp_path, provider=provider, model=model, **extra_config)
+    config = AgentConfig(
+        project_root=tmp_path,
+        provider=provider,
+        model=model,
+        permission_profile="workspace-write",
+        **extra_config,
+    )
     llm = FakeLLMClient(
         [
             json.dumps(

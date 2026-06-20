@@ -61,7 +61,9 @@ def format_config(config: Config) -> str:
     """Format non-secret configuration values for terminal output."""
     values = {
         "project_root": config.project_root,
+        "runtime_dir": config.runtime_dir,
         "skills_dir": config.skills_dir,
+        "skills_dirs": ", ".join(str(path) for path in config.skills_dirs),
         "store_path": config.store_path,
         "traces_dir": config.traces_dir,
         "mcp_config_path": config.mcp_config_path,

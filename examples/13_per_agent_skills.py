@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -12,12 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from chulk import Agent, Skills  # noqa: E402
-from chulk.config import Config, load_config  # noqa: E402
+from chulk import Agent, AgentConfig, Skills  # noqa: E402
+from chulk.config import Config  # noqa: E402
 
 
 def write_skill(project_root: Path, name: str, content: str) -> None:
-    skill_dir = project_root / "skills" / name
+    skill_dir = project_root / ".chulk" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
@@ -56,8 +55,9 @@ def main() -> None:
     with TemporaryDirectory(prefix="chulk-skills-example-") as temp_dir:
         project_root = Path(temp_dir)
         prepare_demo_project(project_root)
-        config = load_config({**os.environ, "CHULK_PROJECT_ROOT": str(project_root)})
-        require_provider_credentials(config)
+        config = AgentConfig.from_env(project_root=project_root, runtime_dir=".chulk")
+        runtime_config = config.to_config()
+        require_provider_credentials(runtime_config)
         assistant = Agent(
             config=config,
             tools=[],

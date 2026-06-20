@@ -86,6 +86,7 @@ def create_agent(
     session_store = SQLiteSessionStore(config.store_path)
     skill_registry = SkillRegistry(
         config.skills_dir,
+        skills_dirs=config.skills_dirs,
         max_skills=config.max_skills_per_turn,
         max_content_chars=config.max_skill_content_chars,
     )
