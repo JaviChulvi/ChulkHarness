@@ -691,10 +691,14 @@ def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path)
 
     assert response == "I can run that command."
     assert agent.state.loaded_skill_names == ["shell"]
+    assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
+    assert "- shell: Use this skill when the user request requires terminal inspection" in system_prompt
+    assert "- memory: Use this skill when the user request involves saving or retrieving" in system_prompt
     assert "Loaded skills are procedural instructions" in system_prompt
     assert "Skill: shell" in system_prompt
     assert "# Shell Skill" in system_prompt
     assert "Skill: memory" not in system_prompt
+    assert "# Memory Skill" not in system_prompt
     assert skill_registry.get_skill("shell").loaded_content is not None
     assert skill_registry.get_skill("memory").loaded_content is None
     assert "skill_selection_completed" in trace_text

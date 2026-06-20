@@ -5,6 +5,7 @@ from __future__ import annotations
 from chulk.core.prompts import (
     JSON_ACTION_PROMPT,
     NATIVE_ACTION_PROMPT,
+    format_available_skills_for_prompt,
     format_conversation_summary_for_prompt,
     format_context_sections_for_prompt,
     format_memories_for_prompt,
@@ -24,7 +25,7 @@ from chulk.core.context import (
 )
 from chulk.core.state import Plan
 from chulk.memory import ConversationMemory, MemoryRecord
-from chulk.skills import SkillSelection
+from chulk.skills import Skill, SkillSelection
 from chulk.tools import ToolRegistry
 
 
@@ -38,6 +39,7 @@ def build_agent_messages(
     tool_registry: ToolRegistry,
     max_skill_content_chars: int,
     max_tool_calls_per_turn: int,
+    available_skills: list[Skill] | None = None,
     context_sections: list[TurnContextSection] | None = None,
     prompt_profile: str | None = None,
     locale: str | None = None,
@@ -55,6 +57,7 @@ def build_agent_messages(
         profile_memories=profile_memories,
         relevant_memories=relevant_memories,
         selected_skills=selected_skills,
+        available_skills=available_skills,
         tool_registry=tool_registry,
         max_skill_content_chars=max_skill_content_chars,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
@@ -80,6 +83,7 @@ def build_agent_prompt(
     tool_registry: ToolRegistry,
     max_skill_content_chars: int,
     max_tool_calls_per_turn: int,
+    available_skills: list[Skill] | None = None,
     context_sections: list[TurnContextSection] | None = None,
     prompt_profile: str | None = None,
     locale: str | None = None,
@@ -100,6 +104,8 @@ def build_agent_prompt(
         selected_skills,
         max_chars_per_skill=max_skill_content_chars,
     )
+    available_skill_catalog = list(available_skills or [])
+    available_skills_prompt = format_available_skills_for_prompt(available_skill_catalog)
     conversation_summary_prompt = format_conversation_summary_for_prompt(memory.conversation_summary)
     prompt_metadata_prompt = format_prompt_metadata_for_prompt(prompt_profile=prompt_profile, locale=locale)
     turn_context_sections = context_sections or []
@@ -124,6 +130,12 @@ def build_agent_prompt(
                 "profile_memory_ids": [memory.id for memory in profile_memories],
                 "relevant_memory_ids": [memory.id for memory in relevant_memories],
             },
+        ),
+        (
+            "available_skills",
+            "Available skills",
+            available_skills_prompt,
+            {"skill_names": [skill.name for skill in available_skill_catalog]},
         ),
         (
             "skills",
@@ -209,6 +221,8 @@ def _section_item_count(name: str, content: str, metadata: dict) -> int:
     if name == "memories":
         return len(metadata.get("profile_memory_ids", [])) + len(metadata.get("relevant_memory_ids", []))
     if name == "skills":
+        return len(metadata.get("skill_names", []))
+    if name == "available_skills":
         return len(metadata.get("skill_names", []))
     if name == "external_context":
         return len(metadata.get("context_section_ids", []))

@@ -2,7 +2,7 @@
 
 from chulk.core.context import TurnContextSection
 from chulk.memory import MemoryRecord
-from chulk.skills import SkillSelection
+from chulk.skills import Skill, SkillSelection
 from chulk.core.planning import format_read_only_planning_tools
 from chulk.core.state import Plan
 
@@ -105,6 +105,23 @@ def format_tools_for_prompt(tool_descriptions: str) -> str:
     if not tool_descriptions:
         return "Available tools: none."
     return f"Available tools:\n{tool_descriptions}"
+
+
+def format_available_skills_for_prompt(available_skills: list[Skill]) -> str:
+    """Format registered skill metadata for prompt injection."""
+    if not available_skills:
+        return "Available skills: none."
+
+    lines = [
+        "Available skills are prompt-loadable procedural playbooks.",
+        "This catalog is metadata only; detailed instructions are available only under Loaded skills.",
+        "Do not claim to follow a skill's detailed procedure unless that skill is loaded for this turn.",
+        "Available skills:",
+    ]
+    for skill in available_skills:
+        description = skill.description.strip() or "No description provided."
+        lines.append(f"- {skill.name}: {description}")
+    return "\n".join(lines)
 
 
 def format_conversation_summary_for_prompt(summary: str | None) -> str:

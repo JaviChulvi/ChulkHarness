@@ -5,6 +5,7 @@ import json
 from chulk.core.context import ContextBudget, TurnContextSection, estimate_tokens
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.memory import ConversationMemory
+from chulk.skills import Skill
 from chulk.tools import ToolRegistry, calculator_tool
 
 
@@ -39,10 +40,46 @@ def test_build_agent_prompt_reports_named_sections():
     assert report["omitted_message_count"] == 0
     assert "system_prompt" in section_names
     assert "memories" in section_names
+    assert "available_skills" in section_names
     assert "skills" in section_names
     assert "tools" in section_names
     assert "history" in section_names
     assert "observations" in section_names
+    assert "Available skills: none." in prompt.messages[0]["content"]
+
+
+def test_build_agent_prompt_lists_available_skill_metadata_without_loading_content(tmp_path):
+    memory = ConversationMemory()
+    memory.add_user_message("review this")
+    skill_path = tmp_path / "review" / "SKILL.md"
+    available_skill = Skill(
+        name="review",
+        description="Use this skill when reviewing code.",
+        path=skill_path,
+        loaded_content="# Review Skill\n\nDetailed review procedure.",
+    )
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        available_skills=[available_skill],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    available_section = next(section for section in report["sections"] if section["name"] == "available_skills")
+
+    assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
+    assert "- review: Use this skill when reviewing code." in system_prompt
+    assert "Loaded skills: none selected for this turn." in system_prompt
+    assert "# Review Skill" not in system_prompt
+    assert available_section["metadata"]["skill_names"] == ["review"]
+    assert available_section["item_count"] == 1
 
 
 def test_build_agent_prompt_injects_external_context_and_prompt_metadata():
