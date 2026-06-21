@@ -457,8 +457,15 @@ def test_agent_prompt_shows_available_tools():
     agent.run_turn("hello")
 
     system_prompt = llm.requests[0][0]["content"]
+    assert "<tools>" in system_prompt
+    assert "<available_tools>" in system_prompt
+    assert "<tool>" in system_prompt
+    assert "<name>calculator</name>" in system_prompt
+    assert "<arguments_schema_json>" in system_prompt
     assert "Available tools" in system_prompt
     assert "calculator" in system_prompt
+    assert "<tool_call_rules>" in system_prompt
+    assert "<max_tool_calls_per_turn>4</max_tool_calls_per_turn>" in system_prompt
     assert "Tool-call limit" in system_prompt
     assert "at most 4 tool calls" in system_prompt
 
@@ -505,8 +512,8 @@ def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
         def complete(self, messages):
             system_prompt = messages[0]["content"]
             assert "Quarterly planning source" in system_prompt
-            assert "profile: polp-search" in system_prompt
-            assert "locale: es-ES" in system_prompt
+            assert "<profile>polp-search</profile>" in system_prompt
+            assert "<locale>es-ES</locale>" in system_prompt
             return json.dumps({"type": "final_answer", "content": "used source"})
 
     agent = Agent(ContextAwareLLM([]), trace_logger=trace_logger)
@@ -691,10 +698,14 @@ def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path)
 
     assert response == "I can run that command."
     assert agent.state.loaded_skill_names == ["shell"]
+    assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
+    assert "- shell: Use this skill when the user request requires terminal inspection" in system_prompt
+    assert "- memory: Use this skill when the user request involves saving or retrieving" in system_prompt
     assert "Loaded skills are procedural instructions" in system_prompt
     assert "Skill: shell" in system_prompt
     assert "# Shell Skill" in system_prompt
     assert "Skill: memory" not in system_prompt
+    assert "# Memory Skill" not in system_prompt
     assert skill_registry.get_skill("shell").loaded_content is not None
     assert skill_registry.get_skill("memory").loaded_content is None
     assert "skill_selection_completed" in trace_text

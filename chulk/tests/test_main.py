@@ -801,7 +801,7 @@ def test_main_runs_one_message_with_fake_llm(capsys):
     assert output.strip() == "hello from fake llm"
 
 
-def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
+def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     skill_dir = tmp_path / ".chulk" / "skills" / "shell"
     skill_dir.mkdir(parents=True)
@@ -813,8 +813,18 @@ def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_p
     class SkillAwareFakeLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
             system_prompt = messages[0]["content"]
-            if "Skill: shell" in system_prompt and "# Shell Skill" in system_prompt:
-                return json.dumps({"type": "final_answer", "content": "shell skill loaded"})
+            xml_sections_present = (
+                system_prompt.startswith("<chulk_prompt>")
+                and "<available_skills>" in system_prompt
+                and "</available_skills>" in system_prompt
+                and "<skills>" in system_prompt
+                and "</skills>" in system_prompt
+                and system_prompt.endswith("</chulk_prompt>")
+            )
+            catalog_visible = "- shell: Use this skill when command execution is needed." in system_prompt
+            skill_loaded = "Skill: shell" in system_prompt and "# Shell Skill" in system_prompt
+            if xml_sections_present and catalog_visible and skill_loaded:
+                return json.dumps({"type": "final_answer", "content": "shell skill listed and loaded"})
             return json.dumps({"type": "final_answer", "content": "missing skill"})
 
     def factory(_config):
@@ -825,7 +835,7 @@ def test_main_loads_skill_metadata_and_injects_selected_skill(monkeypatch, tmp_p
     output = capsys.readouterr().out
 
     assert exit_code == 0
-    assert output.strip() == "shell skill loaded"
+    assert output.strip() == "shell skill listed and loaded"
 
 
 def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):

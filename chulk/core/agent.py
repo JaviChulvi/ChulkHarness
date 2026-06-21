@@ -911,6 +911,7 @@ class Agent:
             tool_registry=self.tool_registry,
             max_skill_content_chars=self.max_skill_content_chars,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
+            available_skills=self.skill_registry.list_skills() if self.skill_registry is not None else [],
             context_sections=turn.context_sections,
             prompt_profile=turn.prompt_profile,
             locale=turn.locale,

@@ -114,11 +114,17 @@ class TerminalUI:
 
         budget = report.get("budget", {})
         sections = [section for section in report.get("sections", []) if isinstance(section, dict)]
-        largest_sections = sorted(
+        display_sections = sorted(
             sections,
             key=lambda section: int(section.get("estimated_tokens") or 0),
             reverse=True,
         )[:8]
+        history_section = next((section for section in sections if section.get("name") == "history"), None)
+        if history_section is not None and all(section is not history_section for section in display_sections):
+            if len(display_sections) >= 8:
+                display_sections[-1] = history_section
+            else:
+                display_sections.append(history_section)
         lines = [
             self.heading("Context"),
             f"  estimated {_format_count(int(report.get('estimated_tokens') or 0))} tokens, "
@@ -129,10 +135,10 @@ class TerminalUI:
             f"  obs omit  {report.get('omitted_observation_count', 0)} observation message(s)",
             "  sections",
         ]
-        if not largest_sections:
+        if not display_sections:
             lines.append("    none")
             return "\n".join(lines)
-        for section in largest_sections:
+        for section in display_sections:
             name = str(section.get("label") or section.get("name") or "section")
             tokens = _format_count(int(section.get("estimated_tokens") or 0))
             chars = _format_count(int(section.get("char_count") or 0))
