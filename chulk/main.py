@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Callable
 
 from chulk import __version__
@@ -29,7 +30,13 @@ from chulk.llm import (
 )
 from chulk.presets import software_engineer
 from chulk.runtime import create_agent
-from chulk.sessions import SQLiteSessionStore
+from chulk.sessions import (
+    AmbiguousSessionError,
+    DEFAULT_EXPORT_FORMAT,
+    SessionNotFoundError,
+    SQLiteSessionStore,
+    export_session,
+)
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 
 
@@ -53,6 +60,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--once",
         metavar="MESSAGE",
         help="Send one message to the agent and exit.",
+    )
+    parser.add_argument(
+        "--export",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="SESSION_ID",
+        help="Export a session transcript and exit. Defaults to the most recent session.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["md", "json"],
+        default=None,
+        help="Transcript format for --export (default: md).",
+    )
+    parser.add_argument(
+        "--out",
+        metavar="PATH",
+        default=None,
+        help="Output path for --export (default: .chulk/exports/<id>-<timestamp>.<format>).",
     )
     return parser
 
@@ -273,6 +300,37 @@ def _load_prompt_history(
     prompt_history.replace(messages)
 
 
+def _run_export_flag(
+    args: argparse.Namespace,
+    config: Config,
+    output_func: Callable[[str], None],
+) -> int:
+    """Handle the non-interactive `--export` flag."""
+    session_store = SQLiteSessionStore(config.store_path)
+    session_id = args.export or None
+    if session_id is None:
+        recent = session_store.list_conversations(limit=1)
+        if not recent:
+            output_func("error: no sessions found to export")
+            return 1
+        session_id = recent[0].id
+
+    try:
+        written_path = export_session(
+            session_store,
+            session_id,
+            runtime_dir=config.runtime_dir,
+            format=args.format or DEFAULT_EXPORT_FORMAT,
+            output_path=Path(args.out) if args.out else None,
+        )
+    except (SessionNotFoundError, AmbiguousSessionError, ValueError) as exc:
+        output_func(f"error: {exc}")
+        return 1
+
+    output_func(str(written_path))
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -292,6 +350,14 @@ def main(
     if args.show_config:
         print(format_config(load_config()))
         return 0
+
+    if args.export is not None:
+        try:
+            config = load_config()
+        except ValueError as exc:
+            output_func(terminal.error(f"configuration error: {exc}"))
+            return 1
+        return _run_export_flag(args, config, output_func)
 
     try:
         config = load_config()

@@ -50,6 +50,8 @@ Agent session state is split from per-turn state. `AgentState` tracks the conver
 
 Sessions are persisted in the same local SQLite database as long-term memory, using separate conversation tables. Use `/sessions` to list recent sessions, `/resume <conversation_id>` to resume one by full id or unique prefix, and `/history` to inspect recent persisted messages for the active session. Resumed sessions reload short-term history, append to the same trace file, and preserve pending `/plan` approvals across restarts.
 
+Use `/export` to write a self-contained transcript of a session for sharing or auditing. `/export` exports the current session, `/export <conversation_id>` exports a session by full id or unique prefix (the same lookup `/resume` uses), `--format json` switches from the default Markdown transcript to a structured `{"session": {...}, "messages": [...]}` JSON document, and `--out <path>` overrides the output location. Without `--out`, transcripts are written to `.chulk/exports/<conversation_id>-<timestamp>.md` (created on demand). The same export runs non-interactively with `chulk --export [conversation_id] [--format md|json] [--out path]`, which defaults to the most recent session when no id is given, writes the path to stdout, and exits non-zero with a plain error message (no traceback) for an unknown or ambiguous id.
+
 Planning is optional and controlled per request from the CLI. Use `/plan <request>` for a planned turn. During planning, Chulk allows only read-only reconnaissance tools such as `list_files`, `read_file`, `search_files`, and memory search tools, then asks the model to propose a structured plan action before any mutating execution. Chulk pauses that turn until the user runs `/approve` or `/reject`, then injects the approved plan back into the prompt and traces steps as they move from `pending` to `in_progress`, `completed`, or `blocked`.
 
 Large tool outputs are sent back to the model as bounded head/tail previews. When output is truncated, Chulk stores the full text as a local artifact under the active traces directory, for example `.chulk/traces/<conversation_id>_artifacts/`, and includes the artifact path, length, and SHA-256 hash in the observation metadata. If the omitted middle may matter, the model is instructed to inspect the artifact or run a narrower follow-up tool call before answering. This keeps model context bounded without throwing away important details. Artifact files contain raw local output, so treat them as sensitive runtime data and keep `.chulk/` and `traces/` out of Git.
@@ -424,6 +426,7 @@ Useful interactive commands:
 - `/sessions`
 - `/resume <conversation_id>`
 - `/history`
+- `/export [conversation_id] [--format md|json] [--out path]`
 - `/trace`
 - `/plan <request>`
 - `/plan`
@@ -476,6 +479,13 @@ Run a one-shot message:
 
 ```bash
 chulk --once "Hello"
+```
+
+Export a session transcript non-interactively:
+
+```bash
+chulk --export
+chulk --export <conversation_id> --format json --out transcript.json
 ```
 
 Built-in tools currently registered at startup:

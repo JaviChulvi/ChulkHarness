@@ -71,6 +71,7 @@ class TerminalUI:
             ("/sessions", "list recent persisted sessions"),
             ("/resume <id>", "resume a persisted session"),
             ("/history", "show recent persisted messages"),
+            ("/export [id]", "export a session transcript (md or json)"),
             ("/trace", "show the current trace file"),
             ("/plan <request>", "propose a plan for one request"),
             ("/plan", "show current plan status"),
