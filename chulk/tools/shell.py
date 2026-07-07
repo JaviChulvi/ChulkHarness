@@ -5,8 +5,10 @@ This tool is dangerous and must enforce safety in Python before real use.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import subprocess
 from typing import Any
@@ -77,48 +79,55 @@ def run_shell_command(
             metadata={"command": command, "cwd": str(root)},
         )
 
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **popen_kwargs,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        stdout, stderr = process.communicate()
         return ToolResult(
             tool_name="run_cmd",
             success=False,
             observation=f"Command timed out after {timeout_seconds} seconds.",
-            stdout=_coerce_output_text(exc.stdout),
-            stderr=_coerce_output_text(exc.stderr),
+            stdout=_coerce_output_text(stdout),
+            stderr=_coerce_output_text(stderr),
             error="timeout",
             metadata={
                 "command": command,
                 "cwd": str(root),
                 "timeout_seconds": timeout_seconds,
-                "stdout_length": len(exc.stdout or ""),
-                "stderr_length": len(exc.stderr or ""),
+                "stdout_length": len(stdout or ""),
+                "stderr_length": len(stderr or ""),
             },
         )
 
     return ToolResult(
         tool_name="run_cmd",
-        success=completed.returncode == 0,
-        observation="Command completed." if completed.returncode == 0 else "Command failed.",
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        exit_code=completed.returncode,
-        error=None if completed.returncode == 0 else "nonzero_exit",
+        success=process.returncode == 0,
+        observation="Command completed." if process.returncode == 0 else "Command failed.",
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=process.returncode,
+        error=None if process.returncode == 0 else "nonzero_exit",
         metadata={
             "command": command,
             "cwd": str(root),
             "timeout_seconds": timeout_seconds,
-            "exit_code": completed.returncode,
-            "stdout_length": len(completed.stdout),
-            "stderr_length": len(completed.stderr),
+            "exit_code": process.returncode,
+            "stdout_length": len(stdout),
+            "stderr_length": len(stderr),
         },
     )
 
@@ -164,6 +173,21 @@ def _has_recursive_force_rm(command: str) -> bool:
             if has_recursive and has_force:
                 return True
     return False
+
+
+def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
 
 
 def _coerce_output_text(value: str | bytes | None) -> str:

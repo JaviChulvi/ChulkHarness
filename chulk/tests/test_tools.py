@@ -1,10 +1,13 @@
 """Tests for built-in tools and registry behavior."""
 
 import asyncio
+import os
 from pathlib import Path
 import shlex
+import signal
 import sys
 import threading
+import time
 
 from chulk.memory import SQLiteMemoryStore
 from chulk.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
@@ -542,6 +545,38 @@ def test_shell_command_timeout(tmp_path):
 
     assert not result.success
     assert result.error == "timeout"
+
+
+def test_shell_command_timeout_kills_child_processes(tmp_path):
+    if os.name != "posix":
+        return
+    command = "sleep 30 & echo $! > child.pid; wait"
+
+    result = run_shell_command({"command": command, "timeout_seconds": 1}, tmp_path, default_timeout_seconds=1)
+
+    child_pid = int((tmp_path / "child.pid").read_text(encoding="utf-8").strip())
+    child_alive = _wait_for_process_exit(child_pid)
+    if child_alive:
+        os.kill(child_pid, signal.SIGKILL)
+    assert not result.success
+    assert result.error == "timeout"
+    assert not child_alive
+
+
+def _wait_for_process_exit(pid: int) -> bool:
+    for _ in range(20):
+        if not _process_exists(pid):
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_file_tools_read_write_list_and_search(tmp_path):
