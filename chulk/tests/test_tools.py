@@ -496,6 +496,37 @@ def test_shell_blocks_destructive_command(tmp_path):
     assert result.error == "blocked_command"
 
 
+def test_shell_blocks_recursive_force_rm_variants(tmp_path):
+    blocked_commands = [
+        "rm -fr /",
+        "rm -f -r target",
+        "rm -Rf target",
+        "rm --force --recursive target",
+        "rm --recursive --force target",
+    ]
+
+    for command in blocked_commands:
+        result = run_shell_command({"command": command}, tmp_path)
+
+        assert not result.success, command
+        assert result.error == "blocked_command", command
+
+
+def test_shell_allows_benign_rm_like_commands(tmp_path):
+    safe_file = tmp_path / "file.txt"
+    safe_file.write_text("safe", encoding="utf-8")
+    commands = [
+        "rm file.txt",
+        "printf 'needle' | grep -rf pattern .",
+        "printf 'perf record'",
+    ]
+
+    for command in commands:
+        result = run_shell_command({"command": command}, tmp_path)
+
+        assert result.error != "blocked_command", command
+
+
 def test_shell_blocks_output_redirection_outside_root(tmp_path):
     result = run_shell_command({"command": "printf hello > ../outside.txt"}, tmp_path)
 

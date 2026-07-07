@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -15,7 +16,6 @@ from chulk.tools.registry import Tool, ToolResult
 
 
 DESTRUCTIVE_PATTERNS = [
-    re.compile(r"\brm\s+-[^;&|]*r[^;&|]*f\b"),
     re.compile(r"\bmkfs\b"),
     re.compile(r"\bdd\s+"),
     re.compile(r"\bshutdown\b"),
@@ -125,12 +125,45 @@ def run_shell_command(
 
 def _blocked_reason(command: str, root: Path) -> str | None:
     lowered = command.strip().lower()
+    if _has_recursive_force_rm(lowered):
+        return "command matches a destructive pattern"
     for pattern in DESTRUCTIVE_PATTERNS:
         if pattern.search(lowered):
             return "command matches a destructive pattern"
     if _redirects_outside_root(command, root):
         return "command redirects output outside the project root"
     return None
+
+
+def _has_recursive_force_rm(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+
+    for index, token in enumerate(tokens):
+        if Path(token).name != "rm":
+            continue
+        has_recursive = False
+        has_force = False
+        for argument in tokens[index + 1 :]:
+            if argument in {";", "&&", "||", "|", "&"}:
+                break
+            if argument == "--":
+                break
+            if argument == "--recursive":
+                has_recursive = True
+            elif argument == "--force":
+                has_force = True
+            elif argument.startswith("--"):
+                continue
+            elif argument.startswith("-") and argument != "-":
+                flags = argument.lstrip("-")
+                has_recursive = has_recursive or "r" in flags or "R" in flags
+                has_force = has_force or "f" in flags
+            if has_recursive and has_force:
+                return True
+    return False
 
 
 def _coerce_output_text(value: str | bytes | None) -> str:
