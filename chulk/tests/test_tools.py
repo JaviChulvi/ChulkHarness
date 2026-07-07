@@ -496,6 +496,42 @@ def test_shell_blocks_destructive_command(tmp_path):
     assert result.error == "blocked_command"
 
 
+def test_shell_blocks_reordered_and_long_form_rm_flags(tmp_path):
+    for command in (
+        "rm -fr /",
+        "rm -f -r /tmp/x",
+        "rm --force --recursive /tmp/x",
+        "rm -Rf /tmp/x",
+    ):
+        result = run_shell_command({"command": command}, tmp_path)
+
+        assert not result.success, command
+        assert result.error == "blocked_command", command
+
+
+def test_shell_still_blocks_other_destructive_commands(tmp_path):
+    for command in (
+        "rm -rf *",
+        "mkfs.ext4 /dev/sda1",
+        "dd if=/dev/zero of=/dev/sda",
+        ":(){ :|:& };:",
+        "shutdown -h now",
+        "reboot",
+        "echo pwned > /etc/passwd",
+    ):
+        result = run_shell_command({"command": command}, tmp_path)
+
+        assert not result.success, command
+        assert result.error == "blocked_command", command
+
+
+def test_shell_does_not_block_benign_commands_containing_rm_letters(tmp_path):
+    for command in ("rm file.txt", "grep -rf pattern .", "perf record"):
+        result = run_shell_command({"command": command}, tmp_path)
+
+        assert result.error != "blocked_command", command
+
+
 def test_shell_blocks_output_redirection_outside_root(tmp_path):
     result = run_shell_command({"command": "printf hello > ../outside.txt"}, tmp_path)
 

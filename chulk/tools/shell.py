@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -15,7 +16,6 @@ from chulk.tools.registry import Tool, ToolResult
 
 
 DESTRUCTIVE_PATTERNS = [
-    re.compile(r"\brm\s+-[^;&|]*r[^;&|]*f\b"),
     re.compile(r"\bmkfs\b"),
     re.compile(r"\bdd\s+"),
     re.compile(r"\bshutdown\b"),
@@ -23,6 +23,12 @@ DESTRUCTIVE_PATTERNS = [
     re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:"),
     re.compile(r">\s*/(?:etc|bin|sbin|usr|System|Library)\b"),
 ]
+
+_SHELL_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;&|]")
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_COMMAND_WRAPPERS = {"sudo", "command", "exec"}
+_LONG_RECURSIVE_FLAGS = {"--recursive"}
+_LONG_FORCE_FLAGS = {"--force"}
 
 
 def shell_tool(project_root: Path, timeout_seconds: int = 10) -> Tool:
@@ -128,9 +134,53 @@ def _blocked_reason(command: str, root: Path) -> str | None:
     for pattern in DESTRUCTIVE_PATTERNS:
         if pattern.search(lowered):
             return "command matches a destructive pattern"
+    if _has_recursive_force_rm(lowered):
+        return "command matches a destructive pattern"
     if _redirects_outside_root(command, root):
         return "command redirects output outside the project root"
     return None
+
+
+def _has_recursive_force_rm(lowered_command: str) -> bool:
+    """Detect `rm` invoked with both a recursive and a force flag, in any order."""
+    for segment in _SHELL_SEGMENT_SPLIT.split(lowered_command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+
+        idx = 0
+        while idx < len(tokens) and (tokens[idx] in _COMMAND_WRAPPERS or _ENV_ASSIGNMENT.match(tokens[idx])):
+            idx += 1
+        if idx >= len(tokens):
+            continue
+        if tokens[idx].rsplit("/", 1)[-1] != "rm":
+            continue
+
+        has_recursive = False
+        has_force = False
+        for token in tokens[idx + 1 :]:
+            if token == "--":
+                break
+            if token.startswith("--"):
+                flag = token.split("=", 1)[0]
+                if flag in _LONG_RECURSIVE_FLAGS:
+                    has_recursive = True
+                elif flag in _LONG_FORCE_FLAGS:
+                    has_force = True
+            elif token.startswith("-") and len(token) > 1:
+                flags = token[1:]
+                if "r" in flags:
+                    has_recursive = True
+                if "f" in flags:
+                    has_force = True
+
+        if has_recursive and has_force:
+            return True
+    return False
 
 
 def _coerce_output_text(value: str | bytes | None) -> str:
