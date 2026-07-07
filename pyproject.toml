@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "ruff>=0.14",
 ]
 openai = [
   "openai>=1.109.0",
@@ -39,3 +40,6 @@ exclude = ["chulkharness.egg-info*"]
 [tool.pytest.ini_options]
 testpaths = ["chulk/tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"

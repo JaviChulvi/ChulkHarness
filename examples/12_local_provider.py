@@ -24,7 +24,7 @@ def main() -> None:
     assistant = ChatAgent(config=config)
     result = assistant.run_result("Say hello from the local-provider SDK example.")
     print(result.content)
-    print(f"provider: local")
+    print("provider: local")
     print(f"model: {model}")
     print(f"base_url: {base_url}")
     print(f"trace_path: {result.trace_path}")

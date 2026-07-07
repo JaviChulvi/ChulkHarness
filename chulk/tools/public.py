@@ -26,7 +26,7 @@ from chulk.tools.memory import (
     summarize_memories_tool,
     update_memory_tool,
 )
-from chulk.tools.registry import Tool, ToolExecutionContext, ToolFailureKind, ToolResult
+from chulk.tools.registry import Tool, ToolResult
 from chulk.tools.shell import shell_tool
 
 

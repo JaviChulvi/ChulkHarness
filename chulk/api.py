@@ -19,7 +19,7 @@ from chulk.config import (
     load_config,
 )
 from chulk.core.context import TurnContextSection
-from chulk.core import Agent, TraceEvent
+from chulk.core import Agent as CoreAgent, TraceEvent
 from chulk.llm import LLMClient
 from chulk.mcp import MCPServerConfig, build_mcp_server_config
 from chulk.runtime import create_agent as create_runtime_agent
@@ -381,7 +381,7 @@ class MCP:
 class AgentHandle:
     """Small ergonomic wrapper around the explicit core Agent runtime."""
 
-    def __init__(self, runtime: Agent, *, on_event: EventCallback | None = None) -> None:
+    def __init__(self, runtime: CoreAgent, *, on_event: EventCallback | None = None) -> None:
         self.runtime = runtime
         self._base_event_callback = runtime.event_callback
         self._on_event = on_event
@@ -603,7 +603,7 @@ class AsyncAgentHandle:
         self.handle = handle
 
     @property
-    def runtime(self) -> Agent:
+    def runtime(self) -> CoreAgent:
         return self.handle.runtime
 
     @property
