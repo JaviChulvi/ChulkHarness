@@ -1,0 +1,502 @@
+"""Non-agent CLI diagnostics, initialization, and trace commands."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import json
+import os
+from pathlib import Path
+import subprocess
+from typing import Any
+
+from chulk.config import Config, load_config, resolve_cli_environment
+from chulk.llm import resolve_model_capabilities
+from chulk.tracing import Trace, TraceFormatError
+
+
+@dataclass(frozen=True)
+class DiagnosticCheck:
+    """One human- and machine-readable doctor result."""
+
+    name: str
+    status: str
+    detail: str
+    remedy: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DoctorReport:
+    """Collected local runtime diagnostics."""
+
+    project_root: Path
+    checks: tuple[DiagnosticCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(check.status != "fail" for check in self.checks)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "project_root": str(self.project_root),
+            "checks": [check.to_dict() for check in self.checks],
+        }
+
+
+@dataclass(frozen=True)
+class InitChange:
+    """One filesystem result from ``chulk init``."""
+
+    path: Path
+    action: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": str(self.path), "action": self.action}
+
+
+def run_doctor(*, environ: dict[str, str] | None = None) -> DoctorReport:
+    """Run offline configuration, credential, runtime, and ignore checks."""
+    env = resolve_cli_environment(environ)
+    project_root = Path(env["CHULK_PROJECT_ROOT"]).expanduser().resolve()
+    checks: list[DiagnosticCheck] = []
+    try:
+        config = load_config(env)
+    except (OSError, ValueError) as exc:
+        checks.append(
+            DiagnosticCheck(
+                "configuration",
+                "fail",
+                str(exc),
+                "Correct the reported environment or .env value, then rerun chulk doctor.",
+            )
+        )
+        return DoctorReport(project_root, tuple(checks))
+
+    project_root = config.project_root
+    checks.append(DiagnosticCheck("configuration", "pass", "configuration parsed successfully"))
+    checks.append(_provider_check(config))
+    checks.append(_model_check(config))
+    checks.append(_runtime_check(config))
+    checks.extend(_mcp_checks(config))
+    checks.append(_gitignore_check(config))
+    return DoctorReport(project_root, tuple(checks))
+
+
+def format_doctor_report(report: DoctorReport) -> str:
+    lines = ["Chulk doctor", f"  project  {report.project_root}"]
+    markers = {"pass": "ok", "warn": "warn", "fail": "fail"}
+    for check in report.checks:
+        lines.append(f"  [{markers.get(check.status, check.status)}] {check.name}: {check.detail}")
+        if check.remedy:
+            lines.append(f"         fix: {check.remedy}")
+    lines.append("  result   " + ("ready" if report.ok else "action required"))
+    return "\n".join(lines)
+
+
+def initialize_project(project_root: Path | str, *, mode: str = "coding-agent") -> tuple[InitChange, ...]:
+    """Create safe project-local Chulk scaffolding without overwriting files."""
+    root = Path(project_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    clean_mode = mode.strip().lower()
+    if clean_mode not in {"sdk", "coding-agent", "read-only"}:
+        raise ValueError("init mode must be sdk, coding-agent, or read-only")
+    permission_profile = "workspace-write" if clean_mode == "coding-agent" else "read-only"
+    changes: list[InitChange] = []
+
+    runtime_dir = root / ".chulk"
+    skills_dir = runtime_dir / "skills"
+    mcp_path = runtime_dir / "mcp.json"
+    env_example_path = root / ".env.example"
+    gitignore_path = root / ".gitignore"
+    for target in (runtime_dir, skills_dir, mcp_path, env_example_path, gitignore_path):
+        _validate_init_target(root, target)
+
+    for directory in (runtime_dir, skills_dir):
+        existed = directory.exists()
+        directory.mkdir(parents=True, exist_ok=True)
+        changes.append(InitChange(directory, "exists" if existed else "created"))
+
+    if mcp_path.exists():
+        changes.append(InitChange(mcp_path, "exists"))
+    else:
+        mcp_path.write_text(json.dumps({"servers": []}, indent=2) + "\n", encoding="utf-8")
+        changes.append(InitChange(mcp_path, "created"))
+
+    if env_example_path.exists():
+        changes.append(InitChange(env_example_path, "exists"))
+    else:
+        env_example_path.write_text(_env_example(permission_profile), encoding="utf-8")
+        changes.append(InitChange(env_example_path, "created"))
+
+    action = _ensure_gitignore(gitignore_path)
+    changes.append(InitChange(gitignore_path, action))
+    return tuple(changes)
+
+
+def format_init_changes(project_root: Path | str, changes: tuple[InitChange, ...]) -> str:
+    root = Path(project_root).expanduser().resolve()
+    lines = ["Chulk initialized", f"  project  {root}"]
+    for change in changes:
+        try:
+            shown_path = change.path.relative_to(root)
+        except ValueError:
+            shown_path = change.path
+        lines.append(f"  {change.action:<7} {shown_path}")
+    return "\n".join(lines)
+
+
+def inspect_trace(path: Path | str) -> dict[str, Any]:
+    return Trace.from_jsonl(path).summary()
+
+
+def format_trace_summary(summary: dict[str, Any]) -> str:
+    event_types = summary.get("event_types", {})
+    type_text = ", ".join(f"{name} x{count}" for name, count in event_types.items())
+    lines = [
+        "Chulk trace",
+        f"  path          {summary.get('path')}",
+        f"  conversation  {summary.get('conversation_id')}",
+        f"  events        {summary.get('event_count')}",
+        f"  turns         {summary.get('turn_count')}",
+        f"  failures      {summary.get('failure_count')}",
+        f"  started       {summary.get('started_at')}",
+        f"  ended         {summary.get('ended_at')}",
+        f"  event types   {type_text or 'none'}",
+    ]
+    if summary.get("final_answer"):
+        lines.extend(["  final answer", *[f"    {line}" for line in str(summary["final_answer"]).splitlines()]])
+    lines.append("  warning       traces may contain sensitive runtime data")
+    return "\n".join(lines)
+
+
+def export_trace_html(
+    path: Path | str,
+    *,
+    output_path: Path | str | None = None,
+    force: bool = False,
+) -> Path:
+    trace = Trace.from_jsonl(path)
+    destination = (
+        Path(output_path).expanduser().resolve()
+        if output_path is not None
+        else trace.path.with_suffix(".html")
+    )
+    if destination == trace.path or (destination.exists() and destination.samefile(trace.path)):
+        raise ValueError(f"Trace export output cannot overwrite the source trace: {trace.path}")
+    if destination.exists() and not force:
+        raise FileExistsError(f"Output already exists: {destination}. Pass --force to replace it.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(trace.to_html(), encoding="utf-8")
+    return destination
+
+
+def _provider_check(config: Config) -> DiagnosticCheck:
+    providers = _configured_provider_models(config)
+    missing: list[str] = []
+    for label, provider, _model in providers:
+        if provider == "openai" and not config.openai_api_key:
+            missing.append(f"{label} openai (OPENAI_API_KEY)")
+        elif provider == "deepseek" and not config.deepseek_api_key:
+            missing.append(f"{label} deepseek (DEEPSEEK_API_KEY)")
+    if missing:
+        return DiagnosticCheck(
+            "provider",
+            "fail",
+            "credentials are missing for: " + ", ".join(missing),
+            "Set the listed variables in the environment or project .env.",
+        )
+    if len(providers) == 1:
+        provider = providers[0][1]
+        detail = (
+            f"{provider} credentials are set"
+            if provider in {"openai", "deepseek"}
+            else f"{provider} provider configured"
+        )
+        return DiagnosticCheck("provider", "pass", detail)
+    return DiagnosticCheck(
+        "provider",
+        "pass",
+        f"primary and {len(providers) - 1} fallback provider(s) are configured",
+    )
+
+
+def _model_check(config: Config) -> DiagnosticCheck:
+    providers = _configured_provider_models(config)
+    capabilities = []
+    invalid: list[str] = []
+    for label, provider, model in providers:
+        try:
+            capabilities.append(resolve_model_capabilities(provider, model))
+        except ValueError as exc:
+            invalid.append(f"{label} {provider}/{model}: {exc}")
+    if invalid:
+        return DiagnosticCheck(
+            "model",
+            "fail",
+            "invalid model configuration: " + "; ".join(invalid),
+            "Set primary and fallback models to registered models.",
+        )
+    if len(providers) > 1:
+        return DiagnosticCheck(
+            "model",
+            "pass",
+            f"capability metadata is available for {len(providers)} configured models",
+        )
+    capabilities_for_primary = capabilities[0]
+    return DiagnosticCheck(
+        "model",
+        "pass",
+        f"{config.llm_provider}/{config.model}, {capabilities_for_primary.context_window_tokens} token context",
+    )
+
+
+def _runtime_check(config: Config) -> DiagnosticCheck:
+    errors = [
+        error
+        for label, path in (
+            ("runtime directory", config.runtime_dir),
+            ("SQLite store directory", config.store_path.parent),
+            ("trace directory", config.traces_dir),
+        )
+        if (error := _directory_write_error(label, path)) is not None
+    ]
+    if config.store_path.exists():
+        if not config.store_path.is_file():
+            errors.append(f"SQLite store path is not a file: {config.store_path}")
+        elif not os.access(config.store_path, os.W_OK):
+            errors.append(f"SQLite store path is not writable: {config.store_path}")
+    if not errors:
+        return DiagnosticCheck(
+            "runtime",
+            "pass",
+            "runtime, SQLite store, and trace destinations are writable",
+        )
+    return DiagnosticCheck(
+        "runtime",
+        "fail",
+        "; ".join(errors),
+        "Choose writable runtime, SQLite store, and trace destinations.",
+    )
+
+
+def _mcp_checks(config: Config) -> list[DiagnosticCheck]:
+    if not config.mcp_servers:
+        return [DiagnosticCheck("mcp", "pass", "no MCP servers configured")]
+    missing = [
+        server.authorization_env
+        for server in config.mcp_servers
+        if server.authorization_env and not server.authorization
+    ]
+    if missing:
+        names = ", ".join(str(name) for name in missing)
+        return [
+            DiagnosticCheck(
+                "mcp",
+                "fail",
+                f"missing authorization environment variables: {names}",
+                "Set the missing variables without putting secret values in mcp.json.",
+            )
+        ]
+    return [DiagnosticCheck("mcp", "pass", f"{len(config.mcp_servers)} server(s) configured")]
+
+
+def _gitignore_check(config: Config) -> DiagnosticCheck:
+    git_root = _git_root(config.project_root)
+    if git_root is None:
+        return DiagnosticCheck("gitignore", "warn", "project is not inside a Git worktree")
+    try:
+        project_prefix = config.project_root.relative_to(git_root)
+    except ValueError:
+        project_prefix = Path()
+    tracked = _tracked_runtime_paths(git_root, config)
+    if tracked:
+        return DiagnosticCheck(
+            "gitignore",
+            "fail",
+            "runtime paths are already tracked by Git: " + ", ".join(tracked),
+            "Remove runtime state from the index with git rm --cached, then keep the ignore rules.",
+        )
+    candidates = tuple(
+        str(project_prefix / candidate)
+        for candidate in (".chulk/store.sqlite", "traces/example.jsonl", "chulk/store.sqlite", "state.sqlite")
+    )
+    missing = [candidate for candidate in candidates if not _git_ignores(git_root, candidate)]
+    if not missing:
+        return DiagnosticCheck("gitignore", "pass", "runtime databases and traces are ignored")
+    return DiagnosticCheck(
+        "gitignore",
+        "fail",
+        "runtime paths are not fully ignored: " + ", ".join(missing),
+        "Run chulk init or add .chulk/, traces/, chulk/store.sqlite, and *.sqlite to .gitignore.",
+    )
+
+
+def _git_root(project_root: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _git_ignores(git_root: Path, relative_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "-q", "--", relative_path],
+            cwd=git_root,
+            check=False,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _configured_provider_models(config: Config) -> tuple[tuple[str, str, str], ...]:
+    return (
+        ("primary", config.llm_provider, config.model),
+        *(
+            (f"fallback #{index}", fallback.provider, fallback.model)
+            for index, fallback in enumerate(config.llm_fallback_providers, start=1)
+        ),
+    )
+
+
+def _directory_write_error(label: str, path: Path) -> str | None:
+    if path.exists():
+        if not path.is_dir():
+            return f"{label} is not a directory: {path}"
+        if not os.access(path, os.W_OK):
+            return f"{label} is not writable: {path}"
+        return None
+    if path.is_symlink():
+        return f"{label} is a broken symlink: {path}"
+
+    ancestor = path.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        return f"parent for {label} is not a directory: {ancestor}"
+    if not os.access(ancestor, os.W_OK):
+        return f"parent for {label} is not writable: {ancestor}"
+    return None
+
+
+def _tracked_runtime_paths(git_root: Path, config: Config) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=git_root,
+            check=False,
+            capture_output=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if result.returncode != 0:
+        return ()
+
+    directory_prefixes = tuple(
+        relative
+        for directory in (config.runtime_dir, config.traces_dir)
+        if (relative := _relative_to_git_root(directory, git_root)) is not None
+    )
+    store_path = _relative_to_git_root(config.store_path, git_root)
+    project_prefix = _relative_to_git_root(config.project_root, git_root)
+    tracked: list[str] = []
+    for raw_path in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        project_path = None
+        if project_prefix is not None:
+            try:
+                project_path = path.relative_to(project_prefix)
+            except ValueError:
+                pass
+        if (
+            any(path == prefix or prefix in path.parents for prefix in directory_prefixes)
+            or path == store_path
+            or (project_path is not None and project_path.suffix in {".sqlite", ".sqlite3"})
+        ):
+            tracked.append(raw_path)
+    return tuple(sorted(tracked))
+
+
+def _relative_to_git_root(path: Path, git_root: Path) -> Path | None:
+    try:
+        return path.resolve().relative_to(git_root)
+    except ValueError:
+        return None
+
+
+def _env_example(permission_profile: str) -> str:
+    return "\n".join(
+        [
+            "OPENAI_API_KEY=",
+            "DEEPSEEK_API_KEY=",
+            "CHULK_LLM_PROVIDER=openai",
+            "CHULK_MODEL=",
+            f"CHULK_PERMISSION_PROFILE={permission_profile}",
+            "CHULK_RUNTIME_DIR=.chulk",
+            "",
+        ]
+    )
+
+
+def _validate_init_target(project_root: Path, target: Path) -> None:
+    if target.is_symlink():
+        raise ValueError(f"Refusing to initialize symlinked path: {target}")
+    try:
+        target.resolve(strict=False).relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to initialize path outside project root: {target}") from exc
+
+
+def _ensure_gitignore(path: Path) -> str:
+    required = [
+        ".env",
+        ".env.*",
+        "!.env.example",
+        ".chulk/",
+        "traces/",
+        "chulk/store.sqlite",
+        "*.sqlite",
+        "*.sqlite3",
+    ]
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    existing_lines = {line.strip() for line in existing.splitlines()}
+    missing = [line for line in required if line not in existing_lines]
+    if not missing:
+        return "exists"
+    if existing:
+        prefix = "\n" if existing.endswith("\n") else "\n\n"
+        content = existing + prefix + "# Chulk runtime state\n" + "\n".join(missing) + "\n"
+    else:
+        content = "# Chulk runtime state\n" + "\n".join(missing) + "\n"
+    path.write_text(content, encoding="utf-8")
+    return "created" if not existing else "updated"
+
+
+__all__ = [
+    "DiagnosticCheck",
+    "DoctorReport",
+    "InitChange",
+    "TraceFormatError",
+    "export_trace_html",
+    "format_doctor_report",
+    "format_init_changes",
+    "format_trace_summary",
+    "initialize_project",
+    "inspect_trace",
+    "run_doctor",
+]

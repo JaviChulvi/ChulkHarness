@@ -7,9 +7,11 @@ from types import SimpleNamespace
 
 from chulk import __version__
 from chulk.config import load_config
+from chulk.core.actions import FinalAnswerAction
 from chulk.llm import (
     DeepSeekProvider,
     FallbackChain,
+    LLMActionResult,
     LLMCapabilities,
     LLMClient,
     LocalProvider,
@@ -39,7 +41,8 @@ def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-def test_main_prints_current_status(capsys):
+def test_main_prints_current_status(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     inputs = iter(["/q"])
 
     exit_code = main(
@@ -52,9 +55,11 @@ def test_main_prints_current_status(capsys):
 
     assert exit_code == 0
     assert "ChulkHarness CLI" in output
-    assert "Type /exit, /quit, or /q" in output
+    assert "Type /exit to end the session" in output
     assert "bye" in output
-    assert "/resume " in output
+    assert "/resume " not in output
+    assert SQLiteSessionStore(tmp_path / "chulk" / "store.sqlite").list_conversations() == []
+    assert list((tmp_path / "traces").glob("*.jsonl")) == []
 
 
 def test_main_exit_prints_resume_command_for_current_session(monkeypatch, tmp_path, capsys):
@@ -100,7 +105,7 @@ def test_main_uses_hulk_green_output(monkeypatch, tmp_path, capsys):
     inputs = iter(["/q"])
 
     exit_code = main(
-        [],
+        ["--color", "always"],
         input_func=lambda _prompt: next(inputs),
         llm_client_factory=fake_factory,
     )
@@ -135,6 +140,43 @@ def test_main_handles_interactive_slash_commands(monkeypatch, tmp_path, capsys):
     assert "MCP" in output
     assert "Trace" in output
     assert "bye" in output
+
+
+def test_main_rejects_unknown_slash_command_without_calling_model(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    client = FakeLLMClient()
+    inputs = iter(["/stats", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: client,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert "Unknown command: /stats." in output
+    assert "Did you mean /status?" in output
+    assert client.requests == []
+
+
+def test_main_help_is_grouped_and_registry_backed(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    inputs = iter(["/help", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=fake_factory,
+    )
+
+    output = strip_ansi(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert all(category in output for category in ("General", "Run", "Inspect", "Sessions", "Display"))
+    assert "/display compact|verbose|quiet" in output
+    assert "/verbose on|off" not in output
 
 
 def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatch, tmp_path, capsys):
@@ -210,19 +252,16 @@ def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsy
     output = strip_ansi(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert ".. starting turn" in output
-    assert ".. checking memory" in output
-    assert ".. loading skills" in output
-    assert ".. asking model - request 1" in output
-    assert ".. model chose tool - calculator" in output
+    assert ".. starting turn" not in output
+    assert ".. checking memory" not in output
+    assert ".. asking model" not in output
     assert ".. running tool - calculator" in output
     assert ".. tool completed - calculator" in output
-    assert ".. turn completed - 2 model request(s), 1 tool call(s)" in output
-    assert "Turn Summary" in output
-    assert "worked for" in output
-    assert "model       2 request(s)" in output
-    assert "tools       calculator x1" in output
+    assert "done ·" in output
+    assert "2 model requests" in output
+    assert "1 tool call" in output
     assert "The result is 4." in output
+    assert output.index("The result is 4.") < output.index("done ·")
 
 
 def test_main_streams_final_answer_by_default_for_streaming_provider(monkeypatch, tmp_path, capsys):
@@ -249,6 +288,7 @@ def test_main_streams_final_answer_by_default_for_streaming_provider(monkeypatch
     assert exit_code == 0
     assert "chulk\n  streamed default answer" in output
     assert output.count("streamed default answer") == 1
+    assert output.index("streamed default answer") < output.index("done ·")
 
 
 def test_main_shows_run_cmd_command_in_live_progress(monkeypatch, tmp_path, capsys):
@@ -448,13 +488,12 @@ def test_main_plan_prefix_approve_flow_with_tools(monkeypatch, tmp_path, capsys)
     output = strip_ansi(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert ".. model proposed plan - 1 step(s)" in output
     assert ".. plan waiting for approval - 1 step(s)" in output
     assert "Use /approve to execute this plan or /reject to cancel it." in output
     assert ".. plan approved" in output
     assert ".. plan step started - Run calculator" in output
     assert ".. plan step completed - Run calculator" in output
-    assert "plan        completed" in output
+    assert "done ·" in output
     assert "The result is 4." in output
 
 
@@ -527,7 +566,6 @@ def test_main_plan_prefix_creates_one_shot_pending_plan(monkeypatch, tmp_path, c
     approved_prompt = fake_llm.requests[1][0]["content"]
 
     assert exit_code == 0
-    assert ".. model proposed plan - 1 step(s)" in output
     assert ".. plan waiting for approval - 1 step(s)" in output
     assert "Use /approve to execute this plan or /reject to cancel it." in output
     assert "Model proposed a new plan after execution had already been approved." not in output
@@ -579,7 +617,7 @@ def test_main_plan_prefix_reject_flow(monkeypatch, tmp_path, capsys):
     assert "Add file inspection flow" in output
     assert ".. plan rejected" in output
     assert "Plan rejected. No tools were run." in output
-    assert "plan        rejected" in output
+    assert "done ·" in output
 
 
 def test_main_pending_plan_blocks_normal_input(monkeypatch, tmp_path, capsys):
@@ -632,9 +670,9 @@ def test_main_pending_plan_blocks_normal_input(monkeypatch, tmp_path, capsys):
     assert fake_llm.request_count == 1
 
 
-def test_main_quiet_mode_hides_live_progress(monkeypatch, tmp_path, capsys):
+def test_main_quiet_display_hides_live_progress(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    inputs = iter(["/quiet on", "what is 2 + 2?", "/q"])
+    inputs = iter(["/display quiet", "what is 2 + 2?", "/q"])
 
     class QuietFakeLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
@@ -652,15 +690,15 @@ def test_main_quiet_mode_hides_live_progress(monkeypatch, tmp_path, capsys):
     output = strip_ansi(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert "quiet mode on" in output
+    assert "display mode quiet" in output
     assert ".. starting turn" not in output
-    assert "Turn Summary" not in output
+    assert "done ·" not in output
     assert "quiet answer" in output
 
 
-def test_main_verbose_mode_shows_event_names(monkeypatch, tmp_path, capsys):
+def test_main_verbose_display_shows_event_names(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    inputs = iter(["/verbose on", "what is 2 + 2?", "/q"])
+    inputs = iter(["/display verbose", "what is 2 + 2?", "/q"])
 
     class VerboseFakeLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
@@ -678,16 +716,17 @@ def test_main_verbose_mode_shows_event_names(monkeypatch, tmp_path, capsys):
     output = strip_ansi(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert "verbose mode on" in output
+    assert "display mode verbose" in output
     assert "turn_started - starting turn" in output
     assert "model_request_started - asking model" in output
     assert "model_response_parsed - model returned final answer" in output
     assert "verbose answer" in output
+    assert output.index("verbose answer") < output.index("Turn Summary")
 
 
-def test_main_summary_mode_can_be_disabled(monkeypatch, tmp_path, capsys):
+def test_main_display_command_reports_current_mode(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    inputs = iter(["/summary off", "hello", "/q"])
+    inputs = iter(["/display", "hello", "/q"])
 
     class SummaryFakeLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
@@ -705,9 +744,10 @@ def test_main_summary_mode_can_be_disabled(monkeypatch, tmp_path, capsys):
     output = strip_ansi(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert "turn summary off" in output
+    assert "display mode compact" in output
     assert "Turn Summary" not in output
     assert "summary-free answer" in output
+    assert "done ·" in output
 
 
 def test_main_prints_version(capsys):
@@ -746,6 +786,21 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "max_tool_stdout_chars: 8000" in output
     assert "max_tool_stderr_chars: 4000" in output
     assert "max_reflection_attempts: 0" in output
+
+
+def test_main_show_config_reports_invalid_configuration_without_traceback(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_LLM_PROVIDER", "not-a-provider")
+
+    exit_code = main(["--show-config"])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "configuration error" in captured.err
+    assert "CHULK_LLM_PROVIDER" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_create_cli_llm_uses_public_fallback_provider_specs(tmp_path):
@@ -799,6 +854,227 @@ def test_main_runs_one_message_with_fake_llm(capsys):
 
     assert exit_code == 0
     assert output.strip() == "hello from fake llm"
+
+
+def test_main_exec_emits_structured_json(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+
+    exit_code = main(["exec", "hello", "there", "--json"], llm_client_factory=fake_factory)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["content"] == "hello from fake llm"
+    assert payload["conversation_id"]
+    assert payload["trace_path"].endswith(f"{payload['conversation_id']}.jsonl")
+
+
+def test_main_exec_returns_runtime_error_for_failed_turn(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+
+    exit_code = main(
+        ["exec", "hello", "--json"],
+        llm_client_factory=lambda _config: FakeLLMClient("not action json"),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["status"] == "failed"
+    assert "not valid action JSON" in payload["content"]
+
+
+def test_main_exec_plain_failure_writes_only_to_stderr(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+
+    exit_code = main(
+        ["exec", "hello"],
+        llm_client_factory=lambda _config: FakeLLMClient("not action json"),
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "not valid action JSON" in captured.err
+
+
+def test_main_exec_uses_current_directory_as_default_project_root(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("CHULK_PROJECT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    configured_roots = []
+
+    def factory(config):
+        configured_roots.append(config.project_root)
+        return FakeLLMClient()
+
+    exit_code = main(["exec", "hello"], llm_client_factory=factory)
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == "mocked response"
+    assert configured_roots == [tmp_path.resolve()]
+
+
+def test_main_exec_json_keeps_configuration_failure_machine_readable(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_LLM_PROVIDER", "invalid")
+
+    exit_code = main(["exec", "hello", "--json"], llm_client_factory=fake_factory)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["status"] == "configuration_error"
+    assert "CHULK_LLM_PROVIDER" in payload["error"]
+
+
+def test_main_exec_denies_interactive_permission_and_returns_exit_three(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
+
+    class PermissionFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "content": None,
+                        "tool_name": "run_cmd",
+                        "arguments_json": json.dumps({"command": "printf should-not-run"}),
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The command was not run."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    exit_code = main(
+        ["exec", "run", "a", "shell", "command", "--json"],
+        llm_client_factory=lambda _config: PermissionFakeLLM(),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 3
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["status"] == "approval_required"
+    assert payload["tool_calls"] == [
+        {
+            "error": "permission_denied",
+            "failure_kind": "user_blocked",
+            "success": False,
+            "tool_name": "run_cmd",
+        }
+    ]
+
+
+def test_main_exec_tracks_hosted_mcp_approval_without_tool_record(monkeypatch, tmp_path, capsys):
+    mcp_dir = tmp_path / ".chulk"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example.com",
+                        "allowed_tools": ["search_docs"],
+                        "approval": "always",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
+
+    class HostedApprovalFakeLLM(LLMClient):
+        def complete_action(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            hosted_mcp_servers=None,
+            mcp_approval_callback=None,
+            **_kwargs,
+        ) -> LLMActionResult:
+            assert [server.label for server in hosted_mcp_servers] == ["docs"]
+            assert mcp_approval_callback is not None
+            approved = mcp_approval_callback(
+                {
+                    "id": "approval-1",
+                    "server_label": "docs",
+                    "name": "search_docs",
+                    "arguments": "{}",
+                }
+            )
+            assert approved is False
+            return LLMActionResult(
+                action=FinalAnswerAction(type="final_answer", content="The MCP request was denied."),
+                raw_response='{"type":"final_answer","content":"The MCP request was denied."}',
+            )
+
+    exit_code = main(
+        ["exec", "search", "the", "docs", "--json"],
+        llm_client_factory=lambda _config: HostedApprovalFakeLLM(),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 3
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["status"] == "approval_required"
+    assert payload["tool_calls"] == []
+
+
+def test_main_exec_does_not_treat_policy_denial_as_approval_required(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "read-only")
+
+    class PolicyDenialFakeLLM(LLMClient):
+        def __init__(self) -> None:
+            self.responses = [
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "tool_name": "run_cmd",
+                        "arguments": {"command": "printf should-not-run"},
+                    }
+                ),
+                json.dumps({"type": "final_answer", "content": "The command was blocked by policy."}),
+            ]
+
+        def complete(self, messages: list[dict[str, str]]) -> str:
+            return self.responses.pop(0)
+
+    exit_code = main(
+        ["exec", "run", "a", "shell", "command", "--json"],
+        llm_client_factory=lambda _config: PolicyDenialFakeLLM(),
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["tool_calls"][0]["error"] == "permission_denied"
 
 
 def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
@@ -959,7 +1235,7 @@ def test_main_e2e_uses_openai_native_tool_calling(monkeypatch, tmp_path, capsys)
 
     assert exit_code == 0
     assert "The result is 4." in output
-    assert "tools       calculator x1" in output
+    assert "1 tool call" in output
     assert len(fake_openai.responses.calls) == 2
     assert first_call["tool_choice"] == "auto"
     assert "tools" in first_call
@@ -1123,8 +1399,9 @@ def test_main_reports_missing_openai_key(monkeypatch, tmp_path, capsys):
 
     exit_code = main(["--once", "hello"])
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
 
-    assert exit_code == 1
-    assert "configuration error" in output
-    assert "OPENAI_API_KEY" in output
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "configuration error" in captured.err
+    assert "OPENAI_API_KEY" in captured.err

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import argparse
+from argparse import Namespace
 from collections.abc import Sequence
+import sys
 from typing import Callable
 
 from chulk import __version__
@@ -14,9 +15,20 @@ from chulk.cli import (
     ProgressReporter,
     ProgressSettings,
     TerminalUI,
+    command_completion_candidates,
     handle_cli_command,
 )
-from chulk.config import Config, load_config
+from chulk.cli.entrypoints import (
+    EXIT_CONFIGURATION_ERROR,
+    EXIT_OK,
+    json_text,
+    run_doctor_command,
+    run_exec_command,
+    run_init_command,
+    run_trace_command,
+)
+from chulk.cli.parser import build_parser
+from chulk.config import Config, load_cli_config
 from chulk.core import Agent
 from chulk.llm import (
     DeepSeekProvider,
@@ -29,32 +41,8 @@ from chulk.llm import (
 )
 from chulk.presets import software_engineer
 from chulk.runtime import create_agent
-from chulk.sessions import SQLiteSessionStore
+from chulk.sessions import AmbiguousSessionError, SessionNotFoundError, SQLiteSessionStore
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="chulk",
-        description="Run the ChulkHarness agent runtime.",
-    )
-    parser.add_argument(
-        "--version",
-        action="store_true",
-        help="Print the ChulkHarness version and exit.",
-    )
-    parser.add_argument(
-        "--show-config",
-        action="store_true",
-        help="Print resolved local configuration and exit.",
-    )
-    parser.add_argument(
-        "--once",
-        metavar="MESSAGE",
-        help="Send one message to the agent and exit.",
-    )
-    return parser
 
 
 def format_config(config: Config) -> str:
@@ -158,8 +146,10 @@ def run_chat_loop(
     agent_factory: Callable[[str], Agent] | None = None,
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
+    error_func: Callable[[str], None] | None = None,
 ) -> int:
     """Run the interactive chat loop."""
+    error_func = error_func or _print_stderr
     terminal = terminal or TerminalUI.themed()
     progress_settings = ProgressSettings()
     progress_reporter = ProgressReporter(
@@ -180,6 +170,8 @@ def run_chat_loop(
     agent.permission_callback = permission_callback
     session_store = SQLiteSessionStore(config.store_path) if config is not None else None
     prompt_history = PromptHistory.create(enabled=input_func is input)
+    if hasattr(prompt_history, "configure_completion"):
+        prompt_history.configure_completion(command_completion_candidates())
     _load_prompt_history(prompt_history, session_store, agent)
     if config is not None:
         output_func(terminal.banner(config, agent))
@@ -202,6 +194,11 @@ def run_chat_loop(
         terminal=terminal,
         progress_settings=progress_settings,
         output_func=output_func,
+        response_func=lambda response: (
+            None
+            if progress_reporter.streamed_answer
+            else output_func(terminal.assistant_message(response))
+        ),
         session_store=session_store,
         agent_factory=agent_factory,
         switch_agent=switch_agent,
@@ -228,36 +225,40 @@ def run_chat_loop(
 
         prompt_history.add(user_message)
 
+        progress_reporter.reset_stream_state()
+        handled = False
         try:
-            if handle_cli_command(user_message.strip(), command_context):
-                continue
+            handled = handle_cli_command(user_message.strip(), command_context)
         except LLMError as exc:
-            output_func(terminal.error(f"error: {exc}"))
+            error_func(terminal.error(f"error: {exc}"))
             return 1
         except Exception as exc:
-            output_func(terminal.error(f"error: unexpected failure: {exc}"))
+            error_func(terminal.error(f"error: unexpected failure: {exc}"))
             return 1
         finally:
             progress_reporter.close()
+        if handled:
+            progress_reporter.flush_summary()
+            continue
 
         if command_context.agent.has_pending_plan():
             output_func(terminal.warning("A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."))
             continue
 
         try:
-            progress_reporter.reset_stream_state()
             assistant_response = command_context.agent.run_turn(user_message)
         except LLMError as exc:
-            output_func(terminal.error(f"error: {exc}"))
+            error_func(terminal.error(f"error: {exc}"))
             return 1
         except Exception as exc:
-            output_func(terminal.error(f"error: unexpected failure: {exc}"))
+            error_func(terminal.error(f"error: unexpected failure: {exc}"))
             return 1
         finally:
             progress_reporter.close()
 
         if not progress_reporter.streamed_answer:
             output_func(terminal.assistant_message(assistant_response))
+        progress_reporter.flush_summary()
 
 
 def _load_prompt_history(
@@ -278,40 +279,89 @@ def main(
     *,
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
+    error_func: Callable[[str], None] | None = None,
     llm_client_factory: Callable[[Config], LLMClient] | None = None,
 ) -> int:
     """Run the current CLI."""
+    error_func = error_func or _print_stderr
     parser = build_parser()
     args = parser.parse_args(argv)
-    terminal = TerminalUI.themed()
+    terminal = TerminalUI.themed(color=args.color)
 
     if args.version:
-        print(f"ChulkHarness {__version__}")
-        return 0
+        output_func(f"ChulkHarness {__version__}")
+        return EXIT_OK
+
+    if args.command == "init":
+        return run_init_command(
+            args.project_root,
+            mode=args.init_mode,
+            json_output=args.json_output,
+            output_func=output_func,
+            error_func=error_func,
+        )
+    if args.command == "doctor":
+        return run_doctor_command(json_output=args.json_output, output_func=output_func)
+    if args.command == "trace":
+        return run_trace_command(
+            args.trace_command,
+            args.path,
+            json_output=args.json_output,
+            output_path=getattr(args, "output", None),
+            force=bool(getattr(args, "force", False)),
+            output_func=output_func,
+            error_func=error_func,
+        )
 
     if args.show_config:
-        print(format_config(load_config()))
-        return 0
+        try:
+            output_func(format_config(load_cli_config()))
+        except (OSError, ValueError) as exc:
+            error_func(terminal.error(f"configuration error: {exc}"))
+            return EXIT_CONFIGURATION_ERROR
+        return EXIT_OK
 
     try:
-        config = load_config()
-        agent = create_cli_agent(config, llm_client_factory)
+        config = load_cli_config()
+    except (OSError, ValueError, LLMConfigurationError) as exc:
+        if args.command == "exec" and getattr(args, "json_output", False):
+            output_func(json_text({"ok": False, "status": "configuration_error", "error": str(exc)}))
+        else:
+            error_func(terminal.error(f"configuration error: {exc}"))
+        return EXIT_CONFIGURATION_ERROR
+
+    if args.command == "exec" or args.once is not None:
+        if args.resume or args.continue_session:
+            error_func(terminal.error("configuration error: --resume and --continue are interactive-only"))
+            return EXIT_CONFIGURATION_ERROR
+        message = " ".join(args.message) if args.command == "exec" else str(args.once)
+        json_output = bool(getattr(args, "json_output", False))
+        return run_exec_command(
+            message,
+            agent_factory=lambda: create_cli_agent(config, llm_client_factory),
+            json_output=json_output,
+            output_func=output_func,
+            error_func=error_func,
+        )
+
+    try:
+        conversation_id = _resolve_startup_conversation(config, args)
+    except (SessionNotFoundError, AmbiguousSessionError) as exc:
+        error_func(terminal.error(f"session error: {exc}"))
+        return EXIT_CONFIGURATION_ERROR
+    try:
+        agent = create_cli_agent(config, llm_client_factory, conversation_id=conversation_id)
         agent.permission_callback = _make_cli_permission_callback(
             terminal,
             input_func=input_func,
             output_func=output_func,
         )
+    except (SessionNotFoundError, AmbiguousSessionError) as exc:
+        error_func(terminal.error(f"session error: {exc}"))
+        return EXIT_CONFIGURATION_ERROR
     except (ValueError, LLMConfigurationError) as exc:
-        output_func(terminal.error(f"configuration error: {exc}"))
-        return 1
-
-    if args.once is not None:
-        try:
-            output_func(agent.run_turn(args.once))
-        except LLMError as exc:
-            output_func(f"error: {exc}")
-            return 1
-        return 0
+        error_func(terminal.error(f"configuration error: {exc}"))
+        return EXIT_CONFIGURATION_ERROR
 
     return run_chat_loop(
         agent,
@@ -324,7 +374,23 @@ def main(
         ),
         input_func=input_func,
         output_func=output_func,
+        error_func=error_func,
     )
+
+
+def _resolve_startup_conversation(config: Config, args: Namespace) -> str | None:
+    if args.resume:
+        return str(args.resume)
+    if not args.continue_session:
+        return None
+    latest = SQLiteSessionStore(config.store_path).latest_conversation()
+    if latest is None:
+        raise SessionNotFoundError("No persisted session is available to continue")
+    return latest.id
+
+
+def _print_stderr(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 def _make_cli_permission_callback(
