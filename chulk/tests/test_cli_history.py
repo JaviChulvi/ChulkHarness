@@ -7,6 +7,9 @@ from chulk.sessions.models import MessageRecord
 class FakeReadline:
     def __init__(self) -> None:
         self.items: list[str] = []
+        self.completer = None
+        self.delimiters = ""
+        self.binding = ""
 
     def clear_history(self) -> None:
         self.items.clear()
@@ -21,6 +24,15 @@ class FakeReadline:
         if index < 1 or index > len(self.items):
             return None
         return self.items[index - 1]
+
+    def set_completer_delims(self, delimiters: str) -> None:
+        self.delimiters = delimiters
+
+    def set_completer(self, completer) -> None:
+        self.completer = completer
+
+    def parse_and_bind(self, binding: str) -> None:
+        self.binding = binding
 
 
 def test_prompt_history_loads_user_messages_only():
@@ -64,3 +76,16 @@ def test_prompt_history_does_not_duplicate_latest_prompt():
     history.add("next prompt")
 
     assert readline.items == ["same prompt", "next prompt"]
+
+
+def test_prompt_history_configures_command_completion():
+    readline = FakeReadline()
+    history = PromptHistory(readline=readline, enabled=True)
+
+    history.configure_completion(["/status", "/sessions", "/status"])
+
+    assert readline.delimiters == "\n"
+    assert readline.binding == "tab: complete"
+    assert readline.completer("/sta", 0) == "/status"
+    assert readline.completer("/sta", 1) is None
+    assert readline.completer("/s", 1) == "/sessions"
