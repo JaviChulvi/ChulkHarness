@@ -11,7 +11,7 @@ from typing import Protocol
 from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
-from chulk.core.events import AgentEvent
+from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
 from chulk.mcp import create_mcp_bridge_tools
@@ -91,12 +91,18 @@ def create_agent(
         max_content_chars=config.max_skill_content_chars,
     )
     state = _create_agent_state(session_store, conversation_id)
-    trace_logger = JSONLTraceLogger(config.traces_dir, state.conversation_id)
+    trace_logger = JSONLTraceLogger(
+        config.traces_dir,
+        state.conversation_id,
+        defer_until_event=TraceEvent.TURN_STARTED if conversation_id is None else None,
+    )
     skill_registry.load_metadata()
     skill_resolution = _resolve_skill_specs(skill_registry, skill_specs)
     for warning_payload in skill_resolution.warnings:
         warnings.warn(warning_payload["message"], UserWarning, stacklevel=2)
         trace_logger.log("skill_config_warning", warning_payload)
+    if skill_resolution.warnings:
+        trace_logger.activate()
     conversation_memory = ConversationMemory(max_messages=config.history_limit)
     if conversation_id is not None:
         latest_summary = session_store.load_latest_summary(state.conversation_id)
@@ -118,6 +124,7 @@ def create_agent(
         provider=config.llm_provider,
         model=config.model,
         trace_path=trace_logger.path,
+        lazy=conversation_id is None,
     )
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
