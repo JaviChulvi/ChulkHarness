@@ -410,9 +410,9 @@ Run the current CLI:
 chulk
 ```
 
-The interactive CLI always uses a Hulk-green terminal theme. During interactive turns, Chulk prints compact live progress lines such as memory search, skill selection, model requests, tool calls, command previews, elapsed time, and turn completion. Real terminals also show a small ASCII spinner while the model or a tool is working. Arrow up/down navigates prompt history for the active session when terminal `readline` support is available. The input prompt is intentionally short (`>`) so the transcript does not repeat a heavy label on every line. `chulk --once` remains plain output for scripting.
+The interactive CLI uses color only for a real TTY and honors `NO_COLOR`; use `--color auto|always|never` to override detection. The default `compact` display keeps routine memory, skill, and model bookkeeping out of the transcript while preserving tool calls, permissions, plans, failures, and a one-line end-of-turn summary. `/display verbose` exposes all trace-driven progress and the detailed summary, while `/display quiet` prints only assistant responses and necessary prompts.
 
-At the end of each turn, Chulk prints a compact summary with total time, model request count, tools used, selected memory count, selected skills, context estimate, and the trace path. Use `/context` to inspect the latest prompt section breakdown, `/quiet on` to hide live progress, `/verbose on` to include trace-event names in progress lines, and `/summary off` to hide the summary block.
+Real terminals show a small ASCII spinner while the model or a tool is working. Arrow up/down navigates the active session's prompt history, and Tab completes registered slash commands when terminal `readline` support is available. Unknown slash commands are rejected locally with a suggestion instead of being sent to the model. The prompt remains intentionally short (`>`).
 
 Useful interactive commands:
 
@@ -429,23 +429,55 @@ Useful interactive commands:
 - `/plan`
 - `/approve`
 - `/reject`
-- `/quiet on|off`
-- `/verbose on|off`
-- `/summary on|off`
+- `/display compact|verbose|quiet`
 - `/clear`
-- `/q`
+- `/exit` (`/quit` and `/q` are aliases)
 
-Send a single message and exit:
+Start directly in a persisted conversation:
 
 ```bash
-chulk --once "Hello"
+chulk --resume <conversation_id>
+chulk --continue
 ```
+
+Fresh interactive sessions are persisted only after their first turn, so opening Chulk and immediately exiting does not create an empty conversation or trace.
+
+Run a non-interactive request. Diagnostics go to stderr and stdout contains only the result:
+
+```bash
+chulk exec "Hello"
+chulk exec "Inspect this repository" --json
+```
+
+`chulk --once "Hello"` remains a compatibility alias for plain `chulk exec`. Non-interactive runs deny approval-gated tools instead of waiting for terminal input. Exit code `0` means success, `1` a runtime/provider failure, `2` a configuration or usage failure, and `3` that interactive approval was required.
 
 Inspect local configuration:
 
 ```bash
 chulk --show-config
 ```
+
+Initialize and diagnose a project without making a model request:
+
+```bash
+chulk init --coding-agent
+chulk init --sdk
+chulk init --read-only
+chulk doctor
+chulk doctor --json
+```
+
+`chulk init` creates missing `.chulk/mcp.json`, `.chulk/skills/`, and `.env.example` files and adds runtime paths to `.gitignore`; it does not replace existing files. `chulk doctor` validates configuration, provider credentials, model metadata, runtime writability, MCP auth, and Git ignore coverage without contacting the provider.
+
+Inspect or export a trace without starting an agent:
+
+```bash
+chulk trace inspect traces/<conversation_id>.jsonl
+chulk trace inspect traces/<conversation_id>.jsonl --json
+chulk trace export traces/<conversation_id>.jsonl --format html
+```
+
+Trace exports contain raw runtime data and should be handled as sensitive artifacts.
 
 Run tests:
 
@@ -475,7 +507,7 @@ chulk
 Run a one-shot message:
 
 ```bash
-chulk --once "Hello"
+chulk exec "Hello"
 ```
 
 Built-in tools currently registered at startup:

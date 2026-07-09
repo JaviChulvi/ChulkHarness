@@ -1266,19 +1266,19 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [ ] Add fatal safety errors that stop the turn immediately.
 - [ ] Add prompt-injection warnings for web, browser, and external document inputs.
 - [ ] Warn when trace or runtime state is created inside a Git-tracked path.
-- [ ] Make `chulk doctor` detect whether `.chulk/`, `traces/`, `chulk/store.sqlite`, and `*.sqlite` are ignored.
+- [x] Make `chulk doctor` detect whether `.chulk/`, `traces/`, `chulk/store.sqlite`, and `*.sqlite` are ignored.
 
 #### Phase E: Trace Productization
 
 - [ ] Treat traces as a public product surface, not only internal logs.
 - [ ] Add a trace schema version to every JSONL event.
 - [ ] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
-- [ ] Add a public trace reader: `Trace.from_jsonl(path)`.
-- [ ] Expose typed trace events with event type and timestamp.
-- [ ] Add `chulk trace inspect <path>`.
-- [ ] Add `chulk trace export <path> --format html`.
+- [x] Add a public trace reader: `Trace.from_jsonl(path)`.
+- [x] Expose typed trace events with event type and timestamp.
+- [x] Add `chulk trace inspect <path>`.
+- [x] Add `chulk trace export <path> --format html`.
 - [ ] Add `chulk trace replay <path>`.
-- [ ] Add a minimal HTML trace export.
+- [x] Add a minimal HTML trace export.
 - [ ] Include user request, prompt context, loaded memories, loaded skills, tool calls, tool outputs, permission decisions, final answer, errors, token usage, and cost usage in trace exports.
 - [ ] Log available tools in traces.
 - [ ] Log timing information in traces.
@@ -1310,10 +1310,10 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [ ] Add provider capability API exposed publicly as `agent.provider.capabilities` or equivalent.
 - [ ] Add provider health checks.
 - [ ] Add invalid-model diagnostics for missing API keys, bad model names, unavailable endpoints, and unsupported tool schemas.
-- [ ] Add `chulk doctor`.
-- [ ] Add `chulk init`.
-- [ ] Add `chulk init --sdk`, `--coding-agent`, and `--read-only`.
-- [ ] Make `chulk init` create `.chulk/mcp.json`, `.chulk/skills/`, `.env.example`, and update `.gitignore`.
+- [x] Add `chulk doctor`.
+- [x] Add `chulk init`.
+- [x] Add `chulk init --sdk`, `--coding-agent`, and `--read-only`.
+- [x] Make `chulk init` create `.chulk/mcp.json`, `.chulk/skills/`, `.env.example`, and update `.gitignore`.
 - [ ] Split docs by audience under `docs/`: index, quickstart, sdk, cli, tools, permissions, skills, memory, tracing, providers, mcp, safety, and release policy.
 - [ ] Add one end-to-end `examples/repo_review_bot/` killer example.
 - [ ] Include a sample trace export in the repo review example.
@@ -1489,8 +1489,8 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 ### Interfaces And Product Surfaces
 
-- [ ] Add non-interactive `chulk exec` for scripts and CI.
-- [ ] Add JSON output mode for automation.
+- [x] Add non-interactive `chulk exec` for scripts and CI.
+- [x] Add JSON output mode for automation.
 - [ ] Add richer Python SDK around `AgentHandle`.
 - [ ] Add JSON-RPC app server.
 - [ ] Add WebSocket event streaming.
@@ -1595,7 +1595,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [ ] Add golden tests for tool-use loops.
 - [ ] Add safety red-team prompts.
 - [ ] Add prompt-performance dashboards.
-- [ ] Add `chulk doctor` diagnostics.
+- [x] Add `chulk doctor` diagnostics.
 - [ ] Add config validation command.
 - [ ] Add tool inventory drift checks.
 - [ ] Add release-readiness checklist command.
