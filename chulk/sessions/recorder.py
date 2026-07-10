@@ -20,20 +20,22 @@ class SessionRecorder:
         provider: str,
         model: str,
         trace_path: Path | str | None = None,
+        lazy: bool = False,
     ) -> None:
         self.store = store
         self.conversation_id = conversation_id
         self.current_turn_id: str | None = None
         self._observation_counts: dict[str, int] = {}
-        self.store.create_conversation(
-            conversation_id,
-            provider=provider,
-            model=model,
-            trace_path=str(trace_path) if trace_path is not None else None,
-        )
+        self.provider = provider
+        self.model = model
+        self.trace_path = str(trace_path) if trace_path is not None else None
+        self.persisted = False
+        if not lazy:
+            self._ensure_conversation()
 
     def callback(self, event_type: str, payload: dict[str, Any]) -> None:
         """Persist the subset of trace events needed to resume and inspect sessions."""
+        self._ensure_conversation()
         if event_type == TraceEvent.TURN_STARTED:
             turn = payload.get("turn")
             if isinstance(turn, dict):
@@ -184,6 +186,17 @@ class SessionRecorder:
             turn = payload.get("turn")
             if isinstance(turn, dict):
                 self.store.save_turn_snapshot(self.conversation_id, turn)
+
+    def _ensure_conversation(self) -> None:
+        if self.persisted:
+            return
+        self.store.create_conversation(
+            self.conversation_id,
+            provider=self.provider,
+            model=self.model,
+            trace_path=self.trace_path,
+        )
+        self.persisted = True
 
 
 def _payload_turn_id(payload: dict[str, Any], fallback: str | None) -> str | None:

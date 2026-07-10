@@ -193,6 +193,28 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
     )
 
 
+def resolve_cli_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | str | None = None,
+) -> dict[str, str]:
+    """Return CLI environment values with one explicit project root."""
+    env = dict(os.environ if environ is None else environ)
+    if not env.get("CHULK_PROJECT_ROOT"):
+        project_root = Path.cwd() if cwd is None else Path(cwd)
+        env["CHULK_PROJECT_ROOT"] = str(project_root.expanduser().resolve())
+    return env
+
+
+def load_cli_config(
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | str | None = None,
+) -> Config:
+    """Load CLI configuration relative to the current project directory."""
+    return load_config(resolve_cli_environment(environ, cwd=cwd))
+
+
 def bundled_skills_dir() -> Path:
     """Return the installed path for Chulk's bundled skill playbooks."""
     return Path(__file__).resolve().parent / "skills" / "bundled"

@@ -259,6 +259,20 @@ class SQLiteSessionStore:
             ).fetchall()
         return [_row_to_conversation(row) for row in rows]
 
+    def latest_conversation(self, *, require_turn: bool = True) -> ConversationRecord | None:
+        """Return the most recently updated resumable conversation."""
+        where = (
+            "WHERE EXISTS (SELECT 1 FROM conversation_turns "
+            "WHERE conversation_turns.conversation_id = conversations.id)"
+            if require_turn
+            else ""
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                _conversation_select_sql(f"{where} ORDER BY conversations.updated_at DESC LIMIT 1")
+            ).fetchone()
+        return _row_to_conversation(row) if row is not None else None
+
     def save_message(
         self,
         conversation_id: str,

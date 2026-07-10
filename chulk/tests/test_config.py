@@ -172,18 +172,18 @@ def test_environment_overrides_dotenv(tmp_path):
     assert config.model == "env-model"
 
 
-def test_invalid_integer_config_raises():
+def test_invalid_integer_config_raises(tmp_path):
     try:
-        load_config({"CHULK_HISTORY_LIMIT": "zero"})
+        load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_HISTORY_LIMIT": "zero"})
     except ValueError as exc:
         assert "CHULK_HISTORY_LIMIT" in str(exc)
     else:
         raise AssertionError("Expected invalid integer config to fail")
 
 
-def test_invalid_reflection_attempts_config_raises():
+def test_invalid_reflection_attempts_config_raises(tmp_path):
     try:
-        load_config({"CHULK_MAX_REFLECTION_ATTEMPTS": "-1"})
+        load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_MAX_REFLECTION_ATTEMPTS": "-1"})
     except ValueError as exc:
         assert "CHULK_MAX_REFLECTION_ATTEMPTS" in str(exc)
     else:

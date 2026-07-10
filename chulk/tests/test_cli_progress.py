@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from io import StringIO
+import re
 import time
+from types import SimpleNamespace
 
-from chulk.cli import Spinner, TerminalUI
+from chulk.cli import CLI_COMMANDS, Spinner, TerminalUI
 
 
 class TTYBuffer(StringIO):
@@ -66,3 +68,54 @@ def test_turn_summary_formats_token_usage_and_cost():
     )
 
     assert "usage       15 tokens (12 in, 3 out est), ~$0.000004" in output
+
+
+def test_terminal_color_auto_respects_tty_no_color_and_force_modes():
+    tty = TTYBuffer()
+
+    automatic = TerminalUI.themed(stream=tty, environ={"TERM": "xterm-256color"})
+    disabled = TerminalUI.themed(stream=tty, environ={"TERM": "xterm-256color", "NO_COLOR": ""})
+    forced = TerminalUI.themed(stream=StringIO(), color="always", environ={"TERM": "dumb"})
+
+    assert automatic.color_enabled is True
+    assert disabled.color_enabled is False
+    assert forced.color_enabled is True
+    assert TerminalUI.themed(stream=StringIO()).color_enabled is False
+
+
+def test_help_alignment_is_calculated_before_ansi_styling():
+    ui = TerminalUI(color_enabled=True, width=100)
+    output = re.sub(r"\x1b\[[0-9;]*m", "", ui.help_text(CLI_COMMANDS))
+    command_lines = [line for line in output.splitlines() if line.startswith("  /")]
+    status_line = next(line for line in command_lines if line.lstrip().startswith("/status"))
+    context_line = next(line for line in command_lines if line.lstrip().startswith("/context"))
+
+    assert status_line.index("show runtime") == context_line.index("show the latest")
+
+
+def test_help_reflows_without_exceeding_narrow_terminal_width():
+    ui = TerminalUI(color_enabled=False, width=36)
+
+    output = ui.help_text(CLI_COMMANDS)
+
+    assert max(len(line) for line in output.splitlines()) <= 36
+
+
+def test_banner_reflows_without_exceeding_narrow_terminal_width(tmp_path):
+    ui = TerminalUI(color_enabled=False, width=36)
+    config = SimpleNamespace(
+        llm_provider="openai",
+        model="gpt-4.1-mini",
+        llm_fallback_providers=(),
+        permission_profile="workspace-write",
+        project_root=tmp_path,
+        mcp_servers=(),
+    )
+    agent = SimpleNamespace(
+        state=SimpleNamespace(conversation_id="conversation-123"),
+        tool_registry=SimpleNamespace(list_tools=lambda: [object(), object()]),
+    )
+
+    output = ui.banner(config, agent)
+
+    assert max(len(line) for line in output.splitlines()) <= 36

@@ -16,11 +16,26 @@ from chulk.core import Agent, TraceEvent
 
 @dataclass
 class ProgressSettings:
-    """Runtime display settings toggled by slash commands."""
+    """Single, explicit display mode for interactive progress."""
 
-    quiet: bool = False
-    verbose: bool = False
-    summary: bool = True
+    mode: str = "compact"
+
+    def __post_init__(self) -> None:
+        self.set_mode(self.mode)
+
+    @property
+    def quiet(self) -> bool:
+        return self.mode == "quiet"
+
+    @property
+    def verbose(self) -> bool:
+        return self.mode == "verbose"
+
+    def set_mode(self, mode: str) -> None:
+        clean_mode = mode.strip().lower()
+        if clean_mode not in {"compact", "verbose", "quiet"}:
+            raise ValueError("display mode must be compact, verbose, or quiet")
+        self.mode = clean_mode
 
 
 class Spinner:
@@ -103,6 +118,7 @@ class ProgressReporter:
         self.current_activity: str | None = None
         self.streamed_answer: bool = False
         self._stream_open: bool = False
+        self._pending_summary: str | None = None
 
     def callback(self, event_type: str, payload: dict) -> None:
         """Handle one agent event."""
@@ -125,18 +141,24 @@ class ProgressReporter:
         if self.settings.quiet:
             return
 
-        line = self.terminal.progress(
-            event_type,
-            payload,
-            elapsed_seconds=self._elapsed(now),
-            duration_seconds=self._duration(event_type, payload, now),
-            verbose=self.settings.verbose,
-        )
-        if line is not None:
-            self.output_func(line)
+        if self.settings.verbose or _show_in_compact_mode(event_type):
+            line = self.terminal.progress(
+                event_type,
+                payload,
+                elapsed_seconds=self._elapsed(now),
+                duration_seconds=self._duration(event_type, payload, now),
+                verbose=self.settings.verbose,
+            )
+            if line is not None:
+                self.output_func(line)
 
-        if event_type == TraceEvent.TURN_FINISHED and self.settings.summary:
-            self.output_func(self.terminal.turn_summary(payload, config=self.config, agent=self.agent))
+        if event_type == TraceEvent.TURN_FINISHED:
+            self._pending_summary = self.terminal.turn_summary(
+                payload,
+                config=self.config,
+                agent=self.agent,
+                compact=not self.settings.verbose,
+            )
 
         self._start_spinner_if_needed(event_type, payload)
 
@@ -149,6 +171,15 @@ class ProgressReporter:
     def reset_stream_state(self) -> None:
         self.streamed_answer = False
         self._stream_open = False
+        self._pending_summary = None
+
+    def flush_summary(self) -> None:
+        """Print a completed turn summary after the assistant response."""
+        if self._pending_summary is None or self.settings.quiet:
+            self._pending_summary = None
+            return
+        self.output_func(self._pending_summary)
+        self._pending_summary = None
 
     def _elapsed(self, now: float) -> float | None:
         if self.turn_started_at is None:
@@ -226,6 +257,28 @@ class ProgressReporter:
                 self._stream_open = False
             return True
         return True
+
+
+_COMPACT_PROGRESS_EVENTS = {
+    TraceEvent.CONTEXT_SUMMARY_CREATED,
+    TraceEvent.PLAN_CREATED,
+    TraceEvent.PLAN_APPROVED,
+    TraceEvent.PLAN_REJECTED,
+    TraceEvent.PLAN_REVISION_REQUESTED,
+    TraceEvent.PLAN_STEP_STARTED,
+    TraceEvent.PLAN_STEP_COMPLETED,
+    TraceEvent.PLAN_STEP_BLOCKED,
+    TraceEvent.TOOL_PERMISSION_REQUESTED,
+    TraceEvent.TOOL_PERMISSION_DECIDED,
+    TraceEvent.TOOL_CALL_STARTED,
+    TraceEvent.TOOL_CALL_COMPLETED,
+    TraceEvent.TOOL_CALL_FAILED,
+    TraceEvent.TURN_FAILED,
+}
+
+
+def _show_in_compact_mode(event_type: str) -> bool:
+    return event_type in _COMPACT_PROGRESS_EVENTS
 
 
 def _tool_key(payload: dict) -> int:

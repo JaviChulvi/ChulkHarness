@@ -43,6 +43,20 @@ class PromptHistory:
             return
         self.readline.add_history(clean_prompt)
 
+    def configure_completion(self, candidates: Iterable[str]) -> None:
+        """Enable tab completion for the registered interactive commands."""
+        if not self.enabled or self.readline is None:
+            return
+        values = tuple(dict.fromkeys(value.strip() for value in candidates if value.strip()))
+
+        def complete(text: str, state: int) -> str | None:
+            matches = [value for value in values if value.startswith(text)]
+            return matches[state] if state < len(matches) else None
+
+        self.readline.set_completer_delims("\n")
+        self.readline.set_completer(complete)
+        self.readline.parse_and_bind("tab: complete")
+
     def _latest(self) -> str | None:
         if self.readline is None:
             return None

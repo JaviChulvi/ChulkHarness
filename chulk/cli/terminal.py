@@ -12,6 +12,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
+import textwrap
+from collections.abc import Iterable, Mapping
+from typing import TextIO
 
 from chulk.config import Config
 from chulk.core import Agent, TraceEvent
@@ -31,59 +35,82 @@ class TerminalUI:
 
     color_enabled: bool = True
     width: int = 80
+    interactive: bool = True
 
     @classmethod
-    def themed(cls) -> "TerminalUI":
-        """Create the default Hulk-green terminal formatter."""
-        width = shutil.get_terminal_size((80, 24)).columns
-        return cls(color_enabled=True, width=max(64, min(width, 110)))
+    def themed(
+        cls,
+        *,
+        stream: TextIO | None = None,
+        color: str = "auto",
+        environ: Mapping[str, str] | None = None,
+        width: int | None = None,
+    ) -> "TerminalUI":
+        """Create a TTY-aware Hulk-green terminal formatter."""
+        output_stream = stream or sys.stdout
+        env = os.environ if environ is None else environ
+        interactive = bool(getattr(output_stream, "isatty", lambda: False)())
+        color_mode = color.strip().lower()
+        if color_mode not in {"auto", "always", "never"}:
+            raise ValueError("color mode must be auto, always, or never")
+        color_enabled = color_mode == "always" or (
+            color_mode == "auto"
+            and interactive
+            and "NO_COLOR" not in env
+            and env.get("TERM", "").lower() != "dumb"
+        )
+        terminal_width = width if width is not None else shutil.get_terminal_size((80, 24)).columns
+        return cls(
+            color_enabled=color_enabled,
+            width=max(32, min(terminal_width, 110)),
+            interactive=interactive,
+        )
 
     def prompt(self) -> str:
         """Return the interactive input prompt."""
         return f"{self.accent('>')} "
 
     def banner(self, config: Config, agent: Agent) -> str:
-        """Return the startup banner."""
-        title = "ChulkHarness CLI"
-        top = _rule(title, self.width)
-        bottom = "+" + "-" * (len(top) - 2) + "+"
-        trace_path = agent.trace_logger.path if agent.trace_logger else None
-        rows = [
-            self._row("mode", "interactive agent harness"),
-            self._row("provider", _provider_text(config)),
-            self._row("session", _short_id(agent.state.conversation_id)),
-            self._row("project", _short_path(config.project_root)),
-            self._row("permissions", config.permission_profile),
-            self._row("tools", str(len(agent.tool_registry.list_tools()))),
-            self._row("mcp", _mcp_status_text(config, agent)),
-            self._row("trace", _short_path(trace_path) if trace_path else "disabled"),
-        ]
-        return "\n".join([self.accent(top), *rows, self.accent(bottom)])
+        """Return a compact, responsive startup banner."""
+        primary = f"ChulkHarness CLI · {_provider_text(config)} · {config.permission_profile}"
+        secondary = (
+            f"{_short_path(config.project_root)} · session {_short_id(agent.state.conversation_id)} · "
+            f"{len(agent.tool_registry.list_tools())} tools · mcp {_mcp_status_text(config, agent)}"
+        )
+        lines = _wrap_text(primary, self.width)
+        lines.extend(_wrap_text(secondary, self.width))
+        return "\n".join(
+            [self.accent(lines[0]), *[self.muted(line) for line in lines[1:]]]
+        )
 
-    def help_text(self) -> str:
-        """Return slash-command help."""
-        commands = [
-            ("/help", "show this command list"),
-            ("/status", "show provider, model, project, tools, and trace"),
-            ("/context", "show latest prompt context report"),
-            ("/tools", "list registered tools"),
-            ("/mcp", "show configured MCP servers and provider path"),
-            ("/sessions", "list recent persisted sessions"),
-            ("/resume <id>", "resume a persisted session"),
-            ("/history", "show recent persisted messages"),
-            ("/trace", "show the current trace file"),
-            ("/plan <request>", "propose a plan for one request"),
-            ("/plan", "show current plan status"),
-            ("/approve", "approve a pending plan"),
-            ("/reject", "reject a pending plan"),
-            ("/verbose on|off", "show or hide extra progress details"),
-            ("/quiet on|off", "show or hide live progress lines"),
-            ("/summary on|off", "show or hide the end-of-turn summary"),
-            ("/clear", "clear the terminal screen"),
-            ("/q", "exit the session"),
-        ]
+    def help_text(self, commands: Iterable[object] | None = None) -> str:
+        """Return grouped help generated from the command registry."""
+        if commands is None:
+            from chulk.cli.commands import CLI_COMMANDS
+
+            commands = CLI_COMMANDS
+        command_list = list(commands)
         lines = [self.heading("Commands")]
-        lines.extend(f"  {self.accent(command):<12} {description}" for command, description in commands)
+        categories = list(dict.fromkeys(str(getattr(command, "category")) for command in command_list))
+        for category in categories:
+            lines.append(self.muted(f"  {category}"))
+            category_commands = [
+                command for command in command_list if str(getattr(command, "category")) == category
+            ]
+            usages = [str(getattr(command, "usage")) for command in category_commands]
+            column_width = min(max((len(usage) for usage in usages), default=0), 32)
+            for command in category_commands:
+                usage = str(getattr(command, "usage"))
+                description = str(getattr(command, "description"))
+                if self.width < 60 or len(usage) > column_width:
+                    lines.append(f"  {self.accent(usage)}")
+                    lines.extend(f"    {line}" for line in _wrap_text(description, max(20, self.width - 4)))
+                    continue
+                padded_usage = usage.ljust(column_width)
+                description_width = max(20, self.width - column_width - 5)
+                wrapped_description = _wrap_text(description, description_width)
+                lines.append(f"  {self.accent(padded_usage)}  {wrapped_description[0]}")
+                lines.extend(f"  {' ' * column_width}  {line}" for line in wrapped_description[1:])
         return "\n".join(lines)
 
     def status(self, config: Config, agent: Agent) -> str:
@@ -254,8 +281,15 @@ class TerminalUI:
             return None
         return f"{self.muted('..')} {message}"
 
-    def turn_summary(self, payload: dict, *, config: Config | None = None, agent: Agent | None = None) -> str:
-        """Return a compact end-of-turn summary."""
+    def turn_summary(
+        self,
+        payload: dict,
+        *,
+        config: Config | None = None,
+        agent: Agent | None = None,
+        compact: bool = False,
+    ) -> str:
+        """Return a one-line or detailed end-of-turn summary."""
         turn = payload.get("turn", {})
         tool_counts = _tool_counts(turn.get("tool_calls", []))
         skills = turn.get("loaded_skill_names", [])
@@ -264,6 +298,21 @@ class TerminalUI:
         plan_text = "none"
         if isinstance(plan, dict):
             plan_text = plan.get("status", "unknown")
+        if compact:
+            duration = _format_duration(_turn_duration(turn))
+            requests = int(turn.get("model_request_count") or 0)
+            tool_total = sum(tool_counts.values())
+            usage = turn.get("model_usage_totals", {}).get("usage", {})
+            token_total = int(usage.get("total_tokens") or 0) if isinstance(usage, dict) else 0
+            parts = [
+                "done",
+                duration,
+                f"{requests} model request{'s' if requests != 1 else ''}",
+                f"{tool_total} tool call{'s' if tool_total != 1 else ''}",
+            ]
+            if token_total:
+                parts.append(f"{_format_count(token_total)} tokens")
+            return self.muted(" · ".join(parts))
         lines = [
             self.heading("Turn Summary"),
             f"  worked for  {_format_duration(_turn_duration(turn))}",
@@ -287,6 +336,9 @@ class TerminalUI:
     def bye(self, agent: Agent | None = None) -> str:
         if agent is None:
             return self.muted("bye")
+        recorder = getattr(agent, "session_recorder", None)
+        if recorder is not None and not bool(getattr(recorder, "persisted", False)):
+            return self.muted("bye")
         command = f"/resume {agent.state.conversation_id}"
         return "\n".join(
             [
@@ -297,10 +349,10 @@ class TerminalUI:
         )
 
     def hint(self) -> str:
-        return self.muted("Type /help for commands. Type /exit, /quit, or /q to end the session.")
+        return self.muted("Type /help for commands. Type /exit to end the session.")
 
     def clear(self) -> str:
-        return "\033[2J\033[H" if self.color_enabled else "[screen cleared]"
+        return "\033[2J\033[H" if self.interactive else "[screen cleared]"
 
     def heading(self, text: str) -> str:
         return self.accent(f"> {text}")
@@ -318,7 +370,7 @@ class TerminalUI:
         return self._paint(text, MUTED)
 
     def _row(self, label: str, value: str) -> str:
-        return f"| {self.muted(label):<10} {value}"
+        return f"| {self.muted(label.ljust(10))} {value}"
 
     def _paint(self, text: str, rgb: tuple[int, int, int], *, bold: bool = False) -> str:
         if not self.color_enabled:
@@ -462,6 +514,16 @@ def _context_section_detail(section: dict) -> str:
         if isinstance(roles, dict) and roles:
             return ", ".join(f"{role} {count}" for role, count in sorted(roles.items()))
     return ""
+
+
+def _wrap_text(text: str, width: int) -> list[str]:
+    """Wrap plain terminal text before ANSI styling is applied."""
+    return textwrap.wrap(
+        text,
+        width=max(20, width),
+        break_long_words=True,
+        break_on_hyphens=False,
+    ) or [""]
 
 
 def _rule(title: str, width: int) -> str:

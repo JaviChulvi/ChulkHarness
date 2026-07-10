@@ -275,11 +275,19 @@ def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch,
 
     agent = create_agent(config, lambda _config: FakeLLMClient(), tool_specs=[])
 
+    assert agent.trace_logger.path.exists() is False
+    assert SQLiteSessionStore(config.store_path).list_conversations() == []
+    agent.run_turn("inspect MCP configuration")
+
     events = [json.loads(line) for line in agent.trace_logger.path.read_text(encoding="utf-8").splitlines()]
     assert calls == [["docs"]]
     assert agent.mcp_bridge_tool_names == ["mcp_docs_search_docs"]
     assert agent.tool_registry.get("mcp_docs_search_docs").requires_confirmation is True
-    assert [event["type"] for event in events] == ["mcp_config_loaded", "mcp_tool_discovery_completed"]
+    assert [event["type"] for event in events[:3]] == [
+        "mcp_config_loaded",
+        "mcp_tool_discovery_completed",
+        "turn_started",
+    ]
     assert events[0]["payload"]["provider_path"] == "bridge"
     assert events[1]["payload"]["bridge_required"] is True
 
@@ -445,6 +453,70 @@ def test_cli_lists_resumes_and_shows_history(monkeypatch, tmp_path, capsys):
     assert "first persisted answer" in output
     assert any(message["content"] == "first persisted message" for message in resumed_request_messages)
     assert any(message["content"] == "first persisted answer" for message in resumed_request_messages)
+
+
+def test_cli_resume_flag_starts_in_existing_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    first_exit = main(
+        ["--once", "remember startup resume"],
+        llm_client_factory=lambda _config: FakeLLMClient(
+            [json.dumps({"type": "final_answer", "content": "remembered"})]
+        ),
+    )
+    store = SQLiteSessionStore(tmp_path / "chulk" / "store.sqlite")
+    session_id = store.list_conversations()[0].id
+    resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "resumed directly"})])
+    inputs = iter(["continue directly", "/q"])
+
+    second_exit = main(
+        ["--resume", session_id[:8]],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: resumed_llm,
+    )
+
+    output = capsys.readouterr().out
+
+    assert first_exit == 0
+    assert second_exit == 0
+    assert "resumed directly" in output
+    assert any(message["content"] == "remember startup resume" for message in resumed_llm.requests[0])
+    assert len(store.list_conversations()) == 1
+
+
+def test_cli_continue_resumes_latest_nonempty_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    main(
+        ["--once", "latest session marker"],
+        llm_client_factory=lambda _config: FakeLLMClient(
+            [json.dumps({"type": "final_answer", "content": "stored"})]
+        ),
+    )
+    continued_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "continued latest"})])
+    inputs = iter(["continue", "/q"])
+
+    exit_code = main(
+        ["--continue"],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: continued_llm,
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "continued latest" in output
+    assert any(message["content"] == "latest session marker" for message in continued_llm.requests[0])
+
+
+def test_cli_continue_without_session_fails_cleanly(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+
+    exit_code = main(["--continue"], llm_client_factory=lambda _config: FakeLLMClient())
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "No persisted session is available to continue" in captured.err
 
 
 def test_cli_resume_reloads_arrow_key_prompt_history(monkeypatch, tmp_path, capsys):
