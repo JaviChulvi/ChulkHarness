@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from chulk import Agent, AgentConfig, AgentHandle, AsyncAgent
+from chulk import Agent, AgentConfig, AgentHandle, AsyncAgent, ConfigurationError
 from chulk.core import Agent as CoreAgent
 from chulk.llm import LLMClient
 import chulk.runtime as runtime_module
@@ -51,7 +51,7 @@ def test_public_agent_close_is_idempotent_and_rejects_new_work(tmp_path):
         facade.reject,
         facade.reject_result,
     ):
-        with pytest.raises(RuntimeError, match="Agent is closed"):
+        with pytest.raises(ConfigurationError, match="Agent is closed"):
             operation()
 
 
@@ -84,7 +84,7 @@ async def test_async_context_manager_closes_once_and_rejects_work(tmp_path):
 
     await facade.close()
     assert facade.closed
-    with pytest.raises(RuntimeError, match="Agent is closed"):
+    with pytest.raises(ConfigurationError, match="Agent is closed"):
         await facade.run("again")
 
 

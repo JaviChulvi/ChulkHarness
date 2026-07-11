@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from chulk.redaction import redact_data, redact_text
 from chulk.tools.permissions import ToolPermissionLevel, normalize_permission_level
 from chulk.tools.schema import ToolValidationError, ToolValidationIssue, validate_tool_arguments, validate_tool_schema
 
@@ -145,7 +146,7 @@ class ToolRegistry:
                 metadata={
                     "requested_tool_name": name,
                     "available_tools": available_tools,
-                    "exception": str(exc),
+                    "exception": redact_text(str(exc)),
                 },
             )
             self._log_call(name, arguments, result)
@@ -187,12 +188,12 @@ class ToolRegistry:
                 tool_name=tool.name,
                 success=False,
                 observation=(
-                    f"Tool execution failed for {tool.name}: {exc}. "
+                    f"Tool execution failed for {tool.name}: {redact_text(str(exc))}. "
                     "Retry only if corrected arguments or a safer alternative would change the outcome."
                 ),
-                error=str(exc),
+                error=redact_text(str(exc)),
                 failure_kind=ToolFailureKind.ENVIRONMENT,
-                metadata={"exception_type": type(exc).__name__},
+                metadata=redact_data({"exception_type": type(exc).__name__}),
             )
 
         self._log_call(name, arguments, result)
@@ -218,7 +219,7 @@ class ToolRegistry:
                 metadata={
                     "requested_tool_name": name,
                     "available_tools": available_tools,
-                    "exception": str(exc),
+                    "exception": redact_text(str(exc)),
                 },
             )
             self._log_call(name, arguments, result)
@@ -253,12 +254,12 @@ class ToolRegistry:
                 tool_name=tool.name,
                 success=False,
                 observation=(
-                    f"Tool execution failed for {tool.name}: {exc}. "
+                    f"Tool execution failed for {tool.name}: {redact_text(str(exc))}. "
                     "Retry only if corrected arguments or a safer alternative would change the outcome."
                 ),
-                error=failure_kind if failure_kind == ToolFailureKind.CANCELLED else str(exc),
+                error=failure_kind if failure_kind == ToolFailureKind.CANCELLED else redact_text(str(exc)),
                 failure_kind=failure_kind,
-                metadata={"exception_type": type(exc).__name__},
+                metadata=redact_data({"exception_type": type(exc).__name__}),
             )
 
         self._log_call(name, arguments, result)

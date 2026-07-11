@@ -15,6 +15,17 @@ from chulk._sdk.facade import (
     chat_agent,
 )
 from chulk._sdk.results import PlanResult, PlanSnapshot, RunResult
+from chulk.errors import (
+    ChulkError,
+    ConfigurationError,
+    ErrorDetails,
+    MemoryError,
+    PermissionDeniedError,
+    ProviderError,
+    SafetyError,
+    ToolExecutionError,
+    TraceError,
+)
 
 
 __all__ = [
@@ -27,10 +38,19 @@ __all__ = [
     "AsyncAgentHandle",
     "AsyncChatAgent",
     "ChatAgent",
+    "ChulkError",
+    "ConfigurationError",
+    "ErrorDetails",
     "MCP",
+    "MemoryError",
+    "PermissionDeniedError",
     "PlanResult",
     "PlanSnapshot",
     "RunResult",
+    "ProviderError",
+    "SafetyError",
+    "ToolExecutionError",
+    "TraceError",
     "agent",
     "async_agent",
     "async_chat_agent",

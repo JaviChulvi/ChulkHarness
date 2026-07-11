@@ -10,9 +10,17 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from chulk.errors import ErrorDetails, TraceError
 
-class TraceFormatError(ValueError):
+
+class TraceFormatError(TraceError, ValueError):
     """Raised when a trace cannot be parsed safely."""
+
+    def __init__(self, message: str, *, trace_path: Path | str | None = None) -> None:
+        super().__init__(
+            message,
+            details=ErrorDetails(trace_path=str(trace_path) if trace_path is not None else None),
+        )
 
 
 @dataclass(frozen=True)
@@ -44,14 +52,14 @@ class Trace:
     def from_jsonl(cls, path: Path | str) -> "Trace":
         trace_path = Path(path).expanduser().resolve()
         if not trace_path.exists():
-            raise TraceFormatError(f"Trace file does not exist: {trace_path}")
+            raise TraceFormatError(f"Trace file does not exist: {trace_path}", trace_path=trace_path)
         if not trace_path.is_file():
-            raise TraceFormatError(f"Trace path is not a file: {trace_path}")
+            raise TraceFormatError(f"Trace path is not a file: {trace_path}", trace_path=trace_path)
 
         try:
             trace_text = trace_path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            raise TraceFormatError(f"Trace file is not valid UTF-8: {trace_path}") from exc
+            raise TraceFormatError(f"Trace file is not valid UTF-8: {trace_path}", trace_path=trace_path) from exc
 
         events: list[TraceRecord] = []
         for line_number, raw_line in enumerate(trace_text.splitlines(), start=1):
@@ -60,21 +68,36 @@ class Trace:
             try:
                 value = json.loads(raw_line)
             except json.JSONDecodeError as exc:
-                raise TraceFormatError(f"Invalid JSON on trace line {line_number}: {exc.msg}") from exc
+                raise TraceFormatError(
+                    f"Invalid JSON on trace line {line_number}: {exc.msg}",
+                    trace_path=trace_path,
+                ) from exc
             if not isinstance(value, dict):
-                raise TraceFormatError(f"Trace line {line_number} must contain a JSON object")
+                raise TraceFormatError(
+                    f"Trace line {line_number} must contain a JSON object",
+                    trace_path=trace_path,
+                )
             event_type = value.get("type")
             payload = value.get("payload", {})
             created_at = value.get("created_at")
             if not isinstance(event_type, str) or not event_type:
-                raise TraceFormatError(f"Trace line {line_number} is missing a string event type")
+                raise TraceFormatError(
+                    f"Trace line {line_number} is missing a string event type",
+                    trace_path=trace_path,
+                )
             if not isinstance(payload, dict):
-                raise TraceFormatError(f"Trace line {line_number} has a non-object payload")
+                raise TraceFormatError(
+                    f"Trace line {line_number} has a non-object payload",
+                    trace_path=trace_path,
+                )
             if not isinstance(created_at, str):
-                raise TraceFormatError(f"Trace line {line_number} is missing created_at")
+                raise TraceFormatError(
+                    f"Trace line {line_number} is missing created_at",
+                    trace_path=trace_path,
+                )
             events.append(TraceRecord(event_type, payload, created_at, line_number))
         if not events:
-            raise TraceFormatError(f"Trace file contains no events: {trace_path}")
+            raise TraceFormatError(f"Trace file contains no events: {trace_path}", trace_path=trace_path)
         return cls(path=trace_path, events=tuple(events))
 
     def summary(self) -> dict[str, Any]:

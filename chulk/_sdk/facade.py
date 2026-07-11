@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config, ensure_chat_kwargs
+from chulk._sdk.error_mapping import map_public_error
 from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher
 from chulk._sdk.results import PlanResult, RunResult, plan_snapshot
 from chulk.config import Config
@@ -21,6 +22,7 @@ from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
+T = TypeVar("T")
 
 
 class AgentHandle:
@@ -454,20 +456,26 @@ class Agent:
         redaction_callback: Callable[[str, str, dict], str] | None = None,
         redaction_fail_closed: bool = False,
     ) -> None:
-        self._handle = _build_handle(
-            config=config,
-            preset=preset,
-            llm=llm,
-            tools=tools,
-            skills=skills,
-            system_prompt=system_prompt,
-            conversation_id=conversation_id,
-            permission_callback=permission_callback,
-            on_event=on_event,
-            mcp=mcp,
-            redaction_callback=redaction_callback,
-            redaction_fail_closed=redaction_fail_closed,
-        )
+        try:
+            self._handle = _build_handle(
+                config=config,
+                preset=preset,
+                llm=llm,
+                tools=tools,
+                skills=skills,
+                system_prompt=system_prompt,
+                conversation_id=conversation_id,
+                permission_callback=permission_callback,
+                on_event=on_event,
+                mcp=mcp,
+                redaction_callback=redaction_callback,
+                redaction_fail_closed=redaction_fail_closed,
+            )
+        except Exception as exc:
+            mapped = map_public_error(exc, config=config, operation="construct")
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
     @property
     def runtime(self) -> CoreAgent:
@@ -498,41 +506,50 @@ class Agent:
         return self._handle.closed
 
     def run(self, message: str, **kwargs: Any) -> str:
-        return self._handle.run(message, **kwargs)
+        return self._invoke("run", lambda: self._handle.run(message, **kwargs))
 
     def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return self._handle.run_result(message, **kwargs)
+        return self._invoke("run_result", lambda: self._handle.run_result(message, **kwargs))
 
     def __call__(self, message: str) -> str:
         return self.run(message)
 
     def plan(self, message: str) -> str:
-        return self._handle.plan(message)
+        return self._invoke("plan", lambda: self._handle.plan(message))
 
     def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
-        return self._handle.plan_result(message, **kwargs)
+        return self._invoke("plan_result", lambda: self._handle.plan_result(message, **kwargs))
 
     def approve(self) -> str:
-        return self._handle.approve()
+        return self._invoke("approve", self._handle.approve)
 
     def approve_result(self, **kwargs: Any) -> RunResult:
-        return self._handle.approve_result(**kwargs)
+        return self._invoke("approve_result", lambda: self._handle.approve_result(**kwargs))
 
     def reject(self) -> str:
-        return self._handle.reject()
+        return self._invoke("reject", self._handle.reject)
 
     def reject_result(self, **kwargs: Any) -> RunResult:
-        return self._handle.reject_result(**kwargs)
+        return self._invoke("reject_result", lambda: self._handle.reject_result(**kwargs))
 
     def close(self) -> None:
-        self._handle.close()
+        self._invoke("close", self._handle.close)
 
     def __enter__(self) -> "Agent":
-        self._handle._ensure_open()
+        self._invoke("enter", self._handle._ensure_open)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    def _invoke(self, operation: str, call: Callable[[], T]) -> T:
+        try:
+            return call()
+        except Exception as exc:
+            mapped = map_public_error(exc, runtime=self.runtime, operation=operation)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
 
 class AsyncAgent:
@@ -571,38 +588,47 @@ class AsyncAgent:
         return self._handle.closed
 
     async def run(self, message: str, **kwargs: Any) -> str:
-        return await self._handle.run(message, **kwargs)
+        return await self._invoke_async("run", lambda: self._handle.run(message, **kwargs))
 
     async def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return await self._handle.run_result(message, **kwargs)
+        return await self._invoke_async("run_result", lambda: self._handle.run_result(message, **kwargs))
 
     async def plan(self, message: str) -> str:
-        return await self._handle.plan(message)
+        return await self._invoke_async("plan", lambda: self._handle.plan(message))
 
     async def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
-        return await self._handle.plan_result(message, **kwargs)
+        return await self._invoke_async("plan_result", lambda: self._handle.plan_result(message, **kwargs))
 
     async def approve(self) -> str:
-        return await self._handle.approve()
+        return await self._invoke_async("approve", self._handle.approve)
 
     async def approve_result(self, **kwargs: Any) -> RunResult:
-        return await self._handle.approve_result(**kwargs)
+        return await self._invoke_async("approve_result", lambda: self._handle.approve_result(**kwargs))
 
     async def reject(self) -> str:
-        return await self._handle.reject()
+        return await self._invoke_async("reject", self._handle.reject)
 
     async def reject_result(self, **kwargs: Any) -> RunResult:
-        return await self._handle.reject_result(**kwargs)
+        return await self._invoke_async("reject_result", lambda: self._handle.reject_result(**kwargs))
 
     async def close(self) -> None:
-        await self._handle.close()
+        await self._invoke_async("close", self._handle.close)
 
     async def __aenter__(self) -> "AsyncAgent":
-        self._agent._handle._ensure_open()
+        self._agent._invoke("enter", self._agent._handle._ensure_open)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+    async def _invoke_async(self, operation: str, call: Callable[[], Awaitable[T]]) -> T:
+        try:
+            return await call()
+        except Exception as exc:
+            mapped = map_public_error(exc, runtime=self.runtime, operation=operation)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
 
 def _build_handle(

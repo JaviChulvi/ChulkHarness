@@ -28,6 +28,16 @@ class PermissionDecision(str, Enum):
     ASK = "ask"
 
 
+class TerminalPermissionDenied(PermissionError):
+    """Internal terminal denial retaining safe tool and policy context."""
+
+    def __init__(self, tool_name: str, reason: str, *, policy_name: str = "default") -> None:
+        self.tool_name = tool_name
+        self.reason = reason
+        self.policy_name = policy_name
+        super().__init__(f"Permission denied for tool {tool_name}: {reason}")
+
+
 DEFAULT_PERMISSION_PROFILE = "workspace-write"
 SUPPORTED_PERMISSION_PROFILES = ("read-only", "workspace-write", "trusted-local", "full-access")
 

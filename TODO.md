@@ -1233,7 +1233,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add context-manager support: `with Agent(config=config) as agent: ...`.
 - [x] Add async context-manager support for `AsyncAgent`.
 - [x] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
-- [ ] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
+- [x] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
 - [ ] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
 - [ ] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
 - [ ] Document the public API stability policy before 1.0.

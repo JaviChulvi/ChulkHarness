@@ -28,6 +28,14 @@ DEFAULT_MAX_REFLECTION_ATTEMPTS = 0
 SUPPORTED_LLM_PROVIDERS = supported_llm_providers()
 
 
+class ConfigValueError(ValueError):
+    """Internal validation error retaining the invalid environment field."""
+
+    def __init__(self, field: str, message: str) -> None:
+        self.field = field
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class LLMFallbackProviderConfig:
     """One configured fallback provider after the primary LLM."""
@@ -93,9 +101,9 @@ def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise ValueError(f"{key} must be an integer") from exc
+        raise ConfigValueError(key, f"{key} must be an integer") from exc
     if parsed < 1:
-        raise ValueError(f"{key} must be greater than zero")
+        raise ConfigValueError(key, f"{key} must be greater than zero")
     return parsed
 
 
@@ -106,9 +114,9 @@ def _env_nonnegative_int(env: Mapping[str, str], key: str, default: int) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise ValueError(f"{key} must be an integer") from exc
+        raise ConfigValueError(key, f"{key} must be an integer") from exc
     if parsed < 0:
-        raise ValueError(f"{key} must be zero or greater")
+        raise ConfigValueError(key, f"{key} must be zero or greater")
     return parsed
 
 
@@ -119,9 +127,9 @@ def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
     try:
         parsed = float(value)
     except ValueError as exc:
-        raise ValueError(f"{key} must be a number") from exc
+        raise ConfigValueError(key, f"{key} must be a number") from exc
     if parsed <= 0:
-        raise ValueError(f"{key} must be greater than zero")
+        raise ConfigValueError(key, f"{key} must be greater than zero")
     return parsed
 
 
@@ -143,7 +151,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
     llm_provider = (env.get("CHULK_LLM_PROVIDER") or DEFAULT_PROVIDER).lower()
     if llm_provider not in SUPPORTED_LLM_PROVIDERS:
         supported = ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
-        raise ValueError(f"CHULK_LLM_PROVIDER must be one of: {supported}")
+        raise ConfigValueError("CHULK_LLM_PROVIDER", f"CHULK_LLM_PROVIDER must be one of: {supported}")
 
     default_model = _default_model_for_provider(llm_provider)
     model = env.get("CHULK_MODEL") or default_model

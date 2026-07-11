@@ -584,12 +584,19 @@ class SQLiteMemoryStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        try:
+            conn = sqlite3.connect(self.db_path)
+        except sqlite3.Error as exc:
+            _annotate_memory_error(exc, "connect")
+            raise
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
+        except sqlite3.Error as exc:
+            _annotate_memory_error(exc, "transaction")
+            raise
         finally:
             conn.close()
 
@@ -607,6 +614,14 @@ def select_memories_for_prompt(
     profile_ids = {memory.id for memory in profile}
     relevant = [memory for memory in relevant if memory.id not in profile_ids]
     return profile, relevant
+
+
+def _annotate_memory_error(exc: sqlite3.Error, operation: str) -> None:
+    """Attach non-sensitive store context for the public boundary mapper."""
+    try:
+        exc.memory_operation = operation  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
 
 
 def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
