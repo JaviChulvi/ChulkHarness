@@ -270,12 +270,9 @@ def test_public_agent_dispatches_events_from_constructor_and_run(tmp_path):
 
     assert response == "evented answer"
     assert "".join(deltas) == "evented answer"
-    assert constructor_events[0].type == "turn_started"
-    assert [event.type for event in run_events if event.type.startswith("model_stream_")] == [
-        "model_stream_started",
-        "model_stream_delta",
-        "model_stream_completed",
-    ]
+    assert constructor_events[0].type == "run.started"
+    assert [event.type for event in run_events if event.type == "model.delta"] == ["model.delta"]
+    assert run_events[-1].type == "run.completed"
 
 
 def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
@@ -390,7 +387,10 @@ def test_public_agent_redacts_streamed_and_final_output(tmp_path):
 
     assert response == "[redacted] answer"
     assert "".join(deltas) == "[redacted] answer"
-    assert any(event.type == "final_answer" and event.payload["content"] == "[redacted] answer" for event in events)
+    assert any(
+        event.type == "run.completed" and event.payload.result.content == "[redacted] answer"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

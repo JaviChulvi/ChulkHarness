@@ -1,7 +1,6 @@
 """Stable public programmable API for Chulk."""
 
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
-from chulk._sdk.events import AgentEvent
 from chulk._sdk.facade import (
     Agent,
     AgentHandle,
@@ -26,6 +25,21 @@ from chulk.errors import (
     ToolExecutionError,
     TraceError,
 )
+from chulk.events import (
+    EVENT_SCHEMA_VERSION,
+    AgentEvent,
+    EventName,
+    ModelDeltaPayload,
+    ModelRequestPayload,
+    ModelResponsePayload,
+    PermissionPayload,
+    PlanPayload,
+    ResourcesLoadedPayload,
+    RunCompletedPayload,
+    RunFailedPayload,
+    RunStartedPayload,
+    ToolCallPayload,
+)
 
 
 __all__ = [
@@ -41,15 +55,27 @@ __all__ = [
     "ChulkError",
     "ConfigurationError",
     "ErrorDetails",
+    "EVENT_SCHEMA_VERSION",
+    "EventName",
     "MCP",
     "MemoryError",
+    "ModelDeltaPayload",
+    "ModelRequestPayload",
+    "ModelResponsePayload",
+    "PermissionPayload",
     "PermissionDeniedError",
     "PlanResult",
+    "PlanPayload",
     "PlanSnapshot",
     "RunResult",
     "ProviderError",
+    "ResourcesLoadedPayload",
+    "RunCompletedPayload",
+    "RunFailedPayload",
+    "RunStartedPayload",
     "SafetyError",
     "ToolExecutionError",
+    "ToolCallPayload",
     "TraceError",
     "agent",
     "async_agent",

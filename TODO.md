@@ -1234,8 +1234,8 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add async context-manager support for `AsyncAgent`.
 - [x] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
 - [x] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
-- [ ] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
-- [ ] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
+- [x] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
+- [x] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
 - [ ] Document the public API stability policy before 1.0.
 - [ ] Mark `chulk.core.*`, `chulk.runtime.*`, and undocumented trace payload fields as internal/unstable.
 - [ ] Consider public convenience constructors or aliases: `ChatAgent`, `CodingAgent`, `TrustedLocalAgent`, `Agent.safe()`, `Agent.workspace()`, and `Agent.trusted_local()`.

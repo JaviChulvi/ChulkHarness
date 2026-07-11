@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
+from contextlib import suppress
 from pathlib import Path
+import threading
 from typing import Any, Callable, TypeVar
 
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config, ensure_chat_kwargs
 from chulk._sdk.error_mapping import map_public_error
-from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher
-from chulk._sdk.results import PlanResult, RunResult, plan_snapshot
+from chulk._sdk.event_channel import RunEventChannel, RunGate
+from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher, failure_event, terminal_event
+from chulk._sdk.results import PlanResult, RunResult, plan_snapshot, run_result_from_runtime
 from chulk.config import Config
 from chulk.core import Agent as CoreAgent
 from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
+from chulk.events import AgentEvent, EventName
 from chulk.mcp import MCPServerConfig
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.tools import ToolExecutionContext
@@ -224,33 +228,7 @@ class AgentHandle:
         return self.runtime.state.turns[-1] if self.runtime.state.turns else None
 
     def _run_result(self, content: str) -> RunResult:
-        turn = self._last_turn()
-        usage_totals = turn.model_usage_totals if turn is not None else self.runtime.state.last_usage_report or {}
-        return RunResult(
-            content=content,
-            status=turn.status if turn is not None else "unknown",
-            turn_id=turn.turn_id if turn is not None else self.runtime.state.current_turn_id,
-            conversation_id=self.conversation_id,
-            trace_path=self.trace_path,
-            usage=usage_totals.get("usage") if isinstance(usage_totals, dict) else None,
-            cost=usage_totals.get("cost") if isinstance(usage_totals, dict) else None,
-            context_report=(
-                turn.context_reports[-1]
-                if turn is not None and turn.context_reports
-                else self.runtime.state.last_context_report
-            ),
-            tool_calls=[record.to_dict() for record in turn.tool_calls] if turn is not None else [],
-            observations=[record.to_dict() for record in turn.observations] if turn is not None else [],
-            loaded_skill_names=(
-                list(turn.loaded_skill_names) if turn is not None else list(self.runtime.state.loaded_skill_names)
-            ),
-            loaded_memory_ids=(
-                list(turn.loaded_memory_ids) if turn is not None else list(self.runtime.state.loaded_memory_ids)
-            ),
-            errors=list(turn.errors) if turn is not None else list(self.runtime.state.errors),
-            plan=plan_snapshot(turn.active_plan if turn is not None else self.runtime.state.active_plan),
-            extension_metadata=turn.extension_metadata if turn is not None else {},
-        )
+        return run_result_from_runtime(self.runtime, content)
 
     def _no_pending_plan_result(self, content: str) -> RunResult:
         return RunResult(
@@ -476,6 +454,7 @@ class Agent:
             if mapped is exc:
                 raise
             raise mapped from exc
+        self._run_gate = RunGate()
 
     @property
     def runtime(self) -> CoreAgent:
@@ -506,34 +485,63 @@ class Agent:
         return self._handle.closed
 
     def run(self, message: str, **kwargs: Any) -> str:
-        return self._invoke("run", lambda: self._handle.run(message, **kwargs))
+        return self._invoke("run", lambda: self._handle.run(message, **kwargs), serialized=True)
 
     def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return self._invoke("run_result", lambda: self._handle.run_result(message, **kwargs))
+        return self._invoke("run_result", lambda: self._handle.run_result(message, **kwargs), serialized=True)
 
     def __call__(self, message: str) -> str:
         return self.run(message)
 
     def plan(self, message: str) -> str:
-        return self._invoke("plan", lambda: self._handle.plan(message))
+        return self._invoke("plan", lambda: self._handle.plan(message), serialized=True)
 
     def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
-        return self._invoke("plan_result", lambda: self._handle.plan_result(message, **kwargs))
+        return self._invoke("plan_result", lambda: self._handle.plan_result(message, **kwargs), serialized=True)
 
     def approve(self) -> str:
-        return self._invoke("approve", self._handle.approve)
+        return self._invoke("approve", self._handle.approve, serialized=True)
 
     def approve_result(self, **kwargs: Any) -> RunResult:
-        return self._invoke("approve_result", lambda: self._handle.approve_result(**kwargs))
+        return self._invoke("approve_result", lambda: self._handle.approve_result(**kwargs), serialized=True)
 
     def reject(self) -> str:
-        return self._invoke("reject", self._handle.reject)
+        return self._invoke("reject", self._handle.reject, serialized=True)
 
     def reject_result(self, **kwargs: Any) -> RunResult:
-        return self._invoke("reject_result", lambda: self._handle.reject_result(**kwargs))
+        return self._invoke("reject_result", lambda: self._handle.reject_result(**kwargs), serialized=True)
 
     def close(self) -> None:
-        self._invoke("close", self._handle.close)
+        self._invoke("close", self._handle.close, serialized=True)
+
+    def run_events(self, message: str, **kwargs: Any) -> Iterator[AgentEvent]:
+        """Yield one run's ordered public events, including its terminal result."""
+        channel = RunEventChannel()
+        caller_on_event = kwargs.pop("on_event", None)
+
+        def on_event(event: AgentEvent) -> None:
+            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
+                channel.publish(event)
+            if caller_on_event is not None:
+                caller_on_event(event)
+
+        def work() -> None:
+            try:
+                result = self.run_result(message, on_event=on_event, **kwargs)
+            except Exception as exc:
+                event = failure_event(
+                    exc,
+                    conversation_id=self.conversation_id,
+                    turn_id=self.state.current_turn_id,
+                )
+                channel.finish(event)
+                _notify_event_callback_safely(caller_on_event, event)
+            else:
+                channel.finish(terminal_event(result))
+
+        worker = threading.Thread(target=work, name="chulk-run-events")
+        worker.start()
+        yield from channel.iterate(worker)
 
     def __enter__(self) -> "Agent":
         self._invoke("enter", self._handle._ensure_open)
@@ -542,8 +550,11 @@ class Agent:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _invoke(self, operation: str, call: Callable[[], T]) -> T:
+    def _invoke(self, operation: str, call: Callable[[], T], *, serialized: bool = False) -> T:
         try:
+            if serialized:
+                with self._run_gate.hold():
+                    return call()
             return call()
         except Exception as exc:
             mapped = map_public_error(exc, runtime=self.runtime, operation=operation)
@@ -558,6 +569,7 @@ class AsyncAgent:
     def __init__(self, **kwargs: Any) -> None:
         self._agent = Agent(**kwargs)
         self._handle = AsyncAgentHandle(self._agent._handle)
+        self._async_run_gate = asyncio.Lock()
 
     @property
     def runtime(self) -> CoreAgent:
@@ -588,31 +600,82 @@ class AsyncAgent:
         return self._handle.closed
 
     async def run(self, message: str, **kwargs: Any) -> str:
-        return await self._invoke_async("run", lambda: self._handle.run(message, **kwargs))
+        return await self._invoke_async("run", lambda: self._handle.run(message, **kwargs), serialized=True)
 
     async def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return await self._invoke_async("run_result", lambda: self._handle.run_result(message, **kwargs))
+        return await self._invoke_async("run_result", lambda: self._handle.run_result(message, **kwargs), serialized=True)
 
     async def plan(self, message: str) -> str:
-        return await self._invoke_async("plan", lambda: self._handle.plan(message))
+        return await self._invoke_async("plan", lambda: self._handle.plan(message), serialized=True)
 
     async def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
-        return await self._invoke_async("plan_result", lambda: self._handle.plan_result(message, **kwargs))
+        return await self._invoke_async(
+            "plan_result",
+            lambda: self._handle.plan_result(message, **kwargs),
+            serialized=True,
+        )
 
     async def approve(self) -> str:
-        return await self._invoke_async("approve", self._handle.approve)
+        return await self._invoke_async("approve", self._handle.approve, serialized=True)
 
     async def approve_result(self, **kwargs: Any) -> RunResult:
-        return await self._invoke_async("approve_result", lambda: self._handle.approve_result(**kwargs))
+        return await self._invoke_async(
+            "approve_result",
+            lambda: self._handle.approve_result(**kwargs),
+            serialized=True,
+        )
 
     async def reject(self) -> str:
-        return await self._invoke_async("reject", self._handle.reject)
+        return await self._invoke_async("reject", self._handle.reject, serialized=True)
 
     async def reject_result(self, **kwargs: Any) -> RunResult:
-        return await self._invoke_async("reject_result", lambda: self._handle.reject_result(**kwargs))
+        return await self._invoke_async(
+            "reject_result",
+            lambda: self._handle.reject_result(**kwargs),
+            serialized=True,
+        )
 
     async def close(self) -> None:
-        await self._invoke_async("close", self._handle.close)
+        await self._invoke_async("close", self._handle.close, serialized=True)
+
+    async def run_events_async(self, message: str, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        """Asynchronously yield one run's ordered public events and terminal result."""
+        channel = RunEventChannel()
+        caller_on_event = kwargs.pop("on_event", None)
+
+        def on_event(event: AgentEvent) -> None:
+            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
+                channel.publish(event)
+            if caller_on_event is not None:
+                caller_on_event(event)
+
+        async def work() -> None:
+            try:
+                result = await self.run_result(message, on_event=on_event, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                event = failure_event(
+                    exc,
+                    conversation_id=self.conversation_id,
+                    turn_id=self.state.current_turn_id,
+                )
+                channel.finish(event)
+                _notify_event_callback_safely(caller_on_event, event)
+            else:
+                channel.finish(terminal_event(result))
+
+        worker = asyncio.create_task(work())
+        try:
+            while True:
+                item = await asyncio.to_thread(channel.get)
+                if not isinstance(item, AgentEvent):
+                    break
+                yield item
+        finally:
+            channel.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
 
     async def __aenter__(self) -> "AsyncAgent":
         self._agent._invoke("enter", self._agent._handle._ensure_open)
@@ -621,14 +684,33 @@ class AsyncAgent:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def _invoke_async(self, operation: str, call: Callable[[], Awaitable[T]]) -> T:
+    async def _invoke_async(
+        self,
+        operation: str,
+        call: Callable[[], Awaitable[T]],
+        *,
+        serialized: bool = False,
+    ) -> T:
         try:
+            if serialized:
+                async with self._async_run_gate:
+                    return await call()
             return await call()
         except Exception as exc:
             mapped = map_public_error(exc, runtime=self.runtime, operation=operation)
             if mapped is exc:
                 raise
             raise mapped from exc
+
+
+def _notify_event_callback_safely(callback: EventCallback | None, event: AgentEvent) -> None:
+    """Best-effort delivery after a callback itself caused run failure."""
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        return
 
 
 def _build_handle(

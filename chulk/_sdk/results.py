@@ -114,3 +114,36 @@ def plan_snapshot(plan: Any | None) -> PlanSnapshot | None:
 
 
 __all__ = ["PlanResult", "PlanSnapshot", "RunResult"]
+
+
+def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResult:
+    """Build the public run snapshot from a completed internal runtime turn."""
+    state = runtime.state
+    turn = state.turns[-1] if state.turns else None
+    usage_totals = turn.model_usage_totals if turn is not None else state.last_usage_report or {}
+    terminal_content = content
+    if terminal_content is None and turn is not None:
+        terminal_content = turn.final_answer or (turn.errors[-1] if turn.errors else None)
+    if terminal_content is None:
+        terminal_content = state.final_answer or (state.errors[-1] if state.errors else "")
+    trace_logger = getattr(runtime, "trace_logger", None)
+    return RunResult(
+        content=terminal_content,
+        status=turn.status if turn is not None else "unknown",
+        turn_id=turn.turn_id if turn is not None else state.current_turn_id,
+        conversation_id=state.conversation_id,
+        trace_path=getattr(trace_logger, "path", None),
+        usage=usage_totals.get("usage") if isinstance(usage_totals, dict) else None,
+        cost=usage_totals.get("cost") if isinstance(usage_totals, dict) else None,
+        context_report=(turn.context_reports[-1] if turn is not None and turn.context_reports else state.last_context_report),
+        tool_calls=[record.to_dict() for record in turn.tool_calls] if turn is not None else [],
+        observations=[record.to_dict() for record in turn.observations] if turn is not None else [],
+        loaded_skill_names=list(turn.loaded_skill_names) if turn is not None else list(state.loaded_skill_names),
+        loaded_memory_ids=list(turn.loaded_memory_ids) if turn is not None else list(state.loaded_memory_ids),
+        errors=list(turn.errors) if turn is not None else list(state.errors),
+        plan=plan_snapshot(turn.active_plan if turn is not None else state.active_plan),
+        extension_metadata=turn.extension_metadata if turn is not None else {},
+    )
+
+
+__all__.append("run_result_from_runtime")

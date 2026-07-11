@@ -1886,7 +1886,10 @@ class Agent:
         memory_ids = self.memory_store.extract_and_save_memories(user_message)
         self.state.extracted_memory_ids = memory_ids
         if memory_ids:
-            self._trace(TraceEvent.MEMORY_EXTRACTION_COMPLETED, {"memory_ids": memory_ids})
+            self._trace(
+                TraceEvent.MEMORY_EXTRACTION_COMPLETED,
+                {"turn_id": self.state.current_turn_id, "memory_ids": memory_ids},
+            )
 
     def _select_long_term_memories(self, user_message: str) -> None:
         """Select durable memories that should shape this turn."""
@@ -1897,7 +1900,10 @@ class Agent:
         if self.memory_store is None:
             return
 
-        self._trace(TraceEvent.MEMORY_SEARCH_STARTED, {"query": user_message})
+        self._trace(
+            TraceEvent.MEMORY_SEARCH_STARTED,
+            {"turn_id": self.state.current_turn_id, "query": user_message},
+        )
         profile, relevant = select_memories_for_prompt(self.memory_store, user_message)
         self._profile_memories = profile
         self._relevant_memories = relevant
@@ -1905,6 +1911,7 @@ class Agent:
         self._trace(
             TraceEvent.MEMORY_SEARCH_COMPLETED,
             {
+                "turn_id": self.state.current_turn_id,
                 "profile_memory_ids": [memory.id for memory in profile],
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
@@ -1919,7 +1926,10 @@ class Agent:
         if self.skill_registry is None:
             return
 
-        self._trace(TraceEvent.SKILL_SELECTION_STARTED, {"query": user_message})
+        self._trace(
+            TraceEvent.SKILL_SELECTION_STARTED,
+            {"turn_id": self.state.current_turn_id, "query": user_message},
+        )
         pinned_selections: list[SkillSelection] = []
         pinned_names: set[str] = set()
         for name in self.pinned_skill_names:
@@ -1948,6 +1958,7 @@ class Agent:
         self._trace(
             TraceEvent.SKILL_SELECTION_COMPLETED,
             {
+                "turn_id": self.state.current_turn_id,
                 "loaded_skill_names": self.state.loaded_skill_names,
                 "skills": [
                     {

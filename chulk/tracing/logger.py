@@ -27,7 +27,7 @@ class TraceEvent:
 
 
 class JSONLTraceLogger:
-    """Append-only JSONL trace logger."""
+    """Append-only internal JSONL trace logger, independent of public events."""
 
     def __init__(
         self,

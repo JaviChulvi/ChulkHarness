@@ -15,7 +15,7 @@ class AgentEvent:
 
 
 class TraceEvent:
-    """String constants for trace and progress events."""
+    """Internal trace/progress constants; not a public compatibility catalog."""
 
     TURN_STARTED = "turn_started"
     USER_MESSAGE = "user_message"
