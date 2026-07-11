@@ -6,9 +6,18 @@ applications and local automation.
 Run them from the repository root:
 
 ```bash
+python examples/00_sdk_quickstart.py
 python examples/01_basic_agent.py
 python examples/13_per_agent_skills.py
 ```
+
+For the installed-package quickstart, install the default hosted-provider extra:
+
+```bash
+python -m pip install "chulkharness[openai]"
+```
+
+The distribution name is `chulkharness`; examples import `chulk`, and the CLI command is also `chulk`.
 
 Most examples call a live model. By default they use `openai`, so set:
 
@@ -29,6 +38,7 @@ Git.
 
 ## Scripts
 
+- `00_sdk_quickstart.py` shows the first installed-package run with `Agent`, `AgentConfig`, and `Tool`.
 - `01_basic_agent.py` creates an agent and returns a plain string.
 - `02_agent_config.py` builds an agent with explicit `AgentConfig` paths.
 - `03_builtin_tools.py` enables the built-in calculator tool.

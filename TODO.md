@@ -1177,22 +1177,22 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 #### Phase A: Trust And Packaging
 
-- [ ] Add `LICENSE`.
-- [ ] Add `CHANGELOG.md`.
-- [ ] Add `SECURITY.md`.
-- [ ] Add GitHub Actions CI.
-- [ ] Run CI on Python 3.11, 3.12, and 3.13.
-- [ ] Add linting with `ruff`.
-- [ ] Add type checking with `mypy` or `pyright`.
-- [ ] Run `python -m pytest` in CI.
-- [ ] Run `python -m compileall chulk` in CI.
-- [ ] Build the package wheel in CI.
-- [ ] Install the built wheel in a clean virtual environment in CI.
-- [ ] Verify clean-wheel imports: `from chulk import Agent, AgentConfig, Tool, Tools, Skills`.
-- [ ] Verify built-in presets load from the installed wheel.
-- [ ] Verify built-in skills are discoverable from the installed wheel.
-- [ ] Verify examples import correctly from the installed wheel.
-- [ ] Decide and document the package/install name versus import name.
+- [x] Add `LICENSE`.
+- [x] Add `CHANGELOG.md`.
+- [x] Add `SECURITY.md`.
+- [x] Add GitHub Actions CI.
+- [x] Run CI on Python 3.11, 3.12, and 3.13.
+- [x] Add linting with `ruff`.
+- [x] Add type checking with `mypy` or `pyright`.
+- [x] Run `python -m pytest` in CI.
+- [x] Run `python -m compileall chulk` in CI.
+- [x] Build the package wheel in CI.
+- [x] Install the built wheel in a clean virtual environment in CI.
+- [x] Verify clean-wheel imports: `from chulk import Agent, AgentConfig, Tool, Tools, Skills`.
+- [x] Verify built-in presets load from the installed wheel.
+- [x] Verify built-in skills are discoverable from the installed wheel.
+- [x] Verify examples import correctly from the installed wheel.
+- [x] Decide and document the package/install name versus import name.
 - [ ] Publish a GitHub release after the first clean packaging pass.
 
 #### Phase B: SDK Defaults And Installability
@@ -1202,7 +1202,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Make SDK `Agent()` default runtime state to `Path.cwd() / ".chulk"` instead of the installed package or source tree.
 - [x] Make SDK `Agent()` resolve project root as explicit SDK config, then `CHULK_PROJECT_ROOT`, then `Path.cwd()`, with runtime state under `.chulk` by default.
 - [x] Keep CLI coding-agent defaults separate from SDK defaults.
-- [ ] Use this default runtime layout for user projects: `.chulk/store.sqlite`, `.chulk/traces/`, `.chulk/sessions/`, `.chulk/mcp.json`, and `.chulk/skills/`.
+- [x] Use this default runtime layout for user projects: `.chulk/store.sqlite`, `.chulk/traces/`, `.chulk/sessions/`, `.chulk/mcp.json`, and `.chulk/skills/`.
 - [x] Add `runtime_dir` to the internal `Config` model or otherwise make it visible in diagnostics.
 - [x] Default `store_path` to `.chulk/store.sqlite` for SDK usage.
 - [x] Default `traces_dir` to `.chulk/traces` for SDK usage.
@@ -1219,7 +1219,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add `AgentConfig.local(project_root=".", runtime_dir=".chulk", permission_profile="read-only")` docs and examples.
 - [x] Update README runtime-state docs from `chulk/store.sqlite` and `traces/` to `.chulk/` for SDK usage.
 - [x] Keep repo-development and CLI docs explicit when they intentionally differ from SDK defaults.
-- [ ] Add an SDK quickstart that uses `pip install chulkharness`, `Agent`, `AgentConfig`, and `Tool`.
+- [x] Add an SDK quickstart that uses `pip install chulkharness`, `Agent`, `AgentConfig`, and `Tool`.
 
 #### Phase C: Public API Cleanup
 

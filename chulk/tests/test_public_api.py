@@ -4,12 +4,14 @@ import asyncio
 import gc
 from dataclasses import dataclass
 from enum import Enum
+from importlib.metadata import version as distribution_version
 import json
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
 import time
+import tomllib
 import warnings
 from typing import Annotated, Literal, get_type_hints
 
@@ -38,7 +40,9 @@ from chulk import (
     skills,
     tool,
     tools,
+    __version__,
 )
+from chulk._version import __version__ as source_version
 from chulk.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MODEL, load_config
 from chulk.core.actions import FinalAnswerAction
 from chulk.llm import FallbackChain, LLMActionResult, LLMCapabilities, LLMClient, LLMError
@@ -108,6 +112,20 @@ def test_public_api_exports_capitalized_aliases():
     assert ToolPermissionLevel is ToolsToolPermissionLevel
     assert callable(Skills.only)
     assert callable(Skills.pin)
+
+
+def test_public_package_contract_uses_one_version_and_distinct_names():
+    project_root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert __version__ == source_version == distribution_version("chulkharness")
+    assert project["name"] == "chulkharness"
+    assert project["dynamic"] == ["version"]
+    assert "version" not in project
+    assert project["scripts"]["chulk"] == "chulk.main:main"
+    assert project["requires-python"] == ">=3.11"
+    assert project["license"] == "MIT"
+    assert project["urls"]["Repository"] == "https://github.com/JaviChulvi/ChulkHarness"
 
 
 def test_runtime_create_agent_type_hints_resolve():

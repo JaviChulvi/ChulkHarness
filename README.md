@@ -4,6 +4,24 @@ ChulkHarness is a lightweight Python agent harness for building LLM-driven workf
 
 It is designed for developers who want a clear, inspectable agent runtime without starting from a large framework. The core idea is simple: keep the agent loop visible, keep tool execution auditable, and make every model decision traceable.
 
+## Install
+
+The distribution name is `chulkharness`; Python imports and the command-line entrypoint use `chulk`.
+
+Install the provider-neutral SDK when your application injects its own model client:
+
+```bash
+python -m pip install chulkharness
+```
+
+For the default hosted OpenAI provider, install the optional dependency explicitly:
+
+```bash
+python -m pip install "chulkharness[openai]"
+```
+
+ChulkHarness supports Python 3.11, 3.12, and 3.13. See [the SDK quickstart](examples/00_sdk_quickstart.py), [the example guide](examples/README.md), [the changelog](CHANGELOG.md), and [the security policy](SECURITY.md).
+
 ## Core Capabilities
 
 - Conversation state for short-running sessions.

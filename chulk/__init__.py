@@ -1,6 +1,6 @@
 """ChulkHarness package and public API."""
 
-__version__ = "0.1.0"
+from chulk._version import __version__
 
 from chulk import skills as Skills
 from chulk import tools as Tools
