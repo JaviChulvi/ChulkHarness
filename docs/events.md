@@ -46,7 +46,9 @@ Use `agent.run_events(...)` for a synchronous iterator and
 `async_agent.run_events_async(...)` for an async iterator. Events retain
 execution order and end with exactly one `run.completed` or `run.failed` event.
 The completion payload contains the same `RunResult` contract returned by
-`run_result(...)`.
+`run_result(...)`. See [SDK result contract](sdk.md) for its finite statuses,
+immutable nested records, and serialization rules. Model response events also
+reuse the public `Usage` and `Cost` snapshots, while plan events carry `Plan`.
 
 Constructor and per-run `on_event` callbacks receive the same public envelope.
 `on_delta` remains supported and is driven by `model.delta` events.

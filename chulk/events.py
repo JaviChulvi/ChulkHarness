@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from types import MappingProxyType
 from typing import Any, TypeAlias
 
 from chulk.redaction import redact_data
+from chulk.results import Cost, Plan, RunResult, Usage, freeze_mapping, plain_data
 
 
 EVENT_SCHEMA_VERSION = 1
@@ -42,7 +42,7 @@ class ExtensiblePayload:
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "extensions", MappingProxyType(redact_data(dict(self.extensions))))
+        object.__setattr__(self, "extensions", freeze_mapping(redact_data(dict(self.extensions))))
 
 
 @dataclass(frozen=True)
@@ -65,8 +65,8 @@ class ModelDeltaPayload(ExtensiblePayload):
 class ModelResponsePayload(ExtensiblePayload):
     request_index: int | None = None
     content: str | None = None
-    usage: Mapping[str, Any] | None = None
-    cost: Mapping[str, Any] | None = None
+    usage: Usage | None = None
+    cost: Cost | None = None
 
 
 @dataclass(frozen=True)
@@ -92,17 +92,21 @@ class ResourcesLoadedPayload(ExtensiblePayload):
 
 @dataclass(frozen=True)
 class PlanPayload(ExtensiblePayload):
-    plan: Mapping[str, Any]
+    plan: Plan
 
 
 @dataclass(frozen=True)
 class RunCompletedPayload(ExtensiblePayload):
-    result: Any
+    result: RunResult
 
 
 @dataclass(frozen=True)
 class RunFailedPayload(ExtensiblePayload):
     error: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "error", freeze_mapping(redact_data(dict(self.error))))
 
 
 EventPayload: TypeAlias = (
@@ -132,7 +136,7 @@ class AgentEvent:
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "extensions", MappingProxyType(redact_data(dict(self.extensions))))
+        object.__setattr__(self, "extensions", freeze_mapping(redact_data(dict(self.extensions))))
 
     @property
     def type(self) -> str:
@@ -140,21 +144,13 @@ class AgentEvent:
         return self.name
 
     def to_dict(self) -> dict[str, Any]:
-        payload = (
-            {item.name: getattr(self.payload, item.name) for item in fields(self.payload)}
-            if is_dataclass(self.payload)
-            else self.payload
-        )
-        if isinstance(self.payload, RunCompletedPayload):
-            result = self.payload.result
-            payload = {"result": result.to_dict() if hasattr(result, "to_dict") else redact_data(result)}
         return {
             "name": self.name,
             "timestamp": self.timestamp,
             "schema_version": self.schema_version,
             "conversation_id": self.conversation_id,
             "turn_id": self.turn_id,
-            "payload": redact_data(payload),
+            "payload": redact_data(plain_data(self.payload)),
             "extensions": dict(self.extensions),
         }
 

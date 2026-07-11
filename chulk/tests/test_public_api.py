@@ -313,9 +313,9 @@ def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
     assert result.trace_path == handle.trace_path
     assert result.usage is not None
     assert result.context_report is not None
-    assert result.tool_calls[0]["tool_name"] == "echo_label"
-    assert result.observations[0]["tool_name"] == "echo_label"
-    assert result.loaded_skill_names == ["files"]
+    assert result.tool_calls[0].tool_name == "echo_label"
+    assert result.observations[0].tool_name == "echo_label"
+    assert result.loaded_skill_names == ("files",)
     result_dict = result.to_dict()
     assert result_dict["content"] == "structured answer"
     assert result_dict["trace_path"] == str(handle.trace_path)
@@ -362,8 +362,8 @@ def test_public_agent_run_result_exposes_extension_metadata(tmp_path):
     assert result.content == "structured"
     assert result.status == "completed"
     assert result.extension_metadata == {"confidence": 0.7}
-    assert result.tool_calls == []
-    assert result.observations == []
+    assert result.tool_calls == ()
+    assert result.observations == ()
 
 
 def test_public_agent_redacts_streamed_and_final_output(tmp_path):
@@ -421,7 +421,7 @@ async def test_public_async_agent_awaits_decorated_tool(tmp_path):
     result = await handle.run_result("use async")
 
     assert result.content == "async done"
-    assert result.tool_calls[0]["success"] is True
+    assert result.tool_calls[0].success is True
 
 
 @pytest.mark.asyncio
@@ -496,8 +496,8 @@ async def test_public_async_agent_approve_awaits_decorated_tool(tmp_path):
     assert result.content == "async approval done"
     assert result.status == "completed"
     assert calls == ["approved"]
-    assert result.tool_calls[0]["success"] is True
-    assert result.tool_calls[0]["failure_kind"] is None
+    assert result.tool_calls[0].success is True
+    assert result.tool_calls[0].failure_kind is None
 
 
 def test_public_decorated_async_tool_sync_rejection_closes_coroutine():
@@ -646,7 +646,7 @@ def test_public_permission_callback_denies_confirming_tool(tmp_path):
 
     assert result.content == "denied"
     assert calls == []
-    assert result.tool_calls[0]["error"] == "permission_denied"
+    assert result.tool_calls[0].error == "permission_denied"
 
 
 def test_public_confirming_tool_is_denied_without_callback(tmp_path):
@@ -679,7 +679,7 @@ def test_public_confirming_tool_is_denied_without_callback(tmp_path):
 
     assert result.content == "blocked"
     assert calls == []
-    assert result.tool_calls[0]["error"] == "permission_denied"
+    assert result.tool_calls[0].error == "permission_denied"
 
 
 def test_public_agent_can_approve_workspace_shell_tool(tmp_path):
@@ -709,8 +709,8 @@ def test_public_agent_can_approve_workspace_shell_tool(tmp_path):
     ).run_result("run shell")
 
     assert result.content == "shell approved"
-    assert result.tool_calls[0]["success"] is True
-    assert "stdout:\nsdk" in result.observations[0]["content"]
+    assert result.tool_calls[0].success is True
+    assert "stdout:\nsdk" in result.observations[0].content
 
 
 def test_public_agent_can_pin_skill(tmp_path):
@@ -1507,8 +1507,8 @@ def test_public_mcp_bridge_registers_for_non_openai_providers(monkeypatch, tmp_p
 
     assert bridge_calls == [(server,)]
     assert result.content == "bridge ok"
-    assert result.tool_calls[0]["tool_name"] == "mcp_docs_search_docs"
-    assert result.tool_calls[0]["success"] is True
+    assert result.tool_calls[0].tool_name == "mcp_docs_search_docs"
+    assert result.tool_calls[0].success is True
 
 
 def test_public_plan_result_approve_result_and_reject_result(tmp_path):
@@ -1586,12 +1586,12 @@ def test_public_approve_and_reject_result_without_pending_plan_use_neutral_metad
     assert approve_result.content == "No plan is waiting for approval."
     assert approve_result.status == "no_pending_plan"
     assert approve_result.turn_id is None
-    assert approve_result.tool_calls == []
+    assert approve_result.tool_calls == ()
     assert approve_result.plan is None
     assert reject_result.content == "No plan is waiting for approval."
     assert reject_result.status == "no_pending_plan"
     assert reject_result.turn_id is None
-    assert reject_result.tool_calls == []
+    assert reject_result.tool_calls == ()
     assert reject_result.plan is None
 
 

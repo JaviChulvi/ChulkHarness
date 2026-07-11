@@ -13,7 +13,7 @@ from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config, ensure_ch
 from chulk._sdk.error_mapping import map_public_error
 from chulk._sdk.event_channel import RunEventChannel, RunGate
 from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher, failure_event, terminal_event
-from chulk._sdk.results import PlanResult, RunResult, plan_snapshot, run_result_from_runtime
+from chulk._sdk.results import PlanResult, RunResult, plan_result_from_runtime, run_result_from_runtime
 from chulk.config import Config
 from chulk.core import Agent as CoreAgent
 from chulk.core.context import TurnContextSection
@@ -240,27 +240,7 @@ class AgentHandle:
         )
 
     def _plan_result(self, content: str) -> PlanResult:
-        turn = self._last_turn()
-        return PlanResult(
-            content=content,
-            status=turn.status if turn is not None else "unknown",
-            plan=plan_snapshot(turn.active_plan if turn is not None else self.runtime.state.active_plan),
-            turn_id=turn.turn_id if turn is not None else self.runtime.state.current_turn_id,
-            conversation_id=self.conversation_id,
-            trace_path=self.trace_path,
-            context_report=(
-                turn.context_reports[-1]
-                if turn is not None and turn.context_reports
-                else self.runtime.state.last_context_report
-            ),
-            loaded_skill_names=(
-                list(turn.loaded_skill_names) if turn is not None else list(self.runtime.state.loaded_skill_names)
-            ),
-            loaded_memory_ids=(
-                list(turn.loaded_memory_ids) if turn is not None else list(self.runtime.state.loaded_memory_ids)
-            ),
-            errors=list(turn.errors) if turn is not None else list(self.runtime.state.errors),
-        )
+        return plan_result_from_runtime(self.runtime, content)
 
 
 class AsyncAgentHandle:

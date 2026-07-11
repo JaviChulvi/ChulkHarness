@@ -244,6 +244,26 @@ def cost_from_dict(payload: object) -> LLMCost | None:
     )
 
 
+def usage_snapshot_data(value: object) -> dict[str, Any] | None:
+    """Return lossless plain usage data for the public snapshot converter."""
+    if isinstance(value, LLMUsage):
+        return dict(value.to_dict())
+    if isinstance(value, dict):
+        normalized = usage_from_dict(value)
+        return normalized.to_dict() if normalized is not None else None
+    return None
+
+
+def cost_snapshot_data(value: object) -> dict[str, Any] | None:
+    """Return lossless plain cost data for the public snapshot converter."""
+    if isinstance(value, LLMCost):
+        return dict(value.to_dict())
+    if isinstance(value, dict):
+        normalized = cost_from_dict(value)
+        return normalized.to_dict() if normalized is not None else None
+    return None
+
+
 def _value(source: object, key: str) -> object:
     if source is None:
         return None

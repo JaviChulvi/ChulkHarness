@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from chulk._sdk.results import run_result_from_runtime
+from chulk._sdk.results import cost_snapshot, plan_snapshot, run_result_from_runtime, usage_snapshot
 from chulk.core import Agent as CoreAgent, TraceEvent
 from chulk.events import (
     AgentEvent,
@@ -83,8 +83,8 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             ModelResponsePayload(
                 request_index=payload.get("request_index"),
                 content=payload.get("content") if isinstance(payload.get("content"), str) else None,
-                usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
-                cost=payload.get("cost") if isinstance(payload.get("cost"), dict) else None,
+                usage=usage_snapshot(payload.get("usage")),
+                cost=cost_snapshot(payload.get("cost")),
             ),
             extensions,
         )
@@ -152,7 +152,10 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
     if event_type in {TraceEvent.PLAN_CREATED, TraceEvent.PLAN_APPROVED}:
         name = EventName.PLAN_CREATED if event_type == TraceEvent.PLAN_CREATED else EventName.PLAN_APPROVED
         plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
-        return _event(name, conversation_id, turn_id, PlanPayload(plan), extensions)
+        snapshot = plan_snapshot(plan)
+        if snapshot is not None:
+            return _event(name, conversation_id, turn_id, PlanPayload(snapshot), extensions)
+        return None
     if event_type == TraceEvent.TURN_FINISHED:
         result = run_result_from_runtime(runtime)
         if result.status in {"failed", "blocked"}:

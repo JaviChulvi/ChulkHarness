@@ -17,7 +17,6 @@ _SECRET_KEY_MARKERS = (
     "credential",
     "password",
     "secret",
-    "token",
 )
 
 
@@ -55,4 +54,6 @@ def redact_data(value: Any) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower().replace("-", "_")
-    return any(marker in lowered for marker in _SECRET_KEY_MARKERS)
+    if any(marker in lowered for marker in _SECRET_KEY_MARKERS):
+        return True
+    return lowered == "token" or lowered.endswith("_token")

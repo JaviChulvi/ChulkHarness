@@ -1,123 +1,141 @@
-"""Structured public SDK result snapshots."""
+"""Convert mutable runtime records into immutable public SDK snapshots."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
+from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
-
-@dataclass(frozen=True)
-class PlanSnapshot:
-    """Public snapshot of a plan at the end of an SDK call."""
-
-    summary: str
-    status: str
-    steps: list[dict]
-    created_at: str | None = None
-    approved_at: str | None = None
-    rejected_at: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "summary": self.summary,
-            "status": self.status,
-            "steps": list(self.steps),
-            "created_at": self.created_at,
-            "approved_at": self.approved_at,
-            "rejected_at": self.rejected_at,
-        }
+from chulk.llm.usage import cost_snapshot_data, usage_snapshot_data
+from chulk.results import (
+    ContextBudget,
+    ContextReport,
+    ContextSection,
+    Cost,
+    Observation,
+    Plan,
+    PlanResult,
+    PlanSnapshot,
+    PlanStatus,
+    PlanStep,
+    PlanStepEvidence,
+    PlanStepStatus,
+    RunResult,
+    RunStatus,
+    ToolCall,
+    Usage,
+)
 
 
-@dataclass(frozen=True)
-class RunResult:
-    """Structured result for one SDK agent turn."""
-
-    content: str
-    status: str
-    turn_id: str | None
-    conversation_id: str
-    trace_path: Path | None
-    usage: dict | None = None
-    cost: dict | None = None
-    context_report: dict | None = None
-    tool_calls: list[dict] = field(default_factory=list)
-    observations: list[dict] = field(default_factory=list)
-    loaded_skill_names: list[str] = field(default_factory=list)
-    loaded_memory_ids: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    plan: PlanSnapshot | None = None
-    extension_metadata: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "content": self.content,
-            "status": self.status,
-            "turn_id": self.turn_id,
-            "conversation_id": self.conversation_id,
-            "trace_path": str(self.trace_path) if self.trace_path is not None else None,
-            "usage": self.usage,
-            "cost": self.cost,
-            "context_report": self.context_report,
-            "tool_calls": list(self.tool_calls),
-            "observations": list(self.observations),
-            "loaded_skill_names": list(self.loaded_skill_names),
-            "loaded_memory_ids": list(self.loaded_memory_ids),
-            "errors": list(self.errors),
-            "plan": self.plan.to_dict() if self.plan is not None else None,
-            "extension_metadata": self.extension_metadata,
-        }
-
-
-@dataclass(frozen=True)
-class PlanResult:
-    """Structured result for a planning turn awaiting approval or rejection."""
-
-    content: str
-    status: str
-    plan: PlanSnapshot | None
-    turn_id: str | None
-    conversation_id: str
-    trace_path: Path | None
-    context_report: dict | None = None
-    loaded_skill_names: list[str] = field(default_factory=list)
-    loaded_memory_ids: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "content": self.content,
-            "status": self.status,
-            "plan": self.plan.to_dict() if self.plan is not None else None,
-            "turn_id": self.turn_id,
-            "conversation_id": self.conversation_id,
-            "trace_path": str(self.trace_path) if self.trace_path is not None else None,
-            "context_report": self.context_report,
-            "loaded_skill_names": list(self.loaded_skill_names),
-            "loaded_memory_ids": list(self.loaded_memory_ids),
-            "errors": list(self.errors),
-        }
-
-
-def plan_snapshot(plan: Any | None) -> PlanSnapshot | None:
-    if plan is None:
+def usage_snapshot(value: object) -> Usage | None:
+    payload = usage_snapshot_data(value)
+    if payload is None:
         return None
-    payload = plan.to_dict()
-    return PlanSnapshot(
-        summary=payload.get("summary") or "",
-        status=payload.get("status") or "unknown",
-        steps=list(payload.get("steps") or []),
-        created_at=payload.get("created_at"),
-        approved_at=payload.get("approved_at"),
-        rejected_at=payload.get("rejected_at"),
+    return Usage(**payload)
+
+
+def cost_snapshot(value: object) -> Cost | None:
+    payload = cost_snapshot_data(value)
+    if payload is None:
+        return None
+    return Cost(
+        amount=_decimal(payload.get("amount")),
+        currency=str(payload.get("currency") or "USD"),
+        pricing_known=bool(payload.get("pricing_known")),
+        estimated=bool(payload.get("estimated")),
+        input_cost=_decimal(payload.get("input_cost")),
+        cached_input_cost=_decimal(payload.get("cached_input_cost")),
+        output_cost=_decimal(payload.get("output_cost")),
+        provider=_optional_str(payload.get("provider")),
+        model=_optional_str(payload.get("model")),
+        pricing_source=_optional_str(payload.get("pricing_source")),
+        pricing_last_checked=_optional_str(payload.get("pricing_last_checked")),
     )
 
 
-__all__ = ["PlanResult", "PlanSnapshot", "RunResult"]
+def tool_call_snapshot(value: object) -> ToolCall:
+    payload = _mapping(value)
+    return ToolCall(
+        tool_name=str(payload.get("tool_name") or "unknown"),
+        arguments=_dict(payload.get("arguments")),
+        iteration=_int(payload.get("iteration")),
+        phase=str(payload.get("phase") or "execution"),
+        plan_step_id=_optional_str(payload.get("plan_step_id")),
+        started_at=_optional_str(payload.get("started_at")),
+        ended_at=_optional_str(payload.get("ended_at")),
+        resolved_tool_name=_optional_str(payload.get("resolved_tool_name")),
+        success=payload.get("success") if isinstance(payload.get("success"), bool) else None,
+        error=_optional_str(payload.get("error")),
+        failure_kind=_optional_str(payload.get("failure_kind")),
+        metadata=_dict(payload.get("metadata")),
+    )
+
+
+def observation_snapshot(value: object) -> Observation:
+    payload = _mapping(value)
+    return Observation(
+        tool_name=str(payload.get("tool_name") or "unknown"),
+        content=str(payload.get("content") or ""),
+        output_metadata=_dict(payload.get("output_metadata")),
+        created_at=_optional_str(payload.get("created_at")),
+    )
+
+
+def context_report_snapshot(value: object) -> ContextReport | None:
+    if value is None:
+        return None
+    payload = _mapping(value)
+    budget_payload = _dict(payload.get("budget"))
+    budget = ContextBudget(
+        enabled=bool(budget_payload.get("enabled")),
+        context_window_tokens=_int(budget_payload.get("context_window_tokens")),
+        max_prompt_tokens=_int(budget_payload.get("max_prompt_tokens")),
+        response_reserve_tokens=_int(budget_payload.get("response_reserve_tokens")),
+        input_token_budget=_optional_int(budget_payload.get("input_token_budget")),
+    )
+    sections = tuple(
+        ContextSection(
+            name=str(section.get("name") or "unknown"),
+            label=str(section.get("label") or ""),
+            char_count=_int(section.get("char_count")),
+            estimated_tokens=_int(section.get("estimated_tokens")),
+            item_count=_int(section.get("item_count"), default=1),
+            metadata=_dict(section.get("metadata")),
+        )
+        for item in payload.get("sections") or ()
+        if (section := _mapping(item))
+    )
+    return ContextReport(
+        total_char_count=_int(payload.get("total_char_count")),
+        estimated_tokens=_int(payload.get("estimated_tokens")),
+        section_estimated_tokens=_int(payload.get("section_estimated_tokens")),
+        budget=budget,
+        over_budget_tokens=_int(payload.get("over_budget_tokens")),
+        trimmed=bool(payload.get("trimmed")),
+        included_message_count=_int(payload.get("included_message_count")),
+        omitted_message_count=_int(payload.get("omitted_message_count")),
+        omitted_observation_count=_int(payload.get("omitted_observation_count")),
+        sections=sections,
+    )
+
+
+def plan_snapshot(value: object | None) -> Plan | None:
+    if value is None:
+        return None
+    payload = _mapping(value)
+    steps = tuple(_plan_step_snapshot(item) for item in payload.get("steps") or ())
+    return Plan(
+        summary=str(payload.get("summary") or ""),
+        status=_enum(PlanStatus, payload.get("status"), PlanStatus.UNKNOWN),
+        steps=steps,
+        created_at=_optional_str(payload.get("created_at")),
+        approved_at=_optional_str(payload.get("approved_at")),
+        rejected_at=_optional_str(payload.get("rejected_at")),
+    )
 
 
 def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResult:
-    """Build the public run snapshot from a completed internal runtime turn."""
+    """Build one detached public snapshot from a completed runtime turn."""
     state = runtime.state
     turn = state.turns[-1] if state.turns else None
     usage_totals = turn.model_usage_totals if turn is not None else state.last_usage_report or {}
@@ -129,21 +147,130 @@ def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResu
     trace_logger = getattr(runtime, "trace_logger", None)
     return RunResult(
         content=terminal_content,
-        status=turn.status if turn is not None else "unknown",
+        status=_enum(RunStatus, turn.status if turn is not None else "unknown", RunStatus.UNKNOWN),
         turn_id=turn.turn_id if turn is not None else state.current_turn_id,
         conversation_id=state.conversation_id,
         trace_path=getattr(trace_logger, "path", None),
-        usage=usage_totals.get("usage") if isinstance(usage_totals, dict) else None,
-        cost=usage_totals.get("cost") if isinstance(usage_totals, dict) else None,
-        context_report=(turn.context_reports[-1] if turn is not None and turn.context_reports else state.last_context_report),
-        tool_calls=[record.to_dict() for record in turn.tool_calls] if turn is not None else [],
-        observations=[record.to_dict() for record in turn.observations] if turn is not None else [],
-        loaded_skill_names=list(turn.loaded_skill_names) if turn is not None else list(state.loaded_skill_names),
-        loaded_memory_ids=list(turn.loaded_memory_ids) if turn is not None else list(state.loaded_memory_ids),
-        errors=list(turn.errors) if turn is not None else list(state.errors),
+        usage=usage_snapshot(usage_totals.get("usage") if isinstance(usage_totals, dict) else None),
+        cost=cost_snapshot(usage_totals.get("cost") if isinstance(usage_totals, dict) else None),
+        context_report=context_report_snapshot(
+            turn.context_reports[-1] if turn is not None and turn.context_reports else state.last_context_report
+        ),
+        tool_calls=tuple(tool_call_snapshot(record) for record in turn.tool_calls) if turn is not None else (),
+        observations=(tuple(observation_snapshot(record) for record in turn.observations) if turn is not None else ()),
+        loaded_skill_names=tuple(turn.loaded_skill_names) if turn is not None else tuple(state.loaded_skill_names),
+        loaded_memory_ids=tuple(turn.loaded_memory_ids) if turn is not None else tuple(state.loaded_memory_ids),
+        errors=tuple(turn.errors) if turn is not None else tuple(state.errors),
         plan=plan_snapshot(turn.active_plan if turn is not None else state.active_plan),
         extension_metadata=turn.extension_metadata if turn is not None else {},
     )
 
 
-__all__.append("run_result_from_runtime")
+def plan_result_from_runtime(runtime: Any, content: str) -> PlanResult:
+    state = runtime.state
+    turn = state.turns[-1] if state.turns else None
+    trace_logger = getattr(runtime, "trace_logger", None)
+    return PlanResult(
+        content=content,
+        status=_enum(RunStatus, turn.status if turn is not None else "unknown", RunStatus.UNKNOWN),
+        plan=plan_snapshot(turn.active_plan if turn is not None else state.active_plan),
+        turn_id=turn.turn_id if turn is not None else state.current_turn_id,
+        conversation_id=state.conversation_id,
+        trace_path=getattr(trace_logger, "path", None),
+        context_report=context_report_snapshot(
+            turn.context_reports[-1] if turn is not None and turn.context_reports else state.last_context_report
+        ),
+        loaded_skill_names=tuple(turn.loaded_skill_names) if turn is not None else tuple(state.loaded_skill_names),
+        loaded_memory_ids=tuple(turn.loaded_memory_ids) if turn is not None else tuple(state.loaded_memory_ids),
+        errors=tuple(turn.errors) if turn is not None else tuple(state.errors),
+    )
+
+
+def _plan_step_snapshot(value: object) -> PlanStep:
+    payload = _mapping(value)
+    evidence = tuple(
+        PlanStepEvidence(
+            content=str(item_payload.get("content") or ""),
+            tool_name=_optional_str(item_payload.get("tool_name")),
+            tool_call_iteration=_optional_int(item_payload.get("tool_call_iteration")),
+            created_at=_optional_str(item_payload.get("created_at")),
+            metadata=_dict(item_payload.get("metadata")),
+        )
+        for item in payload.get("evidence") or ()
+        if (item_payload := _mapping(item))
+    )
+    return PlanStep(
+        id=str(payload.get("id") or ""),
+        title=str(payload.get("title") or ""),
+        description=str(payload.get("description") or ""),
+        status=_enum(PlanStepStatus, payload.get("status"), PlanStepStatus.UNKNOWN),
+        depends_on=tuple(str(item) for item in payload.get("depends_on") or ()),
+        acceptance_criteria=tuple(str(item) for item in payload.get("acceptance_criteria") or ()),
+        retry_limit=_int(payload.get("retry_limit")),
+        evidence=evidence,
+        started_at=_optional_str(payload.get("started_at")),
+        completed_at=_optional_str(payload.get("completed_at")),
+        blocked_at=_optional_str(payload.get("blocked_at")),
+        blocked_reason=_optional_str(payload.get("blocked_reason")),
+    )
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, Mapping):
+            return {str(key): item for key, item in payload.items()}
+    return {}
+
+
+def _dict(value: object) -> dict[str, Any]:
+    return _mapping(value)
+
+
+def _int(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else _int(value)
+
+
+def _optional_str(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _decimal(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _enum(enum_type, value: object, unknown):
+    try:
+        return enum_type(value)
+    except (TypeError, ValueError):
+        return unknown
+
+
+__all__ = [
+    "PlanResult",
+    "PlanSnapshot",
+    "RunResult",
+    "context_report_snapshot",
+    "cost_snapshot",
+    "observation_snapshot",
+    "plan_result_from_runtime",
+    "plan_snapshot",
+    "run_result_from_runtime",
+    "tool_call_snapshot",
+    "usage_snapshot",
+]
