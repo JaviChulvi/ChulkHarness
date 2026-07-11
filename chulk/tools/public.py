@@ -10,6 +10,7 @@ import json
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
 
+from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
@@ -26,8 +27,11 @@ from chulk.tools.memory import (
     summarize_memories_tool,
     update_memory_tool,
 )
-from chulk.tools.registry import Tool, ToolResult
+from chulk.tools.registry import Tool, ToolExecutionContext, ToolResult
 from chulk.tools.shell import shell_tool
+
+
+ToolContext = ToolExecutionContext
 
 
 @dataclass(frozen=True)
@@ -48,20 +52,29 @@ def tool(
     description: str | None = None,
     permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ,
     requires_confirmation: bool = False,
+    output_schema: dict[str, Any] | None = None,
+    output_policy: ToolOutputPolicy | None = None,
+    timeout_seconds: float | None = None,
+    retry_policy: ToolRetryPolicy | None = None,
+    idempotent: bool = False,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Convert a Python callable into a Chulk tool."""
 
     def decorator(func: Callable[..., Any]) -> Tool:
         tool_name = name or func.__name__
         tool_description = description or _description_from_callable(func)
-        args_schema = _schema_from_callable(func)
+        injected_parameter = _injected_parameter(func)
+        args_schema = _schema_from_callable(func, injected_parameter=injected_parameter)
 
-        async def invoke_async(arguments: dict[str, Any]) -> ToolResult:
-            result = await func(**arguments)
+        async def invoke_async(
+            arguments: dict[str, Any],
+            context: ToolExecutionContext | None = None,
+        ) -> ToolResult:
+            result = await func(**_call_arguments(arguments, injected_parameter, context))
             return _coerce_tool_result(tool_name, result)
 
-        def invoke(arguments: dict[str, Any]) -> ToolResult:
-            result = func(**arguments)
+        def invoke(arguments: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+            result = func(**_call_arguments(arguments, injected_parameter, context))
             if inspect.isawaitable(result):
                 return _AwaitableToolResult(tool_name, result)  # type: ignore[return-value]
             return _coerce_tool_result(tool_name, result)
@@ -73,6 +86,11 @@ def tool(
             callable=invoke_async if inspect.iscoroutinefunction(func) else invoke,
             permission_level=permission_level,
             requires_confirmation=requires_confirmation,
+            accepts_context=injected_parameter is not None,
+            output_schema=output_policy.to_dict() if output_policy is not None else output_schema,
+            timeout_seconds=timeout_seconds,
+            retry_policy=retry_policy,
+            idempotent=idempotent,
         )
 
     if fn is None:
@@ -88,6 +106,7 @@ def _coerce_tool_result(tool_name: str, result: Any) -> ToolResult:
         success=True,
         observation=_observation_from_result(result),
         metadata={"result_type": type(result).__name__},
+        value=_json_safe_value(result),
     )
 
 
@@ -192,12 +211,18 @@ def _description_from_callable(func: Callable[..., Any]) -> str:
     return first_line or f"Run {func.__name__}."
 
 
-def _schema_from_callable(func: Callable[..., Any]) -> dict[str, Any]:
+def _schema_from_callable(
+    func: Callable[..., Any],
+    *,
+    injected_parameter: str | None = None,
+) -> dict[str, Any]:
     signature = inspect.signature(func)
     hints = get_type_hints(func, include_extras=True)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for param_name, parameter in signature.parameters.items():
+        if param_name == injected_parameter:
+            continue
         if parameter.kind in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}:
             raise ValueError("@tool functions cannot use *args or **kwargs")
         annotation = hints.get(param_name, Any)
@@ -213,6 +238,33 @@ def _schema_from_callable(func: Callable[..., Any]) -> dict[str, Any]:
         "required": required,
         "additionalProperties": False,
     }
+
+
+def _injected_parameter(func: Callable[..., Any]) -> str | None:
+    hints = get_type_hints(func, include_extras=True)
+    injected = [name for name, annotation in hints.items() if name != "return" and _is_tool_context(annotation)]
+    if len(injected) > 1:
+        raise ValueError("@tool functions can declare at most one ToolContext parameter")
+    return injected[0] if injected else None
+
+
+def _is_tool_context(annotation: Any) -> bool:
+    return annotation is ToolExecutionContext or get_origin(annotation) is ToolExecutionContext
+
+
+def _call_arguments(
+    arguments: dict[str, Any],
+    injected_parameter: str | None,
+    context: ToolExecutionContext | None,
+) -> dict[str, Any]:
+    if injected_parameter is None:
+        return arguments
+    if injected_parameter in arguments:
+        raise ValueError(f"Injected parameter {injected_parameter} cannot be supplied by the model")
+    if context is None:
+        raise ValueError("Required tool dependencies and context were not provided by the host")
+    context.require_deps()
+    return {**arguments, injected_parameter: context}
 
 
 def _json_schema_for_type(annotation: Any) -> dict[str, Any]:
@@ -507,6 +559,7 @@ def _observation_from_result(result: Any) -> str:
 
 __all__ = [
     "ToolRef",
+    "ToolContext",
     "apply_patch",
     "archive_memory",
     "calculator",

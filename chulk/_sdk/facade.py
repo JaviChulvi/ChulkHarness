@@ -9,17 +9,25 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, TypeVar
 
+from chulk.capabilities import Capabilities, MemoryMode
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config, ensure_chat_kwargs
 from chulk._sdk.error_mapping import map_public_error
 from chulk._sdk.event_channel import RunEventChannel, RunGate
 from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher, failure_event, terminal_event
-from chulk._sdk.results import PlanResult, RunResult, plan_result_from_runtime, run_result_from_runtime
+from chulk._sdk.results import (
+    PlanResult,
+    RunResult,
+    memory_proposal_snapshot,
+    plan_result_from_runtime,
+    run_result_from_runtime,
+)
 from chulk.config import Config
 from chulk.core import Agent as CoreAgent
 from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.mcp import MCPServerConfig
+from chulk.results import MemoryProposal
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.tools import ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
@@ -413,7 +421,11 @@ class Agent:
         mcp: Iterable[MCPServerConfig] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
         redaction_fail_closed: bool = False,
+        capabilities: Capabilities | None = None,
+        memory_mode: MemoryMode | str | None = None,
+        deps: object | None = None,
     ) -> None:
+        selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
             self._handle = _build_handle(
                 config=config,
@@ -428,6 +440,8 @@ class Agent:
                 mcp=mcp,
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,
+                capabilities=selected_capabilities,
+                deps=deps,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -435,6 +449,8 @@ class Agent:
                 raise
             raise mapped from exc
         self._run_gate = RunGate()
+        self._capabilities = selected_capabilities
+        self._deps = deps
 
     @property
     def runtime(self) -> CoreAgent:
@@ -464,11 +480,17 @@ class Agent:
     def closed(self) -> bool:
         return self._handle.closed
 
+    @property
+    def capabilities(self) -> Capabilities:
+        return self._capabilities
+
     def run(self, message: str, **kwargs: Any) -> str:
-        return self._invoke("run", lambda: self._handle.run(message, **kwargs), serialized=True)
+        options = self._run_options(kwargs)
+        return self._invoke("run", lambda: self._handle.run(message, **options), serialized=True)
 
     def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return self._invoke("run_result", lambda: self._handle.run_result(message, **kwargs), serialized=True)
+        options = self._run_options(kwargs)
+        return self._invoke("run_result", lambda: self._handle.run_result(message, **options), serialized=True)
 
     def __call__(self, message: str) -> str:
         return self.run(message)
@@ -493,6 +515,36 @@ class Agent:
 
     def close(self) -> None:
         self._invoke("close", self._handle.close, serialized=True)
+
+    def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
+        """Return pending manual-memory proposals as immutable snapshots."""
+        def operation() -> tuple[MemoryProposal, ...]:
+            policy = self.runtime.memory_policy
+            if policy is None:
+                return ()
+            return tuple(memory_proposal_snapshot(item) for item in policy.list_pending())
+
+        return self._invoke("list_memory_proposals", operation)
+
+    def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
+        """Approve one pending memory proposal."""
+        def operation() -> MemoryProposal:
+            policy = self.runtime.memory_policy
+            if policy is None:
+                raise RuntimeError("Memory is not configured")
+            return memory_proposal_snapshot(policy.approve(proposal_id))
+
+        return self._invoke("approve_memory_proposal", operation)
+
+    def reject_memory_proposal(self, proposal_id: str) -> MemoryProposal:
+        """Reject one pending memory proposal."""
+        def operation() -> MemoryProposal:
+            policy = self.runtime.memory_policy
+            if policy is None:
+                raise RuntimeError("Memory is not configured")
+            return memory_proposal_snapshot(policy.reject(proposal_id))
+
+        return self._invoke("reject_memory_proposal", operation)
 
     def run_events(self, message: str, **kwargs: Any) -> Iterator[AgentEvent]:
         """Yield one run's ordered public events, including its terminal result."""
@@ -542,6 +594,15 @@ class Agent:
                 raise
             raise mapped from exc
 
+    def _run_options(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        options = dict(kwargs)
+        deps = options.pop("deps", None)
+        if deps is not None:
+            if options.get("tool_context") is not None:
+                raise ValueError("Pass either deps or tool_context, not both")
+            options["tool_context"] = ToolExecutionContext(deps=deps)
+        return options
+
 
 class AsyncAgent:
     """Public asynchronous facade backed by Chulk's compatibility runtime."""
@@ -579,11 +640,21 @@ class AsyncAgent:
     def closed(self) -> bool:
         return self._handle.closed
 
+    @property
+    def capabilities(self) -> Capabilities:
+        return self._agent.capabilities
+
     async def run(self, message: str, **kwargs: Any) -> str:
-        return await self._invoke_async("run", lambda: self._handle.run(message, **kwargs), serialized=True)
+        options = self._agent._run_options(kwargs)
+        return await self._invoke_async("run", lambda: self._handle.run(message, **options), serialized=True)
 
     async def run_result(self, message: str, **kwargs: Any) -> RunResult:
-        return await self._invoke_async("run_result", lambda: self._handle.run_result(message, **kwargs), serialized=True)
+        options = self._agent._run_options(kwargs)
+        return await self._invoke_async(
+            "run_result",
+            lambda: self._handle.run_result(message, **options),
+            serialized=True,
+        )
 
     async def plan(self, message: str) -> str:
         return await self._invoke_async("plan", lambda: self._handle.plan(message), serialized=True)
@@ -617,6 +688,15 @@ class AsyncAgent:
 
     async def close(self) -> None:
         await self._invoke_async("close", self._handle.close, serialized=True)
+
+    async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
+        return await asyncio.to_thread(self._agent.list_memory_proposals)
+
+    async def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
+        return await asyncio.to_thread(self._agent.approve_memory_proposal, proposal_id)
+
+    async def reject_memory_proposal(self, proposal_id: str) -> MemoryProposal:
+        return await asyncio.to_thread(self._agent.reject_memory_proposal, proposal_id)
 
     async def run_events_async(self, message: str, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         """Asynchronously yield one run's ordered public events and terminal result."""
@@ -707,6 +787,8 @@ def _build_handle(
     mcp: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
+    capabilities: Capabilities | None = None,
+    deps: object | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -723,8 +805,25 @@ def _build_handle(
         mcp_servers=tuple(mcp) if mcp is not None else None,
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,
+        capabilities=capabilities,
+        deps=deps,
     )
     return AgentHandle(runtime, on_event=on_event)
+
+
+def _selected_capabilities(
+    config: Config | AgentConfig | None,
+    capabilities: Capabilities | None,
+    memory_mode: MemoryMode | str | None,
+) -> Capabilities:
+    selected = capabilities
+    if selected is None and isinstance(config, AgentConfig):
+        selected = config.resolved_capabilities()
+    if selected is None:
+        selected = Capabilities.read_only()
+    if memory_mode is not None:
+        selected = selected.with_memory(memory_mode)
+    return selected
 
 
 def agent(**kwargs: Any) -> Agent:

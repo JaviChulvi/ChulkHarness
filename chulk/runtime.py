@@ -8,6 +8,7 @@ from pathlib import Path
 import warnings
 from typing import Protocol
 
+from chulk.capabilities import Capabilities
 from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
@@ -15,10 +16,10 @@ from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
 from chulk.mcp import create_mcp_bridge_tools
-from chulk.memory import ConversationMemory, SQLiteMemoryStore
+from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
-from chulk.tools import Tool, ToolRegistry, create_default_tool_registry
+from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
 from chulk.tools.permissions import (
     PermissionDecision,
     PermissionDecisionRecord,
@@ -42,6 +43,7 @@ class RuntimeToolContext:
     project_root: Path
     shell_timeout_seconds: int
     memory_store: SQLiteMemoryStore | None = None
+    deps: object | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ def create_agent(
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
+    capabilities: Capabilities | None = None,
+    deps: object | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -83,6 +87,8 @@ def create_agent(
         response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
     )
     memory_store = SQLiteMemoryStore(config.store_path)
+    selected_capabilities = capabilities or Capabilities.full()
+    memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
     session_store = SQLiteSessionStore(config.store_path)
     skill_registry = SkillRegistry(
         config.skills_dir,
@@ -130,8 +136,17 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
-    active_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
-    tool_registry, mcp_bridge_tool_names = _create_tool_registry(config, memory_store, tool_specs, active_mcp_servers)
+    configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
+    active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()
+    tool_registry, mcp_bridge_tool_names = _create_tool_registry(
+        config,
+        memory_store,
+        tool_specs,
+        active_mcp_servers,
+        capabilities=selected_capabilities,
+        memory_policy=memory_policy,
+        deps=deps,
+    )
     if active_mcp_servers:
         trace_logger.log(
             "mcp_config_loaded",
@@ -158,6 +173,7 @@ def create_agent(
             state=state,
             memory=conversation_memory,
             memory_store=memory_store,
+            memory_policy=memory_policy,
             skill_registry=skill_registry,
             trace_logger=trace_logger,
             tool_registry=tool_registry,
@@ -181,6 +197,7 @@ def create_agent(
             mcp_servers=active_mcp_servers,
             mcp_bridge_tool_names=mcp_bridge_tool_names,
             owned_resources=owned_resources,
+            default_tool_context=ToolExecutionContext(deps=deps) if deps is not None else None,
         )
     except Exception:
         for resource in reversed(owned_resources):
@@ -243,12 +260,18 @@ def _create_tool_registry(
     memory_store: SQLiteMemoryStore,
     tool_specs: Iterable[object] | None,
     mcp_servers: Iterable[object],
+    *,
+    capabilities: Capabilities,
+    memory_policy: MemoryPolicy,
+    deps: object | None,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
             config.project_root,
             config.shell_timeout_seconds,
             memory_store=memory_store,
+            capabilities=capabilities,
+            memory_policy=memory_policy,
         )
         return _register_mcp_bridge_tools(config, registry, mcp_servers)
 
@@ -256,6 +279,7 @@ def _create_tool_registry(
         project_root=config.project_root,
         shell_timeout_seconds=config.shell_timeout_seconds,
         memory_store=memory_store,
+        deps=deps,
     )
     registry = ToolRegistry()
     for spec in tool_specs:

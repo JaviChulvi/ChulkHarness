@@ -29,6 +29,7 @@ from chulk.tools.permissions import (
     permission_policy_for_profile,
 )
 from chulk.tools.public import (
+    ToolContext,
     ToolRef,
     apply_patch,
     archive_memory,
@@ -60,6 +61,7 @@ __all__ = [
     "ToolPermissionPolicy",
     "ToolRef",
     "ToolExecutionContext",
+    "ToolContext",
     "ToolFailureKind",
     "ToolRegistry",
     "ToolResult",

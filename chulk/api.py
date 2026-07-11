@@ -1,6 +1,7 @@
 """Stable public programmable API for Chulk."""
 
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
+from chulk.capabilities import Capabilities, FileAccess, MemoryMode, ToolOutputPolicy, ToolRetryPolicy
 from chulk._sdk.facade import (
     Agent,
     AgentHandle,
@@ -44,6 +45,8 @@ from chulk.results import (
     ContextReport,
     ContextSection,
     Cost,
+    MemoryProposal,
+    MemoryProposalStatus,
     Observation,
     Plan,
     PlanResult,
@@ -55,8 +58,10 @@ from chulk.results import (
     RunResult,
     RunStatus,
     ToolCall,
+    ToolAttempt,
     Usage,
 )
+from chulk.tools import ToolContext
 
 
 __all__ = [
@@ -69,6 +74,7 @@ __all__ = [
     "AsyncAgentHandle",
     "AsyncChatAgent",
     "ChatAgent",
+    "Capabilities",
     "ChulkError",
     "ConfigurationError",
     "ContextBudget",
@@ -78,8 +84,12 @@ __all__ = [
     "ErrorDetails",
     "EVENT_SCHEMA_VERSION",
     "EventName",
+    "FileAccess",
     "MCP",
     "MemoryError",
+    "MemoryMode",
+    "MemoryProposal",
+    "MemoryProposalStatus",
     "ModelDeltaPayload",
     "ModelRequestPayload",
     "ModelResponsePayload",
@@ -103,8 +113,12 @@ __all__ = [
     "RunStatus",
     "SafetyError",
     "ToolExecutionError",
+    "ToolOutputPolicy",
+    "ToolRetryPolicy",
     "ToolCall",
+    "ToolAttempt",
     "ToolCallPayload",
+    "ToolContext",
     "TraceError",
     "Usage",
     "agent",

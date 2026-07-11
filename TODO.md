@@ -1244,8 +1244,8 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 - [x] Make SDK default permission profile `read-only` unless the user explicitly opts into writes.
 - [x] Keep CLI coding-agent default permission profile `workspace-write`.
-- [ ] Add explicit capability/tool-enabling API for files, shell, network, memory writes, and external services.
-- [ ] Add a `Capabilities` config object or equivalent structured tool capability surface.
+- [x] Add explicit capability/tool-enabling API for files, shell, network, memory writes, and external services.
+- [x] Add a `Capabilities` config object or equivalent structured tool capability surface.
 - [ ] Add custom permission profiles in config.
 - [ ] Add workspace root allowlists.
 - [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, build artifacts, and credentials.
@@ -1291,22 +1291,22 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 #### Phase F: Better App Embedding
 
-- [ ] Add typed dependency/context injection for tools, e.g. `ToolContext[Deps]`.
-- [ ] Allow `Agent(..., deps=...)` or an equivalent dependency object for app-owned state.
-- [ ] Extend the `@Tool` decorator to hide injected context from model-facing argument schemas.
-- [ ] Add optional output schemas or output models for tools.
-- [ ] Include structured output metadata in traces and model observations when configured.
-- [ ] Add tool-level timeout policy.
-- [ ] Add tool-level retry policy.
+- [x] Add typed dependency/context injection for tools, e.g. `ToolContext[Deps]`.
+- [x] Allow `Agent(..., deps=...)` or an equivalent dependency object for app-owned state.
+- [x] Extend the `@Tool` decorator to hide injected context from model-facing argument schemas.
+- [x] Add optional output schemas or output models for tools.
+- [x] Include structured output metadata in traces and model observations when configured.
+- [x] Add tool-level timeout policy.
+- [x] Add tool-level retry policy.
 - [ ] Add tool testing helpers such as `assert_tool_schema(...)` and `invoke_tool(...)`.
-- [ ] Continue supporting async tools through the public decorator.
+- [x] Continue supporting async tools through the public decorator.
 - [ ] Add native async runtime later with async LLM calls, async tools, cancellation, timeouts, streaming events, concurrent read-only tools, and cleanup hooks.
 - [ ] Add memory namespaces for user and workspace isolation.
-- [ ] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
-- [ ] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
-- [ ] Add a memory review queue with pending, approve, and reject APIs.
+- [x] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
+- [x] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
+- [x] Add a memory review queue with pending, approve, and reject APIs.
 - [ ] Add memory retention controls such as TTL and max item count.
-- [ ] Add memory provenance fields: source, conversation id, human approval, confidence, last accessed, and evidence snippets.
+- [x] Add memory provenance fields: source, conversation id, human approval, confidence, last accessed, and evidence snippets.
 - [ ] Add provider capability API exposed publicly as `agent.provider.capabilities` or equivalent.
 - [ ] Add provider health checks.
 - [ ] Add invalid-model diagnostics for missing API keys, bad model names, unavailable endpoints, and unsupported tool schemas.

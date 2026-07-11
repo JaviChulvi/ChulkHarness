@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from chulk.capabilities import Capabilities, MemoryMode
 from chulk.config import (
     Config,
     DEFAULT_DEEPSEEK_MODEL,
@@ -69,12 +70,22 @@ class AgentConfig:
     max_tool_stdout_chars: int | None = None
     max_tool_stderr_chars: int | None = None
     max_reflection_attempts: int | None = None
+    capabilities: Capabilities | None = None
+    memory_mode: MemoryMode | str | None = None
 
     def __post_init__(self) -> None:
         if self.mcp_servers is not None:
             object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
         if self.llm_fallback_providers is not None:
             object.__setattr__(self, "llm_fallback_providers", tuple(self.llm_fallback_providers))
+        if self.memory_mode is not None:
+            base = self.capabilities or Capabilities.read_only()
+            object.__setattr__(self, "capabilities", base.with_memory(self.memory_mode))
+            object.__setattr__(self, "memory_mode", self.capabilities.memory)
+
+    def resolved_capabilities(self) -> Capabilities:
+        """Return explicit capabilities or the safe SDK default."""
+        return self.capabilities or Capabilities.read_only()
 
     def with_overrides(self, **overrides: Any) -> "AgentConfig":
         """Return a copy with any AgentConfig field overridden."""

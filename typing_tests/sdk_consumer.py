@@ -1,16 +1,20 @@
 """External-style static typing fixture for the installed SDK contract."""
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import assert_never
 
 from chulk import (
     Agent,
     AgentConfig,
+    Capabilities,
     ChulkError,
     ConfigurationError,
     ContextReport,
     Cost,
     MemoryError,
+    MemoryMode,
+    MemoryProposal,
     Observation,
     PermissionDeniedError,
     ProviderError,
@@ -23,7 +27,10 @@ from chulk import (
     Skills,
     Tool,
     ToolCall,
+    ToolAttempt,
+    ToolContext,
     ToolExecutionError,
+    ToolRetryPolicy,
     Tools,
     TraceError,
     RunCompletedPayload,
@@ -43,6 +50,7 @@ config: AgentConfig = AgentConfig.local(
 
 agent = Agent(
     config=config,
+    capabilities=Capabilities(files="read", memory=MemoryMode.READ_ONLY),
     tools=[Tools.calculator],
     skills=[Skills.files],
 )
@@ -109,3 +117,23 @@ def exhaustive_run_status(status: RunStatus) -> str:
         case RunStatus.UNKNOWN:
             return "unknown"
     assert_never(status)
+
+
+@dataclass(frozen=True)
+class Dependencies:
+    tenant: str
+
+
+def dependency_tool(query: str, context: ToolContext[Dependencies]) -> str:
+    return f"{context.deps.tenant}:{query}"
+
+
+retry_policy = ToolRetryPolicy(max_attempts=2)
+
+
+def consume_proposal(proposal: MemoryProposal) -> str:
+    return proposal.status.value
+
+
+def consume_attempts(call: ToolCall) -> tuple[ToolAttempt, ...]:
+    return call.attempts

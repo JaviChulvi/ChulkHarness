@@ -28,6 +28,7 @@ from chulk import (
     AsyncChatAgent,
     AgentPreset,
     ChatAgent,
+    Capabilities,
     MCP,
     PermissionDecision,
     PermissionDecisionRecord,
@@ -1286,7 +1287,14 @@ def test_public_mcp_builder_uses_hosted_mcp_for_openai(tmp_path):
     llm = HostedMCPRecordingLLM()
     server = MCP.streamable_http(label="docs", server_url="https://mcp.example.com", allowed_tools=["search_docs"])
 
-    result = Agent(config=config, llm=llm, tools=[], skills=[], mcp=[server]).run_result("search docs")
+    result = Agent(
+        config=config,
+        capabilities=Capabilities(external_services=True),
+        llm=llm,
+        tools=[],
+        skills=[],
+        mcp=[server],
+    ).run_result("search docs")
 
     assert result.content == "hosted mcp captured"
     assert llm.hosted_mcp_servers == (server,)
@@ -1502,6 +1510,7 @@ def test_public_mcp_bridge_registers_for_non_openai_providers(monkeypatch, tmp_p
         tools=[],
         skills=[],
         mcp=[server],
+        capabilities=Capabilities(external_services=True),
         permission_callback=lambda _request, _record: True,
     ).run_result("search docs")
 

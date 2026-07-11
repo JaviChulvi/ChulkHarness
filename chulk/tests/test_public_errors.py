@@ -110,6 +110,34 @@ def test_facade_maps_provider_tool_permission_safety_and_memory_failures(tmp_pat
     assert provider.retryable is True  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    ("policy_method", "facade_method", "arguments"),
+    [
+        ("list_pending", "list_memory_proposals", ()),
+        ("approve", "approve_memory_proposal", ("proposal-id",)),
+        ("reject", "reject_memory_proposal", ("proposal-id",)),
+    ],
+)
+def test_memory_proposal_operations_map_store_failures(
+    tmp_path,
+    monkeypatch,
+    policy_method,
+    facade_method,
+    arguments,
+):
+    facade = _agent(tmp_path)
+    policy = facade.runtime.memory_policy
+    assert policy is not None
+    internal = sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(policy, policy_method, lambda *args: _raise(internal))
+
+    with pytest.raises(MemoryError) as caught:
+        getattr(facade, facade_method)(*arguments)
+
+    assert caught.value.__cause__ is internal
+    assert caught.value.details.extensions["operation"] == facade_method
+
+
 def test_provider_and_tool_details_are_structured(tmp_path):
     facade = _agent(tmp_path)
     provider_failure = LLMError("unavailable", retryable=True)

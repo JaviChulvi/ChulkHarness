@@ -39,6 +39,13 @@ class PlanStepStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class MemoryProposalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class Usage:
     input_tokens: int = 0
@@ -79,6 +86,22 @@ class Cost:
 
 
 @dataclass(frozen=True)
+class ToolAttempt:
+    attempt: int
+    started_at: str
+    ended_at: str
+    success: bool
+    failure_kind: str | None = None
+    error: str | None = None
+    permission_decision: str | None = None
+    retry_scheduled: bool = False
+    retry_disposition: str = "finished"
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
+@dataclass(frozen=True)
 class ToolCall:
     tool_name: str
     arguments: Mapping[str, Any]
@@ -91,10 +114,12 @@ class ToolCall:
     success: bool | None = None
     error: str | None = None
     failure_kind: str | None = None
+    attempts: tuple[ToolAttempt, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", freeze_mapping(self.arguments))
+        object.__setattr__(self, "attempts", tuple(self.attempts))
         object.__setattr__(self, "metadata", freeze_mapping(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
@@ -279,6 +304,36 @@ class PlanResult:
         return plain_data(self)
 
 
+@dataclass(frozen=True)
+class MemoryProposal:
+    id: str
+    content: str
+    tags: tuple[str, ...]
+    metadata: Mapping[str, Any]
+    importance: int
+    source: str
+    confidence: float
+    evidence: str | None
+    conversation_id: str | None
+    turn_id: str | None
+    status: MemoryProposalStatus
+    created_at: str
+    reviewed_at: str | None = None
+    accepted_memory_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tags", tuple(self.tags))
+        object.__setattr__(self, "metadata", freeze_mapping(self.metadata))
+        object.__setattr__(
+            self,
+            "status",
+            enum_value(MemoryProposalStatus, self.status, MemoryProposalStatus.UNKNOWN),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
 EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
@@ -323,6 +378,8 @@ __all__ = [
     "ContextReport",
     "ContextSection",
     "Cost",
+    "MemoryProposal",
+    "MemoryProposalStatus",
     "Observation",
     "Plan",
     "PlanResult",
@@ -334,5 +391,6 @@ __all__ = [
     "RunResult",
     "RunStatus",
     "ToolCall",
+    "ToolAttempt",
     "Usage",
 ]

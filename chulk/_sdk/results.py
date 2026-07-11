@@ -12,6 +12,8 @@ from chulk.results import (
     ContextReport,
     ContextSection,
     Cost,
+    MemoryProposal,
+    MemoryProposalStatus,
     Observation,
     Plan,
     PlanResult,
@@ -22,6 +24,7 @@ from chulk.results import (
     PlanStepStatus,
     RunResult,
     RunStatus,
+    ToolAttempt,
     ToolCall,
     Usage,
 )
@@ -55,6 +58,23 @@ def cost_snapshot(value: object) -> Cost | None:
 
 def tool_call_snapshot(value: object) -> ToolCall:
     payload = _mapping(value)
+    metadata = _dict(payload.get("metadata"))
+    attempt_values = metadata.pop("attempt_history", ())
+    attempts = tuple(
+        ToolAttempt(
+            attempt=_int(attempt_payload.get("attempt")),
+            started_at=str(attempt_payload.get("started_at") or ""),
+            ended_at=str(attempt_payload.get("ended_at") or ""),
+            success=bool(attempt_payload.get("success")),
+            failure_kind=_optional_str(attempt_payload.get("failure_kind")),
+            error=_optional_str(attempt_payload.get("error")),
+            permission_decision=_optional_str(attempt_payload.get("permission_decision")),
+            retry_scheduled=bool(attempt_payload.get("retry_scheduled")),
+            retry_disposition=str(attempt_payload.get("retry_disposition") or "finished"),
+        )
+        for item in attempt_values or ()
+        if (attempt_payload := _mapping(item))
+    )
     return ToolCall(
         tool_name=str(payload.get("tool_name") or "unknown"),
         arguments=_dict(payload.get("arguments")),
@@ -67,7 +87,8 @@ def tool_call_snapshot(value: object) -> ToolCall:
         success=payload.get("success") if isinstance(payload.get("success"), bool) else None,
         error=_optional_str(payload.get("error")),
         failure_kind=_optional_str(payload.get("failure_kind")),
-        metadata=_dict(payload.get("metadata")),
+        attempts=attempts,
+        metadata=metadata,
     )
 
 
@@ -131,6 +152,26 @@ def plan_snapshot(value: object | None) -> Plan | None:
         created_at=_optional_str(payload.get("created_at")),
         approved_at=_optional_str(payload.get("approved_at")),
         rejected_at=_optional_str(payload.get("rejected_at")),
+    )
+
+
+def memory_proposal_snapshot(value: object) -> MemoryProposal:
+    payload = _mapping(value)
+    return MemoryProposal(
+        id=str(payload.get("id") or ""),
+        content=str(payload.get("content") or ""),
+        tags=tuple(str(item) for item in payload.get("tags") or ()),
+        metadata=_dict(payload.get("metadata")),
+        importance=_int(payload.get("importance"), default=1),
+        source=str(payload.get("source") or "manual_review"),
+        confidence=float(payload.get("confidence") or 0),
+        evidence=_optional_str(payload.get("evidence")),
+        conversation_id=_optional_str(payload.get("conversation_id")),
+        turn_id=_optional_str(payload.get("turn_id")),
+        status=_enum(MemoryProposalStatus, payload.get("status"), MemoryProposalStatus.UNKNOWN),
+        created_at=str(payload.get("created_at") or ""),
+        reviewed_at=_optional_str(payload.get("reviewed_at")),
+        accepted_memory_id=_optional_str(payload.get("accepted_memory_id")),
     )
 
 
@@ -267,6 +308,7 @@ __all__ = [
     "RunResult",
     "context_report_snapshot",
     "cost_snapshot",
+    "memory_proposal_snapshot",
     "observation_snapshot",
     "plan_result_from_runtime",
     "plan_snapshot",

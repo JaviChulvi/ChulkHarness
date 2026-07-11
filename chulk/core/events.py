@@ -38,6 +38,7 @@ class TraceEvent:
     TOOL_PERMISSION_REQUESTED = "tool_permission_requested"
     TOOL_PERMISSION_DECIDED = "tool_permission_decided"
     TOOL_CALL_STARTED = "tool_call_started"
+    TOOL_CALL_ATTEMPT = "tool_call_attempt"
     TOOL_CALL = "tool_call"
     TOOL_CALL_COMPLETED = "tool_call_completed"
     TOOL_CALL_FAILED = "tool_call_failed"

@@ -56,6 +56,17 @@ def validate_tool_schema(tool_name: str, schema: dict[str, Any]) -> None:
         raise ValueError(f"Invalid schema for tool {tool_name}: {issue_text}")
 
 
+def validate_tool_output_schema(tool_name: str, schema: dict[str, Any]) -> None:
+    """Validate a tool output schema without requiring an object root."""
+    if not isinstance(schema, dict):
+        raise ValueError(f"Tool {tool_name} output_schema must be an object")
+    issues: list[ToolValidationIssue] = []
+    _validate_schema("$", schema, issues)
+    if issues:
+        issue_text = "; ".join(issue.to_prompt_line() for issue in issues)
+        raise ValueError(f"Invalid output schema for tool {tool_name}: {issue_text}")
+
+
 def validate_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: dict[str, Any]) -> None:
     """Validate model-provided arguments against a tool schema."""
     issues: list[ToolValidationIssue] = []
@@ -72,6 +83,14 @@ def validate_tool_arguments(tool_name: str, arguments: dict[str, Any], schema: d
     else:
         _validate_object("$", arguments, schema, issues)
 
+    if issues:
+        raise ToolValidationError(tool_name, issues, schema)
+
+
+def validate_tool_output(tool_name: str, value: Any, schema: dict[str, Any]) -> None:
+    """Validate a structured successful tool value against its output contract."""
+    issues: list[ToolValidationIssue] = []
+    _validate_value("$", value, schema, issues)
     if issues:
         raise ToolValidationError(tool_name, issues, schema)
 
