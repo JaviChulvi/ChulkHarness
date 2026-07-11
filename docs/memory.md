@@ -37,3 +37,10 @@ created. Rejection never creates a memory.
 Proposal evidence and accepted memories may contain sensitive user data. Keep
 the runtime database private and do not store secrets merely because a prompt
 asks the agent to remember them.
+
+Provenance identifies whether a candidate came from an explicit save or model
+extraction and retains conversation/turn evidence for review. The host should
+show that evidence before approval, apply retention and deletion policy, and
+isolate stores per tenant. Import/export Markdown is a human interchange format;
+SQLite remains the runtime source of truth. See [configuration](configuration.md)
+and [safety](safety.md).

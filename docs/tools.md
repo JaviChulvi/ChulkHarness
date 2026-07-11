@@ -1,5 +1,9 @@
 # Tools in embedded applications
 
+Declare tools with `@Tool`, expose only the smallest necessary list, and give
+each tool an accurate permission level. Model arguments are untrusted and are
+validated against the generated schema before the Python callable starts.
+
 ## Trusted host dependencies
 
 `ToolContext[Deps]` carries application-owned state that the model cannot
@@ -78,3 +82,8 @@ are never retried. Non-idempotent tools are held to one attempt when the policy
 requires idempotency. `RunResult.tool_calls[*].attempts` exposes immutable
 `ToolAttempt` records with timing, permission outcome, failure, and retry
 disposition.
+
+Application dependencies injected through `ToolContext` are host-owned, but
+their methods can still produce side effects. Keep secrets out of `metadata`,
+enforce tenant scope inside the dependency, and return only the data the model
+needs. See [permissions](permissions.md) and [safety](safety.md).

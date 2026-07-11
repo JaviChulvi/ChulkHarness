@@ -58,9 +58,14 @@ async for event in agent.run_events_async("Explain the change"):
     render(event)
 ```
 
-Cancelling an async iteration cancels its worker task and releases callback
-ownership. Closing a synchronous iterator waits for the in-flight operation to
-finish, then removes its channel; Python threads are not force-killed.
+Cancelling an async iteration stops event delivery and releases callback
+ownership after the in-flight operation unwinds. Closing a synchronous iterator
+also waits for the operation to finish; Python threads are not force-killed.
+
+Consumers should always close partially consumed synchronous generators and
+`aclose()` partially consumed async generators. Cancellation is propagated, not
+translated into an SDK error. Cleanup removes event-channel ownership; it does
+not promise to terminate an already running synchronous tool thread.
 
 ## Concurrency policy
 
@@ -69,3 +74,6 @@ call waits for the current turn, so per-run callbacks cannot intercept another
 turn's events. Use separate `Agent` or `AsyncAgent` instances when turns should
 run concurrently. Each instance retains its own conversation, run gate, and
 event routing state.
+
+The public event catalog is stable and versioned; internal trace ordering is
+trace-only. See [release policy](release-policy.md) and [tracing](tracing.md).

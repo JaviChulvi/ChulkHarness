@@ -57,6 +57,16 @@ jobs:
       - name: Typecheck package and external consumer
         run: python -m mypy typing_tests
 
+      - name: Verify documentation contract
+        run: python scripts/check_docs.py
+
+      - name: Run credential-free SDK examples
+        env:
+          CHULK_EXAMPLE_RUNTIME_DIR: ${{ runner.temp }}/chulk-examples
+        run: |
+          python examples/00_sdk_quickstart.py
+          python examples/repo_review_bot/app.py
+
   package:
     name: Clean wheel and examples
     runs-on: ubuntu-latest

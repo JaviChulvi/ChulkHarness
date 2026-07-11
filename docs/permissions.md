@@ -38,3 +38,8 @@ Explicit caller-supplied custom tools remain authoritative for backward
 compatibility. They still pass through their declared permission level and
 confirmation requirement. Retries repeat the permission and approval decision
 for every attempt, and the public `ToolAttempt` records the outcome.
+
+Approval callbacks receive a redacted request with the tool name, declared
+capability category, arguments, and policy context. Treat approval as a host UI
+decision, not as model consent. MCP is an external-service boundary even for
+read-looking methods; see [MCP](mcp.md) and [safety](safety.md).

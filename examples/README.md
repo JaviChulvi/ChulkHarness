@@ -1,17 +1,21 @@
 # Chulk SDK Examples
 
-These scripts show the public Python SDK surface added for embedding Chulk in
-applications and local automation.
+These scripts show the public Python SDK surface for embedding Chulk in
+applications and local automation. Start with the credential-free scripts:
 
 Run them from the repository root:
 
 ```bash
 python examples/00_sdk_quickstart.py
-python examples/01_basic_agent.py
-python examples/13_per_agent_skills.py
+python examples/repo_review_bot/app.py
 ```
 
-For the installed-package quickstart, install the default hosted-provider extra:
+They use `chulk.testing.ScriptedLLMClient`, need no credentials, and make stable
+CI examples. Set `CHULK_EXAMPLE_MODE=live` only for scripts that support an
+explicit live path.
+
+Most numbered examples call a live model and may incur provider charges. Install
+the matching provider extra first:
 
 ```bash
 python -m pip install "chulkharness[openai]"
@@ -19,7 +23,7 @@ python -m pip install "chulkharness[openai]"
 
 The distribution name is `chulkharness`; examples import `chulk`, and the CLI command is also `chulk`.
 
-Most examples call a live model. By default they use `openai`, so set:
+The live examples default to `openai`, so set:
 
 ```bash
 export OPENAI_API_KEY=...
@@ -36,9 +40,15 @@ export CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
 Example runtime state is written under `examples/runtime/`, which is ignored by
 Git.
 
+Use the [documentation index](../docs/index.md) for task guides. In particular,
+see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
+[tools](../docs/tools.md), [events](../docs/events.md), and
+[safety](../docs/safety.md).
+
 ## Scripts
 
-- `00_sdk_quickstart.py` shows the first installed-package run with `Agent`, `AgentConfig`, and `Tool`.
+- `00_sdk_quickstart.py` is deterministic by default and supports explicit live-provider opt-in.
+- `repo_review_bot/app.py` is a complete deterministic, read-only embedded application with a scrubbed trace walkthrough.
 - `01_basic_agent.py` creates an agent and returns a plain string.
 - `02_agent_config.py` builds an agent with explicit `AgentConfig` paths.
 - `03_builtin_tools.py` enables the built-in calculator tool.

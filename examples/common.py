@@ -9,10 +9,15 @@ from typing import Any
 
 import bootstrap  # noqa: F401
 from chulk import AgentConfig
+from chulk.llm import LLMClient
+from chulk.testing import ScriptedLLMClient
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_STATE_ROOT = REPO_ROOT / "examples" / "runtime"
+EXAMPLE_STATE_ROOT = Path(
+    os.getenv("CHULK_EXAMPLE_RUNTIME_DIR", REPO_ROOT / "examples" / "runtime")
+).expanduser()
+EXAMPLE_MODE_ENV = "CHULK_EXAMPLE_MODE"
 
 
 def runtime_dir(name: str) -> Path:
@@ -59,6 +64,29 @@ def live_config(
         permission_profile=permission_profile,
         **overrides,
     )
+
+
+def scripted_or_live(
+    name: str,
+    responses: list[object],
+    *,
+    permission_profile: str = "read-only",
+) -> tuple[AgentConfig, LLMClient | None, str]:
+    """Select deterministic execution by default and live execution explicitly."""
+    mode = os.getenv(EXAMPLE_MODE_ENV, "scripted").strip().lower()
+    if mode == "scripted":
+        return (
+            AgentConfig(
+                project_root=REPO_ROOT,
+                runtime_dir=runtime_dir(name),
+                permission_profile=permission_profile,
+            ),
+            ScriptedLLMClient(responses),
+            mode,
+        )
+    if mode == "live":
+        return live_config(name, permission_profile=permission_profile), None, mode
+    raise SystemExit(f"{EXAMPLE_MODE_ENV} must be 'scripted' or 'live', got {mode!r}")
 
 
 def print_run_result(result: Any) -> None:
