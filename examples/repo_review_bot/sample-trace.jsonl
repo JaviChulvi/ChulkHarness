@@ -1,0 +1,7 @@
+{"created_at":"2026-01-01T00:00:00+00:00","payload":{"conversation_id":"conversation-demo","turn_id":"turn-demo"},"type":"turn_started"}
+{"created_at":"2026-01-01T00:00:01+00:00","payload":{"purpose":"action","request_index":1},"type":"model_request_started"}
+{"created_at":"2026-01-01T00:00:02+00:00","payload":{"tool_name":"read_fixture"},"type":"tool_call_started"}
+{"created_at":"2026-01-01T00:00:03+00:00","payload":{"success":true,"tool_name":"read_fixture"},"type":"tool_call_completed"}
+{"created_at":"2026-01-01T00:00:04+00:00","payload":{"purpose":"action","request_index":2},"type":"model_request_started"}
+{"created_at":"2026-01-01T00:00:05+00:00","payload":{"content":"High \u2014 The setup guide tells users to commit a production API token. Keep secrets in an ignored environment file or secret manager, rotate any token that was committed, and document the safe setup path."},"type":"final_answer"}
+{"created_at":"2026-01-01T00:00:06+00:00","payload":{"status":"completed"},"type":"turn_finished"}

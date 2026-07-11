@@ -16,6 +16,19 @@ from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggr
 class LLMError(RuntimeError):
     """Base error for model provider failures."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.retryable = retryable
+
 
 class LLMConfigurationError(LLMError):
     """Raised when the LLM client cannot be configured."""

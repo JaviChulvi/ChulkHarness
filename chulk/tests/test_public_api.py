@@ -4,12 +4,14 @@ import asyncio
 import gc
 from dataclasses import dataclass
 from enum import Enum
+from importlib.metadata import version as distribution_version
 import json
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
 import time
+import tomllib
 import warnings
 from typing import Annotated, Literal, get_type_hints
 
@@ -20,10 +22,13 @@ from chulk import (
     Agent,
     AgentConfig,
     AgentEvent,
+    AgentHandle,
     AsyncAgent,
+    AsyncAgentHandle,
     AsyncChatAgent,
     AgentPreset,
     ChatAgent,
+    Capabilities,
     MCP,
     PermissionDecision,
     PermissionDecisionRecord,
@@ -35,10 +40,13 @@ from chulk import (
     ToolPermissionLevel,
     Tools,
     agent,
+    async_agent,
     skills,
     tool,
     tools,
+    __version__,
 )
+from chulk._version import __version__ as source_version
 from chulk.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MODEL, load_config
 from chulk.core.actions import FinalAnswerAction
 from chulk.llm import FallbackChain, LLMActionResult, LLMCapabilities, LLMClient, LLMError
@@ -97,7 +105,9 @@ def write_skill(root, name: str, content: str) -> None:
 
 
 def test_public_api_exports_capitalized_aliases():
-    assert Agent is agent
+    assert isinstance(Agent, type)
+    assert isinstance(AsyncAgent, type)
+    assert callable(agent)
     assert Tool is tool
     assert Tools is tools
     assert Skills is skills
@@ -108,6 +118,40 @@ def test_public_api_exports_capitalized_aliases():
     assert ToolPermissionLevel is ToolsToolPermissionLevel
     assert callable(Skills.only)
     assert callable(Skills.pin)
+
+
+def test_lowercase_factories_return_public_facades(tmp_path):
+    sync_agent = agent(
+        config=AgentConfig(project_root=tmp_path / "sync"),
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "sync"})]),
+        tools=[],
+        skills=[],
+    )
+    async_facade = async_agent(
+        config=AgentConfig(project_root=tmp_path / "async"),
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "async"})]),
+        tools=[],
+        skills=[],
+    )
+
+    assert isinstance(sync_agent, Agent)
+    assert isinstance(async_facade, AsyncAgent)
+    assert AgentHandle is not Agent
+    assert AsyncAgentHandle is not AsyncAgent
+
+
+def test_public_package_contract_uses_one_version_and_distinct_names():
+    project_root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert __version__ == source_version == distribution_version("chulkharness")
+    assert project["name"] == "chulkharness"
+    assert project["dynamic"] == ["version"]
+    assert "version" not in project
+    assert project["scripts"]["chulk"] == "chulk.main:main"
+    assert project["requires-python"] == ">=3.11"
+    assert project["license"] == "MIT"
+    assert project["urls"]["Repository"] == "https://github.com/JaviChulvi/ChulkHarness"
 
 
 def test_runtime_create_agent_type_hints_resolve():
@@ -227,12 +271,9 @@ def test_public_agent_dispatches_events_from_constructor_and_run(tmp_path):
 
     assert response == "evented answer"
     assert "".join(deltas) == "evented answer"
-    assert constructor_events[0].type == "turn_started"
-    assert [event.type for event in run_events if event.type.startswith("model_stream_")] == [
-        "model_stream_started",
-        "model_stream_delta",
-        "model_stream_completed",
-    ]
+    assert constructor_events[0].type == "run.started"
+    assert [event.type for event in run_events if event.type == "model.delta"] == ["model.delta"]
+    assert run_events[-1].type == "run.completed"
 
 
 def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
@@ -273,9 +314,9 @@ def test_public_agent_run_result_returns_structured_turn_metadata(tmp_path):
     assert result.trace_path == handle.trace_path
     assert result.usage is not None
     assert result.context_report is not None
-    assert result.tool_calls[0]["tool_name"] == "echo_label"
-    assert result.observations[0]["tool_name"] == "echo_label"
-    assert result.loaded_skill_names == ["files"]
+    assert result.tool_calls[0].tool_name == "echo_label"
+    assert result.observations[0].tool_name == "echo_label"
+    assert result.loaded_skill_names == ("files",)
     result_dict = result.to_dict()
     assert result_dict["content"] == "structured answer"
     assert result_dict["trace_path"] == str(handle.trace_path)
@@ -322,8 +363,8 @@ def test_public_agent_run_result_exposes_extension_metadata(tmp_path):
     assert result.content == "structured"
     assert result.status == "completed"
     assert result.extension_metadata == {"confidence": 0.7}
-    assert result.tool_calls == []
-    assert result.observations == []
+    assert result.tool_calls == ()
+    assert result.observations == ()
 
 
 def test_public_agent_redacts_streamed_and_final_output(tmp_path):
@@ -347,7 +388,10 @@ def test_public_agent_redacts_streamed_and_final_output(tmp_path):
 
     assert response == "[redacted] answer"
     assert "".join(deltas) == "[redacted] answer"
-    assert any(event.type == "final_answer" and event.payload["content"] == "[redacted] answer" for event in events)
+    assert any(
+        event.type == "run.completed" and event.payload.result.content == "[redacted] answer"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -378,7 +422,7 @@ async def test_public_async_agent_awaits_decorated_tool(tmp_path):
     result = await handle.run_result("use async")
 
     assert result.content == "async done"
-    assert result.tool_calls[0]["success"] is True
+    assert result.tool_calls[0].success is True
 
 
 @pytest.mark.asyncio
@@ -453,8 +497,8 @@ async def test_public_async_agent_approve_awaits_decorated_tool(tmp_path):
     assert result.content == "async approval done"
     assert result.status == "completed"
     assert calls == ["approved"]
-    assert result.tool_calls[0]["success"] is True
-    assert result.tool_calls[0]["failure_kind"] is None
+    assert result.tool_calls[0].success is True
+    assert result.tool_calls[0].failure_kind is None
 
 
 def test_public_decorated_async_tool_sync_rejection_closes_coroutine():
@@ -603,7 +647,7 @@ def test_public_permission_callback_denies_confirming_tool(tmp_path):
 
     assert result.content == "denied"
     assert calls == []
-    assert result.tool_calls[0]["error"] == "permission_denied"
+    assert result.tool_calls[0].error == "permission_denied"
 
 
 def test_public_confirming_tool_is_denied_without_callback(tmp_path):
@@ -636,7 +680,7 @@ def test_public_confirming_tool_is_denied_without_callback(tmp_path):
 
     assert result.content == "blocked"
     assert calls == []
-    assert result.tool_calls[0]["error"] == "permission_denied"
+    assert result.tool_calls[0].error == "permission_denied"
 
 
 def test_public_agent_can_approve_workspace_shell_tool(tmp_path):
@@ -666,8 +710,8 @@ def test_public_agent_can_approve_workspace_shell_tool(tmp_path):
     ).run_result("run shell")
 
     assert result.content == "shell approved"
-    assert result.tool_calls[0]["success"] is True
-    assert "stdout:\nsdk" in result.observations[0]["content"]
+    assert result.tool_calls[0].success is True
+    assert "stdout:\nsdk" in result.observations[0].content
 
 
 def test_public_agent_can_pin_skill(tmp_path):
@@ -1243,7 +1287,14 @@ def test_public_mcp_builder_uses_hosted_mcp_for_openai(tmp_path):
     llm = HostedMCPRecordingLLM()
     server = MCP.streamable_http(label="docs", server_url="https://mcp.example.com", allowed_tools=["search_docs"])
 
-    result = Agent(config=config, llm=llm, tools=[], skills=[], mcp=[server]).run_result("search docs")
+    result = Agent(
+        config=config,
+        capabilities=Capabilities(external_services=True),
+        llm=llm,
+        tools=[],
+        skills=[],
+        mcp=[server],
+    ).run_result("search docs")
 
     assert result.content == "hosted mcp captured"
     assert llm.hosted_mcp_servers == (server,)
@@ -1459,13 +1510,14 @@ def test_public_mcp_bridge_registers_for_non_openai_providers(monkeypatch, tmp_p
         tools=[],
         skills=[],
         mcp=[server],
+        capabilities=Capabilities(external_services=True),
         permission_callback=lambda _request, _record: True,
     ).run_result("search docs")
 
     assert bridge_calls == [(server,)]
     assert result.content == "bridge ok"
-    assert result.tool_calls[0]["tool_name"] == "mcp_docs_search_docs"
-    assert result.tool_calls[0]["success"] is True
+    assert result.tool_calls[0].tool_name == "mcp_docs_search_docs"
+    assert result.tool_calls[0].success is True
 
 
 def test_public_plan_result_approve_result_and_reject_result(tmp_path):
@@ -1543,12 +1595,12 @@ def test_public_approve_and_reject_result_without_pending_plan_use_neutral_metad
     assert approve_result.content == "No plan is waiting for approval."
     assert approve_result.status == "no_pending_plan"
     assert approve_result.turn_id is None
-    assert approve_result.tool_calls == []
+    assert approve_result.tool_calls == ()
     assert approve_result.plan is None
     assert reject_result.content == "No plan is waiting for approval."
     assert reject_result.status == "no_pending_plan"
     assert reject_result.turn_id is None
-    assert reject_result.tool_calls == []
+    assert reject_result.tool_calls == ()
     assert reject_result.plan is None
 
 

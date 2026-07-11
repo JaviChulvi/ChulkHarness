@@ -11,11 +11,11 @@ from common import live_config
 
 
 async def main() -> None:
-    assistant = AsyncChatAgent(config=live_config("09-async-agent"))
-    result = await assistant.run_result("Reply with two concise tips for using AsyncAgent in web apps.")
-    print(result.content)
-    print(f"status: {result.status}")
-    print(f"trace_path: {result.trace_path}")
+    async with AsyncChatAgent(config=live_config("09-async-agent")) as assistant:
+        result = await assistant.run_result("Reply with two concise tips for using AsyncAgent in web apps.")
+        print(result.content)
+        print(f"status: {result.status}")
+        print(f"trace_path: {result.trace_path}")
 
 
 if __name__ == "__main__":

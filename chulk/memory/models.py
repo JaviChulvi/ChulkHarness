@@ -35,3 +35,41 @@ class MemoryExtractionCandidate:
     confidence: float = 0.8
     metadata: dict[str, Any] = field(default_factory=dict)
     importance: int = 5
+
+
+@dataclass(frozen=True)
+class MemoryProposalRecord:
+    """A durable memory candidate awaiting or recording host review."""
+
+    id: str
+    content: str
+    tags: list[str]
+    metadata: dict[str, Any]
+    importance: int
+    source: str
+    confidence: float
+    evidence: str | None
+    conversation_id: str | None
+    turn_id: str | None
+    status: str
+    created_at: str
+    reviewed_at: str | None = None
+    accepted_memory_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "tags": list(self.tags),
+            "metadata": dict(self.metadata),
+            "importance": self.importance,
+            "source": self.source,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+            "conversation_id": self.conversation_id,
+            "turn_id": self.turn_id,
+            "status": self.status,
+            "created_at": self.created_at,
+            "reviewed_at": self.reviewed_at,
+            "accepted_memory_id": self.accepted_memory_id,
+        }

@@ -1177,22 +1177,22 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 #### Phase A: Trust And Packaging
 
-- [ ] Add `LICENSE`.
-- [ ] Add `CHANGELOG.md`.
-- [ ] Add `SECURITY.md`.
-- [ ] Add GitHub Actions CI.
-- [ ] Run CI on Python 3.11, 3.12, and 3.13.
-- [ ] Add linting with `ruff`.
-- [ ] Add type checking with `mypy` or `pyright`.
-- [ ] Run `python -m pytest` in CI.
-- [ ] Run `python -m compileall chulk` in CI.
-- [ ] Build the package wheel in CI.
-- [ ] Install the built wheel in a clean virtual environment in CI.
-- [ ] Verify clean-wheel imports: `from chulk import Agent, AgentConfig, Tool, Tools, Skills`.
-- [ ] Verify built-in presets load from the installed wheel.
-- [ ] Verify built-in skills are discoverable from the installed wheel.
-- [ ] Verify examples import correctly from the installed wheel.
-- [ ] Decide and document the package/install name versus import name.
+- [x] Add `LICENSE`.
+- [x] Add `CHANGELOG.md`.
+- [x] Add `SECURITY.md`.
+- [x] Add GitHub Actions CI.
+- [x] Run CI on Python 3.11, 3.12, and 3.13.
+- [x] Add linting with `ruff`.
+- [x] Add type checking with `mypy` or `pyright`.
+- [x] Run `python -m pytest` in CI.
+- [x] Run `python -m compileall chulk` in CI.
+- [x] Build the package wheel in CI.
+- [x] Install the built wheel in a clean virtual environment in CI.
+- [x] Verify clean-wheel imports: `from chulk import Agent, AgentConfig, Tool, Tools, Skills`.
+- [x] Verify built-in presets load from the installed wheel.
+- [x] Verify built-in skills are discoverable from the installed wheel.
+- [x] Verify examples import correctly from the installed wheel.
+- [x] Decide and document the package/install name versus import name.
 - [ ] Publish a GitHub release after the first clean packaging pass.
 
 #### Phase B: SDK Defaults And Installability
@@ -1202,7 +1202,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Make SDK `Agent()` default runtime state to `Path.cwd() / ".chulk"` instead of the installed package or source tree.
 - [x] Make SDK `Agent()` resolve project root as explicit SDK config, then `CHULK_PROJECT_ROOT`, then `Path.cwd()`, with runtime state under `.chulk` by default.
 - [x] Keep CLI coding-agent defaults separate from SDK defaults.
-- [ ] Use this default runtime layout for user projects: `.chulk/store.sqlite`, `.chulk/traces/`, `.chulk/sessions/`, `.chulk/mcp.json`, and `.chulk/skills/`.
+- [x] Use this default runtime layout for user projects: `.chulk/store.sqlite`, `.chulk/traces/`, `.chulk/sessions/`, `.chulk/mcp.json`, and `.chulk/skills/`.
 - [x] Add `runtime_dir` to the internal `Config` model or otherwise make it visible in diagnostics.
 - [x] Default `store_path` to `.chulk/store.sqlite` for SDK usage.
 - [x] Default `traces_dir` to `.chulk/traces` for SDK usage.
@@ -1219,23 +1219,23 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add `AgentConfig.local(project_root=".", runtime_dir=".chulk", permission_profile="read-only")` docs and examples.
 - [x] Update README runtime-state docs from `chulk/store.sqlite` and `traces/` to `.chulk/` for SDK usage.
 - [x] Keep repo-development and CLI docs explicit when they intentionally differ from SDK defaults.
-- [ ] Add an SDK quickstart that uses `pip install chulkharness`, `Agent`, `AgentConfig`, and `Tool`.
+- [x] Add an SDK quickstart that uses `pip install chulkharness`, `Agent`, `AgentConfig`, and `Tool`.
 
 #### Phase C: Public API Cleanup
 
-- [ ] Make `Agent` a real public facade class instead of a function alias.
-- [ ] Keep lowercase `agent(...)` as a backwards-compatible factory that returns an `Agent`.
-- [ ] Keep `AgentHandle` internal or clearly document it as the runtime handle behind the public facade.
-- [ ] Add `Agent.run(...)` and `Agent.run_result(...)` methods that delegate to the handle.
-- [ ] Add `Agent.plan(...)`, `plan_result(...)`, `approve(...)`, `approve_result(...)`, `reject(...)`, and `reject_result(...)` facade methods.
-- [ ] Add `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry` facade properties.
-- [ ] Add `Agent.close()`.
-- [ ] Add context-manager support: `with Agent(config=config) as agent: ...`.
-- [ ] Add async context-manager support for `AsyncAgent`.
-- [ ] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
-- [ ] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
-- [ ] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
-- [ ] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
+- [x] Make `Agent` a real public facade class instead of a function alias.
+- [x] Keep lowercase `agent(...)` as a backwards-compatible factory that returns an `Agent`.
+- [x] Keep `AgentHandle` internal or clearly document it as the runtime handle behind the public facade.
+- [x] Add `Agent.run(...)` and `Agent.run_result(...)` methods that delegate to the handle.
+- [x] Add `Agent.plan(...)`, `plan_result(...)`, `approve(...)`, `approve_result(...)`, `reject(...)`, and `reject_result(...)` facade methods.
+- [x] Add `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry` facade properties.
+- [x] Add `Agent.close()`.
+- [x] Add context-manager support: `with Agent(config=config) as agent: ...`.
+- [x] Add async context-manager support for `AsyncAgent`.
+- [x] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
+- [x] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
+- [x] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
+- [x] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.
 - [ ] Document the public API stability policy before 1.0.
 - [ ] Mark `chulk.core.*`, `chulk.runtime.*`, and undocumented trace payload fields as internal/unstable.
 - [ ] Consider public convenience constructors or aliases: `ChatAgent`, `CodingAgent`, `TrustedLocalAgent`, `Agent.safe()`, `Agent.workspace()`, and `Agent.trusted_local()`.
@@ -1244,8 +1244,8 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 - [x] Make SDK default permission profile `read-only` unless the user explicitly opts into writes.
 - [x] Keep CLI coding-agent default permission profile `workspace-write`.
-- [ ] Add explicit capability/tool-enabling API for files, shell, network, memory writes, and external services.
-- [ ] Add a `Capabilities` config object or equivalent structured tool capability surface.
+- [x] Add explicit capability/tool-enabling API for files, shell, network, memory writes, and external services.
+- [x] Add a `Capabilities` config object or equivalent structured tool capability surface.
 - [ ] Add custom permission profiles in config.
 - [ ] Add workspace root allowlists.
 - [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, build artifacts, and credentials.
@@ -1291,22 +1291,22 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 #### Phase F: Better App Embedding
 
-- [ ] Add typed dependency/context injection for tools, e.g. `ToolContext[Deps]`.
-- [ ] Allow `Agent(..., deps=...)` or an equivalent dependency object for app-owned state.
-- [ ] Extend the `@Tool` decorator to hide injected context from model-facing argument schemas.
-- [ ] Add optional output schemas or output models for tools.
-- [ ] Include structured output metadata in traces and model observations when configured.
-- [ ] Add tool-level timeout policy.
-- [ ] Add tool-level retry policy.
+- [x] Add typed dependency/context injection for tools, e.g. `ToolContext[Deps]`.
+- [x] Allow `Agent(..., deps=...)` or an equivalent dependency object for app-owned state.
+- [x] Extend the `@Tool` decorator to hide injected context from model-facing argument schemas.
+- [x] Add optional output schemas or output models for tools.
+- [x] Include structured output metadata in traces and model observations when configured.
+- [x] Add tool-level timeout policy.
+- [x] Add tool-level retry policy.
 - [ ] Add tool testing helpers such as `assert_tool_schema(...)` and `invoke_tool(...)`.
-- [ ] Continue supporting async tools through the public decorator.
+- [x] Continue supporting async tools through the public decorator.
 - [ ] Add native async runtime later with async LLM calls, async tools, cancellation, timeouts, streaming events, concurrent read-only tools, and cleanup hooks.
 - [ ] Add memory namespaces for user and workspace isolation.
-- [ ] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
-- [ ] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
-- [ ] Add a memory review queue with pending, approve, and reject APIs.
+- [x] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
+- [x] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
+- [x] Add a memory review queue with pending, approve, and reject APIs.
 - [ ] Add memory retention controls such as TTL and max item count.
-- [ ] Add memory provenance fields: source, conversation id, human approval, confidence, last accessed, and evidence snippets.
+- [x] Add memory provenance fields: source, conversation id, human approval, confidence, last accessed, and evidence snippets.
 - [ ] Add provider capability API exposed publicly as `agent.provider.capabilities` or equivalent.
 - [ ] Add provider health checks.
 - [ ] Add invalid-model diagnostics for missing API keys, bad model names, unavailable endpoints, and unsupported tool schemas.

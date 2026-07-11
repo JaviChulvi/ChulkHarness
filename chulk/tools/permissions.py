@@ -28,6 +28,16 @@ class PermissionDecision(str, Enum):
     ASK = "ask"
 
 
+class TerminalPermissionDenied(PermissionError):
+    """Internal terminal denial retaining safe tool and policy context."""
+
+    def __init__(self, tool_name: str, reason: str, *, policy_name: str = "default") -> None:
+        self.tool_name = tool_name
+        self.reason = reason
+        self.policy_name = policy_name
+        super().__init__(f"Permission denied for tool {tool_name}: {reason}")
+
+
 DEFAULT_PERMISSION_PROFILE = "workspace-write"
 SUPPORTED_PERMISSION_PROFILES = ("read-only", "workspace-write", "trusted-local", "full-access")
 
@@ -42,6 +52,8 @@ class PermissionRequest:
     requires_confirmation: bool = False
     policy_name: str = "default"
     reason: str = ""
+    capability_category: str | None = None
+    capability_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +63,10 @@ class PermissionRequest:
             "requires_confirmation": self.requires_confirmation,
             "policy_name": self.policy_name,
             "reason": self.reason,
+            "capability": {
+                "category": self.capability_category,
+                "enabled": self.capability_enabled,
+            },
         }
 
 
@@ -64,6 +80,8 @@ class PermissionDecisionRecord:
     reason: str
     policy_name: str = "default"
     requires_confirmation: bool = False
+    capability_category: str | None = None
+    capability_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +91,10 @@ class PermissionDecisionRecord:
             "reason": self.reason,
             "policy_name": self.policy_name,
             "requires_confirmation": self.requires_confirmation,
+            "capability": {
+                "category": self.capability_category,
+                "enabled": self.capability_enabled,
+            },
         }
 
 
@@ -109,6 +131,8 @@ class ToolPermissionPolicy:
             requires_confirmation=bool(getattr(tool, "requires_confirmation", False)),
             policy_name=self.name,
             reason=reason,
+            capability_category=_capability_category(level),
+            capability_enabled=True,
         )
 
     def decide(self, request: PermissionRequest) -> PermissionDecisionRecord:
@@ -128,6 +152,8 @@ class ToolPermissionPolicy:
             reason=reason,
             policy_name=self.name,
             requires_confirmation=request.requires_confirmation,
+            capability_category=request.capability_category,
+            capability_enabled=request.capability_enabled,
         )
 
 
@@ -210,3 +236,17 @@ def normalize_permission_decision(value: PermissionDecision | str) -> Permission
         return PermissionDecision(str(value))
     except ValueError as exc:
         raise ValueError(f"Unknown permission decision: {value!r}") from exc
+
+
+def _capability_category(level: ToolPermissionLevel) -> str:
+    if level in {ToolPermissionLevel.READ, ToolPermissionLevel.WRITE}:
+        return "files"
+    if level is ToolPermissionLevel.MEMORY:
+        return "memory"
+    if level is ToolPermissionLevel.SHELL:
+        return "shell"
+    if level is ToolPermissionLevel.NETWORK:
+        return "network"
+    if level is ToolPermissionLevel.EXTERNAL_SERVICE:
+        return "external_services"
+    return "destructive"

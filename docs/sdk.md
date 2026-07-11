@@ -1,0 +1,83 @@
+# SDK embedding and result contract
+
+Use `Agent` for synchronous hosts and `AsyncAgent` inside an async event loop.
+Both own their runtime resources; close them explicitly or use `with`/`async
+with`. A closed facade rejects further work. Construction, provider, safety,
+tool, memory, and trace failures map to the stable [SDK exception
+family](sdk-errors.md).
+
+```python
+from chulk import Agent, AgentConfig
+from chulk.testing import ScriptedLLMClient
+
+client = ScriptedLLMClient([{"type": "final_answer", "content": "Ready."}])
+with Agent(config=AgentConfig(project_root="."), llm=client, tools=[], skills=[]) as agent:
+    result = agent.run_result("Check readiness")
+```
+
+Chulk returns immutable public snapshots from `run_result`, `plan_result`,
+`approve_result`, and `reject_result`. Common records are available from `chulk`;
+the complete contract is available from `chulk.results`.
+
+```python
+from chulk import Agent, RunStatus
+from chulk.results import Cost, RunResult, ToolCall, Usage
+
+result: RunResult = agent.run_result("Summarize the project")
+if result.status is RunStatus.COMPLETED:
+    print(result.content)
+
+for call in result.tool_calls:
+    print(call.tool_name, call.success)
+```
+
+`RunStatus`, `PlanStatus`, and `PlanStepStatus` are finite string enums. Unknown
+future values convert to their explicit `UNKNOWN` member instead of pretending
+to be a current lifecycle state.
+
+## Stable records
+
+`RunResult` and `PlanResult` compose typed records rather than unstructured
+containers:
+
+- `Usage` and `Cost` preserve provider-neutral accounting.
+- `ToolCall` and `Observation` describe tool activity and returned evidence.
+- `ContextReport`, `ContextBudget`, and `ContextSection` describe prompt input.
+- `Plan`, `PlanStep`, and `PlanStepEvidence` describe approval and execution.
+
+Sequences are tuples and mappings are recursively read-only. Each result is a
+detached snapshot: later runtime state changes cannot alter a result already
+returned to the caller.
+
+Unknown pricing is represented by `Cost(amount=None, pricing_known=False)`.
+That is distinct from a known free operation whose amount is `Decimal("0")`.
+
+## Serialization
+
+Every public record has `to_dict()`. It returns fresh JSON-oriented lists,
+dictionaries, strings, numbers, booleans, and null values. Decimal monetary
+values and trace paths serialize as strings. The returned containers are mutable
+for adapter convenience and never mutate the source snapshot.
+
+```python
+payload = result.to_dict()
+payload["errors"].append("adapter annotation")  # result.errors is unchanged
+```
+
+`extension_metadata` is recursively read-only on the result and serialized as a
+fresh plain dictionary. Stable fields remain separate from extension data so an
+adapter can preserve unknown metadata without weakening the typed contract.
+
+## Async and concurrency boundary
+
+One facade serializes work-starting calls so one conversation cannot interleave
+turn state or callbacks. Use separate agent instances for true parallel runs.
+`AsyncAgent` uses native async turn execution where available, while some plan
+approval compatibility operations remain thread-backed. Cancellation propagates
+as `asyncio.CancelledError`; hosts should cancel/await tasks and then close the
+agent. A synchronous Python worker thread cannot be force-killed, so tools need
+their own cooperative cancellation and I/O timeouts.
+
+See [events](events.md) for generator cleanup and ordering,
+[configuration](configuration.md) for runtime ownership, and the
+[release policy](release-policy.md) before importing advanced modules.

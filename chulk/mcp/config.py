@@ -11,13 +11,15 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from chulk.errors import ConfigurationError
+
 
 LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 SUPPORTED_TRANSPORTS = {"streamable_http"}
 SUPPORTED_APPROVALS = {"always", "never"}
 
 
-class MCPConfigError(ValueError):
+class MCPConfigError(ConfigurationError, ValueError):
     """Raised when MCP configuration is invalid."""
 
 

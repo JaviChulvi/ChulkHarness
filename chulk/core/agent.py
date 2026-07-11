@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 import re
+import time
 
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
 from chulk.core.context import AgentPrompt, ContextBudget, TurnContextSection
@@ -23,12 +25,19 @@ from chulk.core.reflection import (
     build_reflection_messages,
     parse_reflection_response,
 )
-from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
+from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState, utc_now
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
 from chulk.llm import LLMCost, LLMActionError, LLMClient, LLMError, LLMUsage
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.mcp import MCPServerConfig
-from chulk.memory import ConversationMemory, MemoryRecord, SQLiteMemoryStore, select_memories_for_prompt
+from chulk.memory import (
+    ConversationMemory,
+    MemoryPolicy,
+    MemoryRecord,
+    SQLiteMemoryStore,
+    route_memory_candidates,
+    select_memories_for_prompt,
+)
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import ToolRegistry
 from chulk.tools.permissions import (
@@ -58,6 +67,7 @@ class Agent:
         state: AgentState | None = None,
         memory: ConversationMemory | None = None,
         memory_store: SQLiteMemoryStore | None = None,
+        memory_policy: MemoryPolicy | None = None,
         skill_registry: SkillRegistry | None = None,
         tool_registry: ToolRegistry | None = None,
         trace_logger: JSONLTraceLogger | None = None,
@@ -81,6 +91,8 @@ class Agent:
         pinned_skill_names: list[str] | None = None,
         mcp_servers: list[MCPServerConfig] | tuple[MCPServerConfig, ...] | None = None,
         mcp_bridge_tool_names: list[str] | None = None,
+        owned_resources: list[object] | tuple[object, ...] | None = None,
+        default_tool_context: ToolExecutionContext | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -103,6 +115,9 @@ class Agent:
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()
         self.memory_store = memory_store
+        self.memory_policy = memory_policy or (
+            MemoryPolicy(memory_store, "automatic") if memory_store is not None else None
+        )
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry or ToolRegistry()
         self.trace_logger = trace_logger
@@ -125,11 +140,43 @@ class Agent:
         self.pinned_skill_names = pinned_skill_names or []
         self.mcp_servers = tuple(mcp_servers or ())
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
+        self._owned_resources = list(owned_resources or [])
+        self._closed = False
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
+        self.default_tool_context = default_tool_context
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
         self.state.conversation_summary = self.memory.conversation_summary
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the runtime has been finalized."""
+        return self._closed
+
+    def close(self) -> None:
+        """Finalize owned closeable resources exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[Exception] = []
+        for resource in reversed(self._owned_resources):
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        self.event_callback = None
+        self.event_sink = None
+        self._tool_contexts.clear()
+        if failures:
+            raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Agent is closed")
 
     def run_turn(
         self,
@@ -142,6 +189,7 @@ class Agent:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
         """Run one user turn and return the assistant response."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -166,6 +214,7 @@ class Agent:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
         """Run one user turn and await async tools in the current event loop."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -181,6 +230,7 @@ class Agent:
 
     def run_planned_turn(self, user_message: str) -> str:
         """Run one user turn that must propose a plan before tool execution."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -208,7 +258,14 @@ class Agent:
         )
         if isinstance(turn_or_response, str):
             return turn_or_response
-        return self._run_action_loop(turn_or_response, require_plan=require_plan)
+        try:
+            result = self._run_action_loop(turn_or_response, require_plan=require_plan)
+        except BaseException:
+            self._release_tool_context(turn_or_response)
+            raise
+        if turn_or_response.status != "waiting_for_approval":
+            self._release_tool_context(turn_or_response)
+        return result
 
     async def _run_user_turn_async(
         self,
@@ -232,7 +289,14 @@ class Agent:
         )
         if isinstance(turn_or_response, str):
             return turn_or_response
-        return await self._run_action_loop_async(turn_or_response, require_plan=require_plan)
+        try:
+            result = await self._run_action_loop_async(turn_or_response, require_plan=require_plan)
+        except BaseException:
+            self._release_tool_context(turn_or_response)
+            raise
+        if turn_or_response.status != "waiting_for_approval":
+            self._release_tool_context(turn_or_response)
+        return result
 
     def _start_user_turn(
         self,
@@ -249,7 +313,7 @@ class Agent:
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
-        execution_context = _coerce_tool_execution_context(tool_context)
+        execution_context = _coerce_tool_execution_context(tool_context) or self.default_tool_context
         turn = TurnState(
             user_message=clean_message,
             available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
@@ -259,7 +323,16 @@ class Agent:
             extension_metadata=extension_metadata or {},
             tool_context_metadata=execution_context.metadata if execution_context else {},
         )
-        self._tool_contexts[turn.turn_id] = execution_context
+        if execution_context is None:
+            execution_context = ToolExecutionContext()
+        execution_context = ToolExecutionContext(
+            metadata={
+                **execution_context.metadata,
+                "conversation_id": self.state.conversation_id,
+                "turn_id": turn.turn_id,
+            },
+            deps=execution_context.deps,
+        )
         self.state.current_turn_id = turn.turn_id
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
@@ -285,6 +358,7 @@ class Agent:
         self.memory.add_user_message(clean_message)
         self._trace(TraceEvent.USER_MESSAGE, {"turn_id": turn.turn_id, "content": clean_message})
 
+        self._tool_contexts[turn.turn_id] = execution_context
         return turn
 
     def has_pending_plan(self) -> bool:
@@ -294,17 +368,25 @@ class Agent:
 
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
+        self._ensure_open()
         turn_or_response = self._approve_pending_plan()
         if isinstance(turn_or_response, str):
             return turn_or_response
-        return self._run_action_loop(turn_or_response, require_plan=False)
+        try:
+            return self._run_action_loop(turn_or_response, require_plan=False)
+        finally:
+            self._release_tool_context(turn_or_response)
 
     async def approve_plan_async(self) -> str:
         """Approve the pending plan and continue it with async tool execution."""
+        self._ensure_open()
         turn_or_response = self._approve_pending_plan()
         if isinstance(turn_or_response, str):
             return turn_or_response
-        return await self._run_action_loop_async(turn_or_response, require_plan=False)
+        try:
+            return await self._run_action_loop_async(turn_or_response, require_plan=False)
+        finally:
+            self._release_tool_context(turn_or_response)
 
     def _approve_pending_plan(self) -> TurnState | str:
         """Mark the pending plan approved and return its paused turn."""
@@ -312,36 +394,44 @@ class Agent:
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
 
-        turn.approve_plan()
-        self.state.pending_plan_turn_id = None
-        self.state.active_plan = turn.active_plan
-        self.memory.add_user_message("User approved the plan. Continue executing the approved plan.")
-        self.state.messages = self.memory.recent()
-        self._trace(
-            TraceEvent.PLAN_APPROVED,
-            {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
-        )
+        try:
+            turn.approve_plan()
+            self.state.pending_plan_turn_id = None
+            self.state.active_plan = turn.active_plan
+            self.memory.add_user_message("User approved the plan. Continue executing the approved plan.")
+            self.state.messages = self.memory.recent()
+            self._trace(
+                TraceEvent.PLAN_APPROVED,
+                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+            )
+        except BaseException:
+            self._release_tool_context(turn)
+            raise
         return turn
 
     def reject_plan(self) -> str:
         """Reject the pending plan without executing tools."""
+        self._ensure_open()
         turn = self._pending_plan_turn()
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
 
-        message = "Plan rejected. No tools were run."
-        turn.reject_plan(message)
-        self.state.pending_plan_turn_id = None
-        self.state.active_plan = None
-        self.state.final_answer = message
-        self.memory.add_assistant_message(message)
-        self.state.messages = self.memory.recent()
-        self._trace(
-            TraceEvent.PLAN_REJECTED,
-            {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
-        )
-        self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
-        return message
+        try:
+            message = "Plan rejected. No tools were run."
+            turn.reject_plan(message)
+            self.state.pending_plan_turn_id = None
+            self.state.active_plan = None
+            self.state.final_answer = message
+            self.memory.add_assistant_message(message)
+            self.state.messages = self.memory.recent()
+            self._trace(
+                TraceEvent.PLAN_REJECTED,
+                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+            )
+            self._trace(TraceEvent.TURN_FINISHED, self._state_snapshot(turn))
+            return message
+        finally:
+            self._release_tool_context(turn)
 
     def describe_plan_status(self) -> str:
         """Return a compact pending-plan status for the CLI."""
@@ -550,12 +640,7 @@ class Agent:
                     "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
                 }
                 self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
-                permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
-                result = permission_result or self.tool_registry.run(
-                    action.tool_name,
-                    action.arguments,
-                    context=self._tool_context_for_turn(turn),
-                )
+                result = self._execute_tool_with_retries(action.tool_name, action.arguments, turn)
                 tool_call_record.finish(result)
                 state_tool_call = {
                     "tool_name": action.tool_name,
@@ -821,12 +906,7 @@ class Agent:
                     "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
                 }
                 self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
-                permission_result = self._permission_result_for_tool_call(action.tool_name, action.arguments, turn)
-                result = permission_result or await self.tool_registry.run_async(
-                    action.tool_name,
-                    action.arguments,
-                    context=self._tool_context_for_turn(turn),
-                )
+                result = await self._execute_tool_with_retries_async(action.tool_name, action.arguments, turn)
                 tool_call_record.finish(result)
                 state_tool_call = {
                     "tool_name": action.tool_name,
@@ -1208,6 +1288,100 @@ class Agent:
             return None
         return _permission_denied_result(request, record)
 
+    def _execute_tool_with_retries(
+        self,
+        tool_name: str,
+        arguments: dict,
+        turn: TurnState,
+    ) -> ToolResult:
+        tool = self.tool_registry.get(tool_name) if tool_name in {item.name for item in self.tool_registry.list_tools()} else None
+        retry_policy = getattr(tool, "retry_policy", None)
+        max_attempts = retry_policy.max_attempts if retry_policy is not None else 1
+        non_idempotent_guard = bool(
+            retry_policy is not None
+            and retry_policy.require_idempotent
+            and tool is not None
+            and not tool.idempotent
+        )
+        if non_idempotent_guard:
+            max_attempts = 1
+        attempts: list[dict] = []
+        result: ToolResult | None = None
+        for attempt_number in range(1, max_attempts + 1):
+            started_at = utc_now()
+            permission_result = self._permission_result_for_tool_call(tool_name, arguments, turn)
+            result = permission_result or self.tool_registry.run(
+                tool_name,
+                arguments,
+                context=self._tool_context_for_turn(turn),
+            )
+            retry = _should_retry_tool_result(result, retry_policy, attempt_number, max_attempts)
+            record = _tool_attempt_payload(
+                attempt_number,
+                started_at,
+                result,
+                retry=retry,
+                non_idempotent_guard=non_idempotent_guard,
+            )
+            attempts.append(record)
+            self._trace(
+                TraceEvent.TOOL_CALL_ATTEMPT,
+                {"turn_id": turn.turn_id, "tool_name": tool_name, **record},
+            )
+            if not retry:
+                break
+            if retry_policy is not None and retry_policy.backoff_seconds:
+                time.sleep(retry_policy.backoff_seconds)
+        assert result is not None
+        return replace(result, metadata={**result.metadata, "attempt_history": attempts})
+
+    async def _execute_tool_with_retries_async(
+        self,
+        tool_name: str,
+        arguments: dict,
+        turn: TurnState,
+    ) -> ToolResult:
+        tool = self.tool_registry.get(tool_name) if tool_name in {item.name for item in self.tool_registry.list_tools()} else None
+        retry_policy = getattr(tool, "retry_policy", None)
+        max_attempts = retry_policy.max_attempts if retry_policy is not None else 1
+        non_idempotent_guard = bool(
+            retry_policy is not None
+            and retry_policy.require_idempotent
+            and tool is not None
+            and not tool.idempotent
+        )
+        if non_idempotent_guard:
+            max_attempts = 1
+        attempts: list[dict] = []
+        result: ToolResult | None = None
+        for attempt_number in range(1, max_attempts + 1):
+            started_at = utc_now()
+            permission_result = self._permission_result_for_tool_call(tool_name, arguments, turn)
+            result = permission_result or await self.tool_registry.run_async(
+                tool_name,
+                arguments,
+                context=self._tool_context_for_turn(turn),
+            )
+            retry = _should_retry_tool_result(result, retry_policy, attempt_number, max_attempts)
+            record = _tool_attempt_payload(
+                attempt_number,
+                started_at,
+                result,
+                retry=retry,
+                non_idempotent_guard=non_idempotent_guard,
+            )
+            attempts.append(record)
+            self._trace(
+                TraceEvent.TOOL_CALL_ATTEMPT,
+                {"turn_id": turn.turn_id, "tool_name": tool_name, **record},
+            )
+            if not retry:
+                break
+            if retry_policy is not None and retry_policy.backoff_seconds:
+                await asyncio.sleep(retry_policy.backoff_seconds)
+        assert result is not None
+        return replace(result, metadata={**result.metadata, "attempt_history": attempts})
+
     def _resolve_permission_approval(
         self,
         request: PermissionRequest,
@@ -1221,6 +1395,8 @@ class Agent:
                 reason="tool call requires approval but no permission callback is configured",
                 policy_name=record.policy_name,
                 requires_confirmation=request.requires_confirmation,
+                capability_category=request.capability_category,
+                capability_enabled=request.capability_enabled,
             )
 
         callback_decision = self.permission_callback(request, record)
@@ -1238,6 +1414,8 @@ class Agent:
             reason=reason,
             policy_name=record.policy_name,
             requires_confirmation=request.requires_confirmation,
+            capability_category=request.capability_category,
+            capability_enabled=request.capability_enabled,
         )
 
     def _resolve_hosted_mcp_approval(self, approval_request: dict, turn: TurnState) -> bool:
@@ -1844,12 +2022,25 @@ class Agent:
     def _extract_long_term_memories(self, user_message: str) -> None:
         """Save explicit user-requested memories before retrieval."""
         self.state.extracted_memory_ids = []
-        if self.memory_store is None:
+        if self.memory_store is None or self.memory_policy is None:
             return
-        memory_ids = self.memory_store.extract_and_save_memories(user_message)
-        self.state.extracted_memory_ids = memory_ids
-        if memory_ids:
-            self._trace(TraceEvent.MEMORY_EXTRACTION_COMPLETED, {"memory_ids": memory_ids})
+        result = route_memory_candidates(
+            user_message,
+            self.memory_policy,
+            conversation_id=self.state.conversation_id,
+            turn_id=self.state.current_turn_id,
+        )
+        self.state.extracted_memory_ids = list(result.accepted_memory_ids)
+        if result.accepted_memory_ids or result.proposal_ids:
+            self._trace(
+                TraceEvent.MEMORY_EXTRACTION_COMPLETED,
+                {
+                    "turn_id": self.state.current_turn_id,
+                    "memory_ids": list(result.accepted_memory_ids),
+                    "proposal_ids": list(result.proposal_ids),
+                    "memory_mode": self.memory_policy.mode.value,
+                },
+            )
 
     def _select_long_term_memories(self, user_message: str) -> None:
         """Select durable memories that should shape this turn."""
@@ -1857,10 +2048,13 @@ class Agent:
         self._relevant_memories = []
         self.state.loaded_memory_ids = []
 
-        if self.memory_store is None:
+        if self.memory_store is None or self.memory_policy is None or not self.memory_policy.retrieval_enabled:
             return
 
-        self._trace(TraceEvent.MEMORY_SEARCH_STARTED, {"query": user_message})
+        self._trace(
+            TraceEvent.MEMORY_SEARCH_STARTED,
+            {"turn_id": self.state.current_turn_id, "query": user_message},
+        )
         profile, relevant = select_memories_for_prompt(self.memory_store, user_message)
         self._profile_memories = profile
         self._relevant_memories = relevant
@@ -1868,6 +2062,7 @@ class Agent:
         self._trace(
             TraceEvent.MEMORY_SEARCH_COMPLETED,
             {
+                "turn_id": self.state.current_turn_id,
                 "profile_memory_ids": [memory.id for memory in profile],
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
@@ -1882,7 +2077,10 @@ class Agent:
         if self.skill_registry is None:
             return
 
-        self._trace(TraceEvent.SKILL_SELECTION_STARTED, {"query": user_message})
+        self._trace(
+            TraceEvent.SKILL_SELECTION_STARTED,
+            {"turn_id": self.state.current_turn_id, "query": user_message},
+        )
         pinned_selections: list[SkillSelection] = []
         pinned_names: set[str] = set()
         for name in self.pinned_skill_names:
@@ -1911,6 +2109,7 @@ class Agent:
         self._trace(
             TraceEvent.SKILL_SELECTION_COMPLETED,
             {
+                "turn_id": self.state.current_turn_id,
                 "loaded_skill_names": self.state.loaded_skill_names,
                 "skills": [
                     {
@@ -2049,6 +2248,10 @@ class Agent:
         if turn.tool_context_metadata:
             return ToolExecutionContext(metadata=turn.tool_context_metadata)
         return None
+
+    def _release_tool_context(self, turn: TurnState) -> None:
+        """Release request-scoped host dependencies after terminal work."""
+        self._tool_contexts.pop(turn.turn_id, None)
 
     def _state_snapshot(self, turn: TurnState) -> dict:
         return {
@@ -2228,6 +2431,45 @@ def _permission_denied_result(request: PermissionRequest, record: PermissionDeci
             "permission_decision": record.to_dict(),
         },
     )
+
+
+def _should_retry_tool_result(result: ToolResult, retry_policy, attempt_number: int, max_attempts: int) -> bool:
+    if result.success or retry_policy is None or attempt_number >= max_attempts:
+        return False
+    if result.failure_kind in {
+        ToolFailureKind.CANCELLED,
+        ToolFailureKind.USER_BLOCKED,
+        ToolFailureKind.UNKNOWN_TOOL,
+        ToolFailureKind.INVALID_ARGUMENTS,
+        ToolFailureKind.ASYNC_REQUIRED,
+    }:
+        return False
+    return result.failure_kind in retry_policy.retryable_failure_kinds
+
+
+def _tool_attempt_payload(
+    attempt_number: int,
+    started_at: str,
+    result: ToolResult,
+    *,
+    retry: bool,
+    non_idempotent_guard: bool,
+) -> dict:
+    return {
+        "attempt": attempt_number,
+        "started_at": started_at,
+        "ended_at": utc_now(),
+        "success": result.success,
+        "failure_kind": result.failure_kind,
+        "error": result.error,
+        "permission_decision": "denied" if result.failure_kind == ToolFailureKind.USER_BLOCKED else "allowed",
+        "retry_scheduled": retry,
+        "retry_disposition": (
+            "non_idempotent_guard"
+            if non_idempotent_guard and not result.success
+            else "scheduled" if retry else "finished"
+        ),
+    }
 
 
 def _format_tool_failure_reason(result: ToolResult) -> str:

@@ -1,14 +1,35 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chulkharness"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A lightweight Python agent harness with explicit state, tools, memory, skills, and traces."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ChulkHarness contributors" }]
+keywords = ["agents", "llm", "tools", "memory", "tracing", "sdk"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/JaviChulvi/ChulkHarness"
+Repository = "https://github.com/JaviChulvi/ChulkHarness"
+Issues = "https://github.com/JaviChulvi/ChulkHarness/issues"
+Changelog = "https://github.com/JaviChulvi/ChulkHarness/blob/main/CHANGELOG.md"
+Security = "https://github.com/JaviChulvi/ChulkHarness/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 dev = [
@@ -16,6 +37,7 @@ dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
   "ruff>=0.14",
+  "mypy>=1.11",
   "setuptools>=77",
 ]
 openai = [
@@ -31,12 +53,16 @@ chulk = "chulk.main:main"
 [tool.setuptools]
 package-dir = {"" = "."}
 
+[tool.setuptools.dynamic]
+version = {attr = "chulk._version.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["chulk*"]
-exclude = ["chulkharness.egg-info*"]
+exclude = ["chulk.tests*", "chulkharness.egg-info*"]
 
 [tool.setuptools.package-data]
+"chulk" = ["py.typed"]
 "chulk.presets" = ["AGENT.md"]
 "chulk.skills" = ["bundled/*/SKILL.md"]
 
@@ -46,3 +72,11 @@ pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+follow_imports = "silent"
+warn_unused_configs = true
+warn_redundant_casts = true
+exclude = ["build", "dist"]

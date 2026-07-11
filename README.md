@@ -1,581 +1,81 @@
 # ChulkHarness
 
-ChulkHarness is a lightweight Python agent harness for building LLM-driven workflows with explicit control over state, tools, memory, skills, prompts, and traces.
+ChulkHarness is a lightweight Python agent harness with explicit state, model
+calls, tools, memory, skills, events, and traces. It is designed for developers
+who want an inspectable runtime and a small embedding API.
 
-It is designed for developers who want a clear, inspectable agent runtime without starting from a large framework. The core idea is simple: keep the agent loop visible, keep tool execution auditable, and make every model decision traceable.
+## Start here
 
-## Core Capabilities
+- New SDK user: [credential-free quickstart](docs/quickstart.md)
+- Embedding an application: [documentation index](docs/index.md)
+- Runnable patterns: [SDK examples](examples/README.md)
+- Project direction: [roadmap](TODO.md)
+- Vulnerability reporting: [security policy](SECURITY.md)
 
-- Conversation state for short-running sessions.
-- SQLite-backed long-term memory for durable facts, preferences, and project context.
-- SQLite-backed session persistence and resume.
-- Dynamic tool registration and execution.
-- Built-in command/shell tooling with safety controls.
-- Lazy-loaded skills for domain-specific workflows.
-- Public `from chulk import Agent, Tool` API for embedding the runtime in Python code.
-- Provider fallback chains that still satisfy the shared `LLMClient` contract.
-- Structured model responses for tool calls and final answers.
-- Explicit plan approval mode before tool execution.
-- Hybrid MCP client support through hosted OpenAI MCP tools or Chulk-managed bridge tools.
-- Trace logs that show messages, selected context, tool calls, observations, and errors.
+ChulkHarness supports Python 3.11, 3.12, and 3.13. The distribution name is
+`chulkharness`; Python imports and the command are `chulk`.
 
-## Design Principles
-
-- Lightweight Python modules over hidden runtime magic.
-- Explicit prompts, state, registries, and tool boundaries.
-- Local-first development with simple files and SQLite.
-- Safe defaults for commands and file operations.
-- Provider-swappable LLM client design.
-- Practical enough to extend, small enough to inspect.
-
-## Current Scope
-
-This repository has the Phase 1 chat loop, Phase 2 tool-call loop, Phase 3 SQLite-backed long-term memory, Phase 4 lazy-loaded skills, Phase 5 reliability basics, and the first Phase 6 workflows for plan mode plus session resume in place. It also exposes a small programmable API so the same runtime used by the CLI can be embedded with `from chulk import Agent`. The roadmap lives in [TODO.md](TODO.md).
-
-The LLM layer is provider-swappable. OpenAI, DeepSeek, and local OpenAI-compatible providers use native tool-calling transports by default, with Chulk JSON as a fallback where needed. Provider responses normalize into the same internal action types before the agent loop sees them.
-
-MCP client support uses a hybrid path. OpenAI Responses receives hosted MCP server definitions as native `{"type": "mcp"}` tools. DeepSeek and local providers receive Chulk-managed MCP bridge tools because their native API surface is function tools. Bridge calls are normal Chulk `Tool`s with `external_service` permission, so approval prompts and traces stay on the existing path.
-
-The default `SoftwareEngineer` preset keeps its operating guidance in `chulk/presets/AGENT.md` and injects that playbook into the base system prompt. This keeps durable agent behavior separate from per-turn skills, memory, and tool schemas.
-
-SDK agents store runtime state under `.chulk/` by default: `.chulk/store.sqlite` for memory and sessions, `.chulk/traces/` for traces, `.chulk/mcp.json` for MCP config, and `.chulk/skills/` for project skills. The agent retrieves relevant memories at the start of each turn and separately injects profile memories tagged `persona`, `preference`, `style`, or `workflow` so durable user preferences can shape responses without being confused with skills.
-
-Memory search uses SQLite FTS when available, with a fallback keyword search and local vector reranking. Memories also track tags, source, confidence, importance, archive state, and access metadata. A human-readable `MEMORY.md` can be imported or exported through memory tools, but SQLite remains the runtime memory engine.
-
-Bundled skills ship inside the package under `chulk/skills/bundled/`, while SDK project skills live in `.chulk/skills/` by default. Chulk loads only skill metadata at startup, chooses relevant skills with deterministic keyword matching, and injects full `SKILL.md` instructions only for selected skills in the current turn. Skill instructions stay separate from memory and tool schemas.
-
-SDK traces are stored as JSONL files in `.chulk/traces/`. Each model request logs the full message list sent to the provider by default, with obvious secrets redacted and a configurable prompt character cap.
-
-Agent session state is split from per-turn state. `AgentState` tracks the conversation, while each user message gets a `TurnState` with timing, model request count, tool-call count, tool call records, observations, errors, and final status. Completed turn snapshots are written to traces so a run can be replayed from the logs.
-
-Sessions are persisted in the same local SQLite database as long-term memory, using separate conversation tables. Use `/sessions` to list recent sessions, `/resume <conversation_id>` to resume one by full id or unique prefix, and `/history` to inspect recent persisted messages for the active session. Resumed sessions reload short-term history, append to the same trace file, and preserve pending `/plan` approvals across restarts.
-
-Planning is optional and controlled per request from the CLI. Use `/plan <request>` for a planned turn. During planning, Chulk allows only read-only reconnaissance tools such as `list_files`, `read_file`, `search_files`, and memory search tools, then asks the model to propose a structured plan action before any mutating execution. Chulk pauses that turn until the user runs `/approve` or `/reject`, then injects the approved plan back into the prompt and traces steps as they move from `pending` to `in_progress`, `completed`, or `blocked`.
-
-Large tool outputs are sent back to the model as bounded head/tail previews. When output is truncated, Chulk stores the full text as a local artifact under the active traces directory, for example `.chulk/traces/<conversation_id>_artifacts/`, and includes the artifact path, length, and SHA-256 hash in the observation metadata. If the omitted middle may matter, the model is instructed to inspect the artifact or run a narrower follow-up tool call before answering. This keeps model context bounded without throwing away important details. Artifact files contain raw local output, so treat them as sensitive runtime data and keep `.chulk/` and `traces/` out of Git.
-
-Tool arguments are validated against each tool schema before execution. Invalid calls produce structured observations with field-level validation errors, so the model can correct the call or explain the limitation instead of failing silently.
-
-Shell access and file-writing tools include local guardrails, timeouts, output limits, path checks, and audit-friendly tool results, but untrusted command execution should still be sandboxed in real deployments.
-
-## Planned Structure
-
-```text
-chulk/
-  api.py
-  main.py
-  config.py
-  runtime.py
-  cli/
-    commands.py
-    progress.py
-    terminal.py
-  core/
-    actions.py
-    agent.py
-    events.py
-    observations.py
-    prompt_builder.py
-    prompts.py
-    state.py
-    trace_format.py
-  llm/
-    base.py
-    capabilities.py
-    client.py
-    factory.py
-    messages.py
-    public.py
-    providers/
-      openai.py
-      deepseek.py
-  mcp/
-    bridge.py
-    config.py
-  memory/
-    constants.py
-    extraction.py
-    markdown.py
-    models.py
-    retrieval.py
-    store.py
-    sqlite_store.py
-  tools/
-    builtins.py
-    calculator.py
-    files.py
-    memory.py
-    public.py
-    registry.py
-    schema.py
-    shell.py
-  skills/
-    registry.py
-    bundled/
-      shell/
-        SKILL.md
-      memory/
-        SKILL.md
-      files/
-        SKILL.md
-  sessions/
-    models.py
-    recorder.py
-    sqlite_store.py
-  tracing/
-    logger.py
-  presets/
-    AGENT.md
-    software_engineer.py
-  tests/
-.chulk/
-  skills/
-    custom-skill/
-      SKILL.md
+```bash
+python -m pip install chulkharness
+python examples/00_sdk_quickstart.py
 ```
 
-## Local Setup
+The first example is deterministic and needs no credentials. Hosted providers
+are optional; for OpenAI use `python -m pip install "chulkharness[openai]"`.
 
-Create and activate the Conda environment:
+## SDK
+
+```python
+from chulk import Agent, AgentConfig
+from chulk.testing import ScriptedLLMClient
+
+client = ScriptedLLMClient([
+    {"type": "final_answer", "content": "Hello from Chulk."}
+])
+
+with Agent(
+    config=AgentConfig(project_root="."),
+    llm=client,
+    tools=[],
+    skills=[],
+) as agent:
+    print(agent.run("Say hello"))
+```
+
+SDK agents default to read-only capabilities and store private runtime state
+under `.chulk/`. Read [configuration](docs/configuration.md),
+[permissions](docs/permissions.md), [safety](docs/safety.md), and the
+[release policy](docs/release-policy.md) before production embedding.
+
+## CLI
+
+Install a provider extra, configure its credentials in a local `.env`, then run:
+
+```bash
+chulk
+chulk --once "Summarize this project"
+chulk --show-config
+```
+
+Common interactive commands include `/help`, `/plan <request>`, `/approve`,
+`/reject`, `/sessions`, `/resume <id>`, `/history`, `/memory`, `/skills`, and
+`/mcp`. The CLI and SDK share the same runtime builder but use different safety
+defaults; inspect `chulk --show-config` before enabling side effects.
+
+## Development
 
 ```bash
 conda env create -f environment.yml
 conda activate chulk
-```
-
-That installs ChulkHarness in editable mode with development, OpenAI, and MCP dependencies.
-
-If the environment already exists, update it with:
-
-```bash
-conda env update -f environment.yml --prune
-```
-
-If the `chulk` command was installed before a package-layout change, refresh the editable install:
-
-```bash
-python -m pip install -e ".[dev,openai,mcp]"
-```
-
-Create your local environment file:
-
-```bash
-cp .env.example .env
-```
-
-Set `OPENAI_API_KEY` in `.env` before running chat against OpenAI.
-
-Choose the LLM provider in `.env`:
-
-```bash
-# OpenAI
-CHULK_LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_key
-CHULK_MODEL=gpt-4.1-mini
-
-# DeepSeek
-CHULK_LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your_deepseek_key
-CHULK_MODEL=deepseek-v4-flash
-
-# Local OpenAI-compatible server, such as LM Studio
-CHULK_LLM_PROVIDER=local
-CHULK_MODEL=google/gemma-4-12b-qat
-CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
-CHULK_LOCAL_API_KEY=local
-
-# Ollama can use the same local provider with a different base URL
-CHULK_LLM_PROVIDER=local
-CHULK_MODEL=gemma4:12b
-CHULK_LOCAL_BASE_URL=http://localhost:11434/v1
-CHULK_LOCAL_API_KEY=ollama
-```
-
-The CLI coding agent can use provider fallback with the same public provider objects exposed by `chulk.llm`. Configure the primary provider normally, then add fallback providers as a comma-separated list. Each fallback entry can be `provider` or `provider:model`:
-
-```bash
-CHULK_LLM_PROVIDER=deepseek
-CHULK_MODEL=deepseek-v4-pro
-DEEPSEEK_API_KEY=your_deepseek_key
-OPENAI_API_KEY=your_openai_key
-CHULK_LLM_FALLBACK_PROVIDERS=openai:gpt-4.1-mini
-```
-
-At runtime this builds a `FallbackChain` equivalent to `FallbackChain([DeepSeekProvider(...), OpenAIProvider(...)])`. The CLI always uses `first_success`: try the primary provider first, then each fallback in order until one succeeds. The `local` provider can also appear in fallback chains, for example `CHULK_LLM_FALLBACK_PROVIDERS=local:google/gemma-4-12b-qat,openai:gpt-4.1-mini`.
-
-Choose the tool permission profile with `CHULK_PERMISSION_PROFILE`. Built-in profiles are `read-only`, `workspace-write`, `trusted-local`, and `full-access`. The CLI coding-agent default is `workspace-write`, which allows read, write, and memory tools, but asks before shell, network, external-service, or destructive tool calls. The SDK default is `read-only` unless the app opts into a broader profile.
-
-Configure remote Streamable HTTP MCP servers in `<runtime_dir>/mcp.json`, which defaults to `.chulk/mcp.json`:
-
-```json
-{
-  "servers": [
-    {
-      "label": "docs",
-      "transport": "streamable_http",
-      "server_url": "https://mcp.example.com",
-      "server_description": "Documentation search",
-      "allowed_tools": ["search_docs"],
-      "authorization_env": "DOCS_MCP_TOKEN",
-      "approval": "always"
-    }
-  ]
-}
-```
-
-`CHULK_RUNTIME_DIR` is the runtime home: Chulk reads project skills from `<runtime_dir>/skills` and MCP servers from `<runtime_dir>/mcp.json`. Put secret values in environment variables, not in `mcp.json`; Chulk resolves `authorization_env` at startup and redacts auth fields in config displays and traces. Use `/mcp` to inspect configured servers, provider path, auth status, allowed tools, and discovered bridge tools.
-
-## Programmable API
-
-Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
-See `examples/README.md` for runnable SDK scripts that cover basic agents, tools, permissions, events, planning, async usage, MCP, presets, and local providers.
-
-Create an SDK agent with project-local runtime state:
-
-Explicit `AgentConfig` values override environment and `.env` values. If a field is left unset, the SDK reads `CHULK_*` configuration from the environment or project `.env`, then falls back to SDK defaults such as `.chulk` and `read-only`.
-
-```python
-from chulk import Agent, AgentConfig
-from chulk.presets import SoftwareEngineer
-
-a = Agent(
-    config=AgentConfig.from_env(
-        project_root=".",
-        runtime_dir=".chulk",
-        permission_profile="workspace-write",
-    ),
-    preset=SoftwareEngineer(),
-)
-
-print(a.run("Inspect this repository and summarize the CLI entrypoint."))
-```
-
-Pick specific built-in tools and skills:
-
-```python
-from chulk import Agent, AgentConfig, Tools, Skills
-
-a = Agent(
-    config=AgentConfig.from_env(project_root=".", runtime_dir=".chulk", permission_profile="workspace-write"),
-    tools=[Tools.read_file, Tools.search_files, Tools.apply_patch],
-    skills=[Skills.files, Skills.shell],
-)
-
-print(a.run("Find where the CLI is wired and suggest a small cleanup."))
-```
-
-Use codebase skills per agent. SDK agents load bundled skills plus project skills from `.chulk/skills` by default, and `Skills.only(...)` keeps automatic skill selection scoped to that agent:
-
-```python
-from chulk import Agent, Skills
-from chulk import AgentConfig
-
-a = Agent(
-    config=AgentConfig.from_env(project_root=repo_root, runtime_dir=".chulk"),
-    skills=Skills.only("code-review", "pytest"),
-)
-
-print(a.run("Review the failing test and suggest the smallest fix."))
-```
-
-Use `Skills.pin(...)` only for skills that should be loaded into every turn:
-
-```python
-a = Agent(
-    config=AgentConfig.from_env(project_root=repo_root, runtime_dir=".chulk"),
-    skills=[Skills.only("code-review", "pytest"), Skills.pin("team-style")],
-)
-```
-
-Expose one of your own Python functions as a tool:
-
-```python
-from chulk import Agent, AgentConfig, Tool
-
-@Tool
-def lookup_order(order_id: str) -> str:
-    """Look up an order by id."""
-    return f"Order {order_id} ships tomorrow."
-
-a = Agent(
-    config=AgentConfig.from_env(project_root=".", runtime_dir=".chulk"),
-    tools=[lookup_order],
-    skills=[],
-)
-
-print(a.run("When does order A-100 ship?"))
-```
-
-Use provider fallback:
-
-```python
-from chulk import Agent, AgentConfig, Tools, Skills
-from chulk.llm import FallbackChain, OpenAIProvider, DeepSeekProvider, LocalProvider
-from chulk.presets import SoftwareEngineer
-
-a = Agent(
-    config=AgentConfig.from_env(project_root=".", runtime_dir=".chulk", permission_profile="workspace-write"),
-    preset=SoftwareEngineer(),
-    llm=FallbackChain(
-        providers=[
-            OpenAIProvider(model="gpt-4.1-mini"),
-            LocalProvider(model="google/gemma-4-12b-qat", base_url="http://localhost:1234/v1"),
-            DeepSeekProvider(model="deepseek-v4-flash"),
-        ],
-        strategy="first_success",
-    ),
-    tools=[Tools.read_file, Tools.search_files, Tools.apply_patch],
-    skills=[Skills.files, Skills.shell, Skills.memory],
-)
-
-print(a.run("Inspect the project and update the README"))
-```
-
-Ask for an approval plan before mutation:
-
-```python
-from chulk import Agent, AgentConfig
-from chulk.presets import SoftwareEngineer
-
-a = Agent(
-    config=AgentConfig.from_env(project_root=".", runtime_dir=".chulk", permission_profile="workspace-write"),
-    preset=SoftwareEngineer(),
-)
-
-print(a.plan("Add a small public API example to the README."))
-print(a.approve())
-```
-
-Use structured SDK results and event hooks when embedding Chulk in an app:
-
-```python
-from chulk import Agent, AgentConfig, AgentEvent, MCP, Tools
-from chulk.tools import PermissionDecision
-
-def on_event(event: AgentEvent) -> None:
-    if event.type == "tool_call_started":
-        print(event.payload["tool_name"])
-
-a = Agent(
-    config=AgentConfig(
-        project_root=".",
-        runtime_dir=".chulk",
-        provider="local",
-        model="google/gemma-4-12b-qat",
-        local_base_url="http://localhost:1234/v1",
-        local_api_key="local",
-        permission_profile="workspace-write",
-    ),
-    tools=[Tools.read_file, Tools.search_files, Tools.run_cmd],
-    mcp=[MCP.streamable_http(label="docs", server_url="https://mcp.example.com")],
-    permission_callback=lambda request, record: PermissionDecision.ALLOW,
-    on_event=on_event,
-)
-
-result = a.run_result("Inspect the CLI and summarize the command flow.")
-print(result.content)
-print(result.usage)
-print(result.trace_path)
-```
-
-For async app code, use the async wrapper around the same synchronous runtime:
-
-```python
-from chulk import AsyncAgent
-
-a = AsyncAgent(tools=[], skills=[])
-result = await a.run_result("Say hello from an async context.")
-```
-
-For a local OpenAI-compatible provider, configure the SDK runtime explicitly:
-
-```python
-from chulk import AgentConfig
-
-config = AgentConfig.local(
-    project_root=".",
-    runtime_dir=".chulk",
-    model="local-model",
-    base_url="http://localhost:1234/v1",
-    api_key="local",
-    permission_profile="read-only",
-)
-```
-
-The public handle wraps the same explicit `chulk.core.Agent` used by the CLI. It supports `run(...)`, `run_result(...)`, `plan(...)`, `plan_result(...)`, `approve()`, `approve_result()`, `reject()`, `reject_result()`, `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry`.
-
-Run the current CLI:
-
-```bash
-chulk
-```
-
-The interactive CLI uses color only for a real TTY and honors `NO_COLOR`; use `--color auto|always|never` to override detection. The default `compact` display keeps routine memory, skill, and model bookkeeping out of the transcript while preserving tool calls, permissions, plans, failures, and a one-line end-of-turn summary. `/display verbose` exposes all trace-driven progress and the detailed summary, while `/display quiet` prints only assistant responses and necessary prompts.
-
-Real terminals show a small ASCII spinner while the model or a tool is working. Arrow up/down navigates the active session's prompt history, and Tab completes registered slash commands when terminal `readline` support is available. Unknown slash commands are rejected locally with a suggestion instead of being sent to the model. The prompt remains intentionally short (`>`).
-
-Useful interactive commands:
-
-- `/help`
-- `/status`
-- `/context`
-- `/tools`
-- `/mcp`
-- `/sessions`
-- `/resume <conversation_id>`
-- `/history`
-- `/trace`
-- `/plan <request>`
-- `/plan`
-- `/approve`
-- `/reject`
-- `/display compact|verbose|quiet`
-- `/clear`
-- `/exit` (`/quit` and `/q` are aliases)
-
-Start directly in a persisted conversation:
-
-```bash
-chulk --resume <conversation_id>
-chulk --continue
-```
-
-Fresh interactive sessions are persisted only after their first turn, so opening Chulk and immediately exiting does not create an empty conversation or trace.
-
-Run a non-interactive request. Diagnostics go to stderr and stdout contains only the result:
-
-```bash
-chulk exec "Hello"
-chulk exec "Inspect this repository" --json
-```
-
-`chulk --once "Hello"` remains a compatibility alias for plain `chulk exec`. Non-interactive runs deny approval-gated tools instead of waiting for terminal input. Exit code `0` means success, `1` a runtime/provider failure, `2` a configuration or usage failure, and `3` that interactive approval was required.
-
-Inspect local configuration:
-
-```bash
-chulk --show-config
-```
-
-Initialize and diagnose a project without making a model request:
-
-```bash
-chulk init --coding-agent
-chulk init --sdk
-chulk init --read-only
-chulk doctor
-chulk doctor --json
-```
-
-`chulk init` creates missing `.chulk/mcp.json`, `.chulk/skills/`, and `.env.example` files and adds runtime paths to `.gitignore`; it does not replace existing files. `chulk doctor` validates configuration, provider credentials, model metadata, runtime writability, MCP auth, and Git ignore coverage without contacting the provider.
-
-Inspect or export a trace without starting an agent:
-
-```bash
-chulk trace inspect traces/<conversation_id>.jsonl
-chulk trace inspect traces/<conversation_id>.jsonl --json
-chulk trace export traces/<conversation_id>.jsonl --format html
-```
-
-Trace exports contain raw runtime data and should be handled as sensitive artifacts.
-
-Run tests:
-
-```bash
 python -m pytest
+python -m ruff check chulk examples scripts
+python -m mypy typing_tests
+python -m compileall chulk examples scripts
+python scripts/check_docs.py
 ```
 
-### Alternative: venv
+Architecture and contribution rules live in [AGENTS.md](AGENTS.md). Keep local
+credentials in `.env`; never commit API keys, `.chulk/` state, sensitive traces,
+or local SQLite databases. The implementation roadmap is [TODO.md](TODO.md).
 
-Conda is the recommended setup for this project. If you prefer `venv`, install the same extras manually:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -e ".[dev,openai,mcp]"
-```
-
-## Common Commands
-
-Run the interactive CLI:
-
-```bash
-chulk
-```
-
-Run a one-shot message:
-
-```bash
-chulk exec "Hello"
-```
-
-Built-in tools currently registered at startup:
-
-- `calculator`
-- `run_cmd`
-- `read_file`
-- `apply_patch`
-- `write_file`
-- `list_files`
-- `search_files`
-- `save_memory`
-- `search_memory`
-- `list_memories`
-- `delete_memory`
-- `update_memory`
-- `summarize_memories`
-- `archive_memory`
-- `restore_memory`
-- `compact_memories`
-- `import_memories`
-- `export_memories`
-
-## Environment
-
-`.env` is intentionally ignored by Git. Use `.env.example` as the shared template for local configuration.
-
-Planned environment variables:
-
-```bash
-OPENAI_API_KEY=
-DEEPSEEK_API_KEY=
-CHULK_LLM_PROVIDER=openai
-CHULK_MODEL=
-CHULK_LLM_FALLBACK_PROVIDERS=
-CHULK_PERMISSION_PROFILE=workspace-write
-CHULK_PROJECT_ROOT=
-CHULK_RUNTIME_DIR=.chulk
-CHULK_DEEPSEEK_BASE_URL=https://api.deepseek.com
-CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
-CHULK_LOCAL_API_KEY=
-CHULK_HISTORY_LIMIT=20
-CHULK_MAX_SKILLS_PER_TURN=3
-CHULK_MAX_SKILL_CONTENT_CHARS=4000
-CHULK_TRACE_MAX_PROMPT_CHARS=50000
-CHULK_MAX_OBSERVATION_CHARS=12000
-CHULK_MAX_TOOL_STDOUT_CHARS=8000
-CHULK_MAX_TOOL_STDERR_CHARS=4000
-CHULK_MAX_REFLECTION_ATTEMPTS=0
-CHULK_LLM_TIMEOUT_SECONDS=60
-CHULK_LLM_MAX_RETRIES=2
-```
-
-Prompt context limits are derived from `CHULK_LLM_PROVIDER` and `CHULK_MODEL` in `chulk/llm/capabilities.py`. Chulk uses the model's context window and default response reserve to budget prompt input, then compacts older conversation messages into a task-local summary when raw history would otherwise be omitted. The latest compact summary is persisted with the session, restored on `/resume`, and shown as its own section in `/context`. Each provider request receives an output limit based only on the remaining context for that specific prompt, not a fixed provider cap. Hosted providers require explicit model metadata; the `local` provider uses conservative default metadata for arbitrary local model names, with known local aliases registered explicitly.
-
-Set `CHULK_MAX_REFLECTION_ATTEMPTS=1` to add a bounded pre-final reflection pass. The reviewer returns structured JSON, can approve the proposed final answer, or can add a `reflection_feedback` observation that sends the agent through one more action loop before the answer is shown.
-
-Use `apply_patch` for normal file edits. It applies unified diffs atomically inside the project root and records changed paths plus SHA-256 metadata. `write_file` remains available for creating new UTF-8 files and guarded whole-file replacements; unsafe targets such as `.env`, credential files, SQLite stores, trace artifacts, caches, and dependency/build folders are blocked.
-
-## Development Roadmap
-
-The implementation now includes the core chat/tool/memory/skill runtime, reliability basics, explicit plan approval mode, session persistence, compact context summaries, usage/cost tracking, provider-native tool calling, and hybrid MCP client support. The next larger milestones are reflection, richer skill routing, local review workflows, optional web/search, subagents, and lifecycle hooks:
-
-- Phase 1: Minimal chat agent.
-- Phase 2: Tool registry and tool-call loop.
-- Phase 3: SQLite-backed memory.
-- Phase 4: Lazy-loaded skills.
-- Phase 5: Logging, tracing, tests, and reliability hardening.
-- Phase 6: Planning mode, reflection, semantic memory, and multi-step behavior.
-
-See [TODO.md](TODO.md) for the full checklist.
+ChulkHarness is licensed under the [MIT License](LICENSE).

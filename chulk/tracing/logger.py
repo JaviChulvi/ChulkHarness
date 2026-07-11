@@ -11,6 +11,8 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from chulk.redaction import redact_data
+
 
 @dataclass(frozen=True)
 class TraceEvent:
@@ -25,7 +27,7 @@ class TraceEvent:
 
 
 class JSONLTraceLogger:
-    """Append-only JSONL trace logger."""
+    """Append-only internal JSONL trace logger, independent of public events."""
 
     def __init__(
         self,
@@ -45,7 +47,7 @@ class JSONLTraceLogger:
 
     def log(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Append a trace event."""
-        safe_payload = _redact(payload or {})
+        safe_payload = redact_data(payload or {})
         event = TraceEvent(type=event_type, payload=safe_payload).to_dict()
         if not self._active:
             if event_type != self._defer_until_event:
@@ -83,34 +85,6 @@ class JSONLTraceLogger:
             "byte_count": len(content.encode("utf-8")),
             "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         }
-
-
-def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _redact_secret(key, item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    if isinstance(value, str):
-        return _redact_text(value)
-    return value
-
-
-def _redact_secret(key: str, value: Any) -> Any:
-    lowered = key.lower()
-    if any(marker in lowered for marker in {"api_key", "token", "secret", "password"}):
-        return "[redacted]"
-    return _redact(value)
-
-
-def _redact_text(text: str) -> str:
-    """Redact obvious secret values inside free-form trace text."""
-    redacted = re.sub(
-        r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|token|secret|password)[a-z0-9_-]*)\s*([:=])\s*['\"]?[^'\"\s]+",
-        lambda match: f"{match.group(1)}{match.group(2)} [redacted]",
-        text,
-    )
-    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[redacted]", redacted)
-    return redacted
 
 
 def _safe_artifact_name(name: str) -> str:

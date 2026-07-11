@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from chulk.memory.models import MemoryExtractionCandidate
 from chulk.memory.retrieval import normalize_content
+
+if TYPE_CHECKING:
+    from chulk.memory.policy import MemoryPolicy, MemoryPolicyResult
 
 
 def extract_memory_candidates(text: str) -> list[MemoryExtractionCandidate]:
@@ -45,6 +49,22 @@ def extract_memory_candidates(text: str) -> list[MemoryExtractionCandidate]:
             )
         )
     return candidates
+
+
+def route_memory_candidates(
+    text: str,
+    policy: "MemoryPolicy",
+    *,
+    conversation_id: str | None,
+    turn_id: str | None,
+) -> "MemoryPolicyResult":
+    """Extract candidates and apply the configured persistence/review policy."""
+    return policy.handle_candidates(
+        extract_memory_candidates(text),
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        evidence=text,
+    )
 
 
 def _strip_sentence(text: str) -> str:

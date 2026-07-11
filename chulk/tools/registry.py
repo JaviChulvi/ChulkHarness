@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
-from typing import Any
+from typing import Any, Generic, TypeVar, cast
 
+from chulk.capabilities import ToolRetryPolicy
+from chulk.redaction import redact_data, redact_text
 from chulk.tools.permissions import ToolPermissionLevel, normalize_permission_level
-from chulk.tools.schema import ToolValidationError, ToolValidationIssue, validate_tool_arguments, validate_tool_schema
+from chulk.tools.schema import (
+    ToolValidationError,
+    ToolValidationIssue,
+    validate_tool_arguments,
+    validate_tool_output,
+    validate_tool_output_schema,
+    validate_tool_schema,
+)
 
 
 class ToolFailureKind:
@@ -22,16 +32,28 @@ class ToolFailureKind:
     CANCELLED = "cancelled"
     ENVIRONMENT = "environment_failure"
     USER_BLOCKED = "user_blocked"
+    INVALID_OUTPUT = "invalid_output"
+    TIMEOUT = "timeout"
+
+
+DepsT = TypeVar("DepsT")
 
 
 @dataclass(frozen=True)
-class ToolExecutionContext:
+class ToolExecutionContext(Generic[DepsT]):
     """Host-owned request context passed through to tools without interpretation."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
+    deps: DepsT = field(default=None)  # type: ignore[assignment]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"metadata": self.metadata}
+        return {"metadata": self.metadata, "has_dependencies": self.deps is not None}
+
+    def require_deps(self) -> DepsT:
+        """Return injected dependencies or fail before tool side effects begin."""
+        if self.deps is None:
+            raise ValueError("Required tool dependencies were not provided by the host")
+        return cast(DepsT, self.deps)
 
 
 @dataclass(frozen=True)
@@ -47,6 +69,7 @@ class ToolResult:
     error: str | None = None
     failure_kind: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    value: Any = None
 
     def to_observation(self) -> str:
         """Return the safe observation text shown back to the model."""
@@ -77,10 +100,13 @@ class Tool:
     callable: ToolCallable
     requires_confirmation: bool = False
     permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ
-    timeout_seconds: int | None = None
+    timeout_seconds: float | None = None
     accepts_context: bool = False
     run_in_executor: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] | None = None
+    retry_policy: ToolRetryPolicy | None = None
+    idempotent: bool = False
 
     def normalized_permission_level(self) -> ToolPermissionLevel:
         return normalize_permission_level(self.permission_level)
@@ -100,6 +126,10 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {tool.name}")
         tool.normalized_permission_level()
         validate_tool_schema(tool.name, tool.args_schema)
+        if tool.output_schema is not None:
+            validate_tool_output_schema(tool.name, tool.output_schema)
+        if tool.timeout_seconds is not None and tool.timeout_seconds <= 0:
+            raise ValueError(f"Tool {tool.name} timeout_seconds must be greater than zero")
         self._tools[tool.name] = tool
 
     def list_tools(self) -> list[Tool]:
@@ -145,7 +175,7 @@ class ToolRegistry:
                 metadata={
                     "requested_tool_name": name,
                     "available_tools": available_tools,
-                    "exception": str(exc),
+                    "exception": redact_text(str(exc)),
                 },
             )
             self._log_call(name, arguments, result)
@@ -153,7 +183,7 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            result = self._call_tool(tool, arguments, context)
+            result = self._call_tool_with_timeout(tool, arguments, context)
             if inspect.isawaitable(result):
                 close = getattr(result, "close", None)
                 if callable(close):
@@ -169,7 +199,7 @@ class ToolRegistry:
                     failure_kind=ToolFailureKind.ASYNC_REQUIRED,
                 )
             else:
-                result = self._coerce_result(tool, result)
+                result = self._validate_output(tool, self._coerce_result(tool, result))
         except ToolValidationError as exc:
             result = ToolResult(
                 tool_name=tool.name,
@@ -187,12 +217,12 @@ class ToolRegistry:
                 tool_name=tool.name,
                 success=False,
                 observation=(
-                    f"Tool execution failed for {tool.name}: {exc}. "
+                    f"Tool execution failed for {tool.name}: {redact_text(str(exc))}. "
                     "Retry only if corrected arguments or a safer alternative would change the outcome."
                 ),
-                error=str(exc),
+                error=redact_text(str(exc)),
                 failure_kind=ToolFailureKind.ENVIRONMENT,
-                metadata={"exception_type": type(exc).__name__},
+                metadata=redact_data({"exception_type": type(exc).__name__}),
             )
 
         self._log_call(name, arguments, result)
@@ -218,7 +248,7 @@ class ToolRegistry:
                 metadata={
                     "requested_tool_name": name,
                     "available_tools": available_tools,
-                    "exception": str(exc),
+                    "exception": redact_text(str(exc)),
                 },
             )
             self._log_call(name, arguments, result)
@@ -226,13 +256,8 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            if tool.run_in_executor:
-                result = await asyncio.to_thread(self._call_tool, tool, arguments, context)
-            else:
-                result = self._call_tool(tool, arguments, context)
-            if inspect.isawaitable(result):
-                result = await result
-            result = self._coerce_result(tool, result)
+            result = await self._call_tool_async_with_timeout(tool, arguments, context)
+            result = self._validate_output(tool, self._coerce_result(tool, result))
         except ToolValidationError as exc:
             result = ToolResult(
                 tool_name=tool.name,
@@ -253,12 +278,12 @@ class ToolRegistry:
                 tool_name=tool.name,
                 success=False,
                 observation=(
-                    f"Tool execution failed for {tool.name}: {exc}. "
+                    f"Tool execution failed for {tool.name}: {redact_text(str(exc))}. "
                     "Retry only if corrected arguments or a safer alternative would change the outcome."
                 ),
-                error=failure_kind if failure_kind == ToolFailureKind.CANCELLED else str(exc),
+                error=failure_kind if failure_kind == ToolFailureKind.CANCELLED else redact_text(str(exc)),
                 failure_kind=failure_kind,
-                metadata={"exception_type": type(exc).__name__},
+                metadata=redact_data({"exception_type": type(exc).__name__}),
             )
 
         self._log_call(name, arguments, result)
@@ -281,6 +306,87 @@ class ToolRegistry:
         if isinstance(result, ToolResult):
             return result
         return ToolResult(tool_name=tool.name, success=True, observation=str(result))
+
+    def _call_tool_with_timeout(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolReturn:
+        if tool.timeout_seconds is None:
+            return self._call_tool(tool, arguments, context)
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"chulk-{tool.name}")
+        future = executor.submit(self._call_tool, tool, arguments, context)
+        try:
+            result = future.result(timeout=tool.timeout_seconds)
+        except FutureTimeoutError:
+            future.cancel()
+            return ToolResult(
+                tool_name=tool.name,
+                success=False,
+                observation=f"Tool {tool.name} timed out after {tool.timeout_seconds:g} seconds.",
+                error=ToolFailureKind.TIMEOUT,
+                failure_kind=ToolFailureKind.TIMEOUT,
+                metadata={"timeout_seconds": tool.timeout_seconds},
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return result
+
+    async def _call_tool_async_with_timeout(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolReturn:
+        async def execute() -> ToolReturn:
+            if tool.run_in_executor:
+                result = await asyncio.to_thread(self._call_tool, tool, arguments, context)
+            else:
+                result = self._call_tool(tool, arguments, context)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        try:
+            if tool.timeout_seconds is None:
+                return await execute()
+            return await asyncio.wait_for(execute(), timeout=tool.timeout_seconds)
+        except TimeoutError:
+            return ToolResult(
+                tool_name=tool.name,
+                success=False,
+                observation=f"Tool {tool.name} timed out after {tool.timeout_seconds:g} seconds.",
+                error=ToolFailureKind.TIMEOUT,
+                failure_kind=ToolFailureKind.TIMEOUT,
+                metadata={"timeout_seconds": tool.timeout_seconds},
+            )
+
+    def _validate_output(self, tool: Tool, result: ToolResult) -> ToolResult:
+        if not result.success or tool.output_schema is None:
+            return result
+        try:
+            validate_tool_output(tool.name, result.value, tool.output_schema)
+        except ToolValidationError as exc:
+            return ToolResult(
+                tool_name=tool.name,
+                success=False,
+                observation=f"Tool {tool.name} returned output that did not match its contract.",
+                error=ToolFailureKind.INVALID_OUTPUT,
+                failure_kind=ToolFailureKind.INVALID_OUTPUT,
+                metadata={
+                    "validation_errors": [issue.to_dict() for issue in exc.issues],
+                    "output_schema": tool.output_schema,
+                },
+            )
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                "output_validated": True,
+                "structured_output": result.value,
+            },
+        )
 
     def _log_call(self, name: str, arguments: dict[str, Any], result: ToolResult) -> None:
         self.call_log.append(

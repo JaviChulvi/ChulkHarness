@@ -14,7 +14,7 @@ from uuid import uuid4
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory.extraction import extract_memory_candidates
 from chulk.memory.markdown import parse_markdown_memory_line as _parse_markdown_memory_line
-from chulk.memory.models import MemoryExtractionCandidate, MemoryRecord
+from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord, MemoryRecord
 from chulk.memory.retrieval import (
     choose_memory_to_keep as _choose_memory_to_keep,
     content_similarity as _content_similarity,
@@ -84,6 +84,30 @@ class SQLiteMemoryStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_proposals (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    importance INTEGER NOT NULL DEFAULT 1,
+                    source TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    evidence TEXT,
+                    conversation_id TEXT,
+                    turn_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    reviewed_at TEXT,
+                    accepted_memory_id TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_proposals_status_created "
+                "ON memory_proposals(status, created_at)"
+            )
             _backfill_memory_tags(conn)
             self.fts_enabled = _ensure_fts(conn)
             if self.fts_enabled:
@@ -113,56 +137,104 @@ class SQLiteMemoryStore:
         clean_confidence = _normalize_confidence(confidence)
         clean_embedding = _normalize_embedding(embedding) or text_to_embedding(clean_content)
 
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self._save_memory_in_connection(
+                conn,
+                content=clean_content,
+                tags=clean_tags,
+                metadata=clean_metadata,
+                importance=clean_importance,
+                source=clean_source,
+                confidence=clean_confidence,
+                embedding=clean_embedding,
+                dedupe=dedupe,
+            )
+
+    def _save_memory_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        content: str,
+        tags: list[str],
+        metadata: dict[str, Any],
+        importance: int,
+        source: str,
+        confidence: float,
+        embedding: list[float],
+        dedupe: bool = True,
+    ) -> str:
+        """Persist one normalized memory inside the caller's transaction."""
         if dedupe:
-            duplicate = self.find_duplicate_memory(clean_content)
+            duplicate = _find_duplicate_memory_in_connection(conn, content)
             if duplicate is not None:
-                self.update_memory(
-                    duplicate.id,
-                    tags=_merge_tags(duplicate.tags, clean_tags),
-                    metadata={**duplicate.metadata, **clean_metadata},
-                    importance=max(duplicate.importance, clean_importance),
-                    source=duplicate.source if duplicate.source != "manual" else clean_source,
-                    confidence=max(duplicate.confidence, clean_confidence),
-                    embedding=duplicate.embedding or clean_embedding,
-                    archived_at=None,
+                next_tags = _merge_tags(duplicate.tags, tags)
+                next_metadata = {**duplicate.metadata, **metadata}
+                next_source = duplicate.source if duplicate.source != "manual" else source
+                next_embedding = duplicate.embedding or embedding
+                conn.execute(
+                    """
+                    UPDATE memories
+                    SET updated_at = ?, tags = ?, metadata = ?, importance = ?,
+                        source = ?, confidence = ?, embedding = ?, archived_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        _utc_now(),
+                        json.dumps(next_tags, sort_keys=True),
+                        json.dumps(next_metadata, sort_keys=True),
+                        max(duplicate.importance, importance),
+                        next_source,
+                        max(duplicate.confidence, confidence),
+                        json.dumps(next_embedding),
+                        duplicate.id,
+                    ),
+                )
+                _replace_memory_tags(conn, duplicate.id, next_tags)
+                _replace_memory_fts(
+                    conn,
+                    enabled=self.fts_enabled,
+                    memory_id=duplicate.id,
+                    content=duplicate.content,
+                    tags=next_tags,
+                    metadata=next_metadata,
+                    source=next_source,
                 )
                 return duplicate.id
 
         memory_id = str(uuid4())
         now = _utc_now()
-
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO memories (
-                    id, content, created_at, updated_at, tags, metadata, importance,
-                    source, confidence, embedding, archived_at, access_count, last_accessed_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL)
-                """,
-                (
-                    memory_id,
-                    clean_content,
-                    now,
-                    now,
-                    json.dumps(clean_tags, sort_keys=True),
-                    json.dumps(clean_metadata, sort_keys=True),
-                    clean_importance,
-                    clean_source,
-                    clean_confidence,
-                    json.dumps(clean_embedding),
-                ),
+        conn.execute(
+            """
+            INSERT INTO memories (
+                id, content, created_at, updated_at, tags, metadata, importance,
+                source, confidence, embedding, archived_at, access_count, last_accessed_at
             )
-            _replace_memory_tags(conn, memory_id, clean_tags)
-            _replace_memory_fts(
-                conn,
-                enabled=self.fts_enabled,
-                memory_id=memory_id,
-                content=clean_content,
-                tags=clean_tags,
-                metadata=clean_metadata,
-                source=clean_source,
-            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL)
+            """,
+            (
+                memory_id,
+                content,
+                now,
+                now,
+                json.dumps(tags, sort_keys=True),
+                json.dumps(metadata, sort_keys=True),
+                importance,
+                source,
+                confidence,
+                json.dumps(embedding),
+            ),
+        )
+        _replace_memory_tags(conn, memory_id, tags)
+        _replace_memory_fts(
+            conn,
+            enabled=self.fts_enabled,
+            memory_id=memory_id,
+            content=content,
+            tags=tags,
+            metadata=metadata,
+            source=source,
+        )
         return memory_id
 
     def update_memory(
@@ -471,6 +543,128 @@ class SQLiteMemoryStore:
             )
         return memory_ids
 
+    def create_memory_proposal(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual_review",
+        confidence: float = 1.0,
+        evidence: str | None = None,
+        conversation_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> str:
+        """Persist one candidate without making it available to retrieval."""
+        clean_content = content.strip()
+        if not clean_content:
+            raise ValueError("Memory proposal content cannot be empty")
+        proposal_id = str(uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_proposals (
+                    id, content, tags, metadata, importance, source, confidence,
+                    evidence, conversation_id, turn_id, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    proposal_id,
+                    clean_content,
+                    json.dumps(_normalize_tags(tags or []), sort_keys=True),
+                    json.dumps(metadata or {}, sort_keys=True),
+                    _normalize_importance(importance),
+                    _normalize_source(source),
+                    _normalize_confidence(confidence),
+                    evidence,
+                    conversation_id,
+                    turn_id,
+                    _utc_now(),
+                ),
+            )
+        return proposal_id
+
+    def list_memory_proposals(self, *, status: str | None = "pending") -> list[MemoryProposalRecord]:
+        """List durable proposals, newest first."""
+        if status is not None and status not in {"pending", "approved", "rejected"}:
+            raise ValueError("proposal status must be pending, approved, rejected, or None")
+        query = "SELECT * FROM memory_proposals"
+        parameters: tuple[object, ...] = ()
+        if status is not None:
+            query += " WHERE status = ?"
+            parameters = (status,)
+        query += " ORDER BY created_at DESC"
+        with self._connect() as conn:
+            rows = conn.execute(query, parameters).fetchall()
+        return [_row_to_memory_proposal(row) for row in rows]
+
+    def get_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+        return _row_to_memory_proposal(row) if row is not None else None
+
+    def approve_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord:
+        """Accept one pending proposal and persist it as a retrievable memory."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown memory proposal: {proposal_id}")
+            proposal = _row_to_memory_proposal(row)
+            if proposal.status != "pending":
+                return proposal
+            memory_id = self._save_memory_in_connection(
+                conn,
+                content=proposal.content,
+                tags=_normalize_tags(proposal.tags),
+                metadata={**proposal.metadata, "proposal_id": proposal.id},
+                importance=_normalize_importance(proposal.importance),
+                source=_normalize_source(proposal.source),
+                confidence=_normalize_confidence(proposal.confidence),
+                embedding=text_to_embedding(proposal.content),
+            )
+            conn.execute(
+                """
+                UPDATE memory_proposals
+                SET status = 'approved', reviewed_at = ?, accepted_memory_id = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (_utc_now(), memory_id, proposal_id),
+            )
+            approved_row = conn.execute(
+                "SELECT * FROM memory_proposals WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+            assert approved_row is not None
+            return _row_to_memory_proposal(approved_row)
+
+    def reject_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord:
+        """Reject one pending proposal without creating a memory."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown memory proposal: {proposal_id}")
+            proposal = _row_to_memory_proposal(row)
+            if proposal.status != "pending":
+                return proposal
+            conn.execute(
+                """
+                UPDATE memory_proposals
+                SET status = 'rejected', reviewed_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (_utc_now(), proposal_id),
+            )
+            rejected_row = conn.execute(
+                "SELECT * FROM memory_proposals WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+            assert rejected_row is not None
+            return _row_to_memory_proposal(rejected_row)
+
     def import_markdown(self, path: Path | str) -> list[str]:
         """Import simple bullet memories from a Markdown file."""
         markdown_path = Path(path)
@@ -584,12 +778,19 @@ class SQLiteMemoryStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        try:
+            conn = sqlite3.connect(self.db_path)
+        except sqlite3.Error as exc:
+            _annotate_memory_error(exc, "connect")
+            raise
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
+        except sqlite3.Error as exc:
+            _annotate_memory_error(exc, "transaction")
+            raise
         finally:
             conn.close()
 
@@ -609,6 +810,14 @@ def select_memories_for_prompt(
     return profile, relevant
 
 
+def _annotate_memory_error(exc: sqlite3.Error, operation: str) -> None:
+    """Attach non-sensitive store context for the public boundary mapper."""
+    try:
+        exc.memory_operation = operation  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
+
+
 def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
     return MemoryRecord(
         id=row["id"],
@@ -625,6 +834,50 @@ def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
         access_count=row["access_count"],
         last_accessed_at=row["last_accessed_at"],
     )
+
+
+def _row_to_memory_proposal(row: sqlite3.Row) -> MemoryProposalRecord:
+    return MemoryProposalRecord(
+        id=row["id"],
+        content=row["content"],
+        tags=_safe_json_list(row["tags"]),
+        metadata=_safe_json_dict(row["metadata"]),
+        importance=row["importance"],
+        source=row["source"],
+        confidence=row["confidence"],
+        evidence=row["evidence"],
+        conversation_id=row["conversation_id"],
+        turn_id=row["turn_id"],
+        status=row["status"],
+        created_at=row["created_at"],
+        reviewed_at=row["reviewed_at"],
+        accepted_memory_id=row["accepted_memory_id"],
+    )
+
+
+def _find_duplicate_memory_in_connection(
+    conn: sqlite3.Connection,
+    content: str,
+    *,
+    threshold: float = 0.90,
+) -> MemoryRecord | None:
+    """Find an active duplicate without leaving the current transaction."""
+    normalized = _normalize_content(content)
+    rows = conn.execute(
+        """
+        SELECT * FROM memories
+        WHERE archived_at IS NULL
+        ORDER BY importance DESC, confidence DESC, updated_at DESC
+        LIMIT 1000
+        """
+    ).fetchall()
+    for row in rows:
+        candidate = _row_to_memory(row)
+        if _normalize_content(candidate.content) == normalized:
+            return candidate
+        if _content_similarity(candidate.content, content) >= threshold:
+            return candidate
+    return None
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
