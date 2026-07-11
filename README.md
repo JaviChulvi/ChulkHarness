@@ -245,8 +245,19 @@ Configure remote Streamable HTTP MCP servers in `<runtime_dir>/mcp.json`, which 
 
 ## Programmable API
 
-Use the public API when you want Chulk inside another Python program. Capitalized names are the preferred public aliases.
+Use the public API when you want Chulk inside another Python program. `Agent` and `AsyncAgent` are real facade classes; lowercase `agent(...)` and `async_agent(...)` remain compatible factories returning those classes. `AgentHandle` and `AsyncAgentHandle` remain importable for one deprecation cycle as provisional internal compatibility surfaces, but new code should use the facade classes.
 See `examples/README.md` for runnable SDK scripts that cover basic agents, tools, permissions, events, planning, async usage, MCP, presets, and local providers.
+
+Use context managers for deterministic cleanup:
+
+```python
+from chulk import Agent, AgentConfig
+
+with Agent(config=AgentConfig.from_env(project_root="."), tools=[], skills=[]) as assistant:
+    print(assistant.run("Say hello in one sentence."))
+```
+
+`AsyncAgent` supports `async with`. Its v1 planning compatibility methods may use worker threads around synchronous internals; native async providers and lifecycle hooks remain future work.
 
 Create an SDK agent with project-local runtime state:
 

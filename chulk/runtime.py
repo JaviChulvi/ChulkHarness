@@ -126,6 +126,7 @@ def create_agent(
         trace_path=trace_logger.path,
         lazy=conversation_id is None,
     )
+    client_is_owned = llm_client is None
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
@@ -150,34 +151,43 @@ def create_agent(
                 "bridge_required": _mcp_bridge_required(config, active_mcp_servers),
             },
         )
-    agent = Agent(
-        client,
-        state=state,
-        memory=conversation_memory,
-        memory_store=memory_store,
-        skill_registry=skill_registry,
-        trace_logger=trace_logger,
-        tool_registry=tool_registry,
-        max_tool_calls_per_turn=config.max_tool_calls_per_turn,
-        max_skills_per_turn=config.max_skills_per_turn,
-        max_skill_content_chars=config.max_skill_content_chars,
-        trace_max_prompt_chars=config.trace_max_prompt_chars,
-        max_observation_chars=config.max_observation_chars,
-        max_tool_stdout_chars=config.max_tool_stdout_chars,
-        max_tool_stderr_chars=config.max_tool_stderr_chars,
-        max_reflection_attempts=config.max_reflection_attempts,
-        permission_policy=permission_policy_for_profile(config.permission_profile),
-        permission_callback=permission_callback,
-        context_budget=context_budget,
-        event_callback=session_recorder.callback,
-        event_sink=event_sink,
-        redaction_callback=redaction_callback,
-        redaction_fail_closed=redaction_fail_closed,
-        pinned_skill_names=skill_resolution.pinned_skill_names,
-        system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
-        mcp_servers=active_mcp_servers,
-        mcp_bridge_tool_names=mcp_bridge_tool_names,
-    )
+    owned_resources = [client] if client_is_owned else []
+    try:
+        agent = Agent(
+            client,
+            state=state,
+            memory=conversation_memory,
+            memory_store=memory_store,
+            skill_registry=skill_registry,
+            trace_logger=trace_logger,
+            tool_registry=tool_registry,
+            max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+            max_skills_per_turn=config.max_skills_per_turn,
+            max_skill_content_chars=config.max_skill_content_chars,
+            trace_max_prompt_chars=config.trace_max_prompt_chars,
+            max_observation_chars=config.max_observation_chars,
+            max_tool_stdout_chars=config.max_tool_stdout_chars,
+            max_tool_stderr_chars=config.max_tool_stderr_chars,
+            max_reflection_attempts=config.max_reflection_attempts,
+            permission_policy=permission_policy_for_profile(config.permission_profile),
+            permission_callback=permission_callback,
+            context_budget=context_budget,
+            event_callback=session_recorder.callback,
+            event_sink=event_sink,
+            redaction_callback=redaction_callback,
+            redaction_fail_closed=redaction_fail_closed,
+            pinned_skill_names=skill_resolution.pinned_skill_names,
+            system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
+            mcp_servers=active_mcp_servers,
+            mcp_bridge_tool_names=mcp_bridge_tool_names,
+            owned_resources=owned_resources,
+        )
+    except Exception:
+        for resource in reversed(owned_resources):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
+        raise
     agent.session_store = session_store
     agent.session_recorder = session_recorder
     return agent

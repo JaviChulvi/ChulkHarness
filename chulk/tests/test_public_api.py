@@ -22,7 +22,9 @@ from chulk import (
     Agent,
     AgentConfig,
     AgentEvent,
+    AgentHandle,
     AsyncAgent,
+    AsyncAgentHandle,
     AsyncChatAgent,
     AgentPreset,
     ChatAgent,
@@ -37,6 +39,7 @@ from chulk import (
     ToolPermissionLevel,
     Tools,
     agent,
+    async_agent,
     skills,
     tool,
     tools,
@@ -101,7 +104,9 @@ def write_skill(root, name: str, content: str) -> None:
 
 
 def test_public_api_exports_capitalized_aliases():
-    assert Agent is agent
+    assert isinstance(Agent, type)
+    assert isinstance(AsyncAgent, type)
+    assert callable(agent)
     assert Tool is tool
     assert Tools is tools
     assert Skills is skills
@@ -112,6 +117,26 @@ def test_public_api_exports_capitalized_aliases():
     assert ToolPermissionLevel is ToolsToolPermissionLevel
     assert callable(Skills.only)
     assert callable(Skills.pin)
+
+
+def test_lowercase_factories_return_public_facades(tmp_path):
+    sync_agent = agent(
+        config=AgentConfig(project_root=tmp_path / "sync"),
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "sync"})]),
+        tools=[],
+        skills=[],
+    )
+    async_facade = async_agent(
+        config=AgentConfig(project_root=tmp_path / "async"),
+        llm=FakeLLMClient([json.dumps({"type": "final_answer", "content": "async"})]),
+        tools=[],
+        skills=[],
+    )
+
+    assert isinstance(sync_agent, Agent)
+    assert isinstance(async_facade, AsyncAgent)
+    assert AgentHandle is not Agent
+    assert AsyncAgentHandle is not AsyncAgent
 
 
 def test_public_package_contract_uses_one_version_and_distinct_names():

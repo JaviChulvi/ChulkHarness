@@ -1223,16 +1223,16 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 
 #### Phase C: Public API Cleanup
 
-- [ ] Make `Agent` a real public facade class instead of a function alias.
-- [ ] Keep lowercase `agent(...)` as a backwards-compatible factory that returns an `Agent`.
-- [ ] Keep `AgentHandle` internal or clearly document it as the runtime handle behind the public facade.
-- [ ] Add `Agent.run(...)` and `Agent.run_result(...)` methods that delegate to the handle.
-- [ ] Add `Agent.plan(...)`, `plan_result(...)`, `approve(...)`, `approve_result(...)`, `reject(...)`, and `reject_result(...)` facade methods.
-- [ ] Add `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry` facade properties.
-- [ ] Add `Agent.close()`.
-- [ ] Add context-manager support: `with Agent(config=config) as agent: ...`.
-- [ ] Add async context-manager support for `AsyncAgent`.
-- [ ] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
+- [x] Make `Agent` a real public facade class instead of a function alias.
+- [x] Keep lowercase `agent(...)` as a backwards-compatible factory that returns an `Agent`.
+- [x] Keep `AgentHandle` internal or clearly document it as the runtime handle behind the public facade.
+- [x] Add `Agent.run(...)` and `Agent.run_result(...)` methods that delegate to the handle.
+- [x] Add `Agent.plan(...)`, `plan_result(...)`, `approve(...)`, `approve_result(...)`, `reject(...)`, and `reject_result(...)` facade methods.
+- [x] Add `state`, `conversation_id`, `trace_path`, `tool_registry`, and `skill_registry` facade properties.
+- [x] Add `Agent.close()`.
+- [x] Add context-manager support: `with Agent(config=config) as agent: ...`.
+- [x] Add async context-manager support for `AsyncAgent`.
+- [x] Document `AsyncAgent` v1 as a thread-backed compatibility wrapper where that remains true.
 - [ ] Add a public exception hierarchy: `ChulkError`, `ConfigurationError`, `ProviderError`, `ToolExecutionError`, `PermissionDeniedError`, `SafetyError`, `TraceError`, and `MemoryError`.
 - [ ] Add generator event APIs: `agent.run_events(...)` and `agent.run_events_async(...)`.
 - [ ] Define stable public event names such as `run.started`, `model.request.started`, `model.delta`, `model.response.completed`, `tool.call.started`, `tool.call.completed`, `tool.call.failed`, `permission.requested`, `permission.resolved`, `memory.loaded`, `skill.loaded`, `plan.created`, `plan.approved`, `run.completed`, and `run.failed`.

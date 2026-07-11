@@ -81,6 +81,7 @@ class Agent:
         pinned_skill_names: list[str] | None = None,
         mcp_servers: list[MCPServerConfig] | tuple[MCPServerConfig, ...] | None = None,
         mcp_bridge_tool_names: list[str] | None = None,
+        owned_resources: list[object] | tuple[object, ...] | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -125,11 +126,41 @@ class Agent:
         self.pinned_skill_names = pinned_skill_names or []
         self.mcp_servers = tuple(mcp_servers or ())
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
+        self._owned_resources = list(owned_resources or [])
+        self._closed = False
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
         self.state.conversation_summary = self.memory.conversation_summary
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the runtime has been finalized."""
+        return self._closed
+
+    def close(self) -> None:
+        """Finalize owned closeable resources exactly once."""
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[Exception] = []
+        for resource in reversed(self._owned_resources):
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        self.event_callback = None
+        self.event_sink = None
+        if failures:
+            raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Agent is closed")
 
     def run_turn(
         self,
@@ -142,6 +173,7 @@ class Agent:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
         """Run one user turn and return the assistant response."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -166,6 +198,7 @@ class Agent:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> str:
         """Run one user turn and await async tools in the current event loop."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -181,6 +214,7 @@ class Agent:
 
     def run_planned_turn(self, user_message: str) -> str:
         """Run one user turn that must propose a plan before tool execution."""
+        self._ensure_open()
         clean_message = user_message.strip()
         if not clean_message:
             raise ValueError("user_message cannot be empty")
@@ -294,6 +328,7 @@ class Agent:
 
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
+        self._ensure_open()
         turn_or_response = self._approve_pending_plan()
         if isinstance(turn_or_response, str):
             return turn_or_response
@@ -301,6 +336,7 @@ class Agent:
 
     async def approve_plan_async(self) -> str:
         """Approve the pending plan and continue it with async tool execution."""
+        self._ensure_open()
         turn_or_response = self._approve_pending_plan()
         if isinstance(turn_or_response, str):
             return turn_or_response
@@ -325,6 +361,7 @@ class Agent:
 
     def reject_plan(self) -> str:
         """Reject the pending plan without executing tools."""
+        self._ensure_open()
         turn = self._pending_plan_turn()
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
