@@ -22,6 +22,7 @@ from chulk.llm.client import (
     resolve_model_capabilities,
     supported_llm_providers,
 )
+from chulk.llm.capabilities import conservative_model_capabilities
 from chulk.llm.public import DeepSeekProvider, FallbackChain, FallbackStrategy, LocalProvider, OpenAIProvider, ProviderAttempt
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "OpenAIResponsesClient",
     "ProviderAttempt",
     "create_llm_client",
+    "conservative_model_capabilities",
     "resolve_model_capabilities",
     "supported_llm_providers",
 ]

@@ -14,7 +14,7 @@ from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
-from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
+from chulk.llm import LLMClient, LLMModelCapabilities, create_llm_client, resolve_model_capabilities
 from chulk.mcp import create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
@@ -81,11 +81,6 @@ def create_agent(
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
-    model_capabilities = resolve_model_capabilities(config.llm_provider, config.model)
-    context_budget = ContextBudget(
-        max_prompt_tokens=model_capabilities.context_window_tokens,
-        response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
-    )
     memory_store = SQLiteMemoryStore(config.store_path)
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
@@ -136,6 +131,11 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+    model_capabilities = _client_model_capabilities(client, config)
+    context_budget = ContextBudget(
+        max_prompt_tokens=model_capabilities.context_window_tokens,
+        response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
+    )
     configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
     active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()
     tool_registry, mcp_bridge_tool_names = _create_tool_registry(
@@ -253,6 +253,13 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )
+
+
+def _client_model_capabilities(client: LLMClient, config: Config) -> LLMModelCapabilities:
+    capabilities = getattr(client, "model_capabilities", None)
+    if isinstance(capabilities, LLMModelCapabilities):
+        return capabilities
+    return resolve_model_capabilities(config.llm_provider, config.model)
 
 
 def _create_tool_registry(

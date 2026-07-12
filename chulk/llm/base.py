@@ -6,12 +6,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import inspect
 import json
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
 from chulk.core.prompts import JSON_REPAIR_PROMPT
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggregate_usage, estimate_usage
+
+if TYPE_CHECKING:
+    from chulk.llm.capabilities import LLMModelCapabilities
 
 
 class LLMError(RuntimeError):
@@ -82,6 +85,8 @@ class LLMStreamChunk:
 
 class LLMClient:
     """Small provider-agnostic LLM client interface."""
+
+    model_capabilities: LLMModelCapabilities | None = None
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a normal text response."""

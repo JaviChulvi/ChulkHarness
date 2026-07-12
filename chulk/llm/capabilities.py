@@ -82,6 +82,27 @@ def register_model_capabilities(capabilities: LLMModelCapabilities) -> None:
     MODEL_CAPABILITIES[key] = capabilities
 
 
+def conservative_model_capabilities(
+    capabilities: list[LLMModelCapabilities] | tuple[LLMModelCapabilities, ...],
+) -> LLMModelCapabilities:
+    """Return limits that are safe for every model in a fallback path."""
+    if not capabilities:
+        raise ValueError("At least one model capability record is required")
+    context_window = min(item.context_window_tokens for item in capabilities)
+    response_reserve = min(
+        max(item.default_response_reserve_tokens for item in capabilities),
+        context_window,
+    )
+    providers = ",".join(dict.fromkeys(item.provider for item in capabilities))
+    models = ",".join(dict.fromkeys(item.model for item in capabilities))
+    return LLMModelCapabilities(
+        provider=providers,
+        model=models,
+        context_window_tokens=context_window,
+        default_response_reserve_tokens=response_reserve,
+    )
+
+
 def resolve_model_capabilities(provider: str, model: str) -> LLMModelCapabilities:
     """Return required token metadata for a configured model."""
     key = _model_key(provider, model)

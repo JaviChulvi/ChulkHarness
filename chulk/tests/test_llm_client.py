@@ -21,6 +21,7 @@ from chulk.llm import (
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
+    conservative_model_capabilities,
     resolve_model_capabilities,
 )
 from chulk.llm.tools import PLAN_TOOL_NAME
@@ -1123,6 +1124,46 @@ def test_resolve_model_capabilities_returns_context_window_and_reserve():
     assert local_caps.default_response_reserve_tokens == 4_096
     assert local_qwen_caps.context_window_tokens == 262_144
     assert local_qwen_caps.default_response_reserve_tokens == 4_096
+
+
+def test_conservative_model_capabilities_use_smallest_context_and_largest_reserve():
+    openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
+    local_caps = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
+
+    combined = conservative_model_capabilities([openai_caps, local_caps])
+
+    assert combined.context_window_tokens == 131_072
+    assert combined.default_response_reserve_tokens == 8_192
+    assert combined.input_budget_tokens == 122_880
+
+
+def test_fallback_chain_exposes_conservative_bound_model_capabilities():
+    primary = ScriptedLLMClient(["primary"])
+    primary.model_capabilities = resolve_model_capabilities("openai", "gpt-4.1-mini")
+    fallback = ScriptedLLMClient(["fallback"])
+    fallback.model_capabilities = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
+
+    capabilities = FallbackChain([primary, fallback]).model_capabilities
+
+    assert capabilities is not None
+    assert capabilities.context_window_tokens == 131_072
+    assert capabilities.default_response_reserve_tokens == 8_192
+
+
+def test_factory_attaches_model_capabilities_to_bound_client():
+    client = create_llm_client(
+        provider="local",
+        model="custom-model",
+        openai_api_key=None,
+        deepseek_api_key=None,
+        deepseek_base_url="https://api.deepseek.com",
+        local_api_key="local",
+        local_base_url="http://localhost:1234/v1",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+
+    assert client.model_capabilities.context_window_tokens == 131_072
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():

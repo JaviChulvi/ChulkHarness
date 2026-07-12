@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk, call_with_supported_kwargs
+from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
 from chulk.llm.factory import create_llm_client
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
@@ -138,6 +139,14 @@ class FallbackChain(LLMClient):
             raise ValueError("FallbackChain requires at least one provider")
         if self.strategy != "first_success":
             raise NotImplementedError(f"FallbackChain strategy is not implemented yet: {self.strategy}")
+
+    @property
+    def model_capabilities(self) -> LLMModelCapabilities | None:
+        """Return limits safe for every bound provider in the chain."""
+        records = [getattr(provider, "model_capabilities", None) for provider in self.providers]
+        if not records or any(record is None for record in records):
+            return None
+        return conservative_model_capabilities(records)
 
     def bind_config(self, config: "Config") -> "FallbackChain":
         bound: list[LLMClient] = []

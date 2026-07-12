@@ -77,11 +77,11 @@ def create_llm_client(
     if provider_spec is None:
         raise LLMConfigurationError(f"Unsupported LLM provider: {provider}")
     try:
-        resolve_model_capabilities(normalized_provider, model)
+        model_capabilities = resolve_model_capabilities(normalized_provider, model)
     except ValueError as exc:
         raise LLMConfigurationError(str(exc)) from exc
 
-    return provider_spec.create_client(
+    client = provider_spec.create_client(
         LLMClientSettings(
             model=model,
             openai_api_key=openai_api_key,
@@ -93,6 +93,8 @@ def create_llm_client(
             max_retries=max_retries,
         )
     )
+    client.model_capabilities = model_capabilities
+    return client
 
 
 def _create_openai_client(settings: LLMClientSettings) -> LLMClient:
