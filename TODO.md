@@ -108,13 +108,13 @@ Module responsibilities:
 - [ ] `chulk/core/prompt_builder.py`
   - [ ] Compose prompts from base instructions, memory, skills, tools, and history.
 
-- [ ] `chulk/llm/`
-  - [ ] Wrap the model provider API.
-  - [ ] Support OpenAI first.
-  - [ ] Hide provider-specific request and response details from the agent loop.
-  - [ ] Provide text completion and structured JSON completion helpers.
-  - [ ] Handle retries, timeouts, rate limits, and provider errors.
-  - [ ] Register providers through a provider registry and explicit capability metadata.
+- [x] `chulk/llm/`
+  - [x] Wrap the model provider API.
+  - [x] Support OpenAI first.
+  - [x] Hide provider-specific request and response details from the agent loop.
+  - [x] Provide text completion and structured JSON completion helpers.
+  - [x] Handle retries, timeouts, rate limits, and provider errors.
+  - [x] Register providers through a provider registry and explicit capability metadata.
 
 - [x] `chulk/memory/`
   - [x] Manage short-term conversation history.
@@ -263,10 +263,10 @@ Build a small provider wrapper before adding agent complexity.
 
 Future provider support:
 
-- [ ] Add a minimal local/mock provider for tests.
-- [ ] Add support for local LLMs later.
+- [x] Add a minimal local/mock provider for tests.
+- [x] Add support for local LLMs later.
 - [x] Add DeepSeek as an additional hosted provider.
-- [ ] Add support for additional hosted providers later.
+- [x] Add support for additional hosted providers later.
 - [x] Keep response normalization in one place.
 
 ## 5. Tool System
@@ -1154,7 +1154,7 @@ Optional future directions:
 - [x] MCP-like tool interface.
 - [ ] Vector database.
 - [ ] Multi-agent mode.
-- [ ] Local LLM support.
+- [x] Local LLM support.
 - [ ] OpenTelemetry-style traces.
 - [ ] Permission UI.
 - [ ] Skill marketplace or folder installer.

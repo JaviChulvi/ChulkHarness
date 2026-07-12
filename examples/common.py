@@ -18,6 +18,9 @@ EXAMPLE_STATE_ROOT = Path(
     os.getenv("CHULK_EXAMPLE_RUNTIME_DIR", REPO_ROOT / "examples" / "runtime")
 ).expanduser()
 EXAMPLE_MODE_ENV = "CHULK_EXAMPLE_MODE"
+EXPLICIT_MODEL_PROVIDERS = frozenset(
+    {"openai-compatible", "openrouter", "anthropic", "bedrock", "gemini"}
+)
 
 
 def runtime_dir(name: str) -> Path:
@@ -31,19 +34,61 @@ def provider_from_env(explicit: str | None = None) -> str:
 
 
 def require_env(*names: str) -> None:
-    missing = [name for name in names if not os.getenv(name)]
+    missing = [name for name in names if not _configured_env(name)]
     if missing:
         joined = ", ".join(missing)
         print(f"Missing required environment variable(s): {joined}", file=sys.stderr)
         raise SystemExit(2)
 
 
-def require_provider_credentials(provider: str) -> None:
+def require_any_env(provider: str, *names: str) -> None:
+    if any(_configured_env(name) for name in names):
+        return
+    joined = ", ".join(names)
+    print(f"Missing {provider} configuration; set one of: {joined}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def require_provider_credentials(provider: str, *, model: str | None = None) -> None:
+    if provider in EXPLICIT_MODEL_PROVIDERS and not (
+        (model is not None and model.strip()) or _configured_env("CHULK_MODEL")
+    ):
+        print(f"CHULK_MODEL is required for provider {provider}", file=sys.stderr)
+        raise SystemExit(2)
+
     if provider == "openai":
         require_env("OPENAI_API_KEY")
-    elif provider == "deepseek" and not (os.getenv("CHULK_DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")):
-        print("Missing CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY", file=sys.stderr)
-        raise SystemExit(2)
+    elif provider == "deepseek":
+        require_any_env(provider, "CHULK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+    elif provider == "openai-compatible":
+        require_env(
+            "CHULK_OPENAI_COMPATIBLE_API_KEY",
+            "CHULK_OPENAI_COMPATIBLE_BASE_URL",
+        )
+    elif provider == "openrouter":
+        require_any_env(provider, "CHULK_OPENROUTER_API_KEY", "OPENROUTER_API_KEY")
+    elif provider == "anthropic":
+        require_any_env(provider, "CHULK_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+    elif provider == "bedrock":
+        require_any_env(
+            provider,
+            "CHULK_BEDROCK_API_KEY",
+            "BEDROCK_API_KEY",
+            "AWS_BEARER_TOKEN_BEDROCK",
+        )
+        require_any_env(provider, "CHULK_BEDROCK_BASE_URL", "CHULK_BASE_URL")
+    elif provider == "gemini":
+        require_any_env(
+            provider,
+            "CHULK_GEMINI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        )
+
+
+def _configured_env(name: str) -> bool:
+    value = os.getenv(name)
+    return value is not None and bool(value.strip())
 
 
 def live_config(
@@ -55,7 +100,7 @@ def live_config(
     **overrides: Any,
 ) -> AgentConfig:
     provider_name = provider_from_env(provider)
-    require_provider_credentials(provider_name)
+    require_provider_credentials(provider_name, model=model)
     return AgentConfig.from_env(
         project_root=REPO_ROOT,
         runtime_dir=runtime_dir(name),
