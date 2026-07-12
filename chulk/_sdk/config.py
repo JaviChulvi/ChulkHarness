@@ -90,8 +90,9 @@ class AgentConfig:
             object.__setattr__(self, "llm_fallback_providers", tuple(self.llm_fallback_providers))
         if self.memory_mode is not None:
             base = self.capabilities or Capabilities.read_only()
-            object.__setattr__(self, "capabilities", base.with_memory(self.memory_mode))
-            object.__setattr__(self, "memory_mode", self.capabilities.memory)
+            capabilities = base.with_memory(self.memory_mode)
+            object.__setattr__(self, "capabilities", capabilities)
+            object.__setattr__(self, "memory_mode", capabilities.memory)
 
     def resolved_capabilities(self) -> Capabilities:
         """Return explicit capabilities or the safe SDK default."""
@@ -326,21 +327,25 @@ class AgentConfig:
             if self.skills_dir is not None
             else runtime_dir / "skills"
         )
-        updates: dict[str, object] = {
-            "project_root": project_root,
-            "runtime_dir": runtime_dir,
-            "store_path": store_path,
-            "traces_dir": traces_dir,
-            "skills_dir": skills_dir,
-            "skills_dirs": _skills_dirs(skills_dir),
-            "mcp_config_path": config.mcp_config_path,
-            "permission_profile": permission_profile,
-        }
+        config = replace(
+            config,
+            project_root=project_root,
+            runtime_dir=runtime_dir,
+            store_path=store_path,
+            traces_dir=traces_dir,
+            skills_dir=skills_dir,
+            skills_dirs=_skills_dirs(skills_dir),
+            mcp_config_path=config.mcp_config_path,
+            permission_profile=permission_profile,
+        )
         if self.mcp_servers is not None:
-            updates["mcp_servers"] = tuple(self.mcp_servers)
+            config = replace(config, mcp_servers=tuple(self.mcp_servers))
         if self.llm_fallback_providers is not None:
-            updates["llm_fallback_providers"] = tuple(self.llm_fallback_providers)
-        return replace(config, **updates)
+            config = replace(
+                config,
+                llm_fallback_providers=tuple(self.llm_fallback_providers),
+            )
+        return config
 
 
 class MCP:

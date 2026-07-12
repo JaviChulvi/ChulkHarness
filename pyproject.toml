@@ -90,4 +90,4 @@ check_untyped_defs = true
 follow_imports = "silent"
 warn_unused_configs = true
 warn_redundant_casts = true
-exclude = ["build", "dist"]
+exclude = ["build", "dist", "chulk/tests"]

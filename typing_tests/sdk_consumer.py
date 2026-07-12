@@ -125,7 +125,7 @@ class Dependencies:
 
 
 def dependency_tool(query: str, context: ToolContext[Dependencies]) -> str:
-    return f"{context.deps.tenant}:{query}"
+    return f"{context.require_deps().tenant}:{query}"
 
 
 retry_policy = ToolRetryPolicy(max_attempts=2)

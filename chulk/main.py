@@ -34,6 +34,7 @@ from chulk.core import Agent
 from chulk.llm import (
     AnthropicProvider,
     BedrockProvider,
+    BindableLLM,
     DeepSeekProvider,
     FallbackChain,
     GeminiProvider,
@@ -148,16 +149,7 @@ def create_cli_agent(
 
 def create_cli_llm(config: Config) -> FallbackChain:
     """Create the CLI LLM chain from public provider objects."""
-    providers: list[
-        OpenAIProvider
-        | DeepSeekProvider
-        | LocalProvider
-        | OpenAICompatibleProvider
-        | OpenRouterProvider
-        | AnthropicProvider
-        | BedrockProvider
-        | GeminiProvider
-    ] = [
+    providers: list[LLMClient | BindableLLM] = [
         _create_provider_spec(config.llm_provider, config.model)
     ]
     providers.extend(

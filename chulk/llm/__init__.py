@@ -37,6 +37,7 @@ from chulk.llm.capabilities import conservative_model_capabilities
 from chulk.llm.public import (
     AnthropicProvider,
     BedrockProvider,
+    BindableLLM,
     DeepSeekProvider,
     FallbackChain,
     FallbackStrategy,
@@ -53,6 +54,7 @@ __all__ = [
     "AnthropicProvider",
     "BedrockOpenAICompatibleClient",
     "BedrockProvider",
+    "BindableLLM",
     "DeepSeekProvider",
     "DeepSeekChatCompletionsClient",
     "FallbackChain",

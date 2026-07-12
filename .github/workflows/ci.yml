@@ -55,7 +55,7 @@ jobs:
           python -m pip install -e ".[dev,openai,mcp]"
 
       - name: Typecheck package and external consumer
-        run: python -m mypy typing_tests
+        run: python -m mypy chulk typing_tests
 
       - name: Verify documentation contract
         run: python scripts/check_docs.py

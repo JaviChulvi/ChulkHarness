@@ -29,8 +29,13 @@ FallbackStrategy = Literal["first_success", "round_robin", "lowest_latency"]
 class BindableLLM(Protocol):
     """Provider spec that can create an LLM client from runtime config."""
 
-    provider: str
-    model: str
+    @property
+    def provider(self) -> str:
+        """Provider registry name."""
+
+    @property
+    def model(self) -> str:
+        """Configured model identifier."""
 
     def bind_config(self, config: "Config") -> LLMClient:
         """Return a configured LLM client."""
@@ -684,6 +689,7 @@ def _provider_error_metadata(exc: Exception) -> tuple[str | None, bool | None, b
 __all__ = [
     "AnthropicProvider",
     "BedrockProvider",
+    "BindableLLM",
     "DeepSeekProvider",
     "FallbackChain",
     "FallbackStrategy",

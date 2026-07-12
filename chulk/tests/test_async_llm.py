@@ -25,6 +25,7 @@ MESSAGES = [{"role": "user", "content": "hello"}]
 
 def test_public_llm_exports_every_provider_wrapper() -> None:
     assert {
+        "BindableLLM",
         "OpenAIProvider",
         "DeepSeekProvider",
         "LocalProvider",
