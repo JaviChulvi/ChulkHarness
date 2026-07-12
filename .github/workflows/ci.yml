@@ -52,7 +52,7 @@ jobs:
       - name: Install development dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,openai,mcp]"
+          python -m pip install -e ".[dev,providers,mcp]"
 
       - name: Typecheck package and external consumer
         run: python -m mypy chulk typing_tests
