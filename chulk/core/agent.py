@@ -172,6 +172,11 @@ class Agent:
                 close()
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
+        if self.trace_logger is not None:
+            try:
+                self.trace_logger.close()
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
         self.event_callback = None
         self.event_sink = None
         self._tool_contexts.clear()

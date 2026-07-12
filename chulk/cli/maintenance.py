@@ -152,6 +152,11 @@ def inspect_trace(path: Path | str) -> dict[str, Any]:
     return Trace.from_jsonl(path).summary()
 
 
+def replay_trace(path: Path | str) -> dict[str, Any]:
+    """Reconstruct recorded turns without running tools, models, or network calls."""
+    return Trace.from_jsonl(path).replay()
+
+
 def format_trace_summary(summary: dict[str, Any]) -> str:
     event_types = summary.get("event_types", {})
     type_text = ", ".join(f"{name} x{count}" for name, count in event_types.items())
@@ -159,7 +164,9 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         "Chulk trace",
         f"  path          {summary.get('path')}",
         f"  conversation  {summary.get('conversation_id')}",
+        f"  schemas       {_format_schema_versions(summary.get('schema_versions'))}",
         f"  events        {summary.get('event_count')}",
+        f"  sessions      {summary.get('session_count')}",
         f"  turns         {summary.get('turn_count')}",
         f"  failures      {summary.get('failure_count')}",
         f"  started       {summary.get('started_at')}",
@@ -170,6 +177,60 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         lines.extend(["  final answer", *[f"    {line}" for line in str(summary["final_answer"]).splitlines()]])
     lines.append("  warning       traces may contain sensitive runtime data")
     return "\n".join(lines)
+
+
+def format_trace_replay(replay: dict[str, Any]) -> str:
+    """Format a deterministic, explicitly non-executing trace reconstruction."""
+    lines = [
+        "Chulk trace replay",
+        f"  path          {replay.get('path')}",
+        f"  conversation  {replay.get('conversation_id')}",
+        f"  schemas       {_format_schema_versions(replay.get('schema_versions'))}",
+        f"  events        {replay.get('event_count')}",
+        f"  sessions      {replay.get('session_count')}",
+        f"  turns         {replay.get('turn_count')}",
+        "  mode          read-only; no model, tool, or network execution",
+    ]
+    turns = replay.get("turns")
+    if isinstance(turns, list):
+        for index, turn in enumerate(turns, start=1):
+            if not isinstance(turn, dict):
+                continue
+            lines.append(
+                f"  turn {index}        {turn.get('turn_id')} [{turn.get('status', 'unknown')}]"
+            )
+            if turn.get("user_message") is not None:
+                lines.extend(
+                    [
+                        "    user",
+                        *[f"      {line}" for line in str(turn["user_message"]).splitlines()],
+                    ]
+                )
+            lines.append(f"    model calls  {turn.get('model_request_count', 0)}")
+            tool_calls = turn.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                lines.append("    tools")
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    lines.append(
+                        f"      {tool_call.get('tool_name') or 'unknown'} [{tool_call.get('status')}]"
+                    )
+            if turn.get("final_answer") is not None:
+                lines.extend(
+                    [
+                        "    answer",
+                        *[f"      {line}" for line in str(turn["final_answer"]).splitlines()],
+                    ]
+                )
+    lines.append("  warning       replay output may contain sensitive runtime data")
+    return "\n".join(lines)
+
+
+def _format_schema_versions(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "unknown"
+    return ", ".join(str(item) for item in value)
 
 
 def export_trace_html(
@@ -495,8 +556,10 @@ __all__ = [
     "export_trace_html",
     "format_doctor_report",
     "format_init_changes",
+    "format_trace_replay",
     "format_trace_summary",
     "initialize_project",
     "inspect_trace",
+    "replay_trace",
     "run_doctor",
 ]

@@ -1271,21 +1271,21 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 #### Phase E: Trace Productization
 
 - [ ] Treat traces as a public product surface, not only internal logs.
-- [ ] Add a trace schema version to every JSONL event.
-- [ ] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
+- [x] Add a trace schema version to every JSONL event.
+- [x] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
 - [x] Add a public trace reader: `Trace.from_jsonl(path)`.
 - [x] Expose typed trace events with event type and timestamp.
 - [x] Add `chulk trace inspect <path>`.
 - [x] Add `chulk trace export <path> --format html`.
-- [ ] Add `chulk trace replay <path>`.
+- [x] Add `chulk trace replay <path>`.
 - [x] Add a minimal HTML trace export.
 - [ ] Include user request, prompt context, loaded memories, loaded skills, tool calls, tool outputs, permission decisions, final answer, errors, token usage, and cost usage in trace exports.
 - [ ] Log available tools in traces.
-- [ ] Log timing information in traces.
-- [ ] Add `session_started` and `session_finished` trace events.
+- [x] Log timing information in traces.
+- [x] Add `session_started` and `session_finished` trace events.
 - [ ] Make it obvious why a tool was called where the model/action metadata supports it.
 - [ ] Make it obvious which memories were injected.
-- [ ] Add trace redaction tests.
+- [x] Add trace redaction tests.
 - [ ] Add artifact reader support for full truncated outputs saved under traces.
 - [ ] Add replay-friendly event coverage for regression tests.
 

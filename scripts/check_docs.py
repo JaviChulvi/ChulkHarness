@@ -145,7 +145,24 @@ def check_sample_trace() -> None:
     _require(len(parsed.events) == len(events), "trace reader did not parse every sample event")
     _require(tuple(event.get("type") for event in events) == EXPECTED_TRACE_TYPES, "sample trace sequence changed")
     for index, event in enumerate(events, start=1):
-        _require(set(event) == {"created_at", "payload", "type"}, f"trace event {index} has an invalid envelope")
+        _require(
+            set(event)
+            == {
+                "schema_version",
+                "conversation_id",
+                "turn_id",
+                "timestamp",
+                "payload",
+                "type",
+            },
+            f"trace event {index} has an invalid envelope",
+        )
+        _require(event["schema_version"] == 1, f"trace event {index} has the wrong schema version")
+        _require(
+            event["conversation_id"] == "conversation-demo",
+            f"trace event {index} has the wrong conversation id",
+        )
+        _require(event["turn_id"] == "turn-demo", f"trace event {index} has the wrong turn id")
         _require(isinstance(event["payload"], dict), f"trace event {index} payload must be an object")
 
 

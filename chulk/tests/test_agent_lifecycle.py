@@ -9,6 +9,7 @@ import pytest
 from chulk import Agent, AgentConfig, AgentHandle, AsyncAgent, ConfigurationError
 from chulk.core import Agent as CoreAgent
 from chulk.llm import LLMClient
+from chulk.tracing import JSONLTraceLogger
 import chulk.runtime as runtime_module
 
 
@@ -61,6 +62,12 @@ def test_sync_context_manager_closes_on_normal_and_exceptional_exit(tmp_path):
         assert active is normal
         assert active.run("hello") == "done"
     assert normal.closed
+    trace_events = [
+        json.loads(line)
+        for line in normal.trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert trace_events[0]["type"] == "session_started"
+    assert trace_events[-1]["type"] == "session_finished"
 
     exceptional = _agent(tmp_path / "exceptional")
     with pytest.raises(LookupError, match="boom"):
@@ -96,6 +103,32 @@ def test_compatibility_handle_closes_owned_resource_once():
     handle.close()
 
     assert resource.close_count == 1
+
+
+def test_runtime_finishes_trace_after_owned_resource_cleanup(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "cleanup-order")
+
+    class TraceAwareResource(FakeLLMClient):
+        def close(self) -> None:
+            trace_logger.log("resource_closed")
+            super().close()
+
+    resource = TraceAwareResource()
+    handle = AgentHandle(
+        CoreAgent(
+            resource,
+            trace_logger=trace_logger,
+            owned_resources=[resource],
+        )
+    )
+
+    handle.close()
+
+    events = [
+        json.loads(line)
+        for line in trace_logger.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["type"] for event in events[-2:]] == ["resource_closed", "session_finished"]
 
 
 def test_caller_injected_llm_is_not_owned_by_public_facade(tmp_path):
