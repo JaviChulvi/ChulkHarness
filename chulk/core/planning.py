@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 
-READ_ONLY_PLANNING_TOOL_NAMES = frozenset(
-    {
-        "calculator",
-        "list_files",
-        "read_file",
-        "search_files",
-        "search_memory",
-        "list_memories",
-        "summarize_memories",
-    }
-)
+from chulk.tools.permissions import ToolPermissionLevel
+from chulk.tools.registry import Tool
 
-SUBSTANTIVE_RECONNAISSANCE_TOOL_NAMES = frozenset({"read_file", "search_files", "search_memory", "summarize_memories"})
 
 RECONNAISSANCE_STEP_TERMS = frozenset(
     {
@@ -56,9 +47,19 @@ IMPLEMENTATION_STEP_TERMS = frozenset(
 )
 
 
-def format_read_only_planning_tools() -> str:
-    """Return read-only planning tool names for prompt text."""
-    return ", ".join(sorted(READ_ONLY_PLANNING_TOOL_NAMES))
+def read_only_planning_tool_names(tools: Iterable[Tool]) -> frozenset[str]:
+    """Return registered tools whose declared permission metadata is read-only."""
+    return frozenset(
+        tool.name
+        for tool in tools
+        if tool.normalized_permission_level() is ToolPermissionLevel.READ
+    )
+
+
+def format_read_only_planning_tools(tool_names: Iterable[str]) -> str:
+    """Return registered read-only planning tool names for prompt text."""
+    names = sorted(set(tool_names))
+    return ", ".join(names) if names else "none"
 
 
 def plan_step_looks_like_reconnaissance(title: str, description: str) -> bool:

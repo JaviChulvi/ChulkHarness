@@ -33,7 +33,7 @@ from chulk.tools import (
     shell_tool,
     write_file_tool,
 )
-from chulk.tools.permissions import PermissionDecision, ToolPermissionPolicy
+from chulk.tools.permissions import PermissionDecision, ToolPermissionLevel, ToolPermissionPolicy
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
 
@@ -1131,6 +1131,100 @@ def test_agent_planned_turn_allows_read_only_reconnaissance_before_plan(tmp_path
     assert any(message["role"] == "observation" for message in llm.requests[1])
 
 
+def test_agent_planned_turn_uses_registered_permission_metadata_for_reconnaissance():
+    calls = []
+    plan_payload = {
+        "summary": "Implement the feature using the inspected project metadata.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Implement project metadata support",
+                "description": "Update the runtime to consume the inspected project metadata.",
+                "status": "pending",
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "inspect_project_metadata",
+                    "arguments_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="inspect_project_metadata",
+            description="Inspect project metadata without side effects.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=lambda arguments: calls.append(arguments) or ToolResult(
+                "inspect_project_metadata",
+                True,
+                "Project type is Python.",
+            ),
+            permission_level=ToolPermissionLevel.READ,
+        )
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_planned_turn("Plan project metadata support")
+
+    assert "Implement project metadata support" in response
+    assert calls == [{}]
+    assert agent.state.turns[0].tool_calls[0].phase == "planning"
+    assert "<read_only_reconnaissance_tools>inspect_project_metadata</read_only_reconnaissance_tools>" in (
+        llm.requests[0][0]["content"]
+    )
+
+
+def test_agent_planned_turn_blocks_read_named_tool_declared_as_write():
+    calls = []
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "read_file",
+                    "arguments_json": "{}",
+                }
+            )
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="read_file",
+            description="A misleadingly named mutating tool.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=lambda arguments: calls.append(arguments) or ToolResult("read_file", True, "mutated"),
+            permission_level=ToolPermissionLevel.WRITE,
+        )
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    response = agent.run_planned_turn("Plan a change")
+
+    assert "Planning can only use read-only reconnaissance tools before approval" in response
+    assert "Allowed planning tools: none." in response
+    assert calls == []
+    assert agent.state.turns[0].tool_call_count == 0
+
+
 def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
     (tmp_path / "chulk").mkdir()
     (tmp_path / "chulk" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
@@ -1741,6 +1835,197 @@ def test_agent_blocks_plan_immediately_when_step_tool_fails(tmp_path):
     assert turn.tool_call_count == 1
     assert turn.model_request_count == 2
     assert "plan_step_blocked" in event_types
+    assert llm.responses == [json.dumps({"type": "final_answer", "content": "Should not be used."})]
+
+
+def test_agent_retries_failed_plan_step_within_budget_then_completes():
+    call_count = 0
+
+    def flaky_tool(_arguments):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return ToolResult(
+                tool_name="flaky_tool",
+                success=False,
+                observation="The first attempt failed.",
+                error="transient_failure",
+                failure_kind=ToolFailureKind.ENVIRONMENT,
+            )
+        return ToolResult(tool_name="flaky_tool", success=True, observation="The recovery attempt succeeded.")
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="flaky_tool",
+            description="Fail once, then succeed.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=flaky_tool,
+        )
+    )
+    plan_payload = {
+        "summary": "Recover one flaky operation.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Run flaky operation",
+                "description": "Run the operation and recover from one transient failure.",
+                "status": "pending",
+                "acceptance_criteria": ["The operation succeeds."],
+                "retry_limit": 1,
+            }
+        ],
+    }
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "flaky_tool",
+                    "arguments_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "flaky_tool",
+                    "arguments_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The recovery attempt succeeded.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "The flaky operation recovered and completed."}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry)
+
+    pending_response = agent.run_planned_turn("run the flaky operation")
+    response = asyncio.run(agent.approve_plan_async())
+    turn = agent.state.turns[0]
+    assert turn.active_plan is not None
+    step = turn.active_plan.steps[0]
+    retry_evidence = step.evidence[0].metadata["plan_step_retry"]
+
+    assert "retries   0/1 used; 1 remaining" in pending_response
+    assert response == "The flaky operation recovered and completed."
+    assert call_count == 2
+    assert turn.status == "completed"
+    assert step.status == "completed"
+    assert step.retry_count == 1
+    assert step.retries_remaining == 0
+    assert step.tool_failure_count == 1
+    assert retry_evidence["disposition"] == "retry_scheduled"
+    assert retry_evidence["retries_used"] == 1
+    assert any(observation.tool_name == "plan_step_retry" for observation in turn.observations)
+    assert "Retry budget: 1/1 used; 0 remaining" in llm.requests[2][0]["content"]
+
+
+def test_agent_blocks_failed_plan_step_only_after_retry_budget_is_exhausted(tmp_path):
+    def failing_tool(_arguments):
+        return ToolResult(
+            tool_name="fail_tool",
+            success=False,
+            observation="The tool failed deliberately.",
+            error="deliberate_failure",
+            failure_kind=ToolFailureKind.ENVIRONMENT,
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="fail_tool",
+            description="Always fail.",
+            args_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            callable=failing_tool,
+        )
+    )
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "retry-session")
+    plan_payload = {
+        "summary": "Try a failing tool with one recovery attempt.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Run failing tool",
+                "description": "Call a tool and use one recovery attempt if needed.",
+                "status": "pending",
+                "retry_limit": 1,
+            }
+        ],
+    }
+    tool_call = json.dumps(
+        {
+            "type": "tool_call",
+            "content": None,
+            "tool_name": "fail_tool",
+            "arguments_json": "{}",
+        }
+    )
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                }
+            ),
+            tool_call,
+            tool_call,
+            json.dumps({"type": "final_answer", "content": "Should not be used."}),
+        ]
+    )
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
+
+    agent.run_planned_turn("run the failing plan")
+    response = agent.approve_plan()
+    turn = agent.state.turns[0]
+    assert turn.active_plan is not None
+    step = turn.active_plan.steps[0]
+    retry_records = [record.metadata["plan_step_retry"] for record in step.evidence]
+    events = [json.loads(line) for line in trace_logger.path.read_text(encoding="utf-8").splitlines()]
+
+    assert response == (
+        "Plan step blocked: Run failing tool. Tool fail_tool failed with deliberate_failure. "
+        "Step retry limit exhausted after 1 retry."
+    )
+    assert turn.status == "blocked"
+    assert step.status == "blocked"
+    assert step.retry_count == 1
+    assert step.retries_remaining == 0
+    assert step.tool_failure_count == 2
+    assert [record["disposition"] for record in retry_records] == ["retry_scheduled", "retry_limit_exhausted"]
+    assert retry_records[-1]["failure_number"] == 2
+    assert turn.tool_call_count == 2
+    assert turn.model_request_count == 3
+    assert sum(event["type"] == "plan_step_blocked" for event in events) == 1
     assert llm.responses == [json.dumps({"type": "final_answer", "content": "Should not be used."})]
 
 

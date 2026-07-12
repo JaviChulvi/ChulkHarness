@@ -135,7 +135,9 @@ def test_parse_rich_plan_step_fields():
 
     assert isinstance(action, PlanAction)
     assert action.plan.steps[0].acceptance_criteria == ["State serializes dependencies.", "State serializes evidence."]
-    assert action.plan.steps[0].retry_limit == 0
+    assert action.plan.steps[0].retry_limit == 2
+    assert action.plan.steps[0].retry_count == 0
+    assert action.plan.steps[0].retries_remaining == 2
     assert action.plan.steps[1].depends_on == ["1"]
 
 

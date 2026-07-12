@@ -16,7 +16,11 @@ from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateActi
 from chulk.core.context import AgentPrompt, ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.observations import format_tool_observation
-from chulk.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
+from chulk.core.planning import (
+    format_read_only_planning_tools,
+    plan_looks_like_reconnaissance,
+    read_only_planning_tool_names,
+)
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.reflection import (
@@ -595,8 +599,9 @@ class Agent:
 
             if isinstance(action, ToolCallAction):
                 if require_plan:
-                    if action.tool_name not in READ_ONLY_PLANNING_TOOL_NAMES:
-                        allowed_tools = format_read_only_planning_tools()
+                    planning_tool_names = self._read_only_planning_tool_names()
+                    if action.tool_name not in planning_tool_names:
+                        allowed_tools = format_read_only_planning_tools(planning_tool_names)
                         return self._fail_turn(
                             "Planning can only use read-only reconnaissance tools before approval. "
                             f"Allowed planning tools: {allowed_tools}. "
@@ -700,7 +705,7 @@ class Agent:
                     if result.success:
                         self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
                     else:
-                        blocked_response = self._block_plan_step_after_tool_failure(
+                        blocked_response = self._handle_plan_step_tool_failure(
                             turn,
                             plan_step,
                             tool_call_record,
@@ -708,7 +713,8 @@ class Agent:
                             observation,
                             output_metadata,
                         )
-                        return blocked_response
+                        if blocked_response is not None:
+                            return blocked_response
 
     async def _run_action_loop_async(self, turn: TurnState, *, require_plan: bool) -> str:
         """Run model/tool iterations, awaiting async tool calls."""
@@ -861,8 +867,9 @@ class Agent:
 
             if isinstance(action, ToolCallAction):
                 if require_plan:
-                    if action.tool_name not in READ_ONLY_PLANNING_TOOL_NAMES:
-                        allowed_tools = format_read_only_planning_tools()
+                    planning_tool_names = self._read_only_planning_tool_names()
+                    if action.tool_name not in planning_tool_names:
+                        allowed_tools = format_read_only_planning_tools(planning_tool_names)
                         return self._fail_turn(
                             "Planning can only use read-only reconnaissance tools before approval. "
                             f"Allowed planning tools: {allowed_tools}. "
@@ -966,7 +973,7 @@ class Agent:
                     if result.success:
                         self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
                     else:
-                        blocked_response = self._block_plan_step_after_tool_failure(
+                        blocked_response = self._handle_plan_step_tool_failure(
                             turn,
                             plan_step,
                             tool_call_record,
@@ -974,7 +981,8 @@ class Agent:
                             observation,
                             output_metadata,
                         )
-                        return blocked_response
+                        if blocked_response is not None:
+                            return blocked_response
 
     def _build_messages(self, turn: TurnState, *, require_plan: bool) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
@@ -1882,6 +1890,9 @@ class Agent:
     def _tool_call_count_for_phase(self, turn: TurnState, phase: str) -> int:
         return sum(1 for tool_call in turn.tool_calls if tool_call.phase == phase)
 
+    def _read_only_planning_tool_names(self) -> frozenset[str]:
+        return read_only_planning_tool_names(self.tool_registry.list_tools())
+
     def _prepare_plan_execution_step(self, turn: TurnState, *, require_plan: bool) -> str | None:
         if require_plan:
             return None
@@ -1926,16 +1937,21 @@ class Agent:
         tool_call_record: ToolCallRecord,
         observation: str,
         output_metadata: dict,
+        *,
+        retry_metadata: dict | None = None,
     ) -> None:
+        metadata = {
+            "phase": tool_call_record.phase,
+            "output_metadata": output_metadata,
+            "tool_call": tool_call_record.to_dict(),
+        }
+        if retry_metadata is not None:
+            metadata["plan_step_retry"] = retry_metadata
         step.add_evidence(
             observation,
             tool_name=tool_call_record.tool_name,
             tool_call_iteration=tool_call_record.iteration,
-            metadata={
-                "phase": tool_call_record.phase,
-                "output_metadata": output_metadata,
-                "tool_call": tool_call_record.to_dict(),
-            },
+            metadata=metadata,
         )
 
     def _handle_plan_step_update(
@@ -1978,7 +1994,7 @@ class Agent:
         self._trace_plan_step_event(turn, step, TraceEvent.PLAN_STEP_BLOCKED)
         return self._block_turn(_format_plan_step_blocked_message(step), turn)
 
-    def _block_plan_step_after_tool_failure(
+    def _handle_plan_step_tool_failure(
         self,
         turn: TurnState,
         step: PlanStep,
@@ -1986,10 +2002,69 @@ class Agent:
         result: ToolResult,
         observation: str,
         output_metadata: dict,
-    ) -> str:
-        self._record_plan_tool_evidence(step, tool_call_record, observation, output_metadata)
+    ) -> str | None:
         reason = _format_tool_failure_reason(result)
-        step.block(reason)
+        retries_used = step.retry_count
+        retry_number = retries_used + 1
+        tool_calls_remaining = max(
+            0,
+            self.max_tool_calls_per_turn - self._tool_call_count_for_phase(turn, tool_call_record.phase),
+        )
+        retry_scheduled = retry_number <= step.retry_limit and tool_calls_remaining > 0
+        if retry_scheduled:
+            disposition = "retry_scheduled"
+            retries_used = retry_number
+        elif retry_number > step.retry_limit:
+            disposition = "retry_limit_exhausted"
+        else:
+            disposition = "tool_call_limit_exhausted"
+        retry_metadata = {
+            "disposition": disposition,
+            "failure_number": step.tool_failure_count + 1,
+            "retry_limit": step.retry_limit,
+            "retries_used": retries_used,
+            "retries_remaining": max(0, step.retry_limit - retries_used),
+            "tool_calls_remaining": tool_calls_remaining,
+            "failure_kind": result.failure_kind,
+            "error": result.error,
+        }
+        self._record_plan_tool_evidence(
+            step,
+            tool_call_record,
+            observation,
+            output_metadata,
+            retry_metadata=retry_metadata,
+        )
+
+        if retry_scheduled:
+            self._add_synthetic_observation(
+                turn,
+                tool_name="plan_step_retry",
+                content=(
+                    f"Plan step {step.id} remains in_progress after {reason} "
+                    f"Recovery attempt {retries_used} of {step.retry_limit} is available; "
+                    f"{step.retries_remaining} retries remain. Correct the arguments or choose a safe "
+                    "alternative that can satisfy the current step's acceptance criteria."
+                ),
+                output_metadata={
+                    "step_id": step.id,
+                    "step_status": step.status,
+                    **retry_metadata,
+                },
+            )
+            return None
+
+        blocked_reason = reason
+        if step.retry_limit:
+            if disposition == "retry_limit_exhausted":
+                retry_label = "retry" if step.retry_count == 1 else "retries"
+                blocked_reason = f"{reason} Step retry limit exhausted after {step.retry_count} {retry_label}."
+            else:
+                blocked_reason = (
+                    f"{reason} No step retry could run because the execution tool-call limit "
+                    f"({self.max_tool_calls_per_turn}) was reached."
+                )
+        step.block(blocked_reason)
         self._trace_plan_step_event(
             turn,
             step,
