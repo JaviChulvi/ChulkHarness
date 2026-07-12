@@ -31,6 +31,32 @@ function begins. Dependency values are not written into turn snapshots or
 model-visible arguments. Use `ToolContext.metadata` for non-secret request
 metadata; Chulk adds the current conversation and turn ids.
 
+## Built-in file-read policy
+
+The built-in `read_file`, `list_files`, and `search_files` tools deny sensitive
+paths by default. The deny list covers local `.env` variants, credential and
+private-key files, Git internals, trace directories, SQLite state, and `.chulk`
+runtime state. Committable `.env.example`/`.env.sample`/`.env.template` files,
+normal project source, and `.chulk/skills` playbooks remain readable.
+
+An embedding host can deliberately construct a file tool with sensitive access
+for a trusted workflow:
+
+```python
+from chulk.tools import FileReadPolicy, read_file_tool
+
+read_sensitive_file = read_file_tool(
+    project_root,
+    read_policy=FileReadPolicy(allow_sensitive_paths=True),
+)
+```
+
+The policy is captured when the host creates the tool and is absent from its
+model-facing argument schema. Opting in never relaxes the project-root boundary.
+This policy does not sandbox shell commands or custom tools; applications must
+disable or separately constrain those capabilities when file confidentiality is
+required.
+
 ## Structured output
 
 Declare an object output schema with `output_schema=` or `ToolOutputPolicy`.
