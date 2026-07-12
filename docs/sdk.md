@@ -72,11 +72,13 @@ adapter can preserve unknown metadata without weakening the typed contract.
 
 One facade serializes work-starting calls so one conversation cannot interleave
 turn state or callbacks. Use separate agent instances for true parallel runs.
-`AsyncAgent` uses native async turn execution where available, while some plan
-approval compatibility operations remain thread-backed. Cancellation propagates
-as `asyncio.CancelledError`; hosts should cancel/await tasks and then close the
-agent. A synchronous Python worker thread cannot be force-killed, so tools need
-their own cooperative cancellation and I/O timeouts.
+`AsyncAgent` uses native async model requests for every built-in provider,
+including planning, action repair, context summaries, reflection, and fallback
+chains. Sync-only custom clients and some compatibility operations use worker
+threads. Cancellation propagates as `asyncio.CancelledError`; hosts should
+cancel and await tasks, then close the agent. A synchronous Python worker thread
+cannot be force-killed, so custom clients and tools need cooperative
+cancellation and I/O timeouts.
 
 See [events](events.md) for generator cleanup and ordering,
 [configuration](configuration.md) for runtime ownership, and the

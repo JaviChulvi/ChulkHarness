@@ -54,3 +54,15 @@ export CHULK_LLM_FALLBACK_PROVIDERS=openrouter:vendor/fallback-model,openai:gpt-
 Timeout and retry behavior remains shared across providers through
 `CHULK_LLM_TIMEOUT_SECONDS` and `CHULK_LLM_MAX_RETRIES`. See the provider guide
 for the exact credential and base-URL precedence.
+
+## Configuration diagnostics
+
+Run `chulk doctor` to check the selected primary provider and every configured
+fallback for their required model, credential, endpoint, and optional SDK
+dependency. The command does not make a billable provider request or prove that
+an account can access a particular model.
+
+Run `chulk --show-config` to inspect resolved non-secret settings. API keys are
+reported only as set or not set. Provider base URLs keep their scheme, host,
+port, and path, but Chulk removes user information, query parameters, and
+fragments before printing them.

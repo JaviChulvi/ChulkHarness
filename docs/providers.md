@@ -124,6 +124,13 @@ inject an application-owned `LLMClient` through `Agent(llm=client)`. The shared
 runtime asks providers for validated actions through `complete_action(...)` and
 normalizes provider-specific tool calls before orchestration.
 
+`AsyncAgent` uses each SDK's native async transport: OpenAI's async Responses
+or Chat Completions clients, Anthropic's async Messages client, and Gemini's
+async GenerateContent client. Cancellation propagates through native requests
+and does not advance a fallback chain. A custom client that implements only the
+synchronous interface remains supported through a thread-backed compatibility
+path, which cannot force-stop an already running synchronous call.
+
 `chulk.testing.ScriptedLLMClient` is the deterministic choice for unit tests,
 examples, and offline evaluation. Provider adapter tests inject fake SDK
 clients and never require credentials or network access. Consequently, those
