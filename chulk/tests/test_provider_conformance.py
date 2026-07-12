@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from chulk import runtime as runtime_module
 from chulk.cli import terminal as terminal_module
 from chulk.core.actions import ToolCallAction
 from chulk.llm import (
@@ -18,9 +19,11 @@ from chulk.llm import (
     LLMCapabilities,
     DeepSeekChatCompletionsClient,
     LocalOpenAICompatibleClient,
+    create_llm_client,
     provider_connection_from_config,
 )
-from chulk import runtime as runtime_module
+from chulk.llm.capabilities import LLMModelCapabilities, MODEL_CAPABILITIES
+from chulk.testing import ScriptedLLMClient
 
 
 PROVIDERS = [
@@ -258,9 +261,117 @@ def test_provider_profile_binds_typed_connection_from_existing_config_fields():
         api_key="deepseek-key",
         base_url="https://deepseek.example/v1",
     )
-    assert not hasattr(settings, "openai_api_key")
-    assert not hasattr(settings, "deepseek_api_key")
-    assert not hasattr(settings, "local_api_key")
+    assert settings.openai_api_key is None
+    assert settings.deepseek_api_key is None
+    assert settings.local_api_key is None
+
+
+def test_llm_client_settings_accepts_original_positional_contract():
+    settings = LLMClientSettings(
+        "legacy-model",
+        "openai-key",
+        "deepseek-key",
+        "https://deepseek.example/v1",
+        "local-key",
+        "http://localhost:11434/v1",
+        12.5,
+        4,
+    )
+
+    assert settings.model == "legacy-model"
+    assert settings.openai_api_key == "openai-key"
+    assert settings.deepseek_api_key == "deepseek-key"
+    assert settings.deepseek_base_url == "https://deepseek.example/v1"
+    assert settings.local_api_key == "local-key"
+    assert settings.local_base_url == "http://localhost:11434/v1"
+    assert settings.timeout_seconds == 12.5
+    assert settings.max_retries == 4
+    assert settings.connection == LLMProviderConnection()
+
+
+def test_llm_client_settings_accepts_original_keyword_contract():
+    settings = LLMClientSettings(
+        model="legacy-model",
+        openai_api_key="openai-key",
+        deepseek_api_key="deepseek-key",
+        deepseek_base_url="https://deepseek.example/v1",
+        local_api_key="local-key",
+        local_base_url="http://localhost:11434/v1",
+        timeout_seconds=8,
+        max_retries=1,
+    )
+
+    assert settings.openai_api_key == "openai-key"
+    assert settings.deepseek_api_key == "deepseek-key"
+    assert settings.local_api_key == "local-key"
+    assert settings.timeout_seconds == 8
+    assert settings.max_retries == 1
+
+
+def test_custom_provider_callback_receives_original_settings_fields(monkeypatch):
+    provider = "legacy-custom"
+    model = "legacy-model"
+    captured: dict[str, object] = {}
+    client = ScriptedLLMClient(["answer"])
+
+    def create_legacy_client(settings: LLMClientSettings):
+        captured.update(
+            {
+                "model": settings.model,
+                "openai_api_key": settings.openai_api_key,
+                "deepseek_api_key": settings.deepseek_api_key,
+                "deepseek_base_url": settings.deepseek_base_url,
+                "local_api_key": settings.local_api_key,
+                "local_base_url": settings.local_base_url,
+                "timeout_seconds": settings.timeout_seconds,
+                "max_retries": settings.max_retries,
+            }
+        )
+        return client
+
+    monkeypatch.setitem(
+        LLM_PROVIDER_REGISTRY,
+        provider,
+        LLMProviderProfile(
+            name=provider,
+            capabilities=LLMCapabilities(),
+            create_client=create_legacy_client,
+        ),
+    )
+    monkeypatch.setitem(
+        MODEL_CAPABILITIES,
+        (provider, model),
+        LLMModelCapabilities(
+            provider=provider,
+            model=model,
+            context_window_tokens=8_192,
+            default_response_reserve_tokens=2_048,
+        ),
+    )
+
+    result = create_llm_client(
+        provider=provider,
+        model=model,
+        openai_api_key="openai-key",
+        deepseek_api_key="deepseek-key",
+        deepseek_base_url="https://deepseek.example/v1",
+        local_api_key="local-key",
+        local_base_url="http://localhost:11434/v1",
+        timeout_seconds=15,
+        max_retries=3,
+    )
+
+    assert result is client
+    assert captured == {
+        "model": model,
+        "openai_api_key": "openai-key",
+        "deepseek_api_key": "deepseek-key",
+        "deepseek_base_url": "https://deepseek.example/v1",
+        "local_api_key": "local-key",
+        "local_base_url": "http://localhost:11434/v1",
+        "timeout_seconds": 15,
+        "max_retries": 3,
+    }
 
 
 def test_mcp_routing_uses_provider_capability_instead_of_provider_name(monkeypatch):

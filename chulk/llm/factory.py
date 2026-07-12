@@ -100,14 +100,52 @@ class LLMProviderConnection:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class LLMClientSettings:
-    """Provider-neutral settings used to construct an LLM client."""
+    """Settings passed to registered LLM client factories.
+
+    ``connection`` is the provider-neutral path used by built-in providers.
+    The original credential fields remain available so third-party provider
+    callbacks written against the first public factory contract keep working.
+    """
 
     model: str
     connection: LLMProviderConnection
     timeout_seconds: float
     max_retries: int
+    openai_api_key: str | None
+    deepseek_api_key: str | None
+    deepseek_base_url: str
+    local_api_key: str | None
+    local_base_url: str
+
+    def __init__(
+        self,
+        model: str,
+        openai_api_key: str | None = None,
+        deepseek_api_key: str | None = None,
+        deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL,
+        local_api_key: str | None = None,
+        local_base_url: str = DEFAULT_LOCAL_BASE_URL,
+        timeout_seconds: float = 60.0,
+        max_retries: int = 2,
+        *,
+        connection: LLMProviderConnection | None = None,
+    ) -> None:
+        """Accept both the original positional fields and a bound connection."""
+        object.__setattr__(self, "model", model)
+        object.__setattr__(
+            self,
+            "connection",
+            connection if connection is not None else LLMProviderConnection(),
+        )
+        object.__setattr__(self, "timeout_seconds", timeout_seconds)
+        object.__setattr__(self, "max_retries", max_retries)
+        object.__setattr__(self, "openai_api_key", openai_api_key)
+        object.__setattr__(self, "deepseek_api_key", deepseek_api_key)
+        object.__setattr__(self, "deepseek_base_url", deepseek_base_url)
+        object.__setattr__(self, "local_api_key", local_api_key)
+        object.__setattr__(self, "local_base_url", local_base_url)
 
 
 @dataclass(frozen=True)
@@ -293,6 +331,31 @@ def create_llm_client(
     client = provider_profile.create_client(
         LLMClientSettings(
             model=model,
+            openai_api_key=(
+                openai_api_key
+                if openai_api_key is not None
+                else selected_connection.api_key
+            ),
+            deepseek_api_key=(
+                deepseek_api_key
+                if deepseek_api_key is not None
+                else selected_connection.api_key
+            ),
+            deepseek_base_url=(
+                deepseek_base_url
+                if deepseek_base_url is not None
+                else selected_connection.base_url or DEFAULT_DEEPSEEK_BASE_URL
+            ),
+            local_api_key=(
+                local_api_key
+                if local_api_key is not None
+                else selected_connection.api_key
+            ),
+            local_base_url=(
+                local_base_url
+                if local_base_url is not None
+                else selected_connection.base_url or DEFAULT_LOCAL_BASE_URL
+            ),
             connection=selected_connection,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
