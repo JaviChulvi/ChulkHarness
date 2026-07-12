@@ -15,6 +15,8 @@ LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
 LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = 262_144
 COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
 COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
+ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
+ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -36,6 +38,10 @@ COMPATIBLE_DEFAULT_LIMITS = (
     COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS,
     COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
+ANTHROPIC_DEFAULT_LIMITS = (
+    ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +53,7 @@ class LLMCapabilities:
     supports_streaming: bool = False
     supports_native_tool_calling: bool = False
     supports_hosted_mcp_tools: bool = False
-    api_style: Literal["responses", "chat_completions"] = "chat_completions"
+    api_style: Literal["responses", "chat_completions", "messages"] = "chat_completions"
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,13 @@ def _model_key(provider: str, model: str) -> tuple[str, str]:
 
 def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCapabilities | None:
     normalized_provider, normalized_model = _model_key(provider, model)
+    if normalized_provider == "anthropic":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
     if normalized_provider in {"openai-compatible", "openrouter"}:
         return LLMModelCapabilities(
             provider=normalized_provider,

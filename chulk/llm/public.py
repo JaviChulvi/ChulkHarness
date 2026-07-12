@@ -151,6 +151,31 @@ class OpenRouterProvider:
 
 
 @dataclass(frozen=True)
+class AnthropicProvider:
+    """Anthropic provider spec for the public API."""
+
+    model: str
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_seconds: float | None = None
+    max_retries: int | None = None
+    provider: str = "anthropic"
+
+    def bind_config(self, config: Config) -> LLMClient:
+        connection = provider_connection_from_config(self.provider, config).with_overrides(
+            api_key=self.api_key or None,
+            base_url=self.base_url or None,
+        )
+        return create_llm_client(
+            provider=self.provider,
+            model=self.model,
+            connection=connection,
+            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
+            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+        )
+
+
+@dataclass(frozen=True)
 class ProviderAttempt:
     """One provider attempt inside a fallback request."""
 
@@ -454,6 +479,7 @@ def _provider_error_metadata(exc: Exception) -> tuple[str | None, bool | None, b
 
 
 __all__ = [
+    "AnthropicProvider",
     "DeepSeekProvider",
     "FallbackChain",
     "FallbackStrategy",

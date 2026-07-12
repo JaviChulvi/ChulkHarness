@@ -68,6 +68,8 @@ class Config:
     openai_compatible_base_url: str | None = None
     openrouter_api_key: str | None = None
     openrouter_base_url: str = DEFAULT_OPENROUTER_BASE_URL
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
     llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
@@ -184,6 +186,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         openai_compatible_base_url=env.get("CHULK_OPENAI_COMPATIBLE_BASE_URL") or None,
         openrouter_api_key=env.get("CHULK_OPENROUTER_API_KEY") or env.get("OPENROUTER_API_KEY") or None,
         openrouter_base_url=env.get("CHULK_OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL,
+        anthropic_api_key=env.get("CHULK_ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY") or None,
+        anthropic_base_url=env.get("CHULK_ANTHROPIC_BASE_URL") or None,
         llm_fallback_providers=_parse_fallback_providers(
             env,
             primary_provider=llm_provider,

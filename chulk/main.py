@@ -31,6 +31,7 @@ from chulk.cli.parser import build_parser
 from chulk.config import Config, load_cli_config
 from chulk.core import Agent
 from chulk.llm import (
+    AnthropicProvider,
     DeepSeekProvider,
     FallbackChain,
     LLMClient,
@@ -71,6 +72,8 @@ def format_config(config: Config) -> str:
         "openai_compatible_base_url": config.openai_compatible_base_url or "not set",
         "openrouter_api_key": "set" if config.openrouter_api_key else "not set",
         "openrouter_base_url": config.openrouter_base_url,
+        "anthropic_api_key": "set" if config.anthropic_api_key else "not set",
+        "anthropic_base_url": config.anthropic_base_url or "not set",
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -124,6 +127,7 @@ def create_cli_llm(config: Config) -> FallbackChain:
         | LocalProvider
         | OpenAICompatibleProvider
         | OpenRouterProvider
+        | AnthropicProvider
     ] = [
         _create_provider_spec(config.llm_provider, config.model)
     ]
@@ -137,7 +141,14 @@ def create_cli_llm(config: Config) -> FallbackChain:
 def _create_provider_spec(
     provider: str,
     model: str,
-) -> OpenAIProvider | DeepSeekProvider | LocalProvider | OpenAICompatibleProvider | OpenRouterProvider:
+) -> (
+    OpenAIProvider
+    | DeepSeekProvider
+    | LocalProvider
+    | OpenAICompatibleProvider
+    | OpenRouterProvider
+    | AnthropicProvider
+):
     if provider == "openai":
         return OpenAIProvider(model=model)
     if provider == "deepseek":
@@ -148,6 +159,8 @@ def _create_provider_spec(
         return OpenAICompatibleProvider(model=model)
     if provider == "openrouter":
         return OpenRouterProvider(model=model)
+    if provider == "anthropic":
+        return AnthropicProvider(model=model)
     raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
 
 

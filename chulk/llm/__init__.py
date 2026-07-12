@@ -1,6 +1,7 @@
 """LLM provider clients and shared interfaces."""
 
 from chulk.llm.client import (
+    AnthropicMessagesClient,
     DeepSeekChatCompletionsClient,
     HostedOpenAICompatibleClient,
     LLMActionError,
@@ -32,6 +33,7 @@ from chulk.llm.client import (
 )
 from chulk.llm.capabilities import conservative_model_capabilities
 from chulk.llm.public import (
+    AnthropicProvider,
     DeepSeekProvider,
     FallbackChain,
     FallbackStrategy,
@@ -43,6 +45,8 @@ from chulk.llm.public import (
 )
 
 __all__ = [
+    "AnthropicMessagesClient",
+    "AnthropicProvider",
     "DeepSeekProvider",
     "DeepSeekChatCompletionsClient",
     "FallbackChain",

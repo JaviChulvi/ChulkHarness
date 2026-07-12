@@ -8,6 +8,7 @@ from typing import Protocol
 
 from chulk.llm.base import LLMClient, LLMConfigurationError
 from chulk.llm.capabilities import LLMCapabilities, resolve_model_capabilities
+from chulk.llm.providers.anthropic import ANTHROPIC_CAPABILITIES, AnthropicMessagesClient
 from chulk.llm.providers.compatible import (
     DEFAULT_OPENROUTER_BASE_URL,
     HOSTED_OPENAI_COMPATIBLE_CAPABILITIES,
@@ -57,6 +58,12 @@ class LLMConnectionConfig(Protocol):
 
     @property
     def openrouter_base_url(self) -> str: ...
+
+    @property
+    def anthropic_api_key(self) -> str | None: ...
+
+    @property
+    def anthropic_base_url(self) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -163,6 +170,15 @@ LLM_PROVIDER_REGISTRY: dict[str, LLMProviderProfile] = {
         ),
         create_client=lambda settings: _create_openrouter_client(settings),
     ),
+    "anthropic": LLMProviderProfile(
+        name="anthropic",
+        capabilities=ANTHROPIC_CAPABILITIES,
+        connection_from_config=lambda config: LLMProviderConnection(
+            api_key=config.anthropic_api_key,
+            base_url=config.anthropic_base_url,
+        ),
+        create_client=lambda settings: _create_anthropic_client(settings),
+    ),
 }
 
 
@@ -200,6 +216,8 @@ def create_llm_client(
     openai_compatible_base_url: str | None = None,
     openrouter_api_key: str | None = None,
     openrouter_base_url: str | None = None,
+    anthropic_api_key: str | None = None,
+    anthropic_base_url: str | None = None,
 ) -> LLMClient:
     """Create an LLM client for the selected provider.
 
@@ -225,6 +243,8 @@ def create_llm_client(
         openai_compatible_base_url=openai_compatible_base_url,
         openrouter_api_key=openrouter_api_key,
         openrouter_base_url=openrouter_base_url,
+        anthropic_api_key=anthropic_api_key,
+        anthropic_base_url=anthropic_base_url,
     )
     selected_connection = provider_profile.default_connection.with_overrides(
         api_key=selected_connection.api_key,
@@ -262,6 +282,8 @@ def _legacy_connection(
     openai_compatible_base_url: str | None,
     openrouter_api_key: str | None,
     openrouter_base_url: str | None,
+    anthropic_api_key: str | None,
+    anthropic_base_url: str | None,
 ) -> LLMProviderConnection:
     if profile.name == "openai":
         return LLMProviderConnection(api_key=openai_api_key)
@@ -276,6 +298,8 @@ def _legacy_connection(
         )
     if profile.name == "openrouter":
         return LLMProviderConnection(api_key=openrouter_api_key, base_url=openrouter_base_url)
+    if profile.name == "anthropic":
+        return LLMProviderConnection(api_key=anthropic_api_key, base_url=anthropic_base_url)
     return profile.default_connection
 
 
@@ -323,6 +347,16 @@ def _create_openrouter_client(settings: LLMClientSettings) -> LLMClient:
         model=settings.model,
         api_key=settings.connection.api_key,
         base_url=settings.connection.base_url or DEFAULT_OPENROUTER_BASE_URL,
+        timeout_seconds=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+    )
+
+
+def _create_anthropic_client(settings: LLMClientSettings) -> LLMClient:
+    return AnthropicMessagesClient(
+        model=settings.model,
+        api_key=settings.connection.api_key,
+        base_url=settings.connection.base_url,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
     )

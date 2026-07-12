@@ -22,6 +22,7 @@ from chulk.llm.factory import (
     provider_connection_from_config,
     supported_llm_providers,
 )
+from chulk.llm.providers.anthropic import AnthropicMessagesClient
 from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
 from chulk.llm.providers.compatible import (
     HostedOpenAICompatibleClient,
@@ -32,6 +33,7 @@ from chulk.llm.providers.openai import OpenAIResponsesClient
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 __all__ = [
+    "AnthropicMessagesClient",
     "DeepSeekChatCompletionsClient",
     "HostedOpenAICompatibleClient",
     "LLMActionError",
