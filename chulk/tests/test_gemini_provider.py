@@ -334,6 +334,29 @@ class GeminiSDKError(Exception):
         self.code = code
 
 
+class GeminiHTTPError(Exception):
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.code = status_code
+        self.response = SimpleNamespace(status_code=status_code)
+
+
+class FailOnceModels(FakeModels):
+    def __init__(self, *, error: Exception, responses: list[object]) -> None:
+        super().__init__(responses=responses)
+        self.one_time_error: Exception | None = error
+
+    def generate_content(self, **kwargs):
+        self.generate_calls.append(kwargs)
+        if self.one_time_error is not None:
+            error = self.one_time_error
+            self.one_time_error = None
+            raise error
+        if not self.responses:
+            raise AssertionError("No fake Gemini response configured")
+        return self.responses.pop(0)
+
+
 @pytest.mark.parametrize(
     ("error", "code", "retryable", "fallback_eligible"),
     [
@@ -359,6 +382,52 @@ def test_gemini_sdk_failures_have_typed_provider_metadata(
     assert raised.value.provider == "gemini"
     assert raised.value.model == "gemini-test"
     assert len(models.generate_calls) == 1
+
+
+def test_gemini_http_400_invalid_key_overrides_generic_classification() -> None:
+    models = FakeModels(
+        error=GeminiHTTPError("API key not valid", status_code=400),
+    )
+
+    with pytest.raises(LLMError) as raised:
+        _client(models).complete(MESSAGES)
+
+    assert raised.value.code == "authentication_error"
+    assert raised.value.retryable is False
+    assert raised.value.fallback_eligible is False
+
+
+def test_gemini_http_400_unsupported_function_calling_uses_json_fallback() -> None:
+    fallback_payload = json.dumps(
+        {
+            "type": "final_answer",
+            "content": "safe fallback",
+            "tool_name": None,
+            "arguments_json": "{}",
+            "plan_json": "{}",
+            "step_update_json": "{}",
+        }
+    )
+    models = FailOnceModels(
+        error=GeminiHTTPError(
+            "Function calling is not supported for this model",
+            status_code=400,
+        ),
+        responses=[_response(text=fallback_payload)],
+    )
+
+    result = _client(models).complete_action(MESSAGES, tools=[_calculator_tool()])
+
+    assert result.action == FinalAnswerAction(
+        type="final_answer",
+        content="safe fallback",
+    )
+    assert result.metadata["action_transport"] == "chulk_json_fallback"
+    assert "function calling is not supported" in result.metadata[
+        "native_tool_call_error"
+    ].lower()
+    assert "tools" in models.generate_calls[0]["config"]
+    assert models.generate_calls[1]["config"]["response_mime_type"] == "application/json"
 
 
 @pytest.mark.parametrize("value", [False, True, 0, -1])

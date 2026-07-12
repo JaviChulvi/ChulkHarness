@@ -724,42 +724,24 @@ def _gemini_error_from_exception(
     model: str,
     action_transport: bool = False,
 ) -> LLMError:
-    normalized = provider_error_from_exception(
-        exc,
-        message=message,
-        provider="gemini",
-        model=model,
-        action_transport=action_transport,
-    )
-    if normalized.code != "unknown" or isinstance(exc, LLMError):
-        return normalized
-
     status_code = _gemini_status_code(exc)
     error_text = str(exc).lower()
+    if isinstance(exc, LLMError):
+        return provider_error_from_exception(
+            exc,
+            message=message,
+            provider="gemini",
+            model=model,
+            action_transport=action_transport,
+        )
+
     if _has_any(error_text, "api key not valid", "invalid api key", "api_key_invalid"):
         classification: tuple[LLMErrorCode, bool, bool] = (
             "authentication_error",
             False,
             False,
         )
-    elif status_code == 401:
-        classification = ("authentication_error", False, False)
-    elif status_code == 403:
-        classification = ("permission_denied", False, False)
-    elif status_code == 404 or _has_any(
-        error_text,
-        "model not found",
-        "unknown model",
-        "model does not exist",
-    ):
-        classification = ("model_not_found", False, False)
-    elif status_code == 429:
-        classification = ("rate_limit", True, True)
-    elif status_code == 408:
-        classification = ("timeout", True, True)
-    elif status_code is not None and status_code >= 500:
-        classification = ("server_error", True, True)
-    elif action_transport and _has_any(
+    elif action_transport and status_code in {None, 400, 409, 422} and _has_any(
         error_text,
         "function calling is not supported",
         "function calls are not supported",
@@ -767,10 +749,38 @@ def _gemini_error_from_exception(
         "unsupported function calling",
     ):
         classification = ("unsupported_feature", False, True)
-    elif status_code in {400, 409, 422}:
-        classification = ("invalid_request", False, False)
     else:
-        return normalized
+        normalized = provider_error_from_exception(
+            exc,
+            message=message,
+            provider="gemini",
+            model=model,
+            action_transport=action_transport,
+        )
+        if normalized.code != "unknown":
+            return normalized
+
+        if status_code == 401:
+            classification = ("authentication_error", False, False)
+        elif status_code == 403:
+            classification = ("permission_denied", False, False)
+        elif status_code == 404 or _has_any(
+            error_text,
+            "model not found",
+            "unknown model",
+            "model does not exist",
+        ):
+            classification = ("model_not_found", False, False)
+        elif status_code == 429:
+            classification = ("rate_limit", True, True)
+        elif status_code == 408:
+            classification = ("timeout", True, True)
+        elif status_code is not None and status_code >= 500:
+            classification = ("server_error", True, True)
+        elif status_code in {400, 409, 422}:
+            classification = ("invalid_request", False, False)
+        else:
+            return normalized
 
     code, retryable, fallback_eligible = classification
     return LLMError(

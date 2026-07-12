@@ -339,7 +339,6 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             {
                 "tools": chat_completion_tools(tools),
                 "tool_choice": "auto",
-                "parallel_tool_calls": False,
             }
         )
         response = self._create(request, operation="native tool action request", action_transport=True)
@@ -376,7 +375,6 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             {
                 "tools": chat_completion_tools(tools),
                 "tool_choice": "auto",
-                "parallel_tool_calls": False,
             }
         )
         response = await self._acreate(

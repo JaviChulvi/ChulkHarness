@@ -134,7 +134,7 @@ def test_compatible_providers_follow_native_single_tool_contract(
         tool_name="calculator",
         arguments={"expression": "2 + 2"},
     )
-    assert completions.calls[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in completions.calls[0]
     assert result.metadata["action_transport"] == "provider_native"
 
 

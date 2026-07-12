@@ -255,6 +255,97 @@ def test_doctor_checks_openai_compatible_endpoint_for_every_provider_position(
     assert "CHULK_OPENAI_COMPATIBLE_BASE_URL" in provider_check.detail
 
 
+@pytest.mark.parametrize("as_fallback", [False, True])
+@pytest.mark.parametrize(
+    ("provider", "model", "environment", "expected_package", "expected_extra"),
+    [
+        ("openai", "gpt-4.1-mini", {"OPENAI_API_KEY": "test-key"}, "openai", "openai"),
+        (
+            "deepseek",
+            "deepseek-chat",
+            {"DEEPSEEK_API_KEY": "test-key"},
+            "openai",
+            "openai",
+        ),
+        ("local", "local-test-model", {}, "openai", "openai"),
+        (
+            "openai-compatible",
+            "vendor/model",
+            {
+                "CHULK_OPENAI_COMPATIBLE_API_KEY": "test-key",
+                "CHULK_OPENAI_COMPATIBLE_BASE_URL": "https://models.example/v1",
+            },
+            "openai",
+            "openai",
+        ),
+        (
+            "openrouter",
+            "vendor/model",
+            {"OPENROUTER_API_KEY": "test-key"},
+            "openai",
+            "openai",
+        ),
+        (
+            "anthropic",
+            "claude-test",
+            {"ANTHROPIC_API_KEY": "test-key"},
+            "anthropic",
+            "anthropic",
+        ),
+        (
+            "bedrock",
+            "vendor/model",
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "test-key",
+                "CHULK_BASE_URL": "https://bedrock.example/openai/v1",
+            },
+            "openai",
+            "openai",
+        ),
+        (
+            "gemini",
+            "gemini-test",
+            {"GOOGLE_API_KEY": "test-key"},
+            "google-genai",
+            "gemini",
+        ),
+    ],
+)
+def test_doctor_checks_sdk_package_for_every_provider_position(
+    monkeypatch,
+    tmp_path,
+    as_fallback,
+    provider,
+    model,
+    environment,
+    expected_package,
+    expected_extra,
+):
+    monkeypatch.setattr("chulk.cli.maintenance.find_spec", lambda _module_name: None)
+    fallback_primary_provider = "anthropic" if provider == "local" else "local"
+    fallback_primary_model = "claude-test" if provider == "local" else "local-test-model"
+    configured = {
+        "CHULK_PROJECT_ROOT": str(tmp_path),
+        "CHULK_LLM_PROVIDER": fallback_primary_provider if as_fallback else provider,
+        "CHULK_MODEL": fallback_primary_model if as_fallback else model,
+        **environment,
+    }
+    if as_fallback:
+        configured["CHULK_LLM_FALLBACK_PROVIDERS"] = f"{provider}:{model}"
+        if provider == "local":
+            configured["ANTHROPIC_API_KEY"] = "test-key"
+
+    report = run_doctor(environ=configured)
+
+    provider_check = next(check for check in report.checks if check.name == "provider")
+    expected_label = "fallback #1" if as_fallback else "primary"
+    assert report.ok is False
+    assert provider_check.status == "fail"
+    assert f"{expected_label} {provider}" in provider_check.detail
+    assert expected_package in provider_check.detail
+    assert f"chulkharness[{expected_extra}]" in provider_check.detail
+
+
 def test_doctor_rejects_blank_provider_credentials_and_endpoints(tmp_path):
     report = run_doctor(
         environ={
@@ -290,11 +381,13 @@ def test_doctor_rejects_blank_provider_credentials_and_endpoints(tmp_path):
     ],
 )
 def test_doctor_accepts_documented_provider_aliases(
+    monkeypatch,
     tmp_path,
     provider,
     model,
     environment,
 ):
+    monkeypatch.setattr("chulk.cli.maintenance.find_spec", lambda _module_name: object())
     report = run_doctor(
         environ={
             "CHULK_PROJECT_ROOT": str(tmp_path),

@@ -236,7 +236,7 @@ def test_bedrock_normalizes_one_native_tool_call() -> None:
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["id"] == "call_1"
     assert completions.calls[0]["tool_choice"] == "auto"
-    assert completions.calls[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in completions.calls[0]
 
 
 def test_bedrock_rejects_parallel_native_actions_and_uses_json_fallback() -> None:

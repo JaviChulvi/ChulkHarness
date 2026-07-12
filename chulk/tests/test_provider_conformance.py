@@ -61,6 +61,16 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=completions)
 
 
+class FakeAsyncChatCompletions:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.response
+
+
 def _client(client_type, model: str, completions: FakeChatCompletions):
     return client_type(model=model, client=FakeClient(completions))
 
@@ -109,7 +119,9 @@ def test_provider_text_and_dynamic_output_limit_contract(client_type, model, pro
 
 
 @pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
-def test_provider_native_single_tool_contract_disables_parallel_calls(client_type, model, provider):
+def test_provider_native_single_tool_contract_omits_optional_parallel_parameter(
+    client_type, model, provider
+):
     completions = FakeChatCompletions(
         responses=[_response(content=None, tool_calls=[_tool_call("call_1", expression="2 + 2")])]
     )
@@ -126,8 +138,36 @@ def test_provider_native_single_tool_contract_disables_parallel_calls(client_typ
         arguments={"expression": "2 + 2"},
     )
     assert completions.calls[0]["tool_choice"] == "auto"
-    assert completions.calls[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in completions.calls[0]
     assert result.metadata["provider_tool_call"]["id"] == "call_1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
+async def test_provider_async_native_tool_contract_omits_optional_parallel_parameter(
+    client_type, model, provider
+):
+    async_completions = FakeAsyncChatCompletions(
+        _response(content=None, tool_calls=[_tool_call("call_1", expression="2 + 2")])
+    )
+    client = client_type(
+        model=model,
+        client=FakeClient(FakeChatCompletions()),
+        async_client=FakeClient(async_completions),
+    )
+
+    result = await client.acomplete_action(
+        [{"role": "user", "content": "what is 2+2?"}],
+        tools=[_calculator_tool()],
+    )
+
+    assert result.action == ToolCallAction(
+        type="tool_call",
+        tool_name="calculator",
+        arguments={"expression": "2 + 2"},
+    )
+    assert async_completions.calls[0]["tool_choice"] == "auto"
+    assert "parallel_tool_calls" not in async_completions.calls[0]
 
 
 @pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
@@ -148,7 +188,7 @@ def test_provider_json_fallback_contract(client_type, model, provider):
     assert result.action.content == "fallback"
     assert result.metadata["action_transport"] == "chulk_json_fallback"
     assert "native tools unsupported" in result.metadata["native_tool_call_error"]
-    assert completions.calls[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in completions.calls[0]
     assert completions.calls[0]["max_tokens"] == 321
     assert "tools" not in completions.calls[1]
     assert completions.calls[1]["max_tokens"] == 321

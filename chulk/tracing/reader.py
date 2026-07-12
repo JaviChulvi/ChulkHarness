@@ -18,6 +18,50 @@ from chulk.tracing.logger import TRACE_SCHEMA_VERSION
 LEGACY_TRACE_SCHEMA_VERSION = 0
 SUPPORTED_TRACE_SCHEMA_VERSIONS = frozenset({LEGACY_TRACE_SCHEMA_VERSION, TRACE_SCHEMA_VERSION})
 _FAILURE_EVENT_TYPES = {"turn_failed", "tool_call_failed", "model_stream_failed"}
+_TURN_SCOPED_EVENT_TYPES = {
+    "context_summary_created",
+    "final_answer",
+    "llm_fallback_attempts",
+    "memory_extraction_completed",
+    "memory_search_completed",
+    "memory_search_started",
+    "mcp_approval_decided",
+    "mcp_approval_requested",
+    "model_request_started",
+    "model_response",
+    "model_response_parsed",
+    "model_stream_completed",
+    "model_stream_delta",
+    "model_stream_failed",
+    "model_stream_started",
+    "parsed_action",
+    "plan_approved",
+    "plan_created",
+    "plan_rejected",
+    "plan_revision_requested",
+    "plan_step_blocked",
+    "plan_step_completed",
+    "plan_step_started",
+    "reflection_completed",
+    "reflection_failed",
+    "reflection_revision_requested",
+    "reflection_started",
+    "skill_selection_completed",
+    "skill_selection_started",
+    "tool_call",
+    "tool_call_attempt",
+    "tool_call_completed",
+    "tool_call_failed",
+    "tool_call_started",
+    "tool_observation",
+    "tool_permission_decided",
+    "tool_permission_requested",
+    "turn_context_selected",
+    "turn_failed",
+    "turn_finished",
+    "turn_started",
+    "user_message",
+}
 
 
 class TraceFormatError(TraceError, ValueError):
@@ -121,6 +165,7 @@ class Trace:
             turn_id = _event_turn_id(
                 value,
                 payload,
+                event_type=event_type,
                 schema_version=schema_version,
                 active_turn_id=active_turn_id,
                 line_number=line_number,
@@ -418,6 +463,7 @@ def _event_turn_id(
     value: dict[str, Any],
     payload: dict[str, Any],
     *,
+    event_type: str,
     schema_version: int,
     active_turn_id: str | None,
     line_number: int,
@@ -432,7 +478,13 @@ def _event_turn_id(
             )
         if isinstance(raw_turn_id, str):
             return raw_turn_id
-    return _payload_turn_id(payload) or active_turn_id
+        return None
+    payload_turn_id = _payload_turn_id(payload)
+    if payload_turn_id is not None:
+        return payload_turn_id
+    if schema_version == LEGACY_TRACE_SCHEMA_VERSION or event_type in _TURN_SCOPED_EVENT_TYPES:
+        return active_turn_id
+    return None
 
 
 def _payload_conversation_id(payload: dict[str, Any]) -> str | None:

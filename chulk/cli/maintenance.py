@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,18 @@ from typing import Any
 from chulk.config import Config, load_config, resolve_cli_environment
 from chulk.llm import resolve_model_capabilities
 from chulk.tracing import Trace, TraceFormatError
+
+
+_PROVIDER_SDK_REQUIREMENTS = {
+    "openai": ("openai", "openai", "openai"),
+    "deepseek": ("openai", "openai", "openai"),
+    "local": ("openai", "openai", "openai"),
+    "openai-compatible": ("openai", "openai", "openai"),
+    "openrouter": ("openai", "openai", "openai"),
+    "anthropic": ("anthropic", "anthropic", "anthropic"),
+    "bedrock": ("openai", "openai", "openai"),
+    "gemini": ("google.genai", "google-genai", "gemini"),
+}
 
 
 @dataclass(frozen=True)
@@ -256,18 +269,35 @@ def export_trace_html(
 
 def _provider_check(config: Config) -> DiagnosticCheck:
     providers = _configured_provider_models(config)
-    missing: list[str] = []
+    missing_settings: list[str] = []
+    missing_packages: list[str] = []
     for label, provider, _model in providers:
-        missing.extend(
+        missing_settings.extend(
             f"{label} {provider} ({setting})"
             for setting in _missing_provider_settings(config, provider)
         )
-    if missing:
+        if missing_package := _missing_provider_package(provider):
+            missing_packages.append(f"{label} {provider} ({missing_package})")
+    if missing_settings or missing_packages:
+        details = []
+        remedies = []
+        if missing_settings:
+            details.append(
+                "required provider settings are missing for: "
+                + ", ".join(missing_settings)
+            )
+            remedies.append("Set the listed variables in the environment or project .env.")
+        if missing_packages:
+            details.append(
+                "required provider packages are missing for: "
+                + ", ".join(missing_packages)
+            )
+            remedies.append("Install the listed provider extras.")
         return DiagnosticCheck(
             "provider",
             "fail",
-            "required provider settings are missing for: " + ", ".join(missing),
-            "Set the listed variables in the environment or project .env.",
+            "; ".join(details),
+            " ".join(remedies),
         )
     if len(providers) == 1:
         provider = providers[0][1]
@@ -282,6 +312,20 @@ def _provider_check(config: Config) -> DiagnosticCheck:
         "pass",
         f"primary and {len(providers) - 1} fallback provider(s) are configured",
     )
+
+
+def _missing_provider_package(provider: str) -> str | None:
+    requirement = _PROVIDER_SDK_REQUIREMENTS.get(provider)
+    if requirement is None:
+        return None
+    module_name, package_name, extra_name = requirement
+    try:
+        available = find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        available = False
+    if available:
+        return None
+    return f"{package_name}; install chulkharness[{extra_name}]"
 
 
 def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]:

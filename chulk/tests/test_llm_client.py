@@ -732,7 +732,7 @@ def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "2 + 2"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
-    assert fake_client.chat.completions.kwargs["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in fake_client.chat.completions.kwargs
     assert "tools" in fake_client.chat.completions.kwargs
     assert "response_format" not in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
@@ -1003,7 +1003,7 @@ def test_local_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "3 + 4"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
-    assert fake_client.chat.completions.kwargs["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in fake_client.chat.completions.kwargs
     assert "tools" in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
     assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names

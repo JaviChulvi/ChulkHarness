@@ -290,7 +290,7 @@ def run_shell_command(
     termination_reason: str | None = None
     termination_method: str | None = None
     deadline = started_at + timeout_seconds
-    while process.poll() is None:
+    while process.poll() is None or any(reader.is_alive() for reader in readers):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             termination_reason = "timeout"

@@ -95,6 +95,33 @@ def test_timeout_kills_group_and_preserves_bounded_partial_output(tmp_path: Path
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
+def test_timeout_still_applies_after_shell_parent_exits(tmp_path: Path) -> None:
+    command = "sleep 30 & echo $! > child.pid; echo done"
+
+    started_at = time.monotonic()
+    result = run_shell_command(
+        {"command": command, "timeout_seconds": 1},
+        tmp_path,
+        default_timeout_seconds=1,
+        stdout_limit_bytes=64,
+        stderr_limit_bytes=64,
+    )
+
+    child_pid = int((tmp_path / "child.pid").read_text(encoding="utf-8").strip())
+    child_alive = _wait_for_process_exit(child_pid)
+    if child_alive:
+        os.kill(child_pid, signal.SIGKILL)
+    assert time.monotonic() - started_at < 5
+    assert not result.success
+    assert result.error == "timeout"
+    assert result.stdout == "done\n"
+    assert result.metadata["termination_reason"] == "timeout"
+    assert result.metadata["termination_method"] == "posix_process_group_sigkill"
+    assert result.metadata["reader_threads_stopped"] is True
+    assert not child_alive
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
 def test_output_overflow_kills_descendant_processes(tmp_path: Path) -> None:
     overflow_command = _python_command("import os, time; os.write(1, b'x' * 2000); time.sleep(30)")
     command = (

@@ -176,6 +176,50 @@ def test_reader_accepts_mixed_legacy_and_v1_events_from_an_upgraded_trace(tmp_pa
     assert [event.turn_id for event in trace.events] == ["turn-old"] * 2
 
 
+def test_reader_preserves_turnless_session_event_while_turn_is_active(tmp_path):
+    trace_path = tmp_path / "conversation-1.jsonl"
+    events = [
+        {
+            "schema_version": 1,
+            "conversation_id": "conversation-1",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "type": "session_started",
+            "payload": {},
+        },
+        {
+            "schema_version": 1,
+            "conversation_id": "conversation-1",
+            "turn_id": "turn-open",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+            "type": "turn_started",
+            "payload": {},
+        },
+        {
+            "schema_version": 1,
+            "conversation_id": "conversation-1",
+            "timestamp": "2026-01-01T00:00:02+00:00",
+            "type": "model_request_started",
+            "payload": {},
+        },
+        {
+            "schema_version": 1,
+            "conversation_id": "conversation-1",
+            "timestamp": "2026-01-01T00:00:03+00:00",
+            "type": "session_finished",
+            "payload": {"duration_ms": 3000},
+        },
+    ]
+    trace_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+    trace = Trace.from_jsonl(trace_path)
+
+    assert [event.turn_id for event in trace.events] == [None, "turn-open", "turn-open", None]
+    assert "turn_id" not in trace.events[-1].to_dict()
+
+
 @pytest.mark.parametrize(
     "event",
     [
