@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk, call_with_supported_kwargs
+from chulk.llm.base import (
+    LLMActionResult,
+    LLMClient,
+    LLMError,
+    LLMStreamChunk,
+    call_async_with_supported_kwargs,
+    call_with_supported_kwargs,
+)
 from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
 from chulk.llm.factory import create_llm_client, provider_connection_from_config
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
@@ -265,20 +272,17 @@ class FallbackChain(LLMClient):
     last_attempts: list[ProviderAttempt] = field(default_factory=list)
     last_success_provider: LLMClient | None = field(default=None, init=False, repr=False)
     _action_attempts: list[ProviderAttempt] | None = field(default=None, init=False, repr=False)
+    model_capabilities: LLMModelCapabilities | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if not self.providers:
             raise ValueError("FallbackChain requires at least one provider")
         if self.strategy != "first_success":
             raise NotImplementedError(f"FallbackChain strategy is not implemented yet: {self.strategy}")
-
-    @property
-    def model_capabilities(self) -> LLMModelCapabilities | None:
-        """Return limits safe for every bound provider in the chain."""
         records = [getattr(provider, "model_capabilities", None) for provider in self.providers]
-        if not records or any(record is None for record in records):
-            return None
-        return conservative_model_capabilities(records)
+        typed_records = [record for record in records if isinstance(record, LLMModelCapabilities)]
+        if records and len(typed_records) == len(records):
+            self.model_capabilities = conservative_model_capabilities(typed_records)
 
     def bind_config(self, config: "Config") -> "FallbackChain":
         bound: list[LLMClient] = []
@@ -289,7 +293,7 @@ class FallbackChain(LLMClient):
                 bound.append(provider.bind_config(config))
             else:
                 raise TypeError(f"Unsupported fallback provider: {provider!r}")
-        return FallbackChain(bound, strategy=self.strategy)
+        return FallbackChain(providers=list(bound), strategy=self.strategy)
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         return self.complete_response(messages, max_output_tokens=max_output_tokens).content
@@ -302,6 +306,20 @@ class FallbackChain(LLMClient):
     ) -> LLMResponse:
         return self._try_provider_responses(
             lambda provider: _complete_response(provider, messages, max_output_tokens=max_output_tokens)
+        )
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        return await self._atry_provider_responses(
+            lambda provider: _acomplete_response(
+                provider,
+                messages,
+                max_output_tokens=max_output_tokens,
+            )
         )
 
     def complete_action(
@@ -317,6 +335,31 @@ class FallbackChain(LLMClient):
         self._action_attempts = []
         try:
             return super().complete_action(
+                messages,
+                max_repair_attempts=max_repair_attempts,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+                mcp_approval_callback=mcp_approval_callback,
+            )
+        finally:
+            if self._action_attempts is not None:
+                self.last_attempts = self._action_attempts
+                self._action_attempts = None
+
+    async def acomplete_action(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_repair_attempts: int = 2,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict], bool] | None = None,
+    ) -> LLMActionResult:
+        self._action_attempts = []
+        try:
+            return await super().acomplete_action(
                 messages,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
@@ -360,15 +403,90 @@ class FallbackChain(LLMClient):
             )
         )
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict], bool] | None = None,
+    ) -> LLMResponse:
+        return await self._atry_provider_responses(
+            lambda provider: _acomplete_action_response_once(
+                provider,
+                messages,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
+                mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
+            )
+        )
+
     def _try_provider_responses(self, call) -> LLMResponse:
         self.last_attempts = []
         self.last_success_provider = None
         errors: list[str] = []
         for provider in self.providers:
+            if not isinstance(provider, LLMClient):
+                raise TypeError("FallbackChain must be bound before use")
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
             try:
                 response: LLMResponse = call(provider)
+            except Exception as exc:
+                latency = time.monotonic() - started_at
+                error = str(exc)
+                error_code, retryable, fallback_eligible = _provider_error_metadata(exc)
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    latency,
+                    error=error,
+                    error_code=error_code,
+                    retryable=retryable,
+                    fallback_eligible=fallback_eligible,
+                    usage=getattr(exc, "usage", None),
+                    cost=getattr(exc, "cost", None),
+                )
+                self.last_attempts.append(attempt)
+                self.attempts.append(attempt)
+                if self._action_attempts is not None:
+                    self._action_attempts.append(attempt)
+                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                    raise
+                errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
+                continue
+            latency = time.monotonic() - started_at
+            attempt = ProviderAttempt(provider_name, model, True, latency, usage=response.usage, cost=response.cost)
+            self.last_attempts.append(attempt)
+            self.attempts.append(attempt)
+            if self._action_attempts is not None:
+                self._action_attempts.append(attempt)
+            self.last_success_provider = provider
+            return response
+        detail = "; ".join(errors) if errors else "no providers were available"
+        raise LLMError(
+            f"All fallback providers failed: {detail}",
+            code="fallback_exhausted",
+            retryable=any(attempt.retryable is True for attempt in self.last_attempts),
+        )
+
+    async def _atry_provider_responses(
+        self,
+        call: Callable[[LLMClient], Awaitable[LLMResponse]],
+    ) -> LLMResponse:
+        self.last_attempts = []
+        self.last_success_provider = None
+        errors: list[str] = []
+        for provider in self.providers:
+            if not isinstance(provider, LLMClient):
+                raise TypeError("FallbackChain must be bound before use")
+            started_at = time.monotonic()
+            provider_name, model = _provider_identity(provider)
+            try:
+                response = await call(provider)
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
@@ -418,6 +536,8 @@ class FallbackChain(LLMClient):
         self.last_success_provider = None
         errors: list[str] = []
         for provider in self.providers:
+            if not isinstance(provider, LLMClient):
+                raise TypeError("FallbackChain must be bound before use")
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
             emitted_chunk = False
@@ -482,6 +602,16 @@ def _complete_response(provider: LLMClient, messages: list[dict[str, str]], *, m
     return call_with_supported_kwargs(provider.complete_response, messages, **kwargs)
 
 
+async def _acomplete_response(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_output_tokens: int | None,
+) -> LLMResponse:
+    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+    return await call_async_with_supported_kwargs(provider.acomplete_response, messages, **kwargs)
+
+
 def _stream_complete(
     provider: LLMClient,
     messages: list[dict[str, str]],
@@ -501,7 +631,7 @@ def _complete_action_response_once(
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
     mcp_approval_callback: Callable[[dict], bool] | None = None,
 ) -> LLMResponse:
-    kwargs = {
+    kwargs: dict[str, object] = {
         "tools": tools,
         "hosted_mcp_servers": hosted_mcp_servers,
         "mcp_approval_callback": mcp_approval_callback,
@@ -509,6 +639,29 @@ def _complete_action_response_once(
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
     return call_with_supported_kwargs(provider._complete_action_response_once, messages, **kwargs)
+
+
+async def _acomplete_action_response_once(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_output_tokens: int | None,
+    tools: list[object] | None,
+    hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+    mcp_approval_callback: Callable[[dict], bool] | None = None,
+) -> LLMResponse:
+    kwargs: dict[str, object] = {
+        "tools": tools,
+        "hosted_mcp_servers": hosted_mcp_servers,
+        "mcp_approval_callback": mcp_approval_callback,
+    }
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    return await call_async_with_supported_kwargs(
+        provider._acomplete_action_response_once,
+        messages,
+        **kwargs,
+    )
 
 
 def _supports_hosted_mcp(provider: object) -> bool:
@@ -530,9 +683,11 @@ def _provider_error_metadata(exc: Exception) -> tuple[str | None, bool | None, b
 
 __all__ = [
     "AnthropicProvider",
+    "BedrockProvider",
     "DeepSeekProvider",
     "FallbackChain",
     "FallbackStrategy",
+    "GeminiProvider",
     "LocalProvider",
     "OpenAICompatibleProvider",
     "OpenAIProvider",

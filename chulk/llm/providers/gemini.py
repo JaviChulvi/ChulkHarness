@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from chulk.core.actions import STRICT_AGENT_ACTION_JSON_SCHEMA
@@ -53,6 +53,7 @@ class GeminiGenerateContentClient(LLMClient):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         if not model.strip():
             raise LLMConfigurationError(
@@ -66,11 +67,14 @@ class GeminiGenerateContentClient(LLMClient):
 
         self.model = model.strip()
         self.base_url = base_url.strip() if base_url is not None else None
+        self._async_client = async_client
         if base_url is not None and not self.base_url:
             raise ValueError("base_url must be non-empty when provided")
 
         if client is not None:
             self._client = client
+            if async_client is None:
+                self._async_client = getattr(client, "aio", None)
             return
 
         resolved_api_key = api_key.strip() if api_key else ""
@@ -101,6 +105,7 @@ class GeminiGenerateContentClient(LLMClient):
             api_key=resolved_api_key,
             http_options=cast(Any, http_options),
         )
+        self._async_client = async_client or getattr(self._client, "aio", None)
 
     def complete(
         self,
@@ -120,6 +125,22 @@ class GeminiGenerateContentClient(LLMClient):
         """Return text plus normalized Gemini usage metadata."""
         request = self._request(messages, max_output_tokens=max_output_tokens)
         response = self._generate(request, operation="request")
+        content = _response_text(response)
+        if not content:
+            raise self._invalid_response_error("Gemini response did not include text")
+        return self._response_from_provider(messages, content, _value(response, "usage_metadata"))
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return text through Gemini's native async GenerateContent API."""
+        if self._async_client is None:
+            return await super().acomplete_response(messages, max_output_tokens=max_output_tokens)
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        response = await self._agenerate(request, operation="request")
         content = _response_text(response)
         if not content:
             raise self._invalid_response_error("Gemini response did not include text")
@@ -206,7 +227,7 @@ class GeminiGenerateContentClient(LLMClient):
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
-        mcp_approval_callback: object | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         if hosted_mcp_servers:
             raise LLMError(
@@ -241,6 +262,56 @@ class GeminiGenerateContentClient(LLMClient):
             max_output_tokens=max_output_tokens,
         )
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        if self._async_client is None:
+            return await super()._acomplete_action_response_once(
+                messages,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+                mcp_approval_callback=mcp_approval_callback,
+            )
+        if hosted_mcp_servers:
+            raise LLMError(
+                "Gemini does not support Chulk hosted MCP tools",
+                provider=self.provider,
+                model=self.model,
+                code="unsupported_feature",
+            )
+        if tools is not None:
+            try:
+                return await self._acomplete_native_action_response_once(
+                    messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                )
+            except LLMError as exc:
+                if not is_action_transport_fallback_error(exc):
+                    raise
+                fallback = await self._acomplete_json_action_response_once(
+                    with_json_action_prompt(messages),
+                    max_output_tokens=max_output_tokens,
+                )
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return await self._acomplete_json_action_response_once(
+            messages,
+            max_output_tokens=max_output_tokens,
+        )
+
     def _complete_json_action_response_once(
         self,
         messages: list[dict[str, str]],
@@ -271,6 +342,36 @@ class GeminiGenerateContentClient(LLMClient):
         result.metadata.update({"action_transport": "chulk_json"})
         return result
 
+    async def _acomplete_json_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        request["config"].update(
+            {
+                "response_mime_type": "application/json",
+                "response_json_schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+            }
+        )
+        response = await self._agenerate(request, operation="structured action request")
+        content = _response_text(response)
+        if not content:
+            raise LLMError(
+                "Gemini structured action response did not include JSON text",
+                provider=self.provider,
+                model=self.model,
+                code="action_shape_error",
+            )
+        result = self._response_from_provider(
+            messages,
+            content,
+            _value(response, "usage_metadata"),
+        )
+        result.metadata.update({"action_transport": "chulk_json"})
+        return result
+
     def _complete_native_action_response_once(
         self,
         messages: list[dict[str, str]],
@@ -281,6 +382,38 @@ class GeminiGenerateContentClient(LLMClient):
         request = self._request(messages, max_output_tokens=max_output_tokens)
         request["config"].update(_native_tool_config(tools))
         response = self._generate(
+            request,
+            operation="native tool action request",
+            action_transport=True,
+        )
+        content, raw_tool_call = _normalize_native_action_response(
+            response,
+            provider=self.provider,
+            model=self.model,
+        )
+        result = self._response_from_provider(
+            messages,
+            content,
+            _value(response, "usage_metadata"),
+        )
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": raw_tool_call,
+            }
+        )
+        return result
+
+    async def _acomplete_native_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tools: list[object],
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        request["config"].update(_native_tool_config(tools))
+        response = await self._agenerate(
             request,
             operation="native tool action request",
             action_transport=True,
@@ -331,6 +464,29 @@ class GeminiGenerateContentClient(LLMClient):
     ) -> object:
         try:
             return self._client.models.generate_content(**request)
+        except Exception as exc:
+            error = _gemini_error_from_exception(
+                exc,
+                message=f"Gemini {operation} failed",
+                model=self.model,
+                action_transport=action_transport,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+
+    async def _agenerate(
+        self,
+        request: dict[str, Any],
+        *,
+        operation: str,
+        action_transport: bool = False,
+    ) -> object:
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async Gemini client is not configured")
+        try:
+            return await async_client.models.generate_content(**request)
         except Exception as exc:
             error = _gemini_error_from_exception(
                 exc,

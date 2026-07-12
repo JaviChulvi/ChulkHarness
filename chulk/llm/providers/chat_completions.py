@@ -59,12 +59,14 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         timeout_seconds: float,
         max_retries: int,
         client: Any | None,
+        async_client: Any | None = None,
     ) -> None:
         self.profile = profile
         self.provider = profile.provider
         self.capabilities = profile.capabilities
         self.model = model
         self.base_url = _validate_base_url(base_url)
+        self._async_client = async_client
 
         if client is not None:
             self._client = client
@@ -87,12 +89,26 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 model=self.model,
             ) from exc
 
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            AsyncOpenAI = None  # type: ignore[misc, assignment]
+
         self._client = OpenAI(
             api_key=resolved_api_key,
             base_url=self.base_url,
             timeout=timeout_seconds,
             max_retries=max_retries,
         )
+        if async_client is not None:
+            self._async_client = async_client
+        elif AsyncOpenAI is not None:
+            self._async_client = AsyncOpenAI(
+                api_key=resolved_api_key,
+                base_url=self.base_url,
+                timeout=timeout_seconds,
+                max_retries=max_retries,
+            )
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response through the configured Chat Completions endpoint."""
@@ -107,6 +123,20 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         """Return a text response plus normalized provider usage."""
         request = self._request(messages, max_output_tokens=max_output_tokens)
         response = self._create(request, operation="request")
+        content = self._message_content(response, operation="response")
+        return self._response_from_provider(messages, content, getattr(response, "usage", None))
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return text through the native async Chat Completions transport."""
+        if self._async_client is None:
+            return await super().acomplete_response(messages, max_output_tokens=max_output_tokens)
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        response = await self._acreate(request, operation="request")
         content = self._message_content(response, operation="response")
         return self._response_from_provider(messages, content, getattr(response, "usage", None))
 
@@ -199,7 +229,7 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
-        mcp_approval_callback: object | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         if tools is not None:
             try:
@@ -224,6 +254,49 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 return fallback
         return self._complete_json_action_response_once(messages, max_output_tokens=max_output_tokens)
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        if self._async_client is None:
+            return await super()._acomplete_action_response_once(
+                messages,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+                mcp_approval_callback=mcp_approval_callback,
+            )
+        if tools is not None:
+            try:
+                return await self._acomplete_native_action_response_once(
+                    messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                )
+            except LLMError as exc:
+                if not is_action_transport_fallback_error(exc):
+                    raise
+                fallback = await self._acomplete_json_action_response_once(
+                    with_json_action_prompt(messages),
+                    max_output_tokens=max_output_tokens,
+                )
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return await self._acomplete_json_action_response_once(
+            messages,
+            max_output_tokens=max_output_tokens,
+        )
+
     def _complete_json_action_response_once(
         self,
         messages: list[dict[str, str]],
@@ -234,6 +307,21 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         if self.profile.json_response_format is not None:
             request["response_format"] = dict(self.profile.json_response_format)
         response = self._create(request, operation="structured action request")
+        content = self._message_content(response, operation="structured action response")
+        result = self._response_from_provider(messages, content, getattr(response, "usage", None))
+        result.metadata.update({"action_transport": "chulk_json"})
+        return result
+
+    async def _acomplete_json_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        if self.profile.json_response_format is not None:
+            request["response_format"] = dict(self.profile.json_response_format)
+        response = await self._acreate(request, operation="structured action request")
         content = self._message_content(response, operation="structured action response")
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update({"action_transport": "chulk_json"})
@@ -255,6 +343,47 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             }
         )
         response = self._create(request, operation="native tool action request", action_transport=True)
+        message = _response_message(
+            response,
+            display_name=self.profile.display_name,
+            provider=self.provider,
+            model=self.model,
+            action_transport=True,
+        )
+        content, raw_tool_call = _normalize_native_action_message(
+            message,
+            provider=self.provider,
+            model=self.model,
+        )
+        result = self._response_from_provider(messages, content, getattr(response, "usage", None))
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": raw_tool_call,
+            }
+        )
+        return result
+
+    async def _acomplete_native_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tools: list[object],
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        request.update(
+            {
+                "tools": chat_completion_tools(tools),
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+            }
+        )
+        response = await self._acreate(
+            request,
+            operation="native tool action request",
+            action_transport=True,
+        )
         message = _response_message(
             response,
             display_name=self.profile.display_name,
@@ -302,6 +431,30 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
     ) -> object:
         try:
             return self._client.chat.completions.create(**request)
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message=f"{self.profile.display_name} {operation} failed",
+                provider=self.provider,
+                model=self.model,
+                action_transport=action_transport,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+
+    async def _acreate(
+        self,
+        request: dict[str, Any],
+        *,
+        operation: str,
+        action_transport: bool = False,
+    ) -> object:
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async Chat Completions client is not configured")
+        try:
+            return await async_client.chat.completions.create(**request)
         except Exception as exc:
             error = provider_error_from_exception(
                 exc,

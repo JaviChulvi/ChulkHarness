@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from chulk.core.actions import AgentAction, FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
@@ -359,8 +358,7 @@ async def run_action_loop_async(agent: Agent, turn: TurnState, *, require_plan: 
         messages = _record_model_request(agent, turn, prompt)
         available_tools: list[object] = list(agent.tool_registry.list_tools())
         try:
-            action_result = await asyncio.to_thread(
-                agent.llm_client.complete_action,
+            action_result = await agent.llm_client.acomplete_action(
                 messages,
                 max_repair_attempts=agent.max_json_repair_attempts,
                 tools=available_tools,
@@ -376,7 +374,7 @@ async def run_action_loop_async(agent: Agent, turn: TurnState, *, require_plan: 
         action = _record_action_result(agent, turn, action_result)
 
         if isinstance(action, PlanAction):
-            return agent._handle_plan_action(action, turn, require_plan=require_plan)
+            return await agent._handle_plan_action_async(action, turn, require_plan=require_plan)
 
         if isinstance(action, PlanStepUpdateAction):
             step_update_response = agent._handle_plan_step_update(action, turn, require_plan=require_plan)

@@ -49,6 +49,7 @@ class LocalOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         super().__init__(
             profile=LOCAL_TRANSPORT_PROFILE,
@@ -58,4 +59,5 @@ class LocalOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             client=client,
+            async_client=async_client,
         )

@@ -68,6 +68,7 @@ class HostedOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         normalized_model = _required_value(model, "model", provider=self.provider)
         normalized_api_key = _required_value(
@@ -90,6 +91,7 @@ class HostedOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             client=client,
+            async_client=async_client,
         )
 
 
@@ -110,6 +112,7 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         normalized_model = _required_value(model, "model", provider=self.provider)
         normalized_api_key = _required_value(
@@ -127,8 +130,18 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
         self.default_headers = openrouter_default_headers(
             site_url=site_url, app_name=app_name
         )
-        if client is None and self.default_headers:
+        build_sync_client = client is None
+        if build_sync_client and self.default_headers:
             client = _openai_sdk_client(
+                api_key=normalized_api_key,
+                base_url=normalized_base_url,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                default_headers=self.default_headers,
+                model=normalized_model,
+            )
+        if async_client is None and build_sync_client and self.default_headers:
+            async_client = _openai_sdk_async_client(
                 api_key=normalized_api_key,
                 base_url=normalized_base_url,
                 timeout_seconds=timeout_seconds,
@@ -144,6 +157,7 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             client=client,
+            async_client=async_client,
         )
 
 
@@ -195,6 +209,32 @@ def _openai_sdk_client(
             model=model,
         ) from exc
     return OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout_seconds,
+        max_retries=max_retries,
+        default_headers=default_headers,
+    )
+
+
+def _openai_sdk_async_client(
+    *,
+    api_key: str,
+    base_url: str,
+    timeout_seconds: float,
+    max_retries: int,
+    default_headers: dict[str, str],
+    model: str,
+) -> Any:
+    try:
+        from openai import AsyncOpenAI
+    except ImportError as exc:
+        raise LLMConfigurationError(
+            "The openai package is required. Install it with: pip install -e '.[openai]'",
+            provider="openrouter",
+            model=model,
+        ) from exc
+    return AsyncOpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=timeout_seconds,

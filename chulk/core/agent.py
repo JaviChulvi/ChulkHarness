@@ -246,6 +246,14 @@ class Agent:
             raise ValueError("user_message cannot be empty")
         return self._run_user_turn(clean_message, require_plan=True)
 
+    async def run_planned_turn_async(self, user_message: str) -> str:
+        """Run one planned turn through async model and tool transports."""
+        self._ensure_open()
+        clean_message = user_message.strip()
+        if not clean_message:
+            raise ValueError("user_message cannot be empty")
+        return await self._run_user_turn_async(clean_message, require_plan=True)
+
     def _run_user_turn(
         self,
         clean_message: str,
@@ -683,7 +691,7 @@ class Agent:
         request_payload["summary_source_message_count"] = len(messages)
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
         try:
-            response = await asyncio.to_thread(self.llm_client.complete_response, summary_messages)
+            response = await self.llm_client.acomplete_response(summary_messages)
             raw_summary = response.content
         except LLMError as exc:
             self._trace(
@@ -733,6 +741,33 @@ class Agent:
                 return self._fail_turn("Planning failed because the model kept proposing reconnaissance as the plan.", turn)
             self._request_plan_revision(turn, plan=plan)
             return self._run_action_loop(turn, require_plan=True)
+
+        turn.wait_for_plan_approval(plan)
+        self.state.active_plan = plan
+        self.state.pending_plan_turn_id = turn.turn_id
+        response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
+        self.memory.add_assistant_message(response)
+        self.state.messages = self.memory.recent()
+        self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()})
+        return response
+
+    async def _handle_plan_action_async(
+        self,
+        action: PlanAction,
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> str:
+        """Handle a proposed plan without falling back to the sync action loop."""
+        if not require_plan:
+            return self._fail_turn("Model proposed a new plan after execution had already been approved.", turn)
+
+        plan = action.plan
+        if self._plan_needs_revision(plan, turn):
+            if turn.planning_feedback_count >= 2:
+                return self._fail_turn("Planning failed because the model kept proposing reconnaissance as the plan.", turn)
+            self._request_plan_revision(turn, plan=plan)
+            return await self._run_action_loop_async(turn, require_plan=True)
 
         turn.wait_for_plan_approval(plan)
         self.state.active_plan = plan
@@ -1161,7 +1196,7 @@ class Agent:
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
 
         try:
-            response = await asyncio.to_thread(self.llm_client.complete_response, messages)
+            response = await self.llm_client.acomplete_response(messages)
             raw_response = response.content
         except LLMError as exc:
             return self._fail_open_reflection(

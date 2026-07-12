@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 import inspect
@@ -167,6 +168,15 @@ class LLMClient:
         """Return a normal text response."""
         raise NotImplementedError
 
+    async def acomplete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """Return text without blocking the event loop."""
+        return (await self.acomplete_response(messages, max_output_tokens=max_output_tokens)).content
+
     def complete_response(
         self,
         messages: list[dict[str, str]],
@@ -177,6 +187,26 @@ class LLMClient:
         kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
         content = call_with_supported_kwargs(self.complete, messages, **kwargs)
         return self._response_with_estimated_usage(messages, content)
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return text and usage through a native async or sync compatibility path.
+
+        Provider clients override this method when their SDK exposes a native
+        async transport. Sync-only injected clients run in asyncio's bounded
+        default executor so they do not block the caller's event loop.
+        """
+        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        return await asyncio.to_thread(
+            call_with_supported_kwargs,
+            self.complete_response,
+            messages,
+            **kwargs,
+        )
 
     def stream_complete(
         self,
@@ -196,24 +226,11 @@ class LLMClient:
 
     def complete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """Return a structured JSON response."""
-        raw_response = self.complete(messages)
-        try:
-            parsed = json.loads(raw_response)
-        except json.JSONDecodeError as exc:
-            raise LLMError(
-                "Model response was not valid JSON",
-                provider=_provider_name(self),
-                model=_model_name(self),
-                code="action_shape_error",
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise LLMError(
-                "Model JSON response must be an object",
-                provider=_provider_name(self),
-                model=_model_name(self),
-                code="action_shape_error",
-            )
-        return parsed
+        return _parse_json_object(self.complete(messages), client=self)
+
+    async def acomplete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        """Return a structured JSON response without blocking the event loop."""
+        return _parse_json_object(await self.acomplete(messages), client=self)
 
     def complete_action(
         self,
@@ -248,18 +265,13 @@ class LLMClient:
                 action_messages,
                 **response_kwargs,
             )
-            raw_response = response.content
-            usage_records.append(response.usage)
-            cost_records.append(response.cost)
             try:
-                return LLMActionResult(
-                    action=parse_model_response(raw_response),
-                    raw_response=raw_response,
-                    repair_attempts=attempt,
+                return _parse_action_response(
+                    response,
+                    attempt=attempt,
                     errors=errors,
-                    usage=aggregate_usage(usage_records),
-                    cost=aggregate_cost(cost_records),
-                    metadata=response.metadata,
+                    usage_records=usage_records,
+                    cost_records=cost_records,
                 )
             except ActionParseError as exc:
                 errors.append(str(exc))
@@ -268,7 +280,7 @@ class LLMClient:
                         f"Model response was not valid action JSON: {exc}",
                         repair_attempts=attempt,
                         errors=errors,
-                        raw_response=raw_response,
+                        raw_response=response.content,
                         usage=aggregate_usage(usage_records),
                         cost=aggregate_cost(cost_records),
                         provider=_provider_name(self),
@@ -278,7 +290,93 @@ class LLMClient:
                     *action_messages,
                     {
                         "role": "user",
-                        "content": _format_json_repair_prompt(raw_response, str(exc)),
+                        "content": _format_json_repair_prompt(response.content, str(exc)),
+                    },
+                ]
+
+        raise LLMActionError(
+            "Model response was not valid action JSON",
+            provider=_provider_name(self),
+            model=_model_name(self),
+        )
+
+    async def acomplete_action(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_repair_attempts: int = 2,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMActionResult:
+        """Return a validated action through the client's async transport."""
+        if (
+            type(self).complete_action is not LLMClient.complete_action
+            and type(self).acomplete_action is LLMClient.acomplete_action
+        ):
+            compatibility_kwargs: dict[str, Any] = {
+                "max_repair_attempts": max_repair_attempts,
+                "tools": tools,
+                "hosted_mcp_servers": hosted_mcp_servers,
+                "mcp_approval_callback": mcp_approval_callback,
+            }
+            if max_output_tokens is not None:
+                compatibility_kwargs["max_output_tokens"] = max_output_tokens
+            return await asyncio.to_thread(
+                call_with_supported_kwargs,
+                self.complete_action,
+                messages,
+                **compatibility_kwargs,
+            )
+        if max_repair_attempts < 0:
+            raise ValueError("max_repair_attempts cannot be negative")
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be greater than zero")
+
+        action_messages = list(messages)
+        errors: list[str] = []
+        usage_records: list[LLMUsage | None] = []
+        cost_records: list[LLMCost | None] = []
+        for attempt in range(max_repair_attempts + 1):
+            response_kwargs: dict[str, Any] = {
+                "tools": tools,
+                "hosted_mcp_servers": hosted_mcp_servers,
+                "mcp_approval_callback": mcp_approval_callback,
+            }
+            if max_output_tokens is not None:
+                response_kwargs["max_output_tokens"] = max_output_tokens
+            response = await call_async_with_supported_kwargs(
+                self._acomplete_action_response_once,
+                action_messages,
+                **response_kwargs,
+            )
+            try:
+                return _parse_action_response(
+                    response,
+                    attempt=attempt,
+                    errors=errors,
+                    usage_records=usage_records,
+                    cost_records=cost_records,
+                )
+            except ActionParseError as exc:
+                errors.append(str(exc))
+                if attempt >= max_repair_attempts:
+                    raise LLMActionError(
+                        f"Model response was not valid action JSON: {exc}",
+                        repair_attempts=attempt,
+                        errors=errors,
+                        raw_response=response.content,
+                        usage=aggregate_usage(usage_records),
+                        cost=aggregate_cost(cost_records),
+                        provider=_provider_name(self),
+                        model=_model_name(self),
+                    ) from exc
+                action_messages = [
+                    *action_messages,
+                    {
+                        "role": "user",
+                        "content": _format_json_repair_prompt(response.content, str(exc)),
                     },
                 ]
 
@@ -306,6 +404,30 @@ class LLMClient:
         content = call_with_supported_kwargs(self._complete_action_once, messages, **kwargs)
         return self._response_with_estimated_usage(messages, content)
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        """Compatibility hook for sync-only custom clients."""
+        kwargs: dict[str, Any] = {
+            "tools": tools,
+            "hosted_mcp_servers": hosted_mcp_servers,
+            "mcp_approval_callback": mcp_approval_callback,
+        }
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
+        return await asyncio.to_thread(
+            call_with_supported_kwargs,
+            self._complete_action_response_once,
+            messages,
+            **kwargs,
+        )
+
     def _response_with_estimated_usage(self, messages: list[dict[str, str]], content: str) -> LLMResponse:
         provider = _provider_name(self)
         model = _model_name(self)
@@ -317,6 +439,49 @@ class LLMClient:
             provider=provider,
             model=model,
         )
+
+
+def _parse_json_object(raw_response: str, *, client: LLMClient) -> dict[str, Any]:
+    """Parse a provider response as one JSON object."""
+    try:
+        parsed = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        raise LLMError(
+            "Model response was not valid JSON",
+            provider=_provider_name(client),
+            model=_model_name(client),
+            code="action_shape_error",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise LLMError(
+            "Model JSON response must be an object",
+            provider=_provider_name(client),
+            model=_model_name(client),
+            code="action_shape_error",
+        )
+    return parsed
+
+
+def _parse_action_response(
+    response: LLMResponse,
+    *,
+    attempt: int,
+    errors: list[str],
+    usage_records: list[LLMUsage | None],
+    cost_records: list[LLMCost | None],
+) -> LLMActionResult:
+    """Parse one sync or async action response and aggregate its accounting."""
+    usage_records.append(response.usage)
+    cost_records.append(response.cost)
+    return LLMActionResult(
+        action=parse_model_response(response.content),
+        raw_response=response.content,
+        repair_attempts=attempt,
+        errors=errors,
+        usage=aggregate_usage(usage_records),
+        cost=aggregate_cost(cost_records),
+        metadata=response.metadata,
+    )
 
 
 def _provider_name(client: object) -> str | None:
@@ -367,9 +532,9 @@ def classify_provider_exception(exc: Exception, *, action_transport: bool = Fals
         return LLMErrorClassification("permission_denied", retryable=False, fallback_eligible=False)
     if "RateLimitError" in class_names or status_code == 429:
         return LLMErrorClassification("rate_limit", retryable=True, fallback_eligible=True)
-    if "APITimeoutError" in class_names or isinstance(exc, TimeoutError) or status_code == 408:
+    if _has_timeout_class(class_names) or isinstance(exc, TimeoutError) or status_code == 408:
         return LLMErrorClassification("timeout", retryable=True, fallback_eligible=True)
-    if "APIConnectionError" in class_names or isinstance(exc, ConnectionError):
+    if _has_connection_class(class_names) or isinstance(exc, ConnectionError):
         return LLMErrorClassification("connection_error", retryable=True, fallback_eligible=True)
     if "InternalServerError" in class_names or (status_code is not None and status_code >= 500):
         return LLMErrorClassification("server_error", retryable=True, fallback_eligible=True)
@@ -439,6 +604,31 @@ def _is_unsupported_action_transport(provider_code: str | None, message: str) ->
     return any(marker in message for marker in unsupported_markers)
 
 
+def _has_timeout_class(class_names: set[str]) -> bool:
+    """Recognize common SDK and HTTP-client timeout families by class name."""
+    known_names = {
+        "APITimeoutError",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "ReadTimeout",
+        "TimeoutException",
+        "WriteTimeout",
+    }
+    return bool(class_names & known_names) or any(name.endswith("TimeoutError") for name in class_names)
+
+
+def _has_connection_class(class_names: set[str]) -> bool:
+    """Recognize common SDK and HTTP-client connection families by class name."""
+    known_names = {
+        "APIConnectionError",
+        "ConnectError",
+        "NetworkError",
+        "ProxyError",
+        "RemoteProtocolError",
+    }
+    return bool(class_names & known_names) or any(name.endswith("ConnectionError") for name in class_names)
+
+
 def _format_json_repair_prompt(raw_response: str, error: str) -> str:
     return "\n".join(
         [
@@ -460,6 +650,19 @@ def call_with_supported_kwargs(call: Callable[..., Any], /, *args: Any, **kwargs
     """
     supported_kwargs = _supported_kwargs(call, kwargs)
     return call(*args, **supported_kwargs)
+
+
+async def call_async_with_supported_kwargs(
+    call: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Await a compatibility hook once, omitting unsupported keywords."""
+    result = call(*args, **_supported_kwargs(call, kwargs))
+    if not inspect.isawaitable(result):
+        raise TypeError(f"Async compatibility hook returned a non-awaitable: {call!r}")
+    return await result
 
 
 def _supported_kwargs(call: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:

@@ -54,9 +54,11 @@ class OpenAIResponsesClient(LLMClient):
         max_retries: int = 2,
         max_output_tokens: int | None = None,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         self.model = model
         self.max_output_tokens = _validate_max_output_tokens(max_output_tokens)
+        self._async_client = async_client
 
         if client is not None:
             self._client = client
@@ -83,6 +85,19 @@ class OpenAIResponsesClient(LLMClient):
             timeout=timeout_seconds,
             max_retries=max_retries,
         )
+        if async_client is not None:
+            self._async_client = async_client
+        else:
+            try:
+                from openai import AsyncOpenAI
+            except ImportError:
+                self._async_client = None
+            else:
+                self._async_client = AsyncOpenAI(
+                    api_key=api_key,
+                    timeout=timeout_seconds,
+                    max_retries=max_retries,
+                )
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using OpenAI's Responses API."""
@@ -98,6 +113,37 @@ class OpenAIResponsesClient(LLMClient):
         request = self._text_request(messages, max_output_tokens=max_output_tokens)
         try:
             response = self._client.responses.create(**request)
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text:
+            return self._response_from_provider(messages, output_text, getattr(response, "usage", None))
+        raise self._invalid_response_error("OpenAI response did not include output_text")
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return text through the native async Responses API."""
+        if self._async_client is None:
+            return await super().acomplete_response(messages, max_output_tokens=max_output_tokens)
+        request = self._text_request(messages, max_output_tokens=max_output_tokens)
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async OpenAI client is not configured")
+        try:
+            response = await async_client.responses.create(**request)
         except Exception as exc:
             error = provider_error_from_exception(
                 exc,
@@ -227,6 +273,53 @@ class OpenAIResponsesClient(LLMClient):
                 return fallback
         return self._complete_json_action_response_once(messages, max_output_tokens=max_output_tokens)
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        if self._async_client is None:
+            return await super()._acomplete_action_response_once(
+                messages,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+                mcp_approval_callback=mcp_approval_callback,
+            )
+        if tools is not None:
+            try:
+                return await self._acomplete_native_action_response_once(
+                    messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                    hosted_mcp_servers=hosted_mcp_servers,
+                    mcp_approval_callback=mcp_approval_callback,
+                )
+            except LLMError as exc:
+                if hosted_mcp_servers:
+                    raise
+                if not is_action_transport_fallback_error(exc):
+                    raise
+                fallback = await self._acomplete_json_action_response_once(
+                    with_json_action_prompt(messages),
+                    max_output_tokens=max_output_tokens,
+                )
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return await self._acomplete_json_action_response_once(
+            messages,
+            max_output_tokens=max_output_tokens,
+        )
+
     def _complete_json_action_response_once(
         self,
         messages: list[dict[str, str]],
@@ -252,6 +345,52 @@ class OpenAIResponsesClient(LLMClient):
             request["max_output_tokens"] = output_limit
         try:
             response = self._client.responses.create(**request)
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI structured action request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text:
+            result = self._response_from_provider(messages, output_text, getattr(response, "usage", None))
+            result.metadata.update({"action_transport": "chulk_json"})
+            return result
+        raise self._invalid_response_error("OpenAI structured action response did not include output_text")
+
+    async def _acomplete_json_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        instructions, response_input = split_instructions(messages)
+        request: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "agent_action",
+                    "strict": True,
+                    "schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                }
+            },
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async OpenAI client is not configured")
+        try:
+            response = await async_client.responses.create(**request)
         except Exception as exc:
             error = provider_error_from_exception(
                 exc,
@@ -311,6 +450,47 @@ class OpenAIResponsesClient(LLMClient):
         )
         return result
 
+    async def _acomplete_native_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tools: list[object],
+        max_output_tokens: int | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        instructions, response_input = split_instructions(messages)
+        request: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions or None,
+            "input": response_input,
+            "tools": openai_response_tools(tools, hosted_mcp_servers=hosted_mcp_servers),
+            "tool_choice": "auto",
+        }
+        output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
+        if output_limit is not None:
+            request["max_output_tokens"] = output_limit
+        response, approval_metadata = await self._acreate_native_action_response(
+            request,
+            mcp_approval_callback=mcp_approval_callback,
+        )
+
+        content, metadata = _normalize_openai_native_action_response(
+            response,
+            provider=self.provider,
+            model=self.model,
+        )
+        result = self._response_from_provider(messages, content, getattr(response, "usage", None))
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": metadata.get("provider_tool_call"),
+                "provider_mcp_output": metadata.get("provider_mcp_output", []),
+                "provider_mcp_approval": approval_metadata,
+            }
+        )
+        return result
+
     def _create_native_action_response(
         self,
         request: dict[str, Any],
@@ -322,6 +502,88 @@ class OpenAIResponsesClient(LLMClient):
         for _ in range(4):
             try:
                 response = self._client.responses.create(**current_request)
+            except Exception as exc:
+                error = provider_error_from_exception(
+                    exc,
+                    message="OpenAI native tool action request failed",
+                    provider=self.provider,
+                    model=self.model,
+                    action_transport=True,
+                )
+                if error is exc:
+                    raise
+                raise error from exc
+
+            approval_request = _find_mcp_approval_request(response)
+            if approval_request is None:
+                return response, approval_metadata
+            if mcp_approval_callback is None:
+                raise LLMError(
+                    "OpenAI MCP approval request could not be handled without a permission callback",
+                    provider=self.provider,
+                    model=self.model,
+                    code="configuration_error",
+                )
+
+            approval_payload = public_value(approval_request)
+            approval_id = _mcp_approval_request_id(approval_payload)
+            if not approval_id:
+                raise LLMError(
+                    "OpenAI MCP approval request did not include an approval id",
+                    provider=self.provider,
+                    model=self.model,
+                    code="invalid_response",
+                )
+            approved = bool(mcp_approval_callback(approval_payload))
+            approval_metadata.append(
+                {
+                    "approval_request_id": approval_id,
+                    "server_label": approval_payload.get("server_label"),
+                    "name": approval_payload.get("name"),
+                    "approved": approved,
+                }
+            )
+            current_request = {
+                "model": self.model,
+                "previous_response_id": _response_id(
+                    response,
+                    provider=self.provider,
+                    model=self.model,
+                ),
+                "input": [
+                    {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": approval_id,
+                        "approve": approved,
+                    }
+                ],
+                "tools": request["tools"],
+                "tool_choice": "auto",
+            }
+            if request.get("max_output_tokens") is not None:
+                current_request["max_output_tokens"] = request["max_output_tokens"]
+
+        raise LLMError(
+            "OpenAI MCP approval loop exceeded the maximum continuation count",
+            provider=self.provider,
+            model=self.model,
+            code="invalid_response",
+        )
+
+    async def _acreate_native_action_response(
+        self,
+        request: dict[str, Any],
+        *,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None,
+    ) -> tuple[object, list[dict[str, Any]]]:
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async OpenAI client is not configured")
+        approval_metadata: list[dict[str, Any]] = []
+        current_request = dict(request)
+        for _ in range(4):
+            try:
+                response = await async_client.responses.create(**current_request)
             except Exception as exc:
                 error = provider_error_from_exception(
                     exc,

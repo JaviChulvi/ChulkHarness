@@ -56,6 +56,7 @@ class AnthropicMessagesClient(LLMClient):
         max_retries: int = 2,
         max_output_tokens: int = DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         self.model = model.strip()
         if not self.model:
@@ -64,6 +65,7 @@ class AnthropicMessagesClient(LLMClient):
                 provider=self.provider,
             )
         self.max_output_tokens = _validate_max_output_tokens(max_output_tokens)
+        self._async_client = async_client
 
         if client is not None:
             self._client = client
@@ -94,6 +96,15 @@ class AnthropicMessagesClient(LLMClient):
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = Anthropic(**client_kwargs)
+        if async_client is not None:
+            self._async_client = async_client
+        else:
+            try:
+                from anthropic import AsyncAnthropic
+            except ImportError:
+                self._async_client = None
+            else:
+                self._async_client = AsyncAnthropic(**client_kwargs)
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using Anthropic's Messages API."""
@@ -107,6 +118,27 @@ class AnthropicMessagesClient(LLMClient):
     ) -> LLMResponse:
         """Return text plus normalized Anthropic usage metadata."""
         response = self._create(
+            self._request(messages, max_output_tokens=max_output_tokens),
+            operation="request",
+        )
+        content = _response_text(
+            response,
+            provider=self.provider,
+            model=self.model,
+            action_transport=False,
+        )
+        return self._response_from_provider(messages, content, _value(response, "usage"))
+
+    async def acomplete_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Return text through Anthropic's native async Messages API."""
+        if self._async_client is None:
+            return await super().acomplete_response(messages, max_output_tokens=max_output_tokens)
+        response = await self._acreate(
             self._request(messages, max_output_tokens=max_output_tokens),
             operation="request",
         )
@@ -246,6 +278,56 @@ class AnthropicMessagesClient(LLMClient):
                 return fallback
         return self._complete_json_action_response_once(messages, max_output_tokens=max_output_tokens)
 
+    async def _acomplete_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        tools: list[object] | None = None,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> LLMResponse:
+        del mcp_approval_callback
+        if self._async_client is None:
+            return await super()._acomplete_action_response_once(
+                messages,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                hosted_mcp_servers=hosted_mcp_servers,
+            )
+        if hosted_mcp_servers:
+            raise LLMError(
+                "Anthropic Messages does not support Chulk hosted MCP tools",
+                provider=self.provider,
+                model=self.model,
+                code="unsupported_feature",
+            )
+        if tools is not None:
+            try:
+                return await self._acomplete_native_action_response_once(
+                    messages,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                )
+            except LLMError as exc:
+                if not is_action_transport_fallback_error(exc):
+                    raise
+                fallback = await self._acomplete_json_action_response_once(
+                    with_json_action_prompt(messages),
+                    max_output_tokens=max_output_tokens,
+                )
+                fallback.metadata.update(
+                    {
+                        "action_transport": "chulk_json_fallback",
+                        "native_tool_call_error": str(exc),
+                    }
+                )
+                return fallback
+        return await self._acomplete_json_action_response_once(
+            messages,
+            max_output_tokens=max_output_tokens,
+        )
+
     def _complete_json_action_response_once(
         self,
         messages: list[dict[str, str]],
@@ -253,6 +335,26 @@ class AnthropicMessagesClient(LLMClient):
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         response = self._create(
+            self._request(messages, max_output_tokens=max_output_tokens),
+            operation="structured action request",
+        )
+        content = _response_text(
+            response,
+            provider=self.provider,
+            model=self.model,
+            action_transport=True,
+        )
+        result = self._response_from_provider(messages, content, _value(response, "usage"))
+        result.metadata.update({"action_transport": "chulk_json"})
+        return result
+
+    async def _acomplete_json_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        response = await self._acreate(
             self._request(messages, max_output_tokens=max_output_tokens),
             operation="structured action request",
         )
@@ -281,6 +383,39 @@ class AnthropicMessagesClient(LLMClient):
             }
         )
         response = self._create(
+            request,
+            operation="native tool action request",
+            action_transport=True,
+        )
+        content, raw_tool_call = _normalize_native_action_response(
+            response,
+            provider=self.provider,
+            model=self.model,
+        )
+        result = self._response_from_provider(messages, content, _value(response, "usage"))
+        result.metadata.update(
+            {
+                "action_transport": "provider_native",
+                "provider_tool_call": raw_tool_call,
+            }
+        )
+        return result
+
+    async def _acomplete_native_action_response_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tools: list[object],
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        request = self._request(messages, max_output_tokens=max_output_tokens)
+        request.update(
+            {
+                "tools": _anthropic_tools(tools),
+                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+            }
+        )
+        response = await self._acreate(
             request,
             operation="native tool action request",
             action_transport=True,
@@ -328,6 +463,30 @@ class AnthropicMessagesClient(LLMClient):
     ) -> object:
         try:
             return self._client.messages.create(**request)
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message=f"Anthropic {operation} failed",
+                provider=self.provider,
+                model=self.model,
+                action_transport=action_transport,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+
+    async def _acreate(
+        self,
+        request: dict[str, Any],
+        *,
+        operation: str,
+        action_transport: bool = False,
+    ) -> object:
+        async_client = self._async_client
+        if async_client is None:
+            raise RuntimeError("Async Anthropic client is not configured")
+        try:
+            return await async_client.messages.create(**request)
         except Exception as exc:
             error = provider_error_from_exception(
                 exc,

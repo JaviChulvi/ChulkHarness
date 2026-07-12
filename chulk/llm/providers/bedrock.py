@@ -49,6 +49,7 @@ class BedrockOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         client: Any | None = None,
+        async_client: Any | None = None,
     ) -> None:
         normalized_model = _required_value(model, "model")
         normalized_api_key = _required_value(
@@ -69,6 +70,7 @@ class BedrockOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             client=client,
+            async_client=async_client,
         )
 
 

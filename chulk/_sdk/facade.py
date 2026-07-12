@@ -342,8 +342,7 @@ class AsyncAgentHandle:
         return self.handle._run_result(content)
 
     async def plan(self, message: str) -> str:
-        self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.plan, message)
+        return (await self.plan_result(message)).content
 
     async def plan_result(
         self,
@@ -353,7 +352,16 @@ class AsyncAgentHandle:
         on_event: EventCallback | None = None,
     ) -> PlanResult:
         self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.plan_result, message, on_delta=on_delta, on_event=on_event)
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.run_planned_turn_async(message)
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        return self.handle._plan_result(content)
 
     async def approve(self) -> str:
         return (await self.approve_result()).content
