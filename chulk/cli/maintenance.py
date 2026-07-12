@@ -258,23 +258,23 @@ def _provider_check(config: Config) -> DiagnosticCheck:
     providers = _configured_provider_models(config)
     missing: list[str] = []
     for label, provider, _model in providers:
-        if provider == "openai" and not config.openai_api_key:
-            missing.append(f"{label} openai (OPENAI_API_KEY)")
-        elif provider == "deepseek" and not config.deepseek_api_key:
-            missing.append(f"{label} deepseek (DEEPSEEK_API_KEY)")
+        missing.extend(
+            f"{label} {provider} ({setting})"
+            for setting in _missing_provider_settings(config, provider)
+        )
     if missing:
         return DiagnosticCheck(
             "provider",
             "fail",
-            "credentials are missing for: " + ", ".join(missing),
+            "required provider settings are missing for: " + ", ".join(missing),
             "Set the listed variables in the environment or project .env.",
         )
     if len(providers) == 1:
         provider = providers[0][1]
         detail = (
-            f"{provider} credentials are set"
-            if provider in {"openai", "deepseek"}
-            else f"{provider} provider configured"
+            f"{provider} provider configured"
+            if provider == "local"
+            else f"{provider} provider requirements are set"
         )
         return DiagnosticCheck("provider", "pass", detail)
     return DiagnosticCheck(
@@ -282,6 +282,59 @@ def _provider_check(config: Config) -> DiagnosticCheck:
         "pass",
         f"primary and {len(providers) - 1} fallback provider(s) are configured",
     )
+
+
+def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]:
+    """Return unresolved environment requirements for one configured provider."""
+    if provider == "openai":
+        return () if _has_provider_value(config.openai_api_key) else ("OPENAI_API_KEY",)
+    if provider == "deepseek":
+        return (
+            ()
+            if _has_provider_value(config.deepseek_api_key)
+            else ("CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",)
+        )
+    if provider == "local":
+        return ()
+    if provider == "openai-compatible":
+        missing = []
+        if not _has_provider_value(config.openai_compatible_api_key):
+            missing.append("CHULK_OPENAI_COMPATIBLE_API_KEY")
+        if not _has_provider_value(config.openai_compatible_base_url):
+            missing.append("CHULK_OPENAI_COMPATIBLE_BASE_URL")
+        return tuple(missing)
+    if provider == "openrouter":
+        return (
+            ()
+            if _has_provider_value(config.openrouter_api_key)
+            else ("CHULK_OPENROUTER_API_KEY or OPENROUTER_API_KEY",)
+        )
+    if provider == "anthropic":
+        return (
+            ()
+            if _has_provider_value(config.anthropic_api_key)
+            else ("CHULK_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY",)
+        )
+    if provider == "bedrock":
+        missing = []
+        if not _has_provider_value(config.bedrock_api_key):
+            missing.append(
+                "CHULK_BEDROCK_API_KEY, BEDROCK_API_KEY, or AWS_BEARER_TOKEN_BEDROCK"
+            )
+        if not _has_provider_value(config.bedrock_base_url):
+            missing.append("CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL")
+        return tuple(missing)
+    if provider == "gemini":
+        return (
+            ()
+            if _has_provider_value(config.gemini_api_key)
+            else ("CHULK_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY",)
+        )
+    return ()
+
+
+def _has_provider_value(value: str | None) -> bool:
+    return value is not None and bool(value.strip())
 
 
 def _model_check(config: Config) -> DiagnosticCheck:

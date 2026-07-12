@@ -163,6 +163,173 @@ def test_doctor_rejects_missing_fallback_credentials(tmp_path):
     assert "OPENAI_API_KEY" in provider_check.detail
 
 
+@pytest.mark.parametrize("as_fallback", [False, True])
+@pytest.mark.parametrize(
+    ("provider", "model", "environment", "expected_setting"),
+    [
+        ("openai", "gpt-4.1-mini", {}, "OPENAI_API_KEY"),
+        (
+            "deepseek",
+            "deepseek-chat",
+            {},
+            "CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",
+        ),
+        (
+            "openai-compatible",
+            "vendor/model",
+            {"CHULK_OPENAI_COMPATIBLE_BASE_URL": "https://models.example/v1"},
+            "CHULK_OPENAI_COMPATIBLE_API_KEY",
+        ),
+        (
+            "openrouter",
+            "vendor/model",
+            {},
+            "CHULK_OPENROUTER_API_KEY or OPENROUTER_API_KEY",
+        ),
+        (
+            "anthropic",
+            "claude-test",
+            {},
+            "CHULK_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY",
+        ),
+        (
+            "bedrock",
+            "vendor/model",
+            {"CHULK_BEDROCK_BASE_URL": "https://bedrock.example/openai/v1"},
+            "CHULK_BEDROCK_API_KEY, BEDROCK_API_KEY, or AWS_BEARER_TOKEN_BEDROCK",
+        ),
+        (
+            "gemini",
+            "gemini-test",
+            {},
+            "CHULK_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY",
+        ),
+    ],
+)
+def test_doctor_checks_credentials_for_every_provider_position(
+    tmp_path,
+    as_fallback,
+    provider,
+    model,
+    environment,
+    expected_setting,
+):
+    configured = {
+        "CHULK_PROJECT_ROOT": str(tmp_path),
+        "CHULK_LLM_PROVIDER": "local" if as_fallback else provider,
+        "CHULK_MODEL": "local-test-model" if as_fallback else model,
+        **environment,
+    }
+    if as_fallback:
+        configured["CHULK_LLM_FALLBACK_PROVIDERS"] = f"{provider}:{model}"
+
+    report = run_doctor(environ=configured)
+
+    provider_check = next(check for check in report.checks if check.name == "provider")
+    expected_label = "fallback #1" if as_fallback else "primary"
+    assert provider_check.status == "fail"
+    assert f"{expected_label} {provider}" in provider_check.detail
+    assert expected_setting in provider_check.detail
+
+
+@pytest.mark.parametrize("as_fallback", [False, True])
+def test_doctor_checks_openai_compatible_endpoint_for_every_provider_position(
+    tmp_path,
+    as_fallback,
+):
+    configured = {
+        "CHULK_PROJECT_ROOT": str(tmp_path),
+        "CHULK_LLM_PROVIDER": "local" if as_fallback else "openai-compatible",
+        "CHULK_MODEL": "local-test-model" if as_fallback else "vendor/model",
+        "CHULK_OPENAI_COMPATIBLE_API_KEY": "test-key",
+    }
+    if as_fallback:
+        configured["CHULK_LLM_FALLBACK_PROVIDERS"] = "openai-compatible:vendor/model"
+
+    report = run_doctor(environ=configured)
+
+    provider_check = next(check for check in report.checks if check.name == "provider")
+    expected_label = "fallback #1" if as_fallback else "primary"
+    assert provider_check.status == "fail"
+    assert f"{expected_label} openai-compatible" in provider_check.detail
+    assert "CHULK_OPENAI_COMPATIBLE_BASE_URL" in provider_check.detail
+
+
+def test_doctor_rejects_blank_provider_credentials_and_endpoints(tmp_path):
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "openai-compatible",
+            "CHULK_MODEL": "vendor/model",
+            "CHULK_OPENAI_COMPATIBLE_API_KEY": "   ",
+            "CHULK_OPENAI_COMPATIBLE_BASE_URL": "   ",
+        }
+    )
+
+    provider_check = next(check for check in report.checks if check.name == "provider")
+    assert provider_check.status == "fail"
+    assert "CHULK_OPENAI_COMPATIBLE_API_KEY" in provider_check.detail
+    assert "CHULK_OPENAI_COMPATIBLE_BASE_URL" in provider_check.detail
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "environment"),
+    [
+        ("deepseek", "deepseek-chat", {"DEEPSEEK_API_KEY": "test-key"}),
+        ("openrouter", "vendor/model", {"OPENROUTER_API_KEY": "test-key"}),
+        ("anthropic", "claude-test", {"ANTHROPIC_API_KEY": "test-key"}),
+        (
+            "bedrock",
+            "vendor/model",
+            {
+                "AWS_BEARER_TOKEN_BEDROCK": "test-key",
+                "CHULK_BASE_URL": "https://bedrock.example/openai/v1",
+            },
+        ),
+        ("gemini", "gemini-test", {"GOOGLE_API_KEY": "test-key"}),
+    ],
+)
+def test_doctor_accepts_documented_provider_aliases(
+    tmp_path,
+    provider,
+    model,
+    environment,
+):
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": provider,
+            "CHULK_MODEL": model,
+            **environment,
+        }
+    )
+
+    provider_check = next(check for check in report.checks if check.name == "provider")
+    assert provider_check.status == "pass"
+
+
+@pytest.mark.parametrize("as_fallback", [False, True])
+def test_doctor_reports_missing_bedrock_endpoint_as_configuration_error(
+    tmp_path,
+    as_fallback,
+):
+    configured = {
+        "CHULK_PROJECT_ROOT": str(tmp_path),
+        "CHULK_LLM_PROVIDER": "local" if as_fallback else "bedrock",
+        "CHULK_MODEL": "local-test-model" if as_fallback else "vendor/model",
+        "CHULK_BEDROCK_API_KEY": "test-key",
+    }
+    if as_fallback:
+        configured["CHULK_LLM_FALLBACK_PROVIDERS"] = "bedrock:vendor/model"
+
+    report = run_doctor(environ=configured)
+
+    assert report.ok is False
+    assert report.checks[0].name == "configuration"
+    assert report.checks[0].status == "fail"
+    assert "CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL" in report.checks[0].detail
+
+
 def test_doctor_rejects_unregistered_fallback_model(tmp_path):
     report = run_doctor(
         environ={

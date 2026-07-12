@@ -6,6 +6,7 @@ from argparse import Namespace
 from collections.abc import Sequence
 import sys
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from chulk import __version__
 from chulk.cli import (
@@ -67,19 +68,19 @@ def format_config(config: Config) -> str:
         "permission_profile": config.permission_profile,
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
-        "deepseek_base_url": config.deepseek_base_url,
+        "deepseek_base_url": _format_base_url(config.deepseek_base_url),
         "local_api_key": "set" if config.local_api_key else "not set",
-        "local_base_url": config.local_base_url,
+        "local_base_url": _format_base_url(config.local_base_url),
         "openai_compatible_api_key": "set" if config.openai_compatible_api_key else "not set",
-        "openai_compatible_base_url": config.openai_compatible_base_url or "not set",
+        "openai_compatible_base_url": _format_base_url(config.openai_compatible_base_url),
         "openrouter_api_key": "set" if config.openrouter_api_key else "not set",
-        "openrouter_base_url": config.openrouter_base_url,
+        "openrouter_base_url": _format_base_url(config.openrouter_base_url),
         "anthropic_api_key": "set" if config.anthropic_api_key else "not set",
-        "anthropic_base_url": config.anthropic_base_url or "not set",
+        "anthropic_base_url": _format_base_url(config.anthropic_base_url),
         "bedrock_api_key": "set" if config.bedrock_api_key else "not set",
-        "bedrock_base_url": config.bedrock_base_url or "not set",
+        "bedrock_base_url": _format_base_url(config.bedrock_base_url),
         "gemini_api_key": "set" if config.gemini_api_key else "not set",
-        "gemini_base_url": config.gemini_base_url or "not set",
+        "gemini_base_url": _format_base_url(config.gemini_base_url),
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -96,6 +97,26 @@ def format_config(config: Config) -> str:
     lines = ["ChulkHarness configuration:"]
     lines.extend(f"  {key}: {value}" for key, value in values.items())
     return "\n".join(lines)
+
+
+def _format_base_url(value: str | None) -> str:
+    """Render a base URL without exposing credentials or URL parameters."""
+    if value is None or not value.strip():
+        return "not set"
+    clean_value = value.strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in clean_value):
+        return "set (value hidden)"
+    try:
+        parsed = urlsplit(clean_value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "set (value hidden)"
+        hostname = parsed.hostname
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        return "set (value hidden)"
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
 def create_cli_agent(
