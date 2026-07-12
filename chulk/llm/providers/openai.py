@@ -6,7 +6,14 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from chulk.core.actions import STRICT_AGENT_ACTION_JSON_SCHEMA
-from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError, LLMStreamChunk
+from chulk.llm.base import (
+    LLMClient,
+    LLMConfigurationError,
+    LLMError,
+    LLMStreamChunk,
+    is_action_transport_fallback_error,
+    provider_error_from_exception,
+)
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
@@ -56,13 +63,19 @@ class OpenAIResponsesClient(LLMClient):
             return
 
         if not api_key:
-            raise LLMConfigurationError("OPENAI_API_KEY is required for the OpenAI LLM client")
+            raise LLMConfigurationError(
+                "OPENAI_API_KEY is required for the OpenAI LLM client",
+                provider=self.provider,
+                model=self.model,
+            )
 
         try:
             from openai import OpenAI
         except ImportError as exc:
             raise LLMConfigurationError(
-                "The openai package is required. Install it with: pip install -e '.[openai]'"
+                "The openai package is required. Install it with: pip install -e '.[openai]'",
+                provider=self.provider,
+                model=self.model,
             ) from exc
 
         self._client = OpenAI(
@@ -86,12 +99,20 @@ class OpenAIResponsesClient(LLMClient):
         try:
             response = self._client.responses.create(**request)
         except Exception as exc:
-            raise LLMError(f"OpenAI request failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
             return self._response_from_provider(messages, output_text, getattr(response, "usage", None))
-        raise LLMError("OpenAI response did not include output_text")
+        raise self._invalid_response_error("OpenAI response did not include output_text")
 
     def stream_complete(
         self,
@@ -105,29 +126,55 @@ class OpenAIResponsesClient(LLMClient):
         try:
             stream = self._client.responses.create(**request)
         except Exception as exc:
-            raise LLMError(f"OpenAI streaming request failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI streaming request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         saw_text = False
         completed = False
         usage = None
-        for event in stream:
-            event_type = _event_value(event, "type")
-            if event_type == "response.output_text.delta":
-                delta = _event_value(event, "delta")
-                if isinstance(delta, str) and delta:
-                    saw_text = True
-                    yield LLMStreamChunk(type="text_delta", text=delta, metadata={"event_type": event_type})
-                continue
-            if event_type == "response.completed":
-                completed = True
-                completed_response = _event_value(event, "response")
-                usage = normalize_openai_usage(_event_value(completed_response, "usage"))
-                continue
-            if event_type == "error":
-                raise LLMError(f"OpenAI streaming request failed: {_event_error_message(event)}")
+        try:
+            for event in stream:
+                event_type = _event_value(event, "type")
+                if event_type == "response.output_text.delta":
+                    delta = _event_value(event, "delta")
+                    if isinstance(delta, str) and delta:
+                        saw_text = True
+                        yield LLMStreamChunk(type="text_delta", text=delta, metadata={"event_type": event_type})
+                    continue
+                if event_type == "response.completed":
+                    completed = True
+                    completed_response = _event_value(event, "response")
+                    usage = normalize_openai_usage(_event_value(completed_response, "usage"))
+                    continue
+                if event_type == "error":
+                    raise LLMError(
+                        f"OpenAI streaming request failed: {_event_error_message(event)}",
+                        provider=self.provider,
+                        model=self.model,
+                        code="server_error",
+                        retryable=True,
+                        fallback_eligible=True,
+                    )
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI streaming request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         if not saw_text:
-            raise LLMError("OpenAI streaming response did not include output text")
+            raise self._invalid_response_error("OpenAI streaming response did not include output text")
         if completed:
             cost = estimate_cost("openai", self.model, usage) if usage is not None else None
             yield LLMStreamChunk(
@@ -164,6 +211,8 @@ class OpenAIResponsesClient(LLMClient):
                 )
             except LLMError as exc:
                 if hosted_mcp_servers:
+                    raise
+                if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
                     with_json_action_prompt(messages),
@@ -204,14 +253,22 @@ class OpenAIResponsesClient(LLMClient):
         try:
             response = self._client.responses.create(**request)
         except Exception as exc:
-            raise LLMError(f"OpenAI structured action request failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message="OpenAI structured action request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text:
             result = self._response_from_provider(messages, output_text, getattr(response, "usage", None))
             result.metadata.update({"action_transport": "chulk_json"})
             return result
-        raise LLMError("OpenAI structured action response did not include output_text")
+        raise self._invalid_response_error("OpenAI structured action response did not include output_text")
 
     def _complete_native_action_response_once(
         self,
@@ -238,7 +295,11 @@ class OpenAIResponsesClient(LLMClient):
             mcp_approval_callback=mcp_approval_callback,
         )
 
-        content, metadata = _normalize_openai_native_action_response(response)
+        content, metadata = _normalize_openai_native_action_response(
+            response,
+            provider=self.provider,
+            model=self.model,
+        )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
             {
@@ -262,18 +323,37 @@ class OpenAIResponsesClient(LLMClient):
             try:
                 response = self._client.responses.create(**current_request)
             except Exception as exc:
-                raise LLMError(f"OpenAI native tool action request failed: {exc}") from exc
+                error = provider_error_from_exception(
+                    exc,
+                    message="OpenAI native tool action request failed",
+                    provider=self.provider,
+                    model=self.model,
+                    action_transport=True,
+                )
+                if error is exc:
+                    raise
+                raise error from exc
 
             approval_request = _find_mcp_approval_request(response)
             if approval_request is None:
                 return response, approval_metadata
             if mcp_approval_callback is None:
-                raise LLMError("OpenAI MCP approval request could not be handled without a permission callback")
+                raise LLMError(
+                    "OpenAI MCP approval request could not be handled without a permission callback",
+                    provider=self.provider,
+                    model=self.model,
+                    code="configuration_error",
+                )
 
             approval_payload = public_value(approval_request)
             approval_id = _mcp_approval_request_id(approval_payload)
             if not approval_id:
-                raise LLMError("OpenAI MCP approval request did not include an approval id")
+                raise LLMError(
+                    "OpenAI MCP approval request did not include an approval id",
+                    provider=self.provider,
+                    model=self.model,
+                    code="invalid_response",
+                )
             approved = bool(mcp_approval_callback(approval_payload))
             approval_metadata.append(
                 {
@@ -285,7 +365,11 @@ class OpenAIResponsesClient(LLMClient):
             )
             current_request = {
                 "model": self.model,
-                "previous_response_id": _response_id(response),
+                "previous_response_id": _response_id(
+                    response,
+                    provider=self.provider,
+                    model=self.model,
+                ),
                 "input": [
                     {
                         "type": "mcp_approval_response",
@@ -299,7 +383,12 @@ class OpenAIResponsesClient(LLMClient):
             if request.get("max_output_tokens") is not None:
                 current_request["max_output_tokens"] = request["max_output_tokens"]
 
-        raise LLMError("OpenAI MCP approval loop exceeded the maximum continuation count")
+        raise LLMError(
+            "OpenAI MCP approval loop exceeded the maximum continuation count",
+            provider=self.provider,
+            model=self.model,
+            code="invalid_response",
+        )
 
     def _text_request(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> dict[str, Any]:
         instructions, response_input = split_instructions(messages)
@@ -323,6 +412,16 @@ class OpenAIResponsesClient(LLMClient):
             cost=estimate_cost("openai", self.model, usage),
             provider="openai",
             model=self.model,
+        )
+
+    def _invalid_response_error(self, message: str) -> LLMError:
+        return LLMError(
+            message,
+            provider=self.provider,
+            model=self.model,
+            code="invalid_response",
+            retryable=True,
+            fallback_eligible=True,
         )
 
 
@@ -360,7 +459,12 @@ def _event_error_message(event: object) -> str:
     return str(error or event)
 
 
-def _normalize_openai_native_action_response(response: object) -> tuple[str, dict[str, Any]]:
+def _normalize_openai_native_action_response(
+    response: object,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, dict[str, Any]]:
     metadata: dict[str, Any] = {"provider_tool_call": None, "provider_mcp_output": []}
     output = _event_value(response, "output")
     if isinstance(output, list):
@@ -373,8 +477,21 @@ def _normalize_openai_native_action_response(response: object) -> tuple[str, dic
                 continue
             name = _event_value(item, "name")
             if not isinstance(name, str) or not name:
-                raise LLMError("OpenAI native tool call did not include a function name")
-            arguments = parse_native_arguments(_event_value(item, "arguments"))
+                raise LLMError(
+                    "OpenAI native tool call did not include a function name",
+                    provider=provider,
+                    model=model,
+                    code="action_shape_error",
+                )
+            try:
+                arguments = parse_native_arguments(_event_value(item, "arguments"))
+            except ValueError as exc:
+                raise LLMError(
+                    str(exc),
+                    provider=provider,
+                    model=model,
+                    code="action_shape_error",
+                ) from exc
             payload = native_tool_action_payload(name, arguments)
             metadata["provider_tool_call"] = public_value(item)
             return action_payload_json(payload), metadata
@@ -382,7 +499,12 @@ def _normalize_openai_native_action_response(response: object) -> tuple[str, dic
     output_text = _event_value(response, "output_text")
     if isinstance(output_text, str) and output_text.strip():
         return action_payload_json(native_final_answer_payload(output_text.strip())), metadata
-    raise LLMError("OpenAI native action response did not include a function call or output_text")
+    raise LLMError(
+        "OpenAI native action response did not include a function call or output_text",
+        provider=provider,
+        model=model,
+        code="action_shape_error",
+    )
 
 
 def _find_mcp_approval_request(response: object) -> object | None:
@@ -403,8 +525,13 @@ def _mcp_approval_request_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _response_id(response: object) -> str:
+def _response_id(response: object, *, provider: str, model: str) -> str:
     response_id = _event_value(response, "id")
     if isinstance(response_id, str) and response_id:
         return response_id
-    raise LLMError("OpenAI response did not include an id for MCP approval continuation")
+    raise LLMError(
+        "OpenAI response did not include an id for MCP approval continuation",
+        provider=provider,
+        model=model,
+        code="invalid_response",
+    )

@@ -88,6 +88,9 @@ def _details(
     policy_name = getattr(exc, "policy_name", None)
     if policy_name:
         extensions["policy_name"] = policy_name
+    if isinstance(exc, LLMError):
+        extensions["error_code"] = exc.code
+        extensions["fallback_eligible"] = exc.fallback_eligible
     return ErrorDetails(
         provider=str(provider) if provider is not None else None,
         model=str(model) if model is not None else None,

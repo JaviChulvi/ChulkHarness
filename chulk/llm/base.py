@@ -17,6 +17,33 @@ if TYPE_CHECKING:
     from chulk.llm.capabilities import LLMModelCapabilities
 
 
+LLMErrorCode = Literal[
+    "action_shape_error",
+    "authentication_error",
+    "configuration_error",
+    "connection_error",
+    "fallback_exhausted",
+    "invalid_request",
+    "invalid_response",
+    "model_not_found",
+    "permission_denied",
+    "rate_limit",
+    "server_error",
+    "timeout",
+    "unknown",
+    "unsupported_feature",
+]
+
+
+@dataclass(frozen=True)
+class LLMErrorClassification:
+    """Provider-neutral retry and fallback semantics for one failure."""
+
+    code: LLMErrorCode
+    retryable: bool
+    fallback_eligible: bool
+
+
 class LLMError(RuntimeError):
     """Base error for model provider failures."""
 
@@ -26,16 +53,52 @@ class LLMError(RuntimeError):
         *,
         provider: str | None = None,
         model: str | None = None,
-        retryable: bool | None = None,
+        code: LLMErrorCode = "unknown",
+        retryable: bool = False,
+        fallback_eligible: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
+        self.code = code
         self.retryable = retryable
+        self.fallback_eligible = fallback_eligible
+
+    @property
+    def error_code(self) -> LLMErrorCode:
+        """Compatibility-friendly explicit name for the provider error code."""
+        return self.code
+
+    def add_context(self, *, provider: str | None = None, model: str | None = None) -> "LLMError":
+        """Fill missing provider identity without discarding existing metadata."""
+        if self.provider is None:
+            self.provider = provider
+        if self.model is None:
+            self.model = model
+        return self
 
 
 class LLMConfigurationError(LLMError):
     """Raised when the LLM client cannot be configured."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        code: LLMErrorCode = "configuration_error",
+        retryable: bool = False,
+        fallback_eligible: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            provider=provider,
+            model=model,
+            code=code,
+            retryable=retryable,
+            fallback_eligible=fallback_eligible,
+        )
 
 
 class LLMActionError(LLMError):
@@ -50,8 +113,20 @@ class LLMActionError(LLMError):
         raw_response: str | None = None,
         usage: LLMUsage | None = None,
         cost: LLMCost | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        code: LLMErrorCode = "action_shape_error",
+        retryable: bool = False,
+        fallback_eligible: bool = False,
     ) -> None:
-        super().__init__(message)
+        super().__init__(
+            message,
+            provider=provider,
+            model=model,
+            code=code,
+            retryable=retryable,
+            fallback_eligible=fallback_eligible,
+        )
         self.repair_attempts = repair_attempts
         self.errors = errors or []
         self.raw_response = raw_response
@@ -125,9 +200,19 @@ class LLMClient:
         try:
             parsed = json.loads(raw_response)
         except json.JSONDecodeError as exc:
-            raise LLMError("Model response was not valid JSON") from exc
+            raise LLMError(
+                "Model response was not valid JSON",
+                provider=_provider_name(self),
+                model=_model_name(self),
+                code="action_shape_error",
+            ) from exc
         if not isinstance(parsed, dict):
-            raise LLMError("Model JSON response must be an object")
+            raise LLMError(
+                "Model JSON response must be an object",
+                provider=_provider_name(self),
+                model=_model_name(self),
+                code="action_shape_error",
+            )
         return parsed
 
     def complete_action(
@@ -186,6 +271,8 @@ class LLMClient:
                         raw_response=raw_response,
                         usage=aggregate_usage(usage_records),
                         cost=aggregate_cost(cost_records),
+                        provider=_provider_name(self),
+                        model=_model_name(self),
                     ) from exc
                 action_messages = [
                     *action_messages,
@@ -195,7 +282,11 @@ class LLMClient:
                     },
                 ]
 
-        raise LLMActionError("Model response was not valid action JSON")
+        raise LLMActionError(
+            "Model response was not valid action JSON",
+            provider=_provider_name(self),
+            model=_model_name(self),
+        )
 
     def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return one raw action response attempt."""
@@ -236,6 +327,116 @@ def _provider_name(client: object) -> str | None:
 def _model_name(client: object) -> str | None:
     value = getattr(client, "model", None)
     return str(value) if value is not None else None
+
+
+def provider_error_from_exception(
+    exc: Exception,
+    *,
+    message: str,
+    provider: str,
+    model: str | None,
+    action_transport: bool = False,
+) -> LLMError:
+    """Normalize an SDK exception while preserving an existing Chulk error."""
+    if isinstance(exc, LLMError):
+        return exc.add_context(provider=provider, model=model)
+    classification = classify_provider_exception(exc, action_transport=action_transport)
+    return LLMError(
+        f"{message}: {exc}",
+        provider=provider,
+        model=model,
+        code=classification.code,
+        retryable=classification.retryable,
+        fallback_eligible=classification.fallback_eligible,
+    )
+
+
+def classify_provider_exception(exc: Exception, *, action_transport: bool = False) -> LLMErrorClassification:
+    """Classify OpenAI-style SDK failures without requiring the SDK at import time."""
+    class_names = {item.__name__ for item in type(exc).__mro__}
+    status_code = _exception_status_code(exc)
+    provider_code = _exception_provider_code(exc)
+    message = str(exc).lower()
+
+    if "AuthenticationError" in class_names or status_code == 401 or provider_code in {
+        "authentication_error",
+        "invalid_api_key",
+    }:
+        return LLMErrorClassification("authentication_error", retryable=False, fallback_eligible=False)
+    if "PermissionDeniedError" in class_names or status_code == 403:
+        return LLMErrorClassification("permission_denied", retryable=False, fallback_eligible=False)
+    if "RateLimitError" in class_names or status_code == 429:
+        return LLMErrorClassification("rate_limit", retryable=True, fallback_eligible=True)
+    if "APITimeoutError" in class_names or isinstance(exc, TimeoutError) or status_code == 408:
+        return LLMErrorClassification("timeout", retryable=True, fallback_eligible=True)
+    if "APIConnectionError" in class_names or isinstance(exc, ConnectionError):
+        return LLMErrorClassification("connection_error", retryable=True, fallback_eligible=True)
+    if "InternalServerError" in class_names or (status_code is not None and status_code >= 500):
+        return LLMErrorClassification("server_error", retryable=True, fallback_eligible=True)
+    if "NotFoundError" in class_names or _is_model_error(provider_code, message, status_code):
+        return LLMErrorClassification("model_not_found", retryable=False, fallback_eligible=False)
+    if action_transport and _is_unsupported_action_transport(provider_code, message):
+        return LLMErrorClassification("unsupported_feature", retryable=False, fallback_eligible=True)
+    if (
+        "BadRequestError" in class_names
+        or "UnprocessableEntityError" in class_names
+        or status_code in {400, 404, 409, 422}
+    ):
+        return LLMErrorClassification("invalid_request", retryable=False, fallback_eligible=False)
+    return LLMErrorClassification("unknown", retryable=False, fallback_eligible=False)
+
+
+def is_action_transport_fallback_error(exc: Exception) -> bool:
+    """Return whether native tool calling may safely retry via Chulk action JSON."""
+    return isinstance(exc, LLMError) and exc.code in {"action_shape_error", "unsupported_feature"}
+
+
+def _exception_status_code(exc: Exception) -> int | None:
+    value = getattr(exc, "status_code", None)
+    if isinstance(value, int):
+        return value
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def _exception_provider_code(exc: Exception) -> str | None:
+    value = getattr(exc, "code", None)
+    if isinstance(value, str) and value:
+        return value.lower()
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict):
+            value = error.get("code")
+            if isinstance(value, str) and value:
+                return value.lower()
+    return None
+
+
+def _is_model_error(provider_code: str | None, message: str, status_code: int | None) -> bool:
+    if provider_code in {"model_not_found", "invalid_model", "unknown_model"}:
+        return True
+    if status_code == 404:
+        return True
+    model_markers = ("model not found", "model_not_found", "unknown model", "does not exist")
+    return any(marker in message for marker in model_markers) and status_code in {None, 400, 404, 422}
+
+
+def _is_unsupported_action_transport(provider_code: str | None, message: str) -> bool:
+    if provider_code in {"unsupported_feature", "unsupported_parameter"}:
+        return True
+    unsupported_markers = (
+        "does not support tool",
+        "doesn't support tool",
+        "native tools unsupported",
+        "tool calling is not supported",
+        "tool calls are not supported",
+        "tools unsupported",
+        "unsupported parameter: tools",
+        "unsupported_parameter: tools",
+    )
+    return any(marker in message for marker in unsupported_markers)
 
 
 def _format_json_repair_prompt(raw_response: str, error: str) -> str:

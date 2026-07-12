@@ -83,7 +83,12 @@ class FailingLLMClient(LLMClient):
     model = "broken"
 
     def complete(self, messages: list[dict[str, str]]) -> str:
-        raise LLMError("provider unavailable")
+        raise LLMError(
+            "provider unavailable",
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class HostedMCPRecordingLLM(LLMClient):

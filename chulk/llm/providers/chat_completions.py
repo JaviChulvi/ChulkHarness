@@ -6,7 +6,14 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from chulk.llm.base import LLMClient, LLMConfigurationError, LLMError, LLMStreamChunk
+from chulk.llm.base import (
+    LLMClient,
+    LLMConfigurationError,
+    LLMError,
+    LLMStreamChunk,
+    is_action_transport_fallback_error,
+    provider_error_from_exception,
+)
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
@@ -65,13 +72,19 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
 
         resolved_api_key = api_key or profile.default_api_key
         if not resolved_api_key and profile.missing_api_key_message:
-            raise LLMConfigurationError(profile.missing_api_key_message)
+            raise LLMConfigurationError(
+                profile.missing_api_key_message,
+                provider=self.provider,
+                model=self.model,
+            )
 
         try:
             from openai import OpenAI
         except ImportError as exc:
             raise LLMConfigurationError(
-                "The openai package is required. Install it with: pip install -e '.[openai]'"
+                "The openai package is required. Install it with: pip install -e '.[openai]'",
+                provider=self.provider,
+                model=self.model,
             ) from exc
 
         self._client = OpenAI(
@@ -108,7 +121,15 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         try:
             stream = self._client.chat.completions.create(**request)
         except Exception as exc:
-            raise LLMError(f"{self.profile.display_name} streaming request failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message=f"{self.profile.display_name} streaming request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         text_parts: list[str] = []
         usage_payload: object = None
@@ -131,10 +152,25 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                         metadata={"transport": "chat_completions"},
                     )
         except Exception as exc:
-            raise LLMError(f"{self.profile.display_name} streaming request failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message=f"{self.profile.display_name} streaming request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
         if not text_parts:
-            raise LLMError(f"{self.profile.display_name} streaming response did not include message content")
+            raise LLMError(
+                f"{self.profile.display_name} streaming response did not include message content",
+                provider=self.provider,
+                model=self.model,
+                code="invalid_response",
+                retryable=True,
+                fallback_eligible=True,
+            )
 
         content = "".join(text_parts)
         response = self._response_from_provider(messages, content, usage_payload)
@@ -173,6 +209,8 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
+                if not is_action_transport_fallback_error(exc):
+                    raise
                 fallback = self._complete_json_action_response_once(
                     with_json_action_prompt(messages),
                     max_output_tokens=max_output_tokens,
@@ -216,9 +254,19 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 "parallel_tool_calls": False,
             }
         )
-        response = self._create(request, operation="native tool action request")
-        message = _response_message(response, display_name=self.profile.display_name)
-        content, raw_tool_call = _normalize_native_action_message(message)
+        response = self._create(request, operation="native tool action request", action_transport=True)
+        message = _response_message(
+            response,
+            display_name=self.profile.display_name,
+            provider=self.provider,
+            model=self.model,
+            action_transport=True,
+        )
+        content, raw_tool_call = _normalize_native_action_message(
+            message,
+            provider=self.provider,
+            model=self.model,
+        )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
             {
@@ -245,18 +293,45 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             request["max_tokens"] = output_limit
         return request
 
-    def _create(self, request: dict[str, Any], *, operation: str) -> object:
+    def _create(
+        self,
+        request: dict[str, Any],
+        *,
+        operation: str,
+        action_transport: bool = False,
+    ) -> object:
         try:
             return self._client.chat.completions.create(**request)
         except Exception as exc:
-            raise LLMError(f"{self.profile.display_name} {operation} failed: {exc}") from exc
+            error = provider_error_from_exception(
+                exc,
+                message=f"{self.profile.display_name} {operation} failed",
+                provider=self.provider,
+                model=self.model,
+                action_transport=action_transport,
+            )
+            if error is exc:
+                raise
+            raise error from exc
 
     def _message_content(self, response: object, *, operation: str) -> str:
-        message = _response_message(response, display_name=self.profile.display_name)
+        message = _response_message(
+            response,
+            display_name=self.profile.display_name,
+            provider=self.provider,
+            model=self.model,
+        )
         content = _value(message, "content")
         if isinstance(content, str) and content:
             return content
-        raise LLMError(f"{self.profile.display_name} {operation} content was empty")
+        raise LLMError(
+            f"{self.profile.display_name} {operation} content was empty",
+            provider=self.provider,
+            model=self.model,
+            code="invalid_response",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
     def _response_from_provider(
         self,
@@ -290,11 +365,25 @@ def _validate_max_output_tokens(value: int | None) -> int | None:
     return value
 
 
-def _response_message(response: object, *, display_name: str) -> object:
+def _response_message(
+    response: object,
+    *,
+    display_name: str,
+    provider: str,
+    model: str,
+    action_transport: bool = False,
+) -> object:
     choice = _first_choice(response)
     message = _value(choice, "message") if choice is not None else None
     if message is None:
-        raise LLMError(f"{display_name} response did not include message content")
+        raise LLMError(
+            f"{display_name} response did not include message content",
+            provider=provider,
+            model=model,
+            code="action_shape_error" if action_transport else "invalid_response",
+            retryable=not action_transport,
+            fallback_eligible=not action_transport,
+        )
     return message
 
 
@@ -305,20 +394,40 @@ def _first_choice(response: object) -> object | None:
     return None
 
 
-def _normalize_native_action_message(message: object) -> tuple[str, dict[str, Any] | None]:
+def _normalize_native_action_message(
+    message: object,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, dict[str, Any] | None]:
     tool_calls = _value(message, "tool_calls")
     if isinstance(tool_calls, (list, tuple)) and tool_calls:
         if len(tool_calls) != 1:
-            raise LLMError("Native action response included multiple tool calls; Chulk accepts one action per turn")
+            raise LLMError(
+                "Native action response included multiple tool calls; Chulk accepts one action per turn",
+                provider=provider,
+                model=model,
+                code="action_shape_error",
+            )
         tool_call = tool_calls[0]
         function = _value(tool_call, "function")
         name = _value(function, "name")
         if not isinstance(name, str) or not name:
-            raise LLMError("Native tool call did not include a function name")
+            raise LLMError(
+                "Native tool call did not include a function name",
+                provider=provider,
+                model=model,
+                code="action_shape_error",
+            )
         try:
             arguments = parse_native_arguments(_value(function, "arguments"))
         except ValueError as exc:
-            raise LLMError(str(exc)) from exc
+            raise LLMError(
+                str(exc),
+                provider=provider,
+                model=model,
+                code="action_shape_error",
+            ) from exc
         payload = native_tool_action_payload(name, arguments)
         raw_tool_call = public_value(tool_call)
         return action_payload_json(payload), raw_tool_call if isinstance(raw_tool_call, dict) else None
@@ -326,7 +435,12 @@ def _normalize_native_action_message(message: object) -> tuple[str, dict[str, An
     content = _value(message, "content")
     if isinstance(content, str) and content.strip():
         return action_payload_json(native_final_answer_payload(content.strip())), None
-    raise LLMError("Native action response did not include a tool call or content")
+    raise LLMError(
+        "Native action response did not include a tool call or content",
+        provider=provider,
+        model=model,
+        code="action_shape_error",
+    )
 
 
 def _value(source: object, key: str) -> object:

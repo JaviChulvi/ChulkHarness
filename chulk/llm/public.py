@@ -111,6 +111,9 @@ class ProviderAttempt:
     error: str | None = None
     usage: LLMUsage | None = None
     cost: LLMCost | None = None
+    error_code: str | None = None
+    retryable: bool | None = None
+    fallback_eligible: bool | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -119,6 +122,9 @@ class ProviderAttempt:
             "success": self.success,
             "latency_seconds": self.latency_seconds,
             "error": self.error,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+            "fallback_eligible": self.fallback_eligible,
             "usage": self.usage.to_dict() if self.usage is not None else None,
             "cost": self.cost.to_dict() if self.cost is not None else None,
         }
@@ -241,12 +247,16 @@ class FallbackChain(LLMClient):
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
+                error_code, retryable, fallback_eligible = _provider_error_metadata(exc)
                 attempt = ProviderAttempt(
                     provider_name,
                     model,
                     False,
                     latency,
                     error=error,
+                    error_code=error_code,
+                    retryable=retryable,
+                    fallback_eligible=fallback_eligible,
                     usage=getattr(exc, "usage", None),
                     cost=getattr(exc, "cost", None),
                 )
@@ -254,6 +264,8 @@ class FallbackChain(LLMClient):
                 self.attempts.append(attempt)
                 if self._action_attempts is not None:
                     self._action_attempts.append(attempt)
+                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                    raise
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
@@ -265,7 +277,11 @@ class FallbackChain(LLMClient):
             self.last_success_provider = provider
             return response
         detail = "; ".join(errors) if errors else "no providers were available"
-        raise LLMError(f"All fallback providers failed: {detail}")
+        raise LLMError(
+            f"All fallback providers failed: {detail}",
+            code="fallback_exhausted",
+            retryable=any(attempt.retryable is True for attempt in self.last_attempts),
+        )
 
     def _stream_providers(
         self,
@@ -279,34 +295,47 @@ class FallbackChain(LLMClient):
         for provider in self.providers:
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
-            emitted_text = False
+            emitted_chunk = False
             usage: LLMUsage | None = None
             cost: LLMCost | None = None
             try:
                 for chunk in _stream_complete(provider, messages, max_output_tokens=max_output_tokens):
-                    if chunk.type == "text_delta" and chunk.text:
-                        emitted_text = True
                     if chunk.usage is not None:
                         usage = chunk.usage
                     if chunk.cost is not None:
                         cost = chunk.cost
+                    emitted_chunk = True
                     yield chunk
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
+                error_code, retryable, fallback_eligible = _provider_error_metadata(exc)
                 attempt = ProviderAttempt(
                     provider_name,
                     model,
                     False,
                     latency,
                     error=error,
+                    error_code=error_code,
+                    retryable=retryable,
+                    fallback_eligible=fallback_eligible,
                     usage=getattr(exc, "usage", None),
                     cost=getattr(exc, "cost", None),
                 )
                 self.last_attempts.append(attempt)
                 self.attempts.append(attempt)
-                if emitted_text:
-                    raise LLMError(f"{provider_name}/{model or 'unknown'} stream failed after emitting text: {error}") from exc
+                if emitted_chunk:
+                    source_error = exc if isinstance(exc, LLMError) else None
+                    raise LLMError(
+                        f"{provider_name}/{model or 'unknown'} stream failed after yielding a chunk: {error}",
+                        provider=provider_name,
+                        model=model,
+                        code=source_error.code if source_error is not None else "unknown",
+                        retryable=source_error.retryable if source_error is not None else False,
+                        fallback_eligible=False,
+                    ) from exc
+                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                    raise
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
@@ -316,7 +345,11 @@ class FallbackChain(LLMClient):
             self.last_success_provider = provider
             return
         detail = "; ".join(errors) if errors else "no providers were available"
-        raise LLMError(f"All fallback providers failed: {detail}")
+        raise LLMError(
+            f"All fallback providers failed: {detail}",
+            code="fallback_exhausted",
+            retryable=any(attempt.retryable is True for attempt in self.last_attempts),
+        )
 
 
 def _complete_response(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> LLMResponse:
@@ -362,6 +395,12 @@ def _provider_identity(provider: object) -> tuple[str, str | None]:
     provider_name = getattr(provider, "provider", None) or getattr(provider, "name", None) or type(provider).__name__
     model = getattr(provider, "model", None)
     return str(provider_name), str(model) if model is not None else None
+
+
+def _provider_error_metadata(exc: Exception) -> tuple[str | None, bool | None, bool | None]:
+    if not isinstance(exc, LLMError):
+        return None, None, None
+    return exc.code, exc.retryable, exc.fallback_eligible
 
 
 __all__ = [

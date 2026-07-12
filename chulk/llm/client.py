@@ -6,6 +6,8 @@ from chulk.llm.base import (
     LLMClient,
     LLMConfigurationError,
     LLMError,
+    LLMErrorClassification,
+    LLMErrorCode,
     LLMStreamChunk,
 )
 from chulk.llm.capabilities import LLMCapabilities, LLMModelCapabilities, resolve_model_capabilities
@@ -35,6 +37,8 @@ __all__ = [
     "LLMConfigurationError",
     "LLMCost",
     "LLMError",
+    "LLMErrorClassification",
+    "LLMErrorCode",
     "LLMModelCapabilities",
     "LLMProvider",
     "LLMProviderConnection",

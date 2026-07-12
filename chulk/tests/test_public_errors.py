@@ -142,7 +142,12 @@ def test_memory_proposal_operations_map_store_failures(
 
 def test_provider_and_tool_details_are_structured(tmp_path):
     facade = _agent(tmp_path)
-    provider_failure = LLMError("unavailable", retryable=True)
+    provider_failure = LLMError(
+        "unavailable",
+        code="rate_limit",
+        retryable=True,
+        fallback_eligible=True,
+    )
     facade._handle.run = lambda *args, **kwargs: _raise(provider_failure)  # type: ignore[method-assign]
 
     with pytest.raises(ProviderError) as provider_caught:
@@ -151,6 +156,8 @@ def test_provider_and_tool_details_are_structured(tmp_path):
     assert provider_caught.value.details.provider == "test-provider"
     assert provider_caught.value.details.model == "test-model"
     assert provider_caught.value.details.retryable is True
+    assert provider_caught.value.details.extensions["error_code"] == "rate_limit"
+    assert provider_caught.value.details.extensions["fallback_eligible"] is True
 
     validation_failure = ToolValidationError(
         "lookup",

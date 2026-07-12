@@ -98,7 +98,14 @@ class ChargedFailureActionLLMClient(LLMClient):
     def _complete_action_response_once(self, messages: list[dict[str, str]], **kwargs) -> LLMResponse:
         usage = LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15)
         cost = LLMCost(amount=Decimal("0.000012"), pricing_known=True, provider=self.provider, model=self.model)
-        raise LLMActionError("provider charged then failed", usage=usage, cost=cost)
+        raise LLMActionError(
+            "provider charged then failed",
+            usage=usage,
+            cost=cost,
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class ChargedSuccessActionLLMClient(LLMClient):

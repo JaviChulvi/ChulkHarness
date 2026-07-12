@@ -180,7 +180,12 @@ class ScriptedStreamingLLMClient(LLMClient):
 
 class FailingLLMClient(LLMClient):
     def complete(self, messages: list[dict[str, str]]) -> str:
-        raise LLMError("provider unavailable")
+        raise LLMError(
+            "provider unavailable",
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class UsageFailingLLMClient(LLMClient):
@@ -196,7 +201,14 @@ class UsageFailingLLMClient(LLMClient):
             provider=self.provider,
             model=self.model,
         )
-        raise LLMActionError("provider charged then failed", usage=usage, cost=cost)
+        raise LLMActionError(
+            "provider charged then failed",
+            usage=usage,
+            cost=cost,
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class UsageSuccessfulLLMClient(LLMClient):
