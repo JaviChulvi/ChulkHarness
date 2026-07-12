@@ -23,6 +23,7 @@ from chulk import (
 )
 from chulk.llm import LLMClient, LLMError
 from chulk.mcp import MCPConfigError
+from chulk.memory import MemorySecretError
 from chulk.tools import Tool, ToolRegistry
 from chulk.tools.permissions import TerminalPermissionDenied
 from chulk.tools.schema import ToolValidationError, ToolValidationIssue
@@ -93,6 +94,7 @@ def test_facade_maps_provider_tool_permission_safety_and_memory_failures(tmp_pat
         ),
         (TerminalPermissionDenied("write_file", "policy denied", policy_name="read-only"), PermissionDeniedError),
         (ValueError("Path is outside the project root"), SafetyError),
+        (MemorySecretError("Credential-like data is not allowed in durable memory."), SafetyError),
         (sqlite3.OperationalError("database is locked"), MemoryError),
     ]
 

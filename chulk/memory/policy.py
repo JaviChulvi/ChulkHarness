@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from chulk.capabilities import MemoryMode
 from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord
+from chulk.memory.security import MemorySecretError, ensure_memory_payload_safe
 from chulk.memory.sqlite_store import SQLiteMemoryStore
 
 
@@ -37,33 +38,42 @@ class MemoryPolicy:
         if self.mode in {MemoryMode.OFF, MemoryMode.READ_ONLY}:
             return MemoryPolicyResult()
         if self.mode is MemoryMode.MANUAL:
-            proposals = tuple(
-                self.store.create_memory_proposal(
-                    candidate.content,
-                    tags=candidate.tags,
-                    metadata=candidate.metadata,
-                    importance=candidate.importance,
-                    source=candidate.source,
-                    confidence=candidate.confidence,
-                    evidence=evidence,
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
+            proposal_ids = []
+            for candidate in candidates:
+                try:
+                    proposal_ids.append(
+                        self.store.create_memory_proposal(
+                            candidate.content,
+                            tags=candidate.tags,
+                            metadata=candidate.metadata,
+                            importance=candidate.importance,
+                            source=candidate.source,
+                            confidence=candidate.confidence,
+                            evidence=evidence,
+                            conversation_id=conversation_id,
+                            turn_id=turn_id,
+                        )
+                    )
+                except MemorySecretError:
+                    continue
+            return MemoryPolicyResult(proposal_ids=tuple(proposal_ids))
+
+        memory_ids = []
+        for candidate in candidates:
+            try:
+                memory_ids.append(
+                    self.store.save_memory(
+                        candidate.content,
+                        tags=candidate.tags,
+                        metadata=candidate.metadata,
+                        importance=candidate.importance,
+                        source=candidate.source,
+                        confidence=candidate.confidence,
+                    )
                 )
-                for candidate in candidates
-            )
-            return MemoryPolicyResult(proposal_ids=proposals)
-        memory_ids = tuple(
-            self.store.save_memory(
-                candidate.content,
-                tags=candidate.tags,
-                metadata=candidate.metadata,
-                importance=candidate.importance,
-                source=candidate.source,
-                confidence=candidate.confidence,
-            )
-            for candidate in candidates
-        )
-        return MemoryPolicyResult(accepted_memory_ids=memory_ids)
+            except MemorySecretError:
+                continue
+        return MemoryPolicyResult(accepted_memory_ids=tuple(memory_ids))
 
     def propose_explicit(
         self,
@@ -77,6 +87,7 @@ class MemoryPolicy:
         conversation_id: str | None = None,
         turn_id: str | None = None,
     ) -> MemoryPolicyResult:
+        ensure_memory_payload_safe(content=content, tags=tags or [], metadata=metadata or {}, source=source)
         candidate = MemoryExtractionCandidate(
             content=content,
             tags=tags or [],

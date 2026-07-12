@@ -15,6 +15,7 @@ from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory.extraction import extract_memory_candidates
 from chulk.memory.markdown import parse_markdown_memory_line as _parse_markdown_memory_line
 from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord, MemoryRecord
+from chulk.memory.security import ensure_memory_payload_safe
 from chulk.memory.retrieval import (
     choose_memory_to_keep as _choose_memory_to_keep,
     content_similarity as _content_similarity,
@@ -135,6 +136,12 @@ class SQLiteMemoryStore:
         clean_importance = _normalize_importance(importance)
         clean_source = _normalize_source(source)
         clean_confidence = _normalize_confidence(confidence)
+        ensure_memory_payload_safe(
+            content=clean_content,
+            tags=clean_tags,
+            metadata=clean_metadata,
+            source=clean_source,
+        )
         clean_embedding = _normalize_embedding(embedding) or text_to_embedding(clean_content)
 
         with self._connect() as conn:
@@ -165,6 +172,7 @@ class SQLiteMemoryStore:
         dedupe: bool = True,
     ) -> str:
         """Persist one normalized memory inside the caller's transaction."""
+        ensure_memory_payload_safe(content=content, tags=tags, metadata=metadata, source=source)
         if dedupe:
             duplicate = _find_duplicate_memory_in_connection(conn, content)
             if duplicate is not None:
@@ -172,6 +180,12 @@ class SQLiteMemoryStore:
                 next_metadata = {**duplicate.metadata, **metadata}
                 next_source = duplicate.source if duplicate.source != "manual" else source
                 next_embedding = duplicate.embedding or embedding
+                ensure_memory_payload_safe(
+                    content=duplicate.content,
+                    tags=next_tags,
+                    metadata=next_metadata,
+                    source=next_source,
+                )
                 conn.execute(
                     """
                     UPDATE memories
@@ -268,6 +282,12 @@ class SQLiteMemoryStore:
         next_archived_at = existing.archived_at if archived_at is None else archived_at
         if next_embedding is None:
             next_embedding = text_to_embedding(next_content)
+        ensure_memory_payload_safe(
+            content=next_content,
+            tags=next_tags,
+            metadata=next_metadata,
+            source=next_source,
+        )
 
         with self._connect() as conn:
             cursor = conn.execute(
@@ -560,6 +580,18 @@ class SQLiteMemoryStore:
         clean_content = content.strip()
         if not clean_content:
             raise ValueError("Memory proposal content cannot be empty")
+        clean_tags = _normalize_tags(tags or [])
+        clean_metadata = metadata or {}
+        clean_source = _normalize_source(source)
+        ensure_memory_payload_safe(
+            content=clean_content,
+            tags=clean_tags,
+            metadata=clean_metadata,
+            source=clean_source,
+            evidence=evidence,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
         proposal_id = str(uuid4())
         with self._connect() as conn:
             conn.execute(
@@ -573,10 +605,10 @@ class SQLiteMemoryStore:
                 (
                     proposal_id,
                     clean_content,
-                    json.dumps(_normalize_tags(tags or []), sort_keys=True),
-                    json.dumps(metadata or {}, sort_keys=True),
+                    json.dumps(clean_tags, sort_keys=True),
+                    json.dumps(clean_metadata, sort_keys=True),
                     _normalize_importance(importance),
-                    _normalize_source(source),
+                    clean_source,
                     _normalize_confidence(confidence),
                     evidence,
                     conversation_id,
@@ -615,6 +647,15 @@ class SQLiteMemoryStore:
             proposal = _row_to_memory_proposal(row)
             if proposal.status != "pending":
                 return proposal
+            ensure_memory_payload_safe(
+                content=proposal.content,
+                tags=proposal.tags,
+                metadata=proposal.metadata,
+                source=proposal.source,
+                evidence=proposal.evidence,
+                conversation_id=proposal.conversation_id,
+                turn_id=proposal.turn_id,
+            )
             memory_id = self._save_memory_in_connection(
                 conn,
                 content=proposal.content,
@@ -670,12 +711,22 @@ class SQLiteMemoryStore:
         markdown_path = Path(path)
         if not markdown_path.exists():
             raise FileNotFoundError(markdown_path)
-        memory_ids = []
+        parsed_memories: list[tuple[str, list[str]]] = []
         for line in markdown_path.read_text(encoding="utf-8").splitlines():
             parsed = _parse_markdown_memory_line(line)
             if parsed is None:
                 continue
             content, tags = parsed
+            ensure_memory_payload_safe(
+                content=content,
+                tags=tags,
+                metadata={"path": str(markdown_path)},
+                source="memory_md",
+            )
+            parsed_memories.append((content, tags))
+
+        memory_ids = []
+        for content, tags in parsed_memories:
             memory_ids.append(
                 self.save_memory(
                     content,
