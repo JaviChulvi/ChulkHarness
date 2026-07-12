@@ -52,6 +52,10 @@ class AgentConfig:
     deepseek_base_url: str | None = None
     local_api_key: str | None = None
     local_base_url: str | None = None
+    openai_compatible_api_key: str | None = None
+    openai_compatible_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str | None = None
     permission_profile: str | None = None
     store_path: str | Path | None = None
     traces_dir: str | Path | None = None
@@ -168,6 +172,40 @@ class AgentConfig:
             values["local_base_url"] = base_url
         return cls.from_env(provider="local", model=model or DEFAULT_LOCAL_MODEL, **values)
 
+    @classmethod
+    def openai_compatible(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for a hosted OpenAI-compatible endpoint."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["openai_compatible_api_key"] = api_key
+        if base_url is not None:
+            values["openai_compatible_base_url"] = base_url
+        return cls.from_env(provider="openai-compatible", model=model, **values)
+
+    @classmethod
+    def openrouter(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for OpenRouter-backed agents."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["openrouter_api_key"] = api_key
+        if base_url is not None:
+            values["openrouter_base_url"] = base_url
+        return cls.from_env(provider="openrouter", model=model, **values)
+
     def to_config(self) -> Config:
         """Build the internal runtime config."""
         env = dict(os.environ)
@@ -182,6 +220,10 @@ class AgentConfig:
         _set_env(env, "CHULK_DEEPSEEK_BASE_URL", self.deepseek_base_url)
         _set_env(env, "CHULK_LOCAL_API_KEY", self.local_api_key)
         _set_env(env, "CHULK_LOCAL_BASE_URL", self.local_base_url)
+        _set_env(env, "CHULK_OPENAI_COMPATIBLE_API_KEY", self.openai_compatible_api_key)
+        _set_env(env, "CHULK_OPENAI_COMPATIBLE_BASE_URL", self.openai_compatible_base_url)
+        _set_env(env, "CHULK_OPENROUTER_API_KEY", self.openrouter_api_key)
+        _set_env(env, "CHULK_OPENROUTER_BASE_URL", self.openrouter_base_url)
         _set_env(env, "CHULK_PERMISSION_PROFILE", self.permission_profile)
         _set_env(env, "CHULK_HISTORY_LIMIT", self.history_limit)
         _set_env(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", self.max_tool_calls_per_turn)

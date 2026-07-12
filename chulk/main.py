@@ -37,7 +37,9 @@ from chulk.llm import (
     LLMConfigurationError,
     LLMError,
     LocalProvider,
+    OpenAICompatibleProvider,
     OpenAIProvider,
+    OpenRouterProvider,
 )
 from chulk.presets import software_engineer
 from chulk.runtime import create_agent
@@ -65,6 +67,10 @@ def format_config(config: Config) -> str:
         "deepseek_base_url": config.deepseek_base_url,
         "local_api_key": "set" if config.local_api_key else "not set",
         "local_base_url": config.local_base_url,
+        "openai_compatible_api_key": "set" if config.openai_compatible_api_key else "not set",
+        "openai_compatible_base_url": config.openai_compatible_base_url or "not set",
+        "openrouter_api_key": "set" if config.openrouter_api_key else "not set",
+        "openrouter_base_url": config.openrouter_base_url,
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -112,7 +118,13 @@ def create_cli_agent(
 
 def create_cli_llm(config: Config) -> FallbackChain:
     """Create the CLI LLM chain from public provider objects."""
-    providers: list[OpenAIProvider | DeepSeekProvider | LocalProvider] = [
+    providers: list[
+        OpenAIProvider
+        | DeepSeekProvider
+        | LocalProvider
+        | OpenAICompatibleProvider
+        | OpenRouterProvider
+    ] = [
         _create_provider_spec(config.llm_provider, config.model)
     ]
     providers.extend(
@@ -122,13 +134,20 @@ def create_cli_llm(config: Config) -> FallbackChain:
     return FallbackChain(providers=providers)
 
 
-def _create_provider_spec(provider: str, model: str) -> OpenAIProvider | DeepSeekProvider | LocalProvider:
+def _create_provider_spec(
+    provider: str,
+    model: str,
+) -> OpenAIProvider | DeepSeekProvider | LocalProvider | OpenAICompatibleProvider | OpenRouterProvider:
     if provider == "openai":
         return OpenAIProvider(model=model)
     if provider == "deepseek":
         return DeepSeekProvider(model=model)
     if provider == "local":
         return LocalProvider(model=model)
+    if provider == "openai-compatible":
+        return OpenAICompatibleProvider(model=model)
+    if provider == "openrouter":
+        return OpenRouterProvider(model=model)
     raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
 
 

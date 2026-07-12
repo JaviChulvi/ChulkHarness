@@ -13,6 +13,8 @@ DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = 16_384
 LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072
 LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
 LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = 262_144
+COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
+COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -29,6 +31,10 @@ LOCAL_DEFAULT_LIMITS = (
 LOCAL_QWEN_3_5_35B_LIMITS = (
     LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS,
     LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+COMPATIBLE_DEFAULT_LIMITS = (
+    COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 
 
@@ -129,6 +135,13 @@ def _model_key(provider: str, model: str) -> tuple[str, str]:
 
 def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCapabilities | None:
     normalized_provider, normalized_model = _model_key(provider, model)
+    if normalized_provider in {"openai-compatible", "openrouter"}:
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
     if normalized_provider == "local":
         return LLMModelCapabilities(
             provider=normalized_provider,

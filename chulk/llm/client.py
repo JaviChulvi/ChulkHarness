@@ -23,12 +23,17 @@ from chulk.llm.factory import (
     supported_llm_providers,
 )
 from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
+from chulk.llm.providers.compatible import (
+    HostedOpenAICompatibleClient,
+    OpenRouterChatCompletionsClient,
+)
 from chulk.llm.providers.local import LocalOpenAICompatibleClient
 from chulk.llm.providers.openai import OpenAIResponsesClient
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 __all__ = [
     "DeepSeekChatCompletionsClient",
+    "HostedOpenAICompatibleClient",
     "LLMActionError",
     "LLMActionResult",
     "LLMClient",
@@ -49,6 +54,7 @@ __all__ = [
     "LLMUsage",
     "LocalOpenAICompatibleClient",
     "OpenAIResponsesClient",
+    "OpenRouterChatCompletionsClient",
     "create_llm_client",
     "provider_capabilities",
     "provider_connection_from_config",

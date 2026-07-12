@@ -2,6 +2,7 @@
 
 from chulk.llm.client import (
     DeepSeekChatCompletionsClient,
+    HostedOpenAICompatibleClient,
     LLMActionError,
     LLMActionResult,
     LLMClient,
@@ -22,6 +23,7 @@ from chulk.llm.client import (
     LLMUsage,
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
+    OpenRouterChatCompletionsClient,
     create_llm_client,
     provider_capabilities,
     provider_connection_from_config,
@@ -29,13 +31,23 @@ from chulk.llm.client import (
     supported_llm_providers,
 )
 from chulk.llm.capabilities import conservative_model_capabilities
-from chulk.llm.public import DeepSeekProvider, FallbackChain, FallbackStrategy, LocalProvider, OpenAIProvider, ProviderAttempt
+from chulk.llm.public import (
+    DeepSeekProvider,
+    FallbackChain,
+    FallbackStrategy,
+    LocalProvider,
+    OpenAICompatibleProvider,
+    OpenAIProvider,
+    OpenRouterProvider,
+    ProviderAttempt,
+)
 
 __all__ = [
     "DeepSeekProvider",
     "DeepSeekChatCompletionsClient",
     "FallbackChain",
     "FallbackStrategy",
+    "HostedOpenAICompatibleClient",
     "LLMActionError",
     "LLMActionResult",
     "LLMClient",
@@ -56,8 +68,11 @@ __all__ = [
     "LLMUsage",
     "LocalOpenAICompatibleClient",
     "LocalProvider",
+    "OpenAICompatibleProvider",
     "OpenAIProvider",
     "OpenAIResponsesClient",
+    "OpenRouterChatCompletionsClient",
+    "OpenRouterProvider",
     "ProviderAttempt",
     "create_llm_client",
     "conservative_model_capabilities",

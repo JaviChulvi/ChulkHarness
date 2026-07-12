@@ -8,6 +8,13 @@ from typing import Protocol
 
 from chulk.llm.base import LLMClient, LLMConfigurationError
 from chulk.llm.capabilities import LLMCapabilities, resolve_model_capabilities
+from chulk.llm.providers.compatible import (
+    DEFAULT_OPENROUTER_BASE_URL,
+    HOSTED_OPENAI_COMPATIBLE_CAPABILITIES,
+    OPENROUTER_CAPABILITIES,
+    HostedOpenAICompatibleClient,
+    OpenRouterChatCompletionsClient,
+)
 from chulk.llm.providers.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
     DEEPSEEK_CAPABILITIES,
@@ -24,11 +31,32 @@ from chulk.llm.providers.openai import OPENAI_CAPABILITIES, OpenAIResponsesClien
 class LLMConnectionConfig(Protocol):
     """Runtime configuration fields used to bind built-in providers."""
 
-    openai_api_key: str | None
-    deepseek_api_key: str | None
-    deepseek_base_url: str
-    local_api_key: str | None
-    local_base_url: str
+    @property
+    def openai_api_key(self) -> str | None: ...
+
+    @property
+    def deepseek_api_key(self) -> str | None: ...
+
+    @property
+    def deepseek_base_url(self) -> str: ...
+
+    @property
+    def local_api_key(self) -> str | None: ...
+
+    @property
+    def local_base_url(self) -> str: ...
+
+    @property
+    def openai_compatible_api_key(self) -> str | None: ...
+
+    @property
+    def openai_compatible_base_url(self) -> str | None: ...
+
+    @property
+    def openrouter_api_key(self) -> str | None: ...
+
+    @property
+    def openrouter_base_url(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -116,6 +144,25 @@ LLM_PROVIDER_REGISTRY: dict[str, LLMProviderProfile] = {
         ),
         create_client=lambda settings: _create_local_client(settings),
     ),
+    "openai-compatible": LLMProviderProfile(
+        name="openai-compatible",
+        capabilities=HOSTED_OPENAI_COMPATIBLE_CAPABILITIES,
+        connection_from_config=lambda config: LLMProviderConnection(
+            api_key=config.openai_compatible_api_key,
+            base_url=config.openai_compatible_base_url,
+        ),
+        create_client=lambda settings: _create_hosted_compatible_client(settings),
+    ),
+    "openrouter": LLMProviderProfile(
+        name="openrouter",
+        capabilities=OPENROUTER_CAPABILITIES,
+        default_connection=LLMProviderConnection(base_url=DEFAULT_OPENROUTER_BASE_URL),
+        connection_from_config=lambda config: LLMProviderConnection(
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
+        ),
+        create_client=lambda settings: _create_openrouter_client(settings),
+    ),
 }
 
 
@@ -149,6 +196,10 @@ def create_llm_client(
     deepseek_base_url: str | None = None,
     local_api_key: str | None = None,
     local_base_url: str | None = None,
+    openai_compatible_api_key: str | None = None,
+    openai_compatible_base_url: str | None = None,
+    openrouter_api_key: str | None = None,
+    openrouter_base_url: str | None = None,
 ) -> LLMClient:
     """Create an LLM client for the selected provider.
 
@@ -170,6 +221,10 @@ def create_llm_client(
         deepseek_base_url=deepseek_base_url,
         local_api_key=local_api_key,
         local_base_url=local_base_url,
+        openai_compatible_api_key=openai_compatible_api_key,
+        openai_compatible_base_url=openai_compatible_base_url,
+        openrouter_api_key=openrouter_api_key,
+        openrouter_base_url=openrouter_base_url,
     )
     selected_connection = provider_profile.default_connection.with_overrides(
         api_key=selected_connection.api_key,
@@ -203,6 +258,10 @@ def _legacy_connection(
     deepseek_base_url: str | None,
     local_api_key: str | None,
     local_base_url: str | None,
+    openai_compatible_api_key: str | None,
+    openai_compatible_base_url: str | None,
+    openrouter_api_key: str | None,
+    openrouter_base_url: str | None,
 ) -> LLMProviderConnection:
     if profile.name == "openai":
         return LLMProviderConnection(api_key=openai_api_key)
@@ -210,6 +269,13 @@ def _legacy_connection(
         return LLMProviderConnection(api_key=deepseek_api_key, base_url=deepseek_base_url)
     if profile.name == "local":
         return LLMProviderConnection(api_key=local_api_key, base_url=local_base_url)
+    if profile.name == "openai-compatible":
+        return LLMProviderConnection(
+            api_key=openai_compatible_api_key,
+            base_url=openai_compatible_base_url,
+        )
+    if profile.name == "openrouter":
+        return LLMProviderConnection(api_key=openrouter_api_key, base_url=openrouter_base_url)
     return profile.default_connection
 
 
@@ -237,6 +303,26 @@ def _create_local_client(settings: LLMClientSettings) -> LLMClient:
         model=settings.model,
         api_key=settings.connection.api_key,
         base_url=settings.connection.base_url or DEFAULT_LOCAL_BASE_URL,
+        timeout_seconds=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+    )
+
+
+def _create_hosted_compatible_client(settings: LLMClientSettings) -> LLMClient:
+    return HostedOpenAICompatibleClient(
+        model=settings.model,
+        api_key=settings.connection.api_key,
+        base_url=settings.connection.base_url,
+        timeout_seconds=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+    )
+
+
+def _create_openrouter_client(settings: LLMClientSettings) -> LLMClient:
+    return OpenRouterChatCompletionsClient(
+        model=settings.model,
+        api_key=settings.connection.api_key,
+        base_url=settings.connection.base_url or DEFAULT_OPENROUTER_BASE_URL,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
     )
