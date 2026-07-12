@@ -210,7 +210,8 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 def _plan_response_text(plan: dict[str, Any]) -> str:
     summary = str(plan.get("summary") or "")
-    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+    raw_steps = plan.get("steps")
+    steps = raw_steps if isinstance(raw_steps, list) else []
     lines = ["Plan", f"  summary  {summary}", "  steps"]
     for step in steps:
         if not isinstance(step, dict):

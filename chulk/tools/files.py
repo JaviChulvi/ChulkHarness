@@ -354,7 +354,7 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
         pending.path.parent.mkdir(parents=True, exist_ok=True)
         pending.path.write_text(pending.new_text, encoding="utf-8")
 
-    changes = [
+    changes: list[dict[str, Any]] = [
         {
             "path": pending.relative_path,
             "status": pending.status,

@@ -44,7 +44,7 @@ class ToolExecutionContext(Generic[DepsT]):
     """Host-owned request context passed through to tools without interpretation."""
 
     metadata: dict[str, Any] = field(default_factory=dict)
-    deps: DepsT = field(default=None)  # type: ignore[assignment]
+    deps: DepsT | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"metadata": self.metadata, "has_dependencies": self.deps is not None}
@@ -53,7 +53,7 @@ class ToolExecutionContext(Generic[DepsT]):
         """Return injected dependencies or fail before tool side effects begin."""
         if self.deps is None:
             raise ValueError("Required tool dependencies were not provided by the host")
-        return cast(DepsT, self.deps)
+        return self.deps
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,9 @@ class ToolResult:
 
 
 ToolReturn = ToolResult | Awaitable[ToolResult | Any] | Any
-ToolCallable = Callable[[dict[str, Any]], ToolReturn] | Callable[[dict[str, Any], ToolExecutionContext | None], ToolReturn]
+ToolCallableWithoutContext = Callable[[dict[str, Any]], ToolReturn]
+ToolCallableWithContext = Callable[[dict[str, Any], ToolExecutionContext[Any] | None], ToolReturn]
+ToolCallable = ToolCallableWithoutContext | ToolCallableWithContext
 
 
 @dataclass(frozen=True)
@@ -183,9 +185,9 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            result = self._call_tool_with_timeout(tool, arguments, context)
-            if inspect.isawaitable(result):
-                close = getattr(result, "close", None)
+            raw_result = self._call_tool_with_timeout(tool, arguments, context)
+            if inspect.isawaitable(raw_result):
+                close = getattr(raw_result, "close", None)
                 if callable(close):
                     close()
                 result = ToolResult(
@@ -199,7 +201,7 @@ class ToolRegistry:
                     failure_kind=ToolFailureKind.ASYNC_REQUIRED,
                 )
             else:
-                result = self._validate_output(tool, self._coerce_result(tool, result))
+                result = self._validate_output(tool, self._coerce_result(tool, raw_result))
         except ToolValidationError as exc:
             result = ToolResult(
                 tool_name=tool.name,
@@ -256,8 +258,8 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            result = await self._call_tool_async_with_timeout(tool, arguments, context)
-            result = self._validate_output(tool, self._coerce_result(tool, result))
+            raw_result = await self._call_tool_async_with_timeout(tool, arguments, context)
+            result = self._validate_output(tool, self._coerce_result(tool, raw_result))
         except ToolValidationError as exc:
             result = ToolResult(
                 tool_name=tool.name,
@@ -299,8 +301,10 @@ class ToolRegistry:
         context: ToolExecutionContext | None,
     ) -> ToolReturn:
         if tool.accepts_context:
-            return tool.callable(arguments, context)  # type: ignore[misc]
-        return tool.callable(arguments)  # type: ignore[misc]
+            callable_with_context = cast(ToolCallableWithContext, tool.callable)
+            return callable_with_context(arguments, context)
+        callable_without_context = cast(ToolCallableWithoutContext, tool.callable)
+        return callable_without_context(arguments)
 
     def _coerce_result(self, tool: Tool, result: Any) -> ToolResult:
         if isinstance(result, ToolResult):

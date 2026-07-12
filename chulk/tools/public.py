@@ -296,15 +296,15 @@ def _json_schema_for_unwrapped_type(annotation: Any) -> dict[str, Any]:
         return {"type": "boolean"}
     if annotation is type(None):
         return {"type": "null"}
-    if annotation in {dict, dict[str, Any]}:
+    if annotation is dict or annotation == dict[str, Any]:
         return {"type": "object"}
-    if annotation in {list, list[str]}:
+    if annotation is list or annotation == list[str]:
         return {"type": "array"}
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         return _enum_schema(annotation)
-    if is_dataclass(annotation):
+    if isinstance(annotation, type) and is_dataclass(annotation):
         return _dataclass_schema(annotation)
-    if hasattr(annotation, "model_json_schema"):
+    if isinstance(annotation, type) and callable(getattr(annotation, "model_json_schema", None)):
         schema = _pydantic_model_schema(annotation)
         return schema if schema is not None else {"type": "string"}
 
@@ -407,8 +407,11 @@ def _pydantic_model_schema(model_type: type) -> dict[str, Any] | None:
     schema = _pydantic_fields_schema(model_type)
     if schema is not None:
         return schema
+    model_json_schema = getattr(model_type, "model_json_schema", None)
+    if not callable(model_json_schema):
+        return None
     try:
-        raw_schema = model_type.model_json_schema()
+        raw_schema = model_json_schema()
     except Exception:
         return None
     return _enforced_schema_subset(raw_schema)

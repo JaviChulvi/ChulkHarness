@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 import operator
 from typing import Any
 
@@ -10,7 +11,7 @@ from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolResult
 
 
-_BINARY_OPERATORS = {
+_BINARY_OPERATORS: dict[type[ast.operator], Callable[[int | float, int | float], int | float]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -18,7 +19,7 @@ _BINARY_OPERATORS = {
     ast.Pow: operator.pow,
     ast.Mod: operator.mod,
 }
-_UNARY_OPERATORS = {
+_UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[int | float], int | float]] = {
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
 }

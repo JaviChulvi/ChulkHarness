@@ -12,7 +12,7 @@ import shlex
 import subprocess
 import threading
 import time
-from typing import Any, BinaryIO, Protocol
+from typing import Any, BinaryIO, Protocol, cast
 
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolFailureKind, ToolResult
@@ -250,7 +250,7 @@ def run_shell_command(
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
     elif os.name == "nt":  # pragma: no cover - exercised on Windows
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
 
     started_at = time.monotonic()
     try:
@@ -283,8 +283,8 @@ def run_shell_command(
     stderr_capture = _BoundedStreamCapture(stderr_limit_bytes)
     overflow_event = threading.Event()
     readers = [
-        _start_reader("stdout", process.stdout, stdout_capture, overflow_event),
-        _start_reader("stderr", process.stderr, stderr_capture, overflow_event),
+        _start_reader("stdout", cast(BinaryIO | None, process.stdout), stdout_capture, overflow_event),
+        _start_reader("stderr", cast(BinaryIO | None, process.stderr), stderr_capture, overflow_event),
     ]
 
     termination_reason: str | None = None
