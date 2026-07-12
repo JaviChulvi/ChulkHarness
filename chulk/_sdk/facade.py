@@ -27,7 +27,7 @@ from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.mcp import MCPServerConfig
-from chulk.results import MemoryProposal
+from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
@@ -241,7 +241,7 @@ class AgentHandle:
     def _no_pending_plan_result(self, content: str) -> RunResult:
         return RunResult(
             content=content,
-            status="no_pending_plan",
+            status=RunStatus.NO_PENDING_PLAN,
             turn_id=None,
             conversation_id=self.conversation_id,
             trace_path=self.trace_path,
