@@ -88,7 +88,10 @@ def write_normalized_trace(source: Path, target: Path) -> None:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         normalized.append(
             {
-                "created_at": (base + timedelta(seconds=index)).isoformat(),
+                "schema_version": 1,
+                "conversation_id": "conversation-demo",
+                "turn_id": "turn-demo",
+                "timestamp": (base + timedelta(seconds=index)).isoformat(),
                 "payload": _normalized_payload(event_type, payload),
                 "type": event_type,
             }

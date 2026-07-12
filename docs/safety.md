@@ -5,6 +5,13 @@ normalizes paths, applies capability and permission checks, records side
 effects, bounds outputs, and blocks obviously destructive shell commands. These
 controls reduce risk; they do not make arbitrary code or remote content safe.
 
+The built-in shell runner bounds stdout and stderr while commands are running,
+kills process groups on timeouts or output overflow, and exposes a host policy
+seam for sandbox wrappers. Regex-based destructive-command checks are only
+guardrails. Direct local execution does not claim containment, and
+`require_shell_containment=True` fails before process creation unless the host
+policy explicitly asserts that it applied containment.
+
 Embedding applications remain responsible for:
 
 - exposing the smallest tool and capability set;

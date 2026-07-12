@@ -25,6 +25,7 @@ from chulk.core.context import (
     select_messages_for_budget,
 )
 from chulk.core.state import Plan
+from chulk.core.planning import read_only_planning_tool_names
 from chulk.memory import ConversationMemory, MemoryRecord
 from chulk.skills import Skill, SkillSelection
 from chulk.tools import ToolRegistry
@@ -118,6 +119,7 @@ def build_agent_prompt(
         plan_approved=plan_approved,
         require_plan=require_plan,
         max_reconnaissance_tool_calls=max_tool_calls_per_turn,
+        read_only_tool_names=read_only_planning_tool_names(tool_registry.list_tools()),
     )
     tool_rules = format_tool_call_rules(max_tool_calls_per_turn)
     tools_prompt = format_tools_for_prompt(tool_descriptions)

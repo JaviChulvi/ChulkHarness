@@ -21,7 +21,9 @@ python examples/00_sdk_quickstart.py
 ```
 
 The first example is deterministic and needs no credentials. Hosted providers
-are optional; for OpenAI use `python -m pip install "chulkharness[openai]"`.
+are optional. Install every provider dependency with
+`python -m pip install "chulkharness[providers]"`, or choose an individual
+extra from the [provider guide](docs/providers.md).
 
 ## SDK
 
@@ -49,7 +51,9 @@ under `.chulk/`. Read [configuration](docs/configuration.md),
 
 ## CLI
 
-Install a provider extra, configure its credentials in a local `.env`, then run:
+Install a provider extra, configure its credentials in a local `.env`, then run.
+The exact provider names are `openai`, `deepseek`, `local`,
+`openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`.
 
 ```bash
 chulk

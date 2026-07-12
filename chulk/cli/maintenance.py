@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,18 @@ from typing import Any
 from chulk.config import Config, load_config, resolve_cli_environment
 from chulk.llm import resolve_model_capabilities
 from chulk.tracing import Trace, TraceFormatError
+
+
+_PROVIDER_SDK_REQUIREMENTS = {
+    "openai": ("openai", "openai", "openai"),
+    "deepseek": ("openai", "openai", "openai"),
+    "local": ("openai", "openai", "openai"),
+    "openai-compatible": ("openai", "openai", "openai"),
+    "openrouter": ("openai", "openai", "openai"),
+    "anthropic": ("anthropic", "anthropic", "anthropic"),
+    "bedrock": ("openai", "openai", "openai"),
+    "gemini": ("google.genai", "google-genai", "gemini"),
+}
 
 
 @dataclass(frozen=True)
@@ -152,6 +165,11 @@ def inspect_trace(path: Path | str) -> dict[str, Any]:
     return Trace.from_jsonl(path).summary()
 
 
+def replay_trace(path: Path | str) -> dict[str, Any]:
+    """Reconstruct recorded turns without running tools, models, or network calls."""
+    return Trace.from_jsonl(path).replay()
+
+
 def format_trace_summary(summary: dict[str, Any]) -> str:
     event_types = summary.get("event_types", {})
     type_text = ", ".join(f"{name} x{count}" for name, count in event_types.items())
@@ -159,7 +177,9 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         "Chulk trace",
         f"  path          {summary.get('path')}",
         f"  conversation  {summary.get('conversation_id')}",
+        f"  schemas       {_format_schema_versions(summary.get('schema_versions'))}",
         f"  events        {summary.get('event_count')}",
+        f"  sessions      {summary.get('session_count')}",
         f"  turns         {summary.get('turn_count')}",
         f"  failures      {summary.get('failure_count')}",
         f"  started       {summary.get('started_at')}",
@@ -170,6 +190,60 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         lines.extend(["  final answer", *[f"    {line}" for line in str(summary["final_answer"]).splitlines()]])
     lines.append("  warning       traces may contain sensitive runtime data")
     return "\n".join(lines)
+
+
+def format_trace_replay(replay: dict[str, Any]) -> str:
+    """Format a deterministic, explicitly non-executing trace reconstruction."""
+    lines = [
+        "Chulk trace replay",
+        f"  path          {replay.get('path')}",
+        f"  conversation  {replay.get('conversation_id')}",
+        f"  schemas       {_format_schema_versions(replay.get('schema_versions'))}",
+        f"  events        {replay.get('event_count')}",
+        f"  sessions      {replay.get('session_count')}",
+        f"  turns         {replay.get('turn_count')}",
+        "  mode          read-only; no model, tool, or network execution",
+    ]
+    turns = replay.get("turns")
+    if isinstance(turns, list):
+        for index, turn in enumerate(turns, start=1):
+            if not isinstance(turn, dict):
+                continue
+            lines.append(
+                f"  turn {index}        {turn.get('turn_id')} [{turn.get('status', 'unknown')}]"
+            )
+            if turn.get("user_message") is not None:
+                lines.extend(
+                    [
+                        "    user",
+                        *[f"      {line}" for line in str(turn["user_message"]).splitlines()],
+                    ]
+                )
+            lines.append(f"    model calls  {turn.get('model_request_count', 0)}")
+            tool_calls = turn.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                lines.append("    tools")
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    lines.append(
+                        f"      {tool_call.get('tool_name') or 'unknown'} [{tool_call.get('status')}]"
+                    )
+            if turn.get("final_answer") is not None:
+                lines.extend(
+                    [
+                        "    answer",
+                        *[f"      {line}" for line in str(turn["final_answer"]).splitlines()],
+                    ]
+                )
+    lines.append("  warning       replay output may contain sensitive runtime data")
+    return "\n".join(lines)
+
+
+def _format_schema_versions(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "unknown"
+    return ", ".join(str(item) for item in value)
 
 
 def export_trace_html(
@@ -195,25 +269,42 @@ def export_trace_html(
 
 def _provider_check(config: Config) -> DiagnosticCheck:
     providers = _configured_provider_models(config)
-    missing: list[str] = []
+    missing_settings: list[str] = []
+    missing_packages: list[str] = []
     for label, provider, _model in providers:
-        if provider == "openai" and not config.openai_api_key:
-            missing.append(f"{label} openai (OPENAI_API_KEY)")
-        elif provider == "deepseek" and not config.deepseek_api_key:
-            missing.append(f"{label} deepseek (DEEPSEEK_API_KEY)")
-    if missing:
+        missing_settings.extend(
+            f"{label} {provider} ({setting})"
+            for setting in _missing_provider_settings(config, provider)
+        )
+        if missing_package := _missing_provider_package(provider):
+            missing_packages.append(f"{label} {provider} ({missing_package})")
+    if missing_settings or missing_packages:
+        details = []
+        remedies = []
+        if missing_settings:
+            details.append(
+                "required provider settings are missing for: "
+                + ", ".join(missing_settings)
+            )
+            remedies.append("Set the listed variables in the environment or project .env.")
+        if missing_packages:
+            details.append(
+                "required provider packages are missing for: "
+                + ", ".join(missing_packages)
+            )
+            remedies.append("Install the listed provider extras.")
         return DiagnosticCheck(
             "provider",
             "fail",
-            "credentials are missing for: " + ", ".join(missing),
-            "Set the listed variables in the environment or project .env.",
+            "; ".join(details),
+            " ".join(remedies),
         )
     if len(providers) == 1:
         provider = providers[0][1]
         detail = (
-            f"{provider} credentials are set"
-            if provider in {"openai", "deepseek"}
-            else f"{provider} provider configured"
+            f"{provider} provider configured"
+            if provider == "local"
+            else f"{provider} provider requirements are set"
         )
         return DiagnosticCheck("provider", "pass", detail)
     return DiagnosticCheck(
@@ -221,6 +312,73 @@ def _provider_check(config: Config) -> DiagnosticCheck:
         "pass",
         f"primary and {len(providers) - 1} fallback provider(s) are configured",
     )
+
+
+def _missing_provider_package(provider: str) -> str | None:
+    requirement = _PROVIDER_SDK_REQUIREMENTS.get(provider)
+    if requirement is None:
+        return None
+    module_name, package_name, extra_name = requirement
+    try:
+        available = find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        available = False
+    if available:
+        return None
+    return f"{package_name}; install chulkharness[{extra_name}]"
+
+
+def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]:
+    """Return unresolved environment requirements for one configured provider."""
+    if provider == "openai":
+        return () if _has_provider_value(config.openai_api_key) else ("OPENAI_API_KEY",)
+    if provider == "deepseek":
+        return (
+            ()
+            if _has_provider_value(config.deepseek_api_key)
+            else ("CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",)
+        )
+    if provider == "local":
+        return ()
+    if provider == "openai-compatible":
+        missing = []
+        if not _has_provider_value(config.openai_compatible_api_key):
+            missing.append("CHULK_OPENAI_COMPATIBLE_API_KEY")
+        if not _has_provider_value(config.openai_compatible_base_url):
+            missing.append("CHULK_OPENAI_COMPATIBLE_BASE_URL")
+        return tuple(missing)
+    if provider == "openrouter":
+        return (
+            ()
+            if _has_provider_value(config.openrouter_api_key)
+            else ("CHULK_OPENROUTER_API_KEY or OPENROUTER_API_KEY",)
+        )
+    if provider == "anthropic":
+        return (
+            ()
+            if _has_provider_value(config.anthropic_api_key)
+            else ("CHULK_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY",)
+        )
+    if provider == "bedrock":
+        missing = []
+        if not _has_provider_value(config.bedrock_api_key):
+            missing.append(
+                "CHULK_BEDROCK_API_KEY, BEDROCK_API_KEY, or AWS_BEARER_TOKEN_BEDROCK"
+            )
+        if not _has_provider_value(config.bedrock_base_url):
+            missing.append("CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL")
+        return tuple(missing)
+    if provider == "gemini":
+        return (
+            ()
+            if _has_provider_value(config.gemini_api_key)
+            else ("CHULK_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY",)
+        )
+    return ()
+
+
+def _has_provider_value(value: str | None) -> bool:
+    return value is not None and bool(value.strip())
 
 
 def _model_check(config: Config) -> DiagnosticCheck:
@@ -495,8 +653,10 @@ __all__ = [
     "export_trace_html",
     "format_doctor_report",
     "format_init_changes",
+    "format_trace_replay",
     "format_trace_summary",
     "initialize_project",
     "inspect_trace",
+    "replay_trace",
     "run_doctor",
 ]

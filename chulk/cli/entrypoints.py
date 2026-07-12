@@ -11,9 +11,11 @@ from chulk.cli.maintenance import (
     export_trace_html,
     format_doctor_report,
     format_init_changes,
+    format_trace_replay,
     format_trace_summary,
     initialize_project,
     inspect_trace,
+    replay_trace,
     run_doctor,
 )
 from chulk.core import Agent
@@ -169,6 +171,12 @@ def run_trace_command(
             summary = inspect_trace(path)
             output_func(json_text(summary) if json_output else format_trace_summary(summary))
             return EXIT_OK
+        if command == "replay":
+            replay = replay_trace(path)
+            output_func(json_text(replay) if json_output else format_trace_replay(replay))
+            return EXIT_OK
+        if command != "export":
+            raise ValueError(f"Unknown trace command: {command}")
         destination = export_trace_html(path, output_path=output_path, force=force)
         payload = {
             "ok": True,

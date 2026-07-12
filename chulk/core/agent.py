@@ -11,12 +11,17 @@ from collections.abc import Callable
 from dataclasses import replace
 import re
 import time
+from typing import Any, cast
 
-from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction, ToolCallAction
+from chulk.core.action_loop import run_action_loop, run_action_loop_async
+from chulk.core.actions import PlanAction, PlanStepUpdateAction
 from chulk.core.context import AgentPrompt, ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.observations import format_tool_observation
-from chulk.core.planning import READ_ONLY_PLANNING_TOOL_NAMES, format_read_only_planning_tools, plan_looks_like_reconnaissance
+from chulk.core.planning import (
+    plan_looks_like_reconnaissance,
+    read_only_planning_tool_names,
+)
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.reflection import (
@@ -26,7 +31,7 @@ from chulk.core.reflection import (
     parse_reflection_response,
 )
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState, utc_now
-from chulk.core.trace_format import format_action_trace, format_model_request_trace
+from chulk.core.trace_format import format_model_request_trace
 from chulk.llm import LLMCost, LLMActionError, LLMClient, LLMError, LLMUsage
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.mcp import MCPServerConfig
@@ -168,6 +173,11 @@ class Agent:
                 close()
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
+        if self.trace_logger is not None:
+            try:
+                self.trace_logger.close()
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
         self.event_callback = None
         self.event_sink = None
         self._tool_contexts.clear()
@@ -235,6 +245,14 @@ class Agent:
         if not clean_message:
             raise ValueError("user_message cannot be empty")
         return self._run_user_turn(clean_message, require_plan=True)
+
+    async def run_planned_turn_async(self, user_message: str) -> str:
+        """Run one planned turn through async model and tool transports."""
+        self._ensure_open()
+        clean_message = user_message.strip()
+        if not clean_message:
+            raise ValueError("user_message cannot be empty")
+        return await self._run_user_turn_async(clean_message, require_plan=True)
 
     def _run_user_turn(
         self,
@@ -448,533 +466,11 @@ class Agent:
 
     def _run_action_loop(self, turn: TurnState, *, require_plan: bool) -> str:
         """Run model/tool iterations until the turn pauses or completes."""
-        while True:
-            blocked_response = self._prepare_plan_execution_step(turn, require_plan=require_plan)
-            if blocked_response is not None:
-                return blocked_response
-
-            prompt = self._build_prompt(turn, require_plan=require_plan)
-            prompt = self._compact_context_if_needed(prompt, turn, require_plan=require_plan)
-            messages = prompt.messages
-            context_report = prompt.context_report.to_dict()
-            turn.context_reports.append(context_report)
-            self.state.last_context_report = context_report
-            turn.model_request_count += 1
-            self._trace(
-                TraceEvent.MODEL_REQUEST_STARTED,
-                format_model_request_trace(
-                    messages,
-                    max_prompt_chars=self.trace_max_prompt_chars,
-                    request_index=turn.model_request_count,
-                    turn_id=turn.turn_id,
-                    loaded_memory_ids=self.state.loaded_memory_ids,
-                    loaded_skill_names=self.state.loaded_skill_names,
-                    available_tool_names=turn.available_tool_names,
-                    context_report=context_report,
-                ),
-            )
-            try:
-                action_result = self.llm_client.complete_action(
-                    messages,
-                    max_repair_attempts=self.max_json_repair_attempts,
-                    tools=self.tool_registry.list_tools(),
-                    hosted_mcp_servers=self.mcp_servers,
-                    mcp_approval_callback=lambda approval_request: self._resolve_hosted_mcp_approval(
-                        approval_request,
-                        turn,
-                    ),
-                )
-            except LLMActionError as exc:
-                self.state.json_repair_attempts += exc.repair_attempts
-                self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                usage_payload, cost_payload = self._record_model_accounting(
-                    turn,
-                    request_index=turn.model_request_count,
-                    usage=exc.usage,
-                    cost=exc.cost,
-                )
-                if exc.raw_response:
-                    self._trace(
-                        TraceEvent.MODEL_RESPONSE,
-                        {
-                            "turn_id": turn.turn_id,
-                            "request_index": turn.model_request_count,
-                            "content": exc.raw_response,
-                            "repair_attempts": exc.repair_attempts,
-                            "repair_errors": exc.errors,
-                            "parse_failed": True,
-                            "usage": usage_payload,
-                            "cost": cost_payload,
-                        },
-                    )
-                return self._fail_action_protocol_turn(exc, turn)
-            action = action_result.action
-            self.state.json_repair_attempts += action_result.repair_attempts
-            self.state.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
-            turn.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
-            fallback_attempts = getattr(self.llm_client, "last_attempts", None)
-            if fallback_attempts:
-                self._trace(
-                    TraceEvent.LLM_FALLBACK_ATTEMPTS,
-                    {
-                        "turn_id": turn.turn_id,
-                        "request_index": turn.model_request_count,
-                        "attempts": [
-                            attempt.to_dict() if hasattr(attempt, "to_dict") else {"attempt": str(attempt)}
-                            for attempt in fallback_attempts
-                        ],
-                    },
-                )
-            usage_payload, cost_payload = self._record_model_accounting(
-                turn,
-                request_index=turn.model_request_count,
-                usage=action_result.usage,
-                cost=action_result.cost,
-                fallback_attempts=fallback_attempts,
-            )
-            self._trace(
-                TraceEvent.MODEL_RESPONSE,
-                {
-                    "turn_id": turn.turn_id,
-                    "request_index": turn.model_request_count,
-                    "content": action_result.raw_response,
-                    "repair_attempts": action_result.repair_attempts,
-                    "repair_errors": action_result.errors,
-                    "usage": usage_payload,
-                    "cost": cost_payload,
-                    "metadata": action_result.metadata,
-                },
-            )
-            self._trace(TraceEvent.PARSED_ACTION, format_action_trace(action))
-            self._trace(TraceEvent.MODEL_RESPONSE_PARSED, format_action_trace(action))
-
-            if isinstance(action, PlanAction):
-                return self._handle_plan_action(action, turn, require_plan=require_plan)
-
-            if isinstance(action, PlanStepUpdateAction):
-                step_update_response = self._handle_plan_step_update(action, turn, require_plan=require_plan)
-                if step_update_response is not None:
-                    return step_update_response
-                continue
-
-            if isinstance(action, FinalAnswerAction):
-                if require_plan:
-                    if turn.planning_feedback_count >= 2:
-                        return self._fail_turn("Planning failed because the model answered directly instead of returning a plan.", turn)
-                    self._request_plan_revision(
-                        turn,
-                        feedback=(
-                            "Planning feedback: the user explicitly requested /plan, so do not answer directly. "
-                            "Use read-only reconnaissance tools if codebase context is needed, then return a plan action "
-                            "with concrete implementation steps that can be approved or rejected."
-                        ),
-                    )
-                    return self._run_action_loop(turn, require_plan=True)
-
-                if self._approved_plan_incomplete(turn):
-                    if turn.plan_execution_feedback_count >= 1:
-                        return self._fail_turn(
-                            "Plan execution failed because the model returned a final answer before completing the approved plan.",
-                            turn,
-                        )
-                    self._request_plan_execution_feedback(
-                        turn,
-                        feedback=(
-                            "Plan execution feedback: the approved plan is not complete. "
-                            "Continue the current executable step with a tool call, or return a plan_step_update "
-                            "if the step's acceptance criteria are already satisfied. Do not return final_answer yet."
-                        ),
-                    )
-                    return self._run_action_loop(turn, require_plan=False)
-
-                if self._final_answer_needs_revision(action.content, turn):
-                    return self._run_action_loop(turn, require_plan=False)
-
-                return self._complete_final_answer(action.content, turn)
-
-            if isinstance(action, ToolCallAction):
-                if require_plan:
-                    if action.tool_name not in READ_ONLY_PLANNING_TOOL_NAMES:
-                        allowed_tools = format_read_only_planning_tools()
-                        return self._fail_turn(
-                            "Planning can only use read-only reconnaissance tools before approval. "
-                            f"Allowed planning tools: {allowed_tools}. "
-                            "Return a plan action or retry with one of the allowed tools.",
-                            turn,
-                        )
-                    phase = "planning"
-                else:
-                    phase = "execution"
-
-                if self._tool_call_count_for_phase(turn, phase) >= self.max_tool_calls_per_turn:
-                    if require_plan and phase == "planning" and not turn.planning_tool_limit_feedback_sent:
-                        turn.planning_tool_limit_feedback_sent = True
-                        self._request_plan_revision(
-                            turn,
-                            feedback=(
-                                "Planning feedback: the read-only reconnaissance tool budget is exhausted. "
-                                "Do not call more tools. Return a plan action now using the context already gathered. "
-                                "The plan must name concrete files/modules to change, behaviors to add, and tests to update."
-                            ),
-                        )
-                        return self._run_action_loop(turn, require_plan=True)
-                    return self._fail_turn(
-                        f"Tool call limit reached ({self.max_tool_calls_per_turn}) "
-                        f"during {phase} before a final answer.",
-                        turn,
-                    )
-                turn.tool_call_count += 1
-                plan_step = None if require_plan else self._active_plan_step_for_tool(turn)
-                tool_call_record = ToolCallRecord(
-                    tool_name=action.tool_name,
-                    arguments=action.arguments,
-                    iteration=turn.tool_call_count,
-                    phase=phase,
-                    plan_step_id=plan_step.id if plan_step else None,
-                )
-                turn.tool_calls.append(tool_call_record)
-                tool_call_payload = {
-                    **tool_call_record.to_dict(),
-                    "turn_id": turn.turn_id,
-                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-                }
-                self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
-                result = self._execute_tool_with_retries(action.tool_name, action.arguments, turn)
-                tool_call_record.finish(result)
-                state_tool_call = {
-                    "tool_name": action.tool_name,
-                    "arguments": action.arguments,
-                    "phase": phase,
-                    "success": result.success,
-                }
-                if tool_call_record.plan_step_id is not None:
-                    state_tool_call["plan_step_id"] = tool_call_record.plan_step_id
-                self.state.tool_calls.append(state_tool_call)
-                self._trace(
-                    TraceEvent.TOOL_CALL,
-                    {
-                        "turn_id": turn.turn_id,
-                        "tool_name": action.tool_name,
-                        "arguments": action.arguments,
-                        "phase": phase,
-                        "plan_step_id": tool_call_record.plan_step_id,
-                        "success": result.success,
-                        "error": result.error,
-                    },
-                )
-                completion_payload = {
-                    **tool_call_record.to_dict(),
-                    "turn_id": turn.turn_id,
-                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-                }
-                self._trace(
-                    TraceEvent.TOOL_CALL_COMPLETED if result.success else TraceEvent.TOOL_CALL_FAILED,
-                    completion_payload,
-                )
-                observation, output_metadata = self._format_tool_observation(action.tool_name, result)
-                self.state.observations.append(
-                    {
-                        "tool_name": action.tool_name,
-                        "observation": observation,
-                        "output_metadata": output_metadata,
-                    }
-                )
-                observation_record = ObservationRecord(
-                    tool_name=action.tool_name,
-                    content=observation,
-                    output_metadata=output_metadata,
-                )
-                turn.observations.append(observation_record)
-                self.memory.add_observation(observation)
-                self._trace(
-                    TraceEvent.TOOL_OBSERVATION,
-                    {
-                        "turn_id": turn.turn_id,
-                        "tool_name": action.tool_name,
-                        "observation": observation,
-                        "output_metadata": output_metadata,
-                    },
-                )
-                if plan_step is not None:
-                    if result.success:
-                        self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
-                    else:
-                        blocked_response = self._block_plan_step_after_tool_failure(
-                            turn,
-                            plan_step,
-                            tool_call_record,
-                            result,
-                            observation,
-                            output_metadata,
-                        )
-                        return blocked_response
+        return run_action_loop(self, turn, require_plan=require_plan)
 
     async def _run_action_loop_async(self, turn: TurnState, *, require_plan: bool) -> str:
         """Run model/tool iterations, awaiting async tool calls."""
-        while True:
-            blocked_response = self._prepare_plan_execution_step(turn, require_plan=require_plan)
-            if blocked_response is not None:
-                return blocked_response
-
-            prompt = self._build_prompt(turn, require_plan=require_plan)
-            prompt = await self._compact_context_if_needed_async(prompt, turn, require_plan=require_plan)
-            messages = prompt.messages
-            context_report = prompt.context_report.to_dict()
-            turn.context_reports.append(context_report)
-            self.state.last_context_report = context_report
-            turn.model_request_count += 1
-            self._trace(
-                TraceEvent.MODEL_REQUEST_STARTED,
-                format_model_request_trace(
-                    messages,
-                    max_prompt_chars=self.trace_max_prompt_chars,
-                    request_index=turn.model_request_count,
-                    turn_id=turn.turn_id,
-                    loaded_memory_ids=self.state.loaded_memory_ids,
-                    loaded_skill_names=self.state.loaded_skill_names,
-                    available_tool_names=turn.available_tool_names,
-                    context_report=context_report,
-                ),
-            )
-            try:
-                action_result = await asyncio.to_thread(
-                    self.llm_client.complete_action,
-                    messages,
-                    max_repair_attempts=self.max_json_repair_attempts,
-                    tools=self.tool_registry.list_tools(),
-                    hosted_mcp_servers=self.mcp_servers,
-                    mcp_approval_callback=lambda approval_request: self._resolve_hosted_mcp_approval(
-                        approval_request,
-                        turn,
-                    ),
-                )
-            except LLMActionError as exc:
-                self.state.json_repair_attempts += exc.repair_attempts
-                self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
-                usage_payload, cost_payload = self._record_model_accounting(
-                    turn,
-                    request_index=turn.model_request_count,
-                    usage=exc.usage,
-                    cost=exc.cost,
-                )
-                if exc.raw_response:
-                    self._trace(
-                        TraceEvent.MODEL_RESPONSE,
-                        {
-                            "turn_id": turn.turn_id,
-                            "request_index": turn.model_request_count,
-                            "content": exc.raw_response,
-                            "repair_attempts": exc.repair_attempts,
-                            "repair_errors": exc.errors,
-                            "parse_failed": True,
-                            "usage": usage_payload,
-                            "cost": cost_payload,
-                        },
-                    )
-                return self._fail_action_protocol_turn(exc, turn)
-
-            action = action_result.action
-            self.state.json_repair_attempts += action_result.repair_attempts
-            self.state.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
-            turn.errors.extend(f"JSON repair attempt: {error}" for error in action_result.errors)
-            fallback_attempts = getattr(self.llm_client, "last_attempts", None)
-            if fallback_attempts:
-                self._trace(
-                    TraceEvent.LLM_FALLBACK_ATTEMPTS,
-                    {
-                        "turn_id": turn.turn_id,
-                        "request_index": turn.model_request_count,
-                        "attempts": [
-                            attempt.to_dict() if hasattr(attempt, "to_dict") else {"attempt": str(attempt)}
-                            for attempt in fallback_attempts
-                        ],
-                    },
-                )
-            usage_payload, cost_payload = self._record_model_accounting(
-                turn,
-                request_index=turn.model_request_count,
-                usage=action_result.usage,
-                cost=action_result.cost,
-                fallback_attempts=fallback_attempts,
-            )
-            self._trace(
-                TraceEvent.MODEL_RESPONSE,
-                {
-                    "turn_id": turn.turn_id,
-                    "request_index": turn.model_request_count,
-                    "content": action_result.raw_response,
-                    "repair_attempts": action_result.repair_attempts,
-                    "repair_errors": action_result.errors,
-                    "usage": usage_payload,
-                    "cost": cost_payload,
-                    "metadata": action_result.metadata,
-                },
-            )
-            self._trace(TraceEvent.PARSED_ACTION, format_action_trace(action))
-            self._trace(TraceEvent.MODEL_RESPONSE_PARSED, format_action_trace(action))
-
-            if isinstance(action, PlanAction):
-                return self._handle_plan_action(action, turn, require_plan=require_plan)
-
-            if isinstance(action, PlanStepUpdateAction):
-                step_update_response = self._handle_plan_step_update(action, turn, require_plan=require_plan)
-                if step_update_response is not None:
-                    return step_update_response
-                continue
-
-            if isinstance(action, FinalAnswerAction):
-                if require_plan:
-                    if turn.planning_feedback_count >= 2:
-                        return self._fail_turn("Planning failed because the model answered directly instead of returning a plan.", turn)
-                    self._request_plan_revision(
-                        turn,
-                        feedback=(
-                            "Planning feedback: the user explicitly requested /plan, so do not answer directly. "
-                            "Use read-only reconnaissance tools if codebase context is needed, then return a plan action "
-                            "with concrete implementation steps that can be approved or rejected."
-                        ),
-                    )
-                    return await self._run_action_loop_async(turn, require_plan=True)
-
-                if self._approved_plan_incomplete(turn):
-                    if turn.plan_execution_feedback_count >= 1:
-                        return self._fail_turn(
-                            "Plan execution failed because the model returned a final answer before completing the approved plan.",
-                            turn,
-                        )
-                    self._request_plan_execution_feedback(
-                        turn,
-                        feedback=(
-                            "Plan execution feedback: the approved plan is not complete. "
-                            "Continue the current executable step with a tool call, or return a plan_step_update "
-                            "if the step's acceptance criteria are already satisfied. Do not return final_answer yet."
-                        ),
-                    )
-                    return await self._run_action_loop_async(turn, require_plan=False)
-
-                if await self._final_answer_needs_revision_async(action.content, turn):
-                    return await self._run_action_loop_async(turn, require_plan=False)
-
-                return self._complete_final_answer(action.content, turn)
-
-            if isinstance(action, ToolCallAction):
-                if require_plan:
-                    if action.tool_name not in READ_ONLY_PLANNING_TOOL_NAMES:
-                        allowed_tools = format_read_only_planning_tools()
-                        return self._fail_turn(
-                            "Planning can only use read-only reconnaissance tools before approval. "
-                            f"Allowed planning tools: {allowed_tools}. "
-                            "Return a plan action or retry with one of the allowed tools.",
-                            turn,
-                        )
-                    phase = "planning"
-                else:
-                    phase = "execution"
-
-                if self._tool_call_count_for_phase(turn, phase) >= self.max_tool_calls_per_turn:
-                    if require_plan and phase == "planning" and not turn.planning_tool_limit_feedback_sent:
-                        turn.planning_tool_limit_feedback_sent = True
-                        self._request_plan_revision(
-                            turn,
-                            feedback=(
-                                "Planning feedback: the read-only reconnaissance tool budget is exhausted. "
-                                "Do not call more tools. Return a plan action now using the context already gathered. "
-                                "The plan must name concrete files/modules to change, behaviors to add, and tests to update."
-                            ),
-                        )
-                        return await self._run_action_loop_async(turn, require_plan=True)
-                    return self._fail_turn(
-                        f"Tool call limit reached ({self.max_tool_calls_per_turn}) "
-                        f"during {phase} before a final answer.",
-                        turn,
-                    )
-                turn.tool_call_count += 1
-                plan_step = None if require_plan else self._active_plan_step_for_tool(turn)
-                tool_call_record = ToolCallRecord(
-                    tool_name=action.tool_name,
-                    arguments=action.arguments,
-                    iteration=turn.tool_call_count,
-                    phase=phase,
-                    plan_step_id=plan_step.id if plan_step else None,
-                )
-                turn.tool_calls.append(tool_call_record)
-                tool_call_payload = {
-                    **tool_call_record.to_dict(),
-                    "turn_id": turn.turn_id,
-                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-                }
-                self._trace(TraceEvent.TOOL_CALL_STARTED, tool_call_payload)
-                result = await self._execute_tool_with_retries_async(action.tool_name, action.arguments, turn)
-                tool_call_record.finish(result)
-                state_tool_call = {
-                    "tool_name": action.tool_name,
-                    "arguments": action.arguments,
-                    "phase": phase,
-                    "success": result.success,
-                }
-                if tool_call_record.plan_step_id is not None:
-                    state_tool_call["plan_step_id"] = tool_call_record.plan_step_id
-                self.state.tool_calls.append(state_tool_call)
-                self._trace(
-                    TraceEvent.TOOL_CALL,
-                    {
-                        "turn_id": turn.turn_id,
-                        "tool_name": action.tool_name,
-                        "arguments": action.arguments,
-                        "phase": phase,
-                        "plan_step_id": tool_call_record.plan_step_id,
-                        "success": result.success,
-                        "error": result.error,
-                    },
-                )
-                completion_payload = {
-                    **tool_call_record.to_dict(),
-                    "turn_id": turn.turn_id,
-                    "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
-                }
-                self._trace(
-                    TraceEvent.TOOL_CALL_COMPLETED if result.success else TraceEvent.TOOL_CALL_FAILED,
-                    completion_payload,
-                )
-                observation, output_metadata = self._format_tool_observation(action.tool_name, result)
-                self.state.observations.append(
-                    {
-                        "tool_name": action.tool_name,
-                        "observation": observation,
-                        "output_metadata": output_metadata,
-                    }
-                )
-                observation_record = ObservationRecord(
-                    tool_name=action.tool_name,
-                    content=observation,
-                    output_metadata=output_metadata,
-                )
-                turn.observations.append(observation_record)
-                self.memory.add_observation(observation)
-                self._trace(
-                    TraceEvent.TOOL_OBSERVATION,
-                    {
-                        "turn_id": turn.turn_id,
-                        "tool_name": action.tool_name,
-                        "observation": observation,
-                        "output_metadata": output_metadata,
-                    },
-                )
-                if plan_step is not None:
-                    if result.success:
-                        self._record_plan_tool_evidence(plan_step, tool_call_record, observation, output_metadata)
-                    else:
-                        blocked_response = self._block_plan_step_after_tool_failure(
-                            turn,
-                            plan_step,
-                            tool_call_record,
-                            result,
-                            observation,
-                            output_metadata,
-                        )
-                        return blocked_response
+        return await run_action_loop_async(self, turn, require_plan=require_plan)
 
     def _build_messages(self, turn: TurnState, *, require_plan: bool) -> list[dict[str, str]]:
         """Build the model input from prompt, tools, and short-term history."""
@@ -1195,7 +691,7 @@ class Agent:
         request_payload["summary_source_message_count"] = len(messages)
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
         try:
-            response = await asyncio.to_thread(self.llm_client.complete_response, summary_messages)
+            response = await self.llm_client.acomplete_response(summary_messages)
             raw_summary = response.content
         except LLMError as exc:
             self._trace(
@@ -1245,6 +741,33 @@ class Agent:
                 return self._fail_turn("Planning failed because the model kept proposing reconnaissance as the plan.", turn)
             self._request_plan_revision(turn, plan=plan)
             return self._run_action_loop(turn, require_plan=True)
+
+        turn.wait_for_plan_approval(plan)
+        self.state.active_plan = plan
+        self.state.pending_plan_turn_id = turn.turn_id
+        response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
+        self.memory.add_assistant_message(response)
+        self.state.messages = self.memory.recent()
+        self._trace(TraceEvent.PLAN_CREATED, {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()})
+        return response
+
+    async def _handle_plan_action_async(
+        self,
+        action: PlanAction,
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> str:
+        """Handle a proposed plan without falling back to the sync action loop."""
+        if not require_plan:
+            return self._fail_turn("Model proposed a new plan after execution had already been approved.", turn)
+
+        plan = action.plan
+        if self._plan_needs_revision(plan, turn):
+            if turn.planning_feedback_count >= 2:
+                return self._fail_turn("Planning failed because the model kept proposing reconnaissance as the plan.", turn)
+            self._request_plan_revision(turn, plan=plan)
+            return await self._run_action_loop_async(turn, require_plan=True)
 
         turn.wait_for_plan_approval(plan)
         self.state.active_plan = plan
@@ -1673,7 +1196,7 @@ class Agent:
         self._trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
 
         try:
-            response = await asyncio.to_thread(self.llm_client.complete_response, messages)
+            response = await self.llm_client.acomplete_response(messages)
             raw_response = response.content
         except LLMError as exc:
             return self._fail_open_reflection(
@@ -1882,6 +1405,9 @@ class Agent:
     def _tool_call_count_for_phase(self, turn: TurnState, phase: str) -> int:
         return sum(1 for tool_call in turn.tool_calls if tool_call.phase == phase)
 
+    def _read_only_planning_tool_names(self) -> frozenset[str]:
+        return read_only_planning_tool_names(self.tool_registry.list_tools())
+
     def _prepare_plan_execution_step(self, turn: TurnState, *, require_plan: bool) -> str | None:
         if require_plan:
             return None
@@ -1926,16 +1452,21 @@ class Agent:
         tool_call_record: ToolCallRecord,
         observation: str,
         output_metadata: dict,
+        *,
+        retry_metadata: dict | None = None,
     ) -> None:
+        metadata = {
+            "phase": tool_call_record.phase,
+            "output_metadata": output_metadata,
+            "tool_call": tool_call_record.to_dict(),
+        }
+        if retry_metadata is not None:
+            metadata["plan_step_retry"] = retry_metadata
         step.add_evidence(
             observation,
             tool_name=tool_call_record.tool_name,
             tool_call_iteration=tool_call_record.iteration,
-            metadata={
-                "phase": tool_call_record.phase,
-                "output_metadata": output_metadata,
-                "tool_call": tool_call_record.to_dict(),
-            },
+            metadata=metadata,
         )
 
     def _handle_plan_step_update(
@@ -1966,7 +1497,7 @@ class Agent:
                     f"Current step id is {step.id}; the model tried to update {action.step_id}."
                 ),
             )
-            return
+            return None
 
         step.add_evidence(action.evidence, tool_name="plan_step_update")
         if action.status == "completed":
@@ -1978,7 +1509,7 @@ class Agent:
         self._trace_plan_step_event(turn, step, TraceEvent.PLAN_STEP_BLOCKED)
         return self._block_turn(_format_plan_step_blocked_message(step), turn)
 
-    def _block_plan_step_after_tool_failure(
+    def _handle_plan_step_tool_failure(
         self,
         turn: TurnState,
         step: PlanStep,
@@ -1986,10 +1517,69 @@ class Agent:
         result: ToolResult,
         observation: str,
         output_metadata: dict,
-    ) -> str:
-        self._record_plan_tool_evidence(step, tool_call_record, observation, output_metadata)
+    ) -> str | None:
         reason = _format_tool_failure_reason(result)
-        step.block(reason)
+        retries_used = step.retry_count
+        retry_number = retries_used + 1
+        tool_calls_remaining = max(
+            0,
+            self.max_tool_calls_per_turn - self._tool_call_count_for_phase(turn, tool_call_record.phase),
+        )
+        retry_scheduled = retry_number <= step.retry_limit and tool_calls_remaining > 0
+        if retry_scheduled:
+            disposition = "retry_scheduled"
+            retries_used = retry_number
+        elif retry_number > step.retry_limit:
+            disposition = "retry_limit_exhausted"
+        else:
+            disposition = "tool_call_limit_exhausted"
+        retry_metadata = {
+            "disposition": disposition,
+            "failure_number": step.tool_failure_count + 1,
+            "retry_limit": step.retry_limit,
+            "retries_used": retries_used,
+            "retries_remaining": max(0, step.retry_limit - retries_used),
+            "tool_calls_remaining": tool_calls_remaining,
+            "failure_kind": result.failure_kind,
+            "error": result.error,
+        }
+        self._record_plan_tool_evidence(
+            step,
+            tool_call_record,
+            observation,
+            output_metadata,
+            retry_metadata=retry_metadata,
+        )
+
+        if retry_scheduled:
+            self._add_synthetic_observation(
+                turn,
+                tool_name="plan_step_retry",
+                content=(
+                    f"Plan step {step.id} remains in_progress after {reason} "
+                    f"Recovery attempt {retries_used} of {step.retry_limit} is available; "
+                    f"{step.retries_remaining} retries remain. Correct the arguments or choose a safe "
+                    "alternative that can satisfy the current step's acceptance criteria."
+                ),
+                output_metadata={
+                    "step_id": step.id,
+                    "step_status": step.status,
+                    **retry_metadata,
+                },
+            )
+            return None
+
+        blocked_reason = reason
+        if step.retry_limit:
+            if disposition == "retry_limit_exhausted":
+                retry_label = "retry" if step.retry_count == 1 else "retries"
+                blocked_reason = f"{reason} Step retry limit exhausted after {step.retry_count} {retry_label}."
+            else:
+                blocked_reason = (
+                    f"{reason} No step retry could run because the execution tool-call limit "
+                    f"({self.max_tool_calls_per_turn}) was reached."
+                )
+        step.block(blocked_reason)
         self._trace_plan_step_event(
             turn,
             step,
@@ -2343,7 +1933,9 @@ def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
     }
 
 
-def _coerce_turn_context_sections(values: list[TurnContextSection | dict | str] | None) -> list[TurnContextSection]:
+def _coerce_turn_context_sections(
+    values: list[TurnContextSection | dict[str, Any] | str] | None,
+) -> list[TurnContextSection]:
     if not values:
         return []
     sections: list[TurnContextSection] = []
@@ -2359,7 +1951,8 @@ def _coerce_turn_context_sections(values: list[TurnContextSection | dict | str] 
             if not isinstance(content, str) or not content.strip():
                 continue
             section_id = value.get("id") or value.get("source_id") or f"context-{index}"
-            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            raw_metadata = value.get("metadata")
+            metadata = cast(dict[str, Any], raw_metadata) if isinstance(raw_metadata, dict) else {}
             sections.append(
                 TurnContextSection(
                     id=str(section_id),

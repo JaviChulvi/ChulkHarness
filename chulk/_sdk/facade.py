@@ -27,9 +27,9 @@ from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.mcp import MCPServerConfig
-from chulk.results import MemoryProposal
+from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
-from chulk.tools import ToolExecutionContext
+from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 
 
@@ -241,7 +241,7 @@ class AgentHandle:
     def _no_pending_plan_result(self, content: str) -> RunResult:
         return RunResult(
             content=content,
-            status="no_pending_plan",
+            status=RunStatus.NO_PENDING_PLAN,
             turn_id=None,
             conversation_id=self.conversation_id,
             trace_path=self.trace_path,
@@ -342,8 +342,7 @@ class AsyncAgentHandle:
         return self.handle._run_result(content)
 
     async def plan(self, message: str) -> str:
-        self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.plan, message)
+        return (await self.plan_result(message)).content
 
     async def plan_result(
         self,
@@ -353,7 +352,16 @@ class AsyncAgentHandle:
         on_event: EventCallback | None = None,
     ) -> PlanResult:
         self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.plan_result, message, on_delta=on_delta, on_event=on_event)
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.run_planned_turn_async(message)
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        return self.handle._plan_result(content)
 
     async def approve(self) -> str:
         return (await self.approve_result()).content
@@ -424,6 +432,8 @@ class Agent:
         capabilities: Capabilities | None = None,
         memory_mode: MemoryMode | str | None = None,
         deps: object | None = None,
+        shell_execution_policy: ShellExecutionPolicy | None = None,
+        require_shell_containment: bool = False,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -442,6 +452,8 @@ class Agent:
                 redaction_fail_closed=redaction_fail_closed,
                 capabilities=selected_capabilities,
                 deps=deps,
+                shell_execution_policy=shell_execution_policy,
+                require_shell_containment=require_shell_containment,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -789,6 +801,8 @@ def _build_handle(
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -807,6 +821,8 @@ def _build_handle(
         redaction_fail_closed=redaction_fail_closed,
         capabilities=capabilities,
         deps=deps,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
     )
     return AgentHandle(runtime, on_event=on_event)
 

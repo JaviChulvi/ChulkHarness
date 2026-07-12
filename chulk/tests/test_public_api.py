@@ -49,7 +49,7 @@ from chulk import (
 from chulk._version import __version__ as source_version
 from chulk.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MODEL, load_config
 from chulk.core.actions import FinalAnswerAction
-from chulk.llm import FallbackChain, LLMActionResult, LLMCapabilities, LLMClient, LLMError
+from chulk.llm import FallbackChain, LLMActionResult, LLMCapabilities, LLMClient, LLMError, LLMModelCapabilities
 from chulk.presets import SoftwareEngineer, software_engineer
 from chulk.presets.software_engineer import DEFAULT_AGENT_PLAYBOOK, SOFTWARE_ENGINEER_SYSTEM_PROMPT
 from chulk.tools import (
@@ -83,7 +83,12 @@ class FailingLLMClient(LLMClient):
     model = "broken"
 
     def complete(self, messages: list[dict[str, str]]) -> str:
-        raise LLMError("provider unavailable")
+        raise LLMError(
+            "provider unavailable",
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class HostedMCPRecordingLLM(LLMClient):
@@ -921,6 +926,26 @@ def test_public_agent_config_supports_programmatic_values_and_env_fallback(monke
     assert handle.runtime.skill_registry.skills_dir == tmp_path / "custom-skills"
     assert handle.runtime.permission_policy.name == "read-only"
     assert handle.runtime.context_budget.max_prompt_tokens == 131_072
+
+
+def test_injected_client_model_capabilities_drive_runtime_budget(tmp_path):
+    client = FakeLLMClient([json.dumps({"type": "final_answer", "content": "configured"})])
+    client.model_capabilities = LLMModelCapabilities(
+        provider="custom",
+        model="small-context",
+        context_window_tokens=8_192,
+        default_response_reserve_tokens=1_024,
+    )
+
+    handle = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=client,
+        tools=[],
+        skills=[],
+    )
+
+    assert handle.runtime.context_budget.max_prompt_tokens == 8_192
+    assert handle.runtime.context_budget.input_token_budget == 7_168
 
 
 def test_public_agent_default_config_uses_cwd_runtime_and_read_only(monkeypatch, tmp_path):

@@ -15,11 +15,15 @@ CI examples. Set `CHULK_EXAMPLE_MODE=live` only for scripts that support an
 explicit live path.
 
 Most numbered examples call a live model and may incur provider charges. Install
-the matching provider extra first:
+all provider SDKs or the matching individual extra first:
 
 ```bash
-python -m pip install "chulkharness[openai]"
+python -m pip install "chulkharness[providers]"
 ```
+
+Use `[openai]` for `openai`, `deepseek`, `local`, `openai-compatible`,
+`openrouter`, or `bedrock`; `[anthropic]` for `anthropic`; and `[gemini]` for
+`gemini`.
 
 The distribution name is `chulkharness`; examples import `chulk`, and the CLI command is also `chulk`.
 
@@ -36,6 +40,16 @@ export CHULK_LLM_PROVIDER=local
 export CHULK_MODEL=your-local-model
 export CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
 ```
+
+The exact provider names are `openai`, `deepseek`, `local`,
+`openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`.
+`CHULK_MODEL` is mandatory for `openai-compatible`, `openrouter`, `anthropic`,
+`bedrock`, and `gemini`. See the provider guide for each provider's credential
+aliases and base-URL requirements.
+
+The automated provider tests use fake SDK clients and do not make live calls.
+Run live examples only with your own test account and verify model access,
+credentials, endpoint, billing, and quotas before relying on a provider.
 
 Example runtime state is written under `examples/runtime/`, which is ignored by
 Git.

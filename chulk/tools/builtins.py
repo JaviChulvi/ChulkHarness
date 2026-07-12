@@ -23,7 +23,12 @@ from chulk.tools.memory import (
 )
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolRegistry, ToolResult
-from chulk.tools.shell import shell_tool
+from chulk.tools.shell import (
+    DEFAULT_SHELL_STDERR_LIMIT_BYTES,
+    DEFAULT_SHELL_STDOUT_LIMIT_BYTES,
+    ShellExecutionPolicy,
+    shell_tool,
+)
 
 
 def create_default_tool_registry(
@@ -32,6 +37,11 @@ def create_default_tool_registry(
     memory_store: SQLiteMemoryStore | None = None,
     capabilities: Capabilities | None = None,
     memory_policy: MemoryPolicy | None = None,
+    *,
+    max_tool_stdout_bytes: int = DEFAULT_SHELL_STDOUT_LIMIT_BYTES,
+    max_tool_stderr_bytes: int = DEFAULT_SHELL_STDERR_LIMIT_BYTES,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
 ) -> ToolRegistry:
     """Create the default tool registry for the agent runtime."""
     selected = capabilities or Capabilities.full()
@@ -39,7 +49,16 @@ def create_default_tool_registry(
     if selected.utilities:
         registry.register(calculator_tool())
     if selected.shell:
-        registry.register(shell_tool(project_root, timeout_seconds=shell_timeout_seconds))
+        registry.register(
+            shell_tool(
+                project_root,
+                timeout_seconds=shell_timeout_seconds,
+                stdout_limit_bytes=max_tool_stdout_bytes,
+                stderr_limit_bytes=max_tool_stderr_bytes,
+                execution_policy=shell_execution_policy,
+                require_containment=require_shell_containment,
+            )
+        )
     if selected.files in {FileAccess.READ, FileAccess.WRITE}:
         registry.register(read_file_tool(project_root))
         registry.register(list_files_tool(project_root))

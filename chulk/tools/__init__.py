@@ -2,7 +2,14 @@
 
 from chulk.tools.builtins import create_default_tool_registry
 from chulk.tools.calculator import calculator_tool
-from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from chulk.tools.files import (
+    FileReadPolicy,
+    apply_patch_tool,
+    list_files_tool,
+    read_file_tool,
+    search_files_tool,
+    write_file_tool,
+)
 from chulk.tools.memory import (
     archive_memory_tool,
     compact_memories_tool,
@@ -52,7 +59,14 @@ from chulk.tools.public import (
     update_memory,
     write_file,
 )
-from chulk.tools.shell import run_shell_command, shell_tool
+from chulk.tools.shell import (
+    DirectShellExecutionPolicy,
+    ShellExecutionDecision,
+    ShellExecutionPolicy,
+    ShellExecutionRequest,
+    run_shell_command,
+    shell_tool,
+)
 
 __all__ = [
     "Tool",
@@ -63,6 +77,11 @@ __all__ = [
     "ToolExecutionContext",
     "ToolContext",
     "ToolFailureKind",
+    "FileReadPolicy",
+    "DirectShellExecutionPolicy",
+    "ShellExecutionDecision",
+    "ShellExecutionPolicy",
+    "ShellExecutionRequest",
     "ToolRegistry",
     "ToolResult",
     "PermissionDecision",

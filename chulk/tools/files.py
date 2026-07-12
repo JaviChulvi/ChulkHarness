@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -15,7 +16,6 @@ from chulk.tools.registry import Tool, ToolResult
 
 
 IGNORED_DIRS = {
-    ".git",
     ".venv",
     ".conda",
     "__pycache__",
@@ -26,12 +26,13 @@ IGNORED_DIRS = {
     "build",
     "dist",
     "node_modules",
-    "traces",
     "chulkharness.egg-info",
     "chulk.egg-info",
 }
+SENSITIVE_READ_DIRS = {".git", "traces"}
 UNSAFE_WRITE_DIRS = {
     *IGNORED_DIRS,
+    *SENSITIVE_READ_DIRS,
     ".mypy_cache",
     ".ruff_cache",
     ".tox",
@@ -42,7 +43,11 @@ UNSAFE_WRITE_DIRS = {
 }
 UNSAFE_SECRET_NAMES = {
     ".env",
+    ".envrc",
+    ".git-credentials",
     ".netrc",
+    ".npmrc",
+    ".pypirc",
     "credentials",
     "credentials.json",
     "service-account.json",
@@ -52,10 +57,25 @@ UNSAFE_SECRET_NAMES = {
     "id_ed25519",
 }
 UNSAFE_SECRET_MARKERS = {"api_key", "apikey", "credential", "credentials", "password", "secret", "secrets", "token", "tokens"}
+UNSAFE_KEY_MARKERS = {"key", "keys", "private_key", "private_keys", "secret_key", "ssh_key", "ssh_private_key"}
 UNSAFE_SECRET_SUFFIXES = {"", ".env", ".ini", ".json", ".key", ".pem", ".p12", ".pfx", ".toml", ".txt", ".yaml", ".yml"}
 UNSAFE_SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+SENSITIVE_KEY_SUFFIXES = {".key", ".p12", ".pem", ".pfx"}
+SAFE_ENV_TEMPLATE_SUFFIXES = {".example", ".sample", ".template"}
+SQLITE_SIDECAR_SUFFIXES = {"journal", "shm", "wal"}
+SENSITIVE_BACKUP_SUFFIXES = {".bak", ".backup", ".old", ".orig"}
 MAX_TEXT_FILE_BYTES = 200_000
 HUNK_HEADER_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
+
+
+@dataclass(frozen=True)
+class FileReadPolicy:
+    """Host-selected access policy for model-facing file read tools."""
+
+    allow_sensitive_paths: bool = False
+
+
+DEFAULT_FILE_READ_POLICY = FileReadPolicy()
 
 
 @dataclass(frozen=True)
@@ -97,7 +117,11 @@ class PendingPatchWrite:
     new_text: str
 
 
-def read_file_tool(project_root: Path) -> Tool:
+def read_file_tool(
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> Tool:
     return Tool(
         name="read_file",
         description="Read a UTF-8 text file inside the project directory.",
@@ -113,7 +137,7 @@ def read_file_tool(project_root: Path) -> Tool:
             "required": ["path"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: read_file(arguments, project_root),
+        callable=lambda arguments: read_file(arguments, project_root, read_policy=read_policy),
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
@@ -177,7 +201,11 @@ def apply_patch_tool(project_root: Path) -> Tool:
     )
 
 
-def list_files_tool(project_root: Path) -> Tool:
+def list_files_tool(
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> Tool:
     return Tool(
         name="list_files",
         description="List files inside the project directory.",
@@ -205,13 +233,17 @@ def list_files_tool(project_root: Path) -> Tool:
             "required": [],
             "additionalProperties": False,
         },
-        callable=lambda arguments: list_files(arguments, project_root),
+        callable=lambda arguments: list_files(arguments, project_root, read_policy=read_policy),
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
 
-def search_files_tool(project_root: Path) -> Tool:
+def search_files_tool(
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> Tool:
     return Tool(
         name="search_files",
         description="Search text files inside the project directory.",
@@ -243,23 +275,32 @@ def search_files_tool(project_root: Path) -> Tool:
             "required": ["query"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: search_files(arguments, project_root),
+        callable=lambda arguments: search_files(arguments, project_root, read_policy=read_policy),
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
 
-def read_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
-    path = resolve_inside_root(project_root, arguments["path"])
+def read_file(
+    arguments: dict[str, Any],
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> ToolResult:
+    root = project_root.resolve()
+    path = resolve_inside_root(root, arguments["path"])
+    safety_error = safe_read_error(path, root, read_policy, requested_path=arguments["path"])
+    if safety_error:
+        return ToolResult("read_file", False, safety_error, error="sensitive_path")
     if not path.exists() or not path.is_file():
-        return ToolResult("read_file", False, f"File not found: {path.relative_to(project_root)}", error="not_found")
+        return ToolResult("read_file", False, f"File not found: {path.relative_to(root)}", error="not_found")
     if path.stat().st_size > MAX_TEXT_FILE_BYTES:
         return ToolResult("read_file", False, "File is too large to read safely.", error="file_too_large")
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return ToolResult("read_file", False, "File is not valid UTF-8 text.", error="not_text")
-    return ToolResult("read_file", True, content, metadata={"path": str(path.relative_to(project_root))})
+    return ToolResult("read_file", True, content, metadata={"path": str(path.relative_to(root))})
 
 
 def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
@@ -313,7 +354,7 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
         pending.path.parent.mkdir(parents=True, exist_ok=True)
         pending.path.write_text(pending.new_text, encoding="utf-8")
 
-    changes = [
+    changes: list[dict[str, Any]] = [
         {
             "path": pending.relative_path,
             "status": pending.status,
@@ -339,43 +380,79 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     )
 
 
-def list_files(arguments: dict[str, Any], project_root: Path) -> ToolResult:
-    directory = resolve_inside_root(project_root, arguments.get("path", "."))
+def list_files(
+    arguments: dict[str, Any],
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> ToolResult:
+    root = project_root.resolve()
+    requested_path = arguments.get("path", ".")
+    directory = resolve_inside_root(root, requested_path)
     pattern = arguments.get("pattern", "*")
     recursive = arguments.get("recursive", False)
     max_results = min(arguments.get("max_results", 100), 500)
 
+    safety_error = safe_read_error(directory, root, read_policy, requested_path=requested_path)
+    if safety_error:
+        return ToolResult("list_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("list_files", False, f"Directory not found: {directory.relative_to(project_root)}", error="not_found")
+        return ToolResult("list_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
 
     iterator = directory.rglob(pattern) if recursive else directory.glob(pattern)
     results: list[str] = []
     for path in iterator:
-        if _is_ignored(path, project_root) or not path.is_file():
+        if (
+            safe_read_error(path, root, read_policy) is not None
+            or _is_ignored(path, root)
+            or not path.is_file()
+        ):
             continue
-        results.append(str(path.relative_to(project_root)))
+        results.append(str(path.relative_to(root)))
         if len(results) >= max_results:
             break
     return ToolResult("list_files", True, "\n".join(sorted(results)) or "No files found.")
 
 
-def search_files(arguments: dict[str, Any], project_root: Path) -> ToolResult:
+def search_files(
+    arguments: dict[str, Any],
+    project_root: Path,
+    *,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+) -> ToolResult:
+    root = project_root.resolve()
     query = arguments["query"]
-    directory = resolve_inside_root(project_root, arguments.get("path", "."))
+    requested_path = arguments.get("path", ".")
+    directory = resolve_inside_root(root, requested_path)
     pattern = arguments.get("pattern", "*")
     max_results = min(arguments.get("max_results", 100), 500)
+    safety_error = safe_read_error(directory, root, read_policy, requested_path=requested_path)
+    if safety_error:
+        return ToolResult("search_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("search_files", False, f"Directory not found: {directory.relative_to(project_root)}", error="not_found")
+        return ToolResult("search_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
 
     if shutil.which("rg"):
-        return _search_with_rg(project_root, directory, query, pattern, max_results)
-    return _search_with_python(project_root, directory, query, pattern, max_results)
+        return _search_with_rg(root, directory, query, pattern, max_results, read_policy)
+    return _search_with_python(root, directory, query, pattern, max_results, read_policy)
 
 
-def _search_with_rg(project_root: Path, directory: Path, query: str, pattern: str, max_results: int) -> ToolResult:
-    command = ["rg", "--line-number", "--color", "never", "--glob", pattern]
+def _search_with_rg(
+    project_root: Path,
+    directory: Path,
+    query: str,
+    pattern: str,
+    max_results: int,
+    read_policy: FileReadPolicy,
+) -> ToolResult:
+    command = ["rg", "--json", "--line-number", "--color", "never", "--hidden", "--glob", pattern]
+    if read_policy.allow_sensitive_paths:
+        command.append("--no-ignore")
     for ignored_dir in sorted(IGNORED_DIRS):
         command.extend(["--glob", f"!{ignored_dir}/**", "--glob", f"!**/{ignored_dir}/**"])
+    if not read_policy.allow_sensitive_paths:
+        for sensitive_dir in sorted(SENSITIVE_READ_DIRS):
+            command.extend(["--glob", f"!{sensitive_dir}/**", "--glob", f"!**/{sensitive_dir}/**"])
     command.extend(["--", query, str(directory)])
 
     completed = subprocess.run(
@@ -387,18 +464,49 @@ def _search_with_rg(project_root: Path, directory: Path, query: str, pattern: st
         check=False,
     )
     if completed.returncode not in {0, 1}:
-        return ToolResult("search_files", False, "Search failed.", stderr=completed.stderr, error="search_failed")
-    lines = completed.stdout.splitlines()[:max_results]
-    normalized = []
-    for line in lines:
-        normalized.append(line.replace(str(project_root) + "/", ""))
-    return ToolResult("search_files", True, "\n".join(normalized) or "No matches found.")
+        return ToolResult("search_files", False, "Search failed.", error="search_failed")
+    results: list[str] = []
+    for raw_result in completed.stdout.splitlines():
+        try:
+            result = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return ToolResult("search_files", False, "Search returned invalid output.", error="search_failed")
+        if result.get("type") != "match":
+            continue
+        data = result["data"]
+        path_text = data["path"].get("text")
+        line_text = data["lines"].get("text")
+        if path_text is None or line_text is None:
+            continue
+        path = Path(path_text)
+        if not path.is_absolute():
+            path = project_root / path
+        if safe_read_error(path, project_root, read_policy) is not None:
+            continue
+        relative_path = path.relative_to(project_root)
+        normalized_line = line_text.rstrip("\r\n")
+        results.append(f"{relative_path}:{data['line_number']}:{normalized_line}")
+        if len(results) >= max_results:
+            break
+    return ToolResult("search_files", True, "\n".join(results) or "No matches found.")
 
 
-def _search_with_python(project_root: Path, directory: Path, query: str, pattern: str, max_results: int) -> ToolResult:
+def _search_with_python(
+    project_root: Path,
+    directory: Path,
+    query: str,
+    pattern: str,
+    max_results: int,
+    read_policy: FileReadPolicy,
+) -> ToolResult:
     results: list[str] = []
     for path in directory.rglob(pattern):
-        if _is_ignored(path, project_root) or not path.is_file() or path.stat().st_size > MAX_TEXT_FILE_BYTES:
+        if (
+            safe_read_error(path, project_root, read_policy) is not None
+            or _is_ignored(path, project_root)
+            or not path.is_file()
+            or path.stat().st_size > MAX_TEXT_FILE_BYTES
+        ):
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -650,9 +758,99 @@ def safe_write_error(path: Path, project_root: Path) -> str | None:
     return None
 
 
+def safe_read_error(
+    path: Path,
+    project_root: Path,
+    read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
+    *,
+    requested_path: str | None = None,
+) -> str | None:
+    """Return a host-policy reason when model-facing file tools must not read a path."""
+    root = project_root.resolve()
+    try:
+        resolved_relative = path.resolve().relative_to(root)
+    except ValueError:
+        return "Path is outside the project root"
+
+    if read_policy.allow_sensitive_paths:
+        return None
+
+    if requested_path is not None and _is_sensitive_read_parts(Path(requested_path).parts):
+        return "Refusing to read a sensitive file or runtime path."
+
+    try:
+        lexical_relative = path.relative_to(root)
+    except ValueError:
+        lexical_relative = resolved_relative
+    if _is_sensitive_read_parts(lexical_relative.parts) or _is_sensitive_read_parts(resolved_relative.parts):
+        return "Refusing to read a sensitive file or runtime path."
+    return None
+
+
 def _is_ignored(path: Path, project_root: Path) -> bool:
     relative_parts = path.relative_to(project_root).parts
     return any(part in IGNORED_DIRS for part in relative_parts)
+
+
+def _is_sensitive_read_parts(parts: tuple[str, ...]) -> bool:
+    lowered_parts = tuple(part.lower() for part in parts if part not in {"", "."})
+    if not lowered_parts:
+        return False
+    if any(part in SENSITIVE_READ_DIRS for part in lowered_parts):
+        return True
+
+    for index, part in enumerate(lowered_parts):
+        if part != ".chulk":
+            continue
+        runtime_parts = lowered_parts[index + 1 :]
+        if not runtime_parts or runtime_parts[0] != "skills":
+            return True
+
+    return _is_sensitive_read_name(lowered_parts[-1])
+
+
+def _is_sensitive_read_name(name: str) -> bool:
+    candidate_names = [name]
+    unwrapped_name = name
+    while True:
+        if unwrapped_name.endswith("~"):
+            unwrapped_name = unwrapped_name[:-1]
+        else:
+            backup_suffix = next((suffix for suffix in SENSITIVE_BACKUP_SUFFIXES if unwrapped_name.endswith(suffix)), None)
+            if backup_suffix is None:
+                break
+            unwrapped_name = unwrapped_name[: -len(backup_suffix)]
+        candidate_names.append(unwrapped_name)
+
+    return any(_is_base_sensitive_read_name(candidate_name) for candidate_name in candidate_names)
+
+
+def _is_base_sensitive_read_name(name: str) -> bool:
+    if _is_secret_env_name(name) or name in UNSAFE_SECRET_NAMES:
+        return True
+    if _looks_like_sqlite_state(name) or Path(name).suffix in SENSITIVE_KEY_SUFFIXES:
+        return True
+    suffix = Path(name).suffix
+    return suffix in UNSAFE_SECRET_SUFFIXES and (_looks_secret_like_name(name) or _looks_key_like_name(name))
+
+
+def _is_secret_env_name(name: str) -> bool:
+    if name == ".env" or name == ".envrc":
+        return True
+    if not name.startswith(".env."):
+        return False
+    return not any(name.endswith(suffix) for suffix in SAFE_ENV_TEMPLATE_SUFFIXES)
+
+
+def _looks_like_sqlite_state(name: str) -> bool:
+    if any(name.endswith(suffix) for suffix in UNSAFE_SQLITE_SUFFIXES):
+        return True
+    database_name, separator, sidecar = name.rpartition("-")
+    return bool(
+        separator
+        and sidecar in SQLITE_SIDECAR_SUFFIXES
+        and any(database_name.endswith(suffix) for suffix in UNSAFE_SQLITE_SUFFIXES)
+    )
 
 
 def _looks_secret_like_name(name: str) -> bool:
@@ -665,6 +863,12 @@ def _looks_secret_like_name(name: str) -> bool:
         or "apikey" in parts
         or bool(parts & UNSAFE_SECRET_MARKERS)
     )
+
+
+def _looks_key_like_name(name: str) -> bool:
+    stem = name.rsplit(".", 1)[0]
+    normalized = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
+    return normalized in UNSAFE_KEY_MARKERS or "private_key" in normalized or "secret_key" in normalized
 
 
 def _relative_path(path: Path, project_root: Path) -> str:

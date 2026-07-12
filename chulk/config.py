@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from chulk.llm import supported_llm_providers
+from chulk.llm.providers.compatible import DEFAULT_OPENROUTER_BASE_URL
 from chulk.mcp import MCPServerConfig, load_mcp_servers
 from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
 
@@ -63,6 +64,16 @@ class Config:
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
     local_api_key: str | None = None
     local_base_url: str = DEFAULT_LOCAL_BASE_URL
+    openai_compatible_api_key: str | None = None
+    openai_compatible_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = DEFAULT_OPENROUTER_BASE_URL
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
+    bedrock_api_key: str | None = None
+    bedrock_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
     llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
@@ -153,8 +164,22 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         supported = ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
         raise ConfigValueError("CHULK_LLM_PROVIDER", f"CHULK_LLM_PROVIDER must be one of: {supported}")
 
-    default_model = _default_model_for_provider(llm_provider)
-    model = env.get("CHULK_MODEL") or default_model
+    model = _configured_model(env, llm_provider)
+    bedrock_base_url = _bedrock_base_url(env)
+    llm_fallback_providers = _parse_fallback_providers(
+        env,
+        primary_provider=llm_provider,
+        primary_model=model,
+    )
+    bedrock_is_configured = llm_provider == "bedrock" or any(
+        fallback.provider == "bedrock" for fallback in llm_fallback_providers
+    )
+    if bedrock_is_configured and bedrock_base_url is None:
+        raise ConfigValueError(
+            "CHULK_BEDROCK_BASE_URL",
+            "CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL is required when Bedrock "
+            "is configured as a primary or fallback provider",
+        )
     runtime_dir = _resolve_config_path(env.get("CHULK_RUNTIME_DIR") or ".chulk", base=project_root)
     mcp_config_path = runtime_dir / "mcp.json"
     mcp_servers = load_mcp_servers(mcp_config_path, env)
@@ -176,11 +201,27 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
         local_api_key=env.get("CHULK_LOCAL_API_KEY") or None,
         local_base_url=env.get("CHULK_LOCAL_BASE_URL") or DEFAULT_LOCAL_BASE_URL,
-        llm_fallback_providers=_parse_fallback_providers(
-            env,
-            primary_provider=llm_provider,
-            primary_model=model,
+        openai_compatible_api_key=env.get("CHULK_OPENAI_COMPATIBLE_API_KEY") or None,
+        openai_compatible_base_url=env.get("CHULK_OPENAI_COMPATIBLE_BASE_URL") or None,
+        openrouter_api_key=env.get("CHULK_OPENROUTER_API_KEY") or env.get("OPENROUTER_API_KEY") or None,
+        openrouter_base_url=env.get("CHULK_OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL,
+        anthropic_api_key=env.get("CHULK_ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY") or None,
+        anthropic_base_url=env.get("CHULK_ANTHROPIC_BASE_URL") or None,
+        bedrock_api_key=(
+            env.get("CHULK_BEDROCK_API_KEY")
+            or env.get("BEDROCK_API_KEY")
+            or env.get("AWS_BEARER_TOKEN_BEDROCK")
+            or None
         ),
+        bedrock_base_url=bedrock_base_url,
+        gemini_api_key=_first_nonblank_env(
+            env,
+            "CHULK_GEMINI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ),
+        gemini_base_url=_first_nonblank_env(env, "CHULK_GEMINI_BASE_URL"),
+        llm_fallback_providers=llm_fallback_providers,
         history_limit=_env_int(env, "CHULK_HISTORY_LIMIT", 20),
         max_tool_calls_per_turn=_env_int(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", 5),
         max_skills_per_turn=_env_int(env, "CHULK_MAX_SKILLS_PER_TURN", DEFAULT_MAX_SKILLS_PER_TURN),
@@ -232,12 +273,40 @@ def _default_skills_dirs(project_skills_dir: Path) -> tuple[Path, ...]:
     return (bundled_skills_dir(), project_skills_dir)
 
 
-def _default_model_for_provider(provider: str) -> str:
-    if provider == "deepseek":
-        return DEFAULT_DEEPSEEK_MODEL
-    if provider == "local":
-        return DEFAULT_LOCAL_MODEL
-    return DEFAULT_MODEL
+def _configured_model(env: Mapping[str, str], provider: str) -> str:
+    configured = (env.get("CHULK_MODEL") or "").strip()
+    if configured:
+        return configured
+    default = _default_model_for_provider(provider)
+    if default is None:
+        raise ConfigValueError(
+            "CHULK_MODEL",
+            f"CHULK_MODEL is required when CHULK_LLM_PROVIDER={provider}",
+        )
+    return default
+
+
+def _default_model_for_provider(provider: str) -> str | None:
+    return {
+        "openai": DEFAULT_MODEL,
+        "deepseek": DEFAULT_DEEPSEEK_MODEL,
+        "local": DEFAULT_LOCAL_MODEL,
+    }.get(provider)
+
+
+def _bedrock_base_url(env: Mapping[str, str]) -> str | None:
+    value = env.get("CHULK_BEDROCK_BASE_URL") or env.get("CHULK_BASE_URL")
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
+def _first_nonblank_env(env: Mapping[str, str], *keys: str) -> str | None:
+    for key in keys:
+        value = env.get(key)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
 
 
 def _parse_fallback_providers(
@@ -258,12 +327,16 @@ def _parse_fallback_providers(
             continue
         provider, separator, raw_model = item.partition(":")
         provider = provider.strip().lower()
-        model = raw_model.strip() if separator else _default_model_for_provider(provider)
         if not provider:
             raise ValueError("CHULK_LLM_FALLBACK_PROVIDERS contains an empty provider name")
         if provider not in SUPPORTED_LLM_PROVIDERS:
             supported = ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
             raise ValueError(f"CHULK_LLM_FALLBACK_PROVIDERS must use providers from: {supported}")
+        model = raw_model.strip() if separator else _default_model_for_provider(provider)
+        if model is None:
+            raise ValueError(
+                f"CHULK_LLM_FALLBACK_PROVIDERS entries for {provider} must include an explicit model"
+            )
         if not model:
             raise ValueError("CHULK_LLM_FALLBACK_PROVIDERS entries with ':' must include a model")
 

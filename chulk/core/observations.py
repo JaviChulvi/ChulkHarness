@@ -20,11 +20,11 @@ def format_tool_observation(
     max_stdout_chars: int,
     max_stderr_chars: int,
     artifact_writer: ArtifactWriter,
-) -> tuple[str, dict]:
+) -> tuple[str, dict[str, Any]]:
     """Format one tool result as a bounded model observation plus metadata."""
     status = "success" if result.success else "error"
     parts = [f"Tool {result.tool_name} finished with {status}.", result.observation]
-    metadata = {
+    metadata: dict[str, Any] = {
         "requested_tool_name": requested_tool_name,
         "tool_name": result.tool_name,
         "success": result.success,
@@ -74,7 +74,7 @@ def format_tool_observation(
 
 def _append_artifact_note(
     parts: list[str],
-    metadata: dict,
+    metadata: dict[str, Any],
     artifact_writer: ArtifactWriter,
     tool_name: str,
     field: str,
@@ -91,7 +91,7 @@ def _append_artifact_note(
     parts.append(_artifact_note(field, artifact))
 
 
-def _artifact_note(field: str, artifact: dict) -> str:
+def _artifact_note(field: str, artifact: dict[str, Any]) -> str:
     return (
         f"[full {field} saved to {artifact['path']}; "
         f"chars={artifact['char_count']}; sha256={artifact['sha256']}]"

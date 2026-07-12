@@ -52,6 +52,16 @@ class AgentConfig:
     deepseek_base_url: str | None = None
     local_api_key: str | None = None
     local_base_url: str | None = None
+    openai_compatible_api_key: str | None = None
+    openai_compatible_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
+    bedrock_api_key: str | None = None
+    bedrock_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
     permission_profile: str | None = None
     store_path: str | Path | None = None
     traces_dir: str | Path | None = None
@@ -80,8 +90,9 @@ class AgentConfig:
             object.__setattr__(self, "llm_fallback_providers", tuple(self.llm_fallback_providers))
         if self.memory_mode is not None:
             base = self.capabilities or Capabilities.read_only()
-            object.__setattr__(self, "capabilities", base.with_memory(self.memory_mode))
-            object.__setattr__(self, "memory_mode", self.capabilities.memory)
+            capabilities = base.with_memory(self.memory_mode)
+            object.__setattr__(self, "capabilities", capabilities)
+            object.__setattr__(self, "memory_mode", capabilities.memory)
 
     def resolved_capabilities(self) -> Capabilities:
         """Return explicit capabilities or the safe SDK default."""
@@ -168,6 +179,94 @@ class AgentConfig:
             values["local_base_url"] = base_url
         return cls.from_env(provider="local", model=model or DEFAULT_LOCAL_MODEL, **values)
 
+    @classmethod
+    def openai_compatible(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for a hosted OpenAI-compatible endpoint."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["openai_compatible_api_key"] = api_key
+        if base_url is not None:
+            values["openai_compatible_base_url"] = base_url
+        return cls.from_env(provider="openai-compatible", model=model, **values)
+
+    @classmethod
+    def openrouter(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for OpenRouter-backed agents."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["openrouter_api_key"] = api_key
+        if base_url is not None:
+            values["openrouter_base_url"] = base_url
+        return cls.from_env(provider="openrouter", model=model, **values)
+
+    @classmethod
+    def anthropic(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for Anthropic-backed agents."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["anthropic_api_key"] = api_key
+        if base_url is not None:
+            values["anthropic_base_url"] = base_url
+        return cls.from_env(provider="anthropic", model=model, **values)
+
+    @classmethod
+    def bedrock(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for an AWS Bedrock OpenAI-compatible endpoint."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["bedrock_api_key"] = api_key
+        if base_url is not None:
+            values["bedrock_base_url"] = base_url
+        return cls.from_env(provider="bedrock", model=model, **values)
+
+    @classmethod
+    def gemini(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for Google Gemini-backed agents."""
+        resolved_model = model.strip()
+        if not resolved_model:
+            raise ValueError("AgentConfig.gemini requires a non-empty model")
+        values = dict(kwargs)
+        if api_key is not None:
+            values["gemini_api_key"] = api_key
+        if base_url is not None:
+            values["gemini_base_url"] = base_url
+        return cls.from_env(provider="gemini", model=resolved_model, **values)
+
     def to_config(self) -> Config:
         """Build the internal runtime config."""
         env = dict(os.environ)
@@ -182,6 +281,16 @@ class AgentConfig:
         _set_env(env, "CHULK_DEEPSEEK_BASE_URL", self.deepseek_base_url)
         _set_env(env, "CHULK_LOCAL_API_KEY", self.local_api_key)
         _set_env(env, "CHULK_LOCAL_BASE_URL", self.local_base_url)
+        _set_env(env, "CHULK_OPENAI_COMPATIBLE_API_KEY", self.openai_compatible_api_key)
+        _set_env(env, "CHULK_OPENAI_COMPATIBLE_BASE_URL", self.openai_compatible_base_url)
+        _set_env(env, "CHULK_OPENROUTER_API_KEY", self.openrouter_api_key)
+        _set_env(env, "CHULK_OPENROUTER_BASE_URL", self.openrouter_base_url)
+        _set_env(env, "CHULK_ANTHROPIC_API_KEY", self.anthropic_api_key)
+        _set_env(env, "CHULK_ANTHROPIC_BASE_URL", self.anthropic_base_url)
+        _set_env(env, "CHULK_BEDROCK_API_KEY", self.bedrock_api_key)
+        _set_env(env, "CHULK_BEDROCK_BASE_URL", self.bedrock_base_url)
+        _set_env(env, "CHULK_GEMINI_API_KEY", self.gemini_api_key)
+        _set_env(env, "CHULK_GEMINI_BASE_URL", self.gemini_base_url)
         _set_env(env, "CHULK_PERMISSION_PROFILE", self.permission_profile)
         _set_env(env, "CHULK_HISTORY_LIMIT", self.history_limit)
         _set_env(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", self.max_tool_calls_per_turn)
@@ -218,21 +327,25 @@ class AgentConfig:
             if self.skills_dir is not None
             else runtime_dir / "skills"
         )
-        updates: dict[str, object] = {
-            "project_root": project_root,
-            "runtime_dir": runtime_dir,
-            "store_path": store_path,
-            "traces_dir": traces_dir,
-            "skills_dir": skills_dir,
-            "skills_dirs": _skills_dirs(skills_dir),
-            "mcp_config_path": config.mcp_config_path,
-            "permission_profile": permission_profile,
-        }
+        config = replace(
+            config,
+            project_root=project_root,
+            runtime_dir=runtime_dir,
+            store_path=store_path,
+            traces_dir=traces_dir,
+            skills_dir=skills_dir,
+            skills_dirs=_skills_dirs(skills_dir),
+            mcp_config_path=config.mcp_config_path,
+            permission_profile=permission_profile,
+        )
         if self.mcp_servers is not None:
-            updates["mcp_servers"] = tuple(self.mcp_servers)
+            config = replace(config, mcp_servers=tuple(self.mcp_servers))
         if self.llm_fallback_providers is not None:
-            updates["llm_fallback_providers"] = tuple(self.llm_fallback_providers)
-        return replace(config, **updates)
+            config = replace(
+                config,
+                llm_fallback_providers=tuple(self.llm_fallback_providers),
+            )
+        return config
 
 
 class MCP:

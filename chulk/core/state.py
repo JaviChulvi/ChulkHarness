@@ -59,12 +59,36 @@ class PlanStep:
         if self.status not in PLAN_STEP_STATUSES:
             allowed = ", ".join(sorted(PLAN_STEP_STATUSES))
             raise ValueError(f"plan step status must be one of: {allowed}")
+        if isinstance(self.retry_limit, bool) or not isinstance(self.retry_limit, int):
+            raise ValueError("plan step retry_limit must be an integer")
         if self.retry_limit < 0:
             raise ValueError("plan step retry_limit cannot be negative")
-        if self.retry_limit != 0:
-            self.retry_limit = 0
         self.depends_on = _dedupe_strings(self.depends_on)
         self.acceptance_criteria = _dedupe_strings(self.acceptance_criteria) or [self.description]
+
+    @property
+    def retry_count(self) -> int:
+        """Return the number of step-level recovery attempts already scheduled."""
+        count = 0
+        for record in self.evidence:
+            retry_metadata = record.metadata.get("plan_step_retry")
+            if isinstance(retry_metadata, dict) and retry_metadata.get("disposition") == "retry_scheduled":
+                count += 1
+        return count
+
+    @property
+    def retries_remaining(self) -> int:
+        """Return the unused step-level retry budget."""
+        return max(0, self.retry_limit - self.retry_count)
+
+    @property
+    def tool_failure_count(self) -> int:
+        """Return the number of terminal tool-call failures recorded for this step."""
+        return sum(
+            1
+            for record in self.evidence
+            if isinstance(record.metadata.get("plan_step_retry"), dict)
+        )
 
     def mark(self, status: str) -> None:
         if status not in PLAN_STEP_STATUSES:
@@ -114,6 +138,9 @@ class PlanStep:
             "depends_on": self.depends_on,
             "acceptance_criteria": self.acceptance_criteria,
             "retry_limit": self.retry_limit,
+            "retry_count": self.retry_count,
+            "retries_remaining": self.retries_remaining,
+            "tool_failure_count": self.tool_failure_count,
             "evidence": [record.to_dict() for record in self.evidence],
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -184,6 +211,11 @@ class Plan:
             if step.depends_on:
                 lines.append(f"  Depends on: {', '.join(step.depends_on)}")
             lines.append(f"  Acceptance criteria: {'; '.join(step.acceptance_criteria)}")
+            if step.retry_limit:
+                lines.append(
+                    f"  Retry budget: {step.retry_count}/{step.retry_limit} used; "
+                    f"{step.retries_remaining} remaining"
+                )
             if step.evidence:
                 latest = step.evidence[-1]
                 lines.append(f"  Evidence: {latest.content}")
@@ -198,6 +230,11 @@ class Plan:
         lines = ["Plan", f"  summary  {self.summary}", "  steps"]
         for step in self.steps:
             lines.append(f"  - [{step.status}] {step.title}: {step.description}")
+            if step.retry_limit:
+                lines.append(
+                    f"    retries   {step.retry_count}/{step.retry_limit} used; "
+                    f"{step.retries_remaining} remaining"
+                )
             if step.evidence:
                 lines.append(f"    evidence  {step.evidence[-1].content}")
             if step.blocked_reason:

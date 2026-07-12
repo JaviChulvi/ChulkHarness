@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, SupportsIndex, SupportsInt, TypeAlias, cast
 
 from chulk.llm.usage import cost_snapshot_data, usage_snapshot_data
 from chulk.results import (
@@ -271,9 +271,12 @@ def _dict(value: object) -> dict[str, Any]:
     return _mapping(value)
 
 
+_IntInput: TypeAlias = str | bytes | bytearray | SupportsInt | SupportsIndex
+
+
 def _int(value: object, *, default: int = 0) -> int:
     try:
-        return int(value) if value is not None else default
+        return int(cast(_IntInput, value)) if value is not None else default
     except (TypeError, ValueError):
         return default
 

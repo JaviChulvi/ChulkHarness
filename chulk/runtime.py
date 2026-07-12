@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import warnings
-from typing import Protocol
+from typing import Protocol, cast
 
 from chulk.capabilities import Capabilities
 from chulk.config import Config
@@ -14,12 +14,19 @@ from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
-from chulk.llm import LLMClient, create_llm_client, resolve_model_capabilities
-from chulk.mcp import create_mcp_bridge_tools
+from chulk.llm import (
+    LLMClient,
+    LLMModelCapabilities,
+    create_llm_client,
+    provider_capabilities,
+    provider_connection_from_config,
+    resolve_model_capabilities,
+)
+from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
-from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
+from chulk.tools import ShellExecutionPolicy, Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
 from chulk.tools.permissions import (
     PermissionDecision,
     PermissionDecisionRecord,
@@ -42,6 +49,10 @@ class RuntimeToolContext:
 
     project_root: Path
     shell_timeout_seconds: int
+    max_tool_stdout_bytes: int
+    max_tool_stderr_bytes: int
+    shell_execution_policy: ShellExecutionPolicy | None = None
+    require_shell_containment: bool = False
     memory_store: SQLiteMemoryStore | None = None
     deps: object | None = None
 
@@ -68,12 +79,14 @@ def create_agent(
         PermissionDecision | bool,
     ]
     | None = None,
-    mcp_servers: Iterable[object] | None = None,
+    mcp_servers: Iterable[MCPServerConfig] | None = None,
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -81,11 +94,6 @@ def create_agent(
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
-    model_capabilities = resolve_model_capabilities(config.llm_provider, config.model)
-    context_budget = ContextBudget(
-        max_prompt_tokens=model_capabilities.context_window_tokens,
-        response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
-    )
     memory_store = SQLiteMemoryStore(config.store_path)
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
@@ -136,6 +144,11 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+    model_capabilities = _client_model_capabilities(client, config)
+    context_budget = ContextBudget(
+        max_prompt_tokens=model_capabilities.context_window_tokens,
+        response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
+    )
     configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
     active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()
     tool_registry, mcp_bridge_tool_names = _create_tool_registry(
@@ -146,6 +159,8 @@ def create_agent(
         capabilities=selected_capabilities,
         memory_policy=memory_policy,
         deps=deps,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
     )
     if active_mcp_servers:
         trace_logger.log(
@@ -245,25 +260,30 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
     return create_llm_client(
         provider=config.llm_provider,
         model=config.model,
-        openai_api_key=config.openai_api_key,
-        deepseek_api_key=config.deepseek_api_key,
-        deepseek_base_url=config.deepseek_base_url,
-        local_api_key=config.local_api_key,
-        local_base_url=config.local_base_url,
+        connection=provider_connection_from_config(config.llm_provider, config),
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )
+
+
+def _client_model_capabilities(client: LLMClient, config: Config) -> LLMModelCapabilities:
+    capabilities = getattr(client, "model_capabilities", None)
+    if isinstance(capabilities, LLMModelCapabilities):
+        return capabilities
+    return resolve_model_capabilities(config.llm_provider, config.model)
 
 
 def _create_tool_registry(
     config: Config,
     memory_store: SQLiteMemoryStore,
     tool_specs: Iterable[object] | None,
-    mcp_servers: Iterable[object],
+    mcp_servers: Iterable[MCPServerConfig],
     *,
     capabilities: Capabilities,
     memory_policy: MemoryPolicy,
     deps: object | None,
+    shell_execution_policy: ShellExecutionPolicy | None,
+    require_shell_containment: bool,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -272,12 +292,20 @@ def _create_tool_registry(
             memory_store=memory_store,
             capabilities=capabilities,
             memory_policy=memory_policy,
+            max_tool_stdout_bytes=config.max_tool_stdout_chars,
+            max_tool_stderr_bytes=config.max_tool_stderr_chars,
+            shell_execution_policy=shell_execution_policy,
+            require_shell_containment=require_shell_containment,
         )
         return _register_mcp_bridge_tools(config, registry, mcp_servers)
 
     context = RuntimeToolContext(
         project_root=config.project_root,
         shell_timeout_seconds=config.shell_timeout_seconds,
+        max_tool_stdout_bytes=config.max_tool_stdout_chars,
+        max_tool_stderr_bytes=config.max_tool_stderr_chars,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
         memory_store=memory_store,
         deps=deps,
     )
@@ -291,7 +319,7 @@ def _create_tool_registry(
 def _register_mcp_bridge_tools(
     config: Config,
     registry: ToolRegistry,
-    mcp_servers: Iterable[object],
+    mcp_servers: Iterable[MCPServerConfig],
 ) -> tuple[ToolRegistry, list[str]]:
     servers = tuple(mcp_servers)
     if not servers or not _mcp_bridge_required(config, servers):
@@ -308,18 +336,22 @@ def _mcp_bridge_required(config: Config, mcp_servers: Iterable[object]) -> bool:
     if not tuple(mcp_servers):
         return False
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(provider != "openai" for provider in provider_path)
+    return any(not _supports_hosted_mcp(provider) for provider in provider_path)
 
 
 def _mcp_provider_path(config: Config, mcp_servers: Iterable[object]) -> str:
     if not tuple(mcp_servers):
         return "none"
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    has_hosted = any(provider == "openai" for provider in provider_path)
-    has_bridge = any(provider != "openai" for provider in provider_path)
+    has_hosted = any(_supports_hosted_mcp(provider) for provider in provider_path)
+    has_bridge = any(not _supports_hosted_mcp(provider) for provider in provider_path)
     if has_hosted and has_bridge:
         return "hosted+bridge"
     return "hosted" if has_hosted else "bridge"
+
+
+def _supports_hosted_mcp(provider: str) -> bool:
+    return provider_capabilities(provider).supports_hosted_mcp_tools
 
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
@@ -398,7 +430,7 @@ def _coerce_skill_specs(skill_specs: object | Iterable[object] | None) -> list[o
     if isinstance(skill_specs, (str, SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef)):
         return [skill_specs]
     try:
-        return list(skill_specs)  # type: ignore[arg-type]
+        return list(cast(Iterable[object], skill_specs))
     except TypeError:
         return [skill_specs]
 

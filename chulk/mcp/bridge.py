@@ -54,7 +54,12 @@ class StreamableHttpMCPClient:
         async with self._connect() as session:
             await session.initialize()
             result = await session.list_tools()
-            return list(_value(result, "tools") or [])
+            tools = _value(result, "tools")
+            if tools is None:
+                return []
+            if not isinstance(tools, Iterable):
+                raise TypeError("MCP list_tools response did not contain an iterable tools value")
+            return list(tools)
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> object:
         async with self._connect() as session:
@@ -81,7 +86,7 @@ class _StreamableHttpSessionContext:
     def __init__(self, client_context, session_type) -> None:
         self.client_context = client_context
         self.session_type = session_type
-        self.session = None
+        self.session: Any | None = None
 
     async def __aenter__(self):
         read_stream, write_stream, _ = await self.client_context.__aenter__()
@@ -89,8 +94,11 @@ class _StreamableHttpSessionContext:
         return await self.session.__aenter__()
 
     async def __aexit__(self, exc_type, exc, tb):
+        session = self.session
+        if session is None:
+            raise RuntimeError("MCP session context exited before it was entered")
         try:
-            return await self.session.__aexit__(exc_type, exc, tb)
+            return await session.__aexit__(exc_type, exc, tb)
         finally:
             await self.client_context.__aexit__(exc_type, exc, tb)
 

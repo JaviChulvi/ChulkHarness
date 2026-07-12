@@ -56,6 +56,12 @@ python examples/00_sdk_quickstart.py
 ```
 
 Live output is intentionally nondeterministic and may incur provider charges.
+The supported provider names are `openai`, `deepseek`, `local`,
+`openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`. The
+last five require an explicit `CHULK_MODEL`; install all optional provider SDKs
+with `python -m pip install "chulkharness[providers]"`. Provider adapter tests
+use injected fakes and make no network calls, so validating a real account,
+model entitlement, key, and endpoint remains the application's responsibility.
 For application code, inject an `LLMClient` when possible and construct the
 agent with an explicit config and capability policy. Continue with the
 [SDK guide](sdk.md), [providers](providers.md), and [permissions](permissions.md).

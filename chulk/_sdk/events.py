@@ -60,7 +60,8 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
     extensions = {"internal_event": event_type}
 
     if event_type == TraceEvent.TURN_STARTED:
-        turn = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
+        turn_value = payload.get("turn")
+        turn = turn_value if isinstance(turn_value, dict) else {}
         return _event(EventName.RUN_STARTED, conversation_id, turn_id, RunStartedPayload(str(turn.get("user_message") or "")), extensions)
     if event_type == TraceEvent.MODEL_REQUEST_STARTED:
         return _event(
@@ -107,7 +108,8 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             extensions,
         )
     if event_type in {TraceEvent.TOOL_PERMISSION_REQUESTED, TraceEvent.MCP_APPROVAL_REQUESTED}:
-        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+        request_value = payload.get("request")
+        request = request_value if isinstance(request_value, dict) else {}
         return _event(
             EventName.PERMISSION_REQUESTED,
             conversation_id,
@@ -120,7 +122,8 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             extensions,
         )
     if event_type in {TraceEvent.TOOL_PERMISSION_DECIDED, TraceEvent.MCP_APPROVAL_DECIDED}:
-        decision = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
+        decision_value = payload.get("decision")
+        decision = decision_value if isinstance(decision_value, dict) else {}
         return _event(
             EventName.PERMISSION_RESOLVED,
             conversation_id,
@@ -179,6 +182,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
 
 def terminal_event(result: Any) -> AgentEvent:
     """Create the exact in-band terminal event for a generator run result."""
+    payload: RunFailedPayload | RunCompletedPayload
     if getattr(result, "status", None) in {"failed", "blocked"}:
         errors = getattr(result, "errors", ())
         message = errors[-1] if errors else getattr(result, "content", "The run failed.")

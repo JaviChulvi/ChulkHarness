@@ -788,6 +788,75 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "max_reflection_attempts: 0" in output
 
 
+def test_main_show_config_sanitizes_all_provider_base_urls(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_LLM_PROVIDER", "local")
+    monkeypatch.setenv("CHULK_MODEL", "local-test-model")
+    base_urls = {
+        "CHULK_DEEPSEEK_BASE_URL": "https://deep-user:deep-secret@deepseek.example/v1?key=deep-query#deep-fragment",
+        "CHULK_LOCAL_BASE_URL": "http://local-user:local-secret@localhost:1234/v1?key=local-query#local-fragment",
+        "CHULK_OPENAI_COMPATIBLE_BASE_URL": "https://compatible-user:compatible-secret@models.example/v1?key=compatible-query#compatible-fragment",
+        "CHULK_OPENROUTER_BASE_URL": "https://router-user:router-secret@openrouter.example/api/v1?key=router-query#router-fragment",
+        "CHULK_ANTHROPIC_BASE_URL": "https://anthropic-user:anthropic-secret@anthropic.example?key=anthropic-query#anthropic-fragment",
+        "CHULK_BEDROCK_BASE_URL": "https://bedrock-user:bedrock-secret@bedrock.example/openai/v1?key=bedrock-query#bedrock-fragment",
+        "CHULK_GEMINI_BASE_URL": "https://gemini-user:gemini-secret@gemini.example/v1?key=gemini-query#gemini-fragment",
+    }
+    for name, value in base_urls.items():
+        monkeypatch.setenv(name, value)
+
+    exit_code = main(["--show-config"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "deepseek_base_url: https://deepseek.example/v1" in output
+    assert "local_base_url: http://localhost:1234/v1" in output
+    assert "openai_compatible_base_url: https://models.example/v1" in output
+    assert "openrouter_base_url: https://openrouter.example/api/v1" in output
+    assert "anthropic_base_url: https://anthropic.example" in output
+    assert "bedrock_base_url: https://bedrock.example/openai/v1" in output
+    assert "gemini_base_url: https://gemini.example/v1" in output
+    assert not any(
+        secret in output
+        for secret in (
+            "deep-secret",
+            "deep-query",
+            "deep-fragment",
+            "local-secret",
+            "local-query",
+            "local-fragment",
+            "compatible-secret",
+            "compatible-query",
+            "compatible-fragment",
+            "router-secret",
+            "router-query",
+            "router-fragment",
+            "anthropic-secret",
+            "anthropic-query",
+            "anthropic-fragment",
+            "bedrock-secret",
+            "bedrock-query",
+            "bedrock-fragment",
+            "gemini-secret",
+            "gemini-query",
+            "gemini-fragment",
+        )
+    )
+
+
+def test_main_show_config_hides_malformed_base_url(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_LLM_PROVIDER", "local")
+    monkeypatch.setenv("CHULK_MODEL", "local-test-model")
+    monkeypatch.setenv("CHULK_ANTHROPIC_BASE_URL", "not-a-url?token=secret-value")
+
+    exit_code = main(["--show-config"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "anthropic_base_url: set (value hidden)" in output
+    assert "secret-value" not in output
+
+
 def test_main_show_config_reports_invalid_configuration_without_traceback(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CHULK_LLM_PROVIDER", "not-a-provider")

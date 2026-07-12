@@ -17,6 +17,8 @@ class AgentEvent:
 class TraceEvent:
     """Internal trace/progress constants; not a public compatibility catalog."""
 
+    SESSION_STARTED = "session_started"
+    SESSION_FINISHED = "session_finished"
     TURN_STARTED = "turn_started"
     USER_MESSAGE = "user_message"
     TURN_CONTEXT_SELECTED = "turn_context_selected"

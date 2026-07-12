@@ -61,7 +61,7 @@ from chulk.results import (
     ToolAttempt,
     Usage,
 )
-from chulk.tools import ToolContext
+from chulk.tools import ShellExecutionDecision, ShellExecutionPolicy, ShellExecutionRequest, ToolContext
 
 
 __all__ = [
@@ -112,6 +112,9 @@ __all__ = [
     "RunStartedPayload",
     "RunStatus",
     "SafetyError",
+    "ShellExecutionDecision",
+    "ShellExecutionPolicy",
+    "ShellExecutionRequest",
     "ToolExecutionError",
     "ToolOutputPolicy",
     "ToolRetryPolicy",

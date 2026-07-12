@@ -108,13 +108,13 @@ Module responsibilities:
 - [ ] `chulk/core/prompt_builder.py`
   - [ ] Compose prompts from base instructions, memory, skills, tools, and history.
 
-- [ ] `chulk/llm/`
-  - [ ] Wrap the model provider API.
-  - [ ] Support OpenAI first.
-  - [ ] Hide provider-specific request and response details from the agent loop.
-  - [ ] Provide text completion and structured JSON completion helpers.
-  - [ ] Handle retries, timeouts, rate limits, and provider errors.
-  - [ ] Register providers through a provider registry and explicit capability metadata.
+- [x] `chulk/llm/`
+  - [x] Wrap the model provider API.
+  - [x] Support OpenAI first.
+  - [x] Hide provider-specific request and response details from the agent loop.
+  - [x] Provide text completion and structured JSON completion helpers.
+  - [x] Handle retries, timeouts, rate limits, and provider errors.
+  - [x] Register providers through a provider registry and explicit capability metadata.
 
 - [x] `chulk/memory/`
   - [x] Manage short-term conversation history.
@@ -263,10 +263,10 @@ Build a small provider wrapper before adding agent complexity.
 
 Future provider support:
 
-- [ ] Add a minimal local/mock provider for tests.
-- [ ] Add support for local LLMs later.
+- [x] Add a minimal local/mock provider for tests.
+- [x] Add support for local LLMs later.
 - [x] Add DeepSeek as an additional hosted provider.
-- [ ] Add support for additional hosted providers later.
+- [x] Add support for additional hosted providers later.
 - [x] Keep response normalization in one place.
 
 ## 5. Tool System
@@ -1154,7 +1154,7 @@ Optional future directions:
 - [x] MCP-like tool interface.
 - [ ] Vector database.
 - [ ] Multi-agent mode.
-- [ ] Local LLM support.
+- [x] Local LLM support.
 - [ ] OpenTelemetry-style traces.
 - [ ] Permission UI.
 - [ ] Skill marketplace or folder installer.
@@ -1164,7 +1164,7 @@ Optional future directions:
 - [ ] Docker development environment.
 - [ ] Configurable model/provider profiles.
 - [ ] Import/export memories.
-- [ ] Agent evaluation scripts.
+- [x] Agent evaluation scripts.
 - [ ] Benchmark prompts for regression testing.
 
 ## 17. Agent Harness Feature Backlog
@@ -1248,8 +1248,11 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add a `Capabilities` config object or equivalent structured tool capability surface.
 - [ ] Add custom permission profiles in config.
 - [ ] Add workspace root allowlists.
-- [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, build artifacts, and credentials.
+- [x] Add model-facing path deny rules for secrets, traces, Git metadata, SQLite/runtime state, private keys, and credentials.
+- [ ] Extend explicit-read deny rules to dependency folders and build artifacts; directory search already excludes them.
 - [ ] Add command prefix rules: allow, prompt, and deny.
+- [x] Add a host-owned shell execution policy boundary with explicit allow/deny and containment assertions.
+- [x] Bound shell output during execution and terminate timed-out process groups.
 - [ ] Add network allow/deny domain rules.
 - [ ] Add trusted command catalog for low-risk read-only commands.
 - [ ] Add approval prompts with approve once, deny once, always allow, and always deny choices.
@@ -1271,21 +1274,21 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 #### Phase E: Trace Productization
 
 - [ ] Treat traces as a public product surface, not only internal logs.
-- [ ] Add a trace schema version to every JSONL event.
-- [ ] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
+- [x] Add a trace schema version to every JSONL event.
+- [x] Standardize trace event envelope fields: schema version, event/type, conversation id, turn id, timestamp, and payload.
 - [x] Add a public trace reader: `Trace.from_jsonl(path)`.
 - [x] Expose typed trace events with event type and timestamp.
 - [x] Add `chulk trace inspect <path>`.
 - [x] Add `chulk trace export <path> --format html`.
-- [ ] Add `chulk trace replay <path>`.
+- [x] Add `chulk trace replay <path>`.
 - [x] Add a minimal HTML trace export.
 - [ ] Include user request, prompt context, loaded memories, loaded skills, tool calls, tool outputs, permission decisions, final answer, errors, token usage, and cost usage in trace exports.
 - [ ] Log available tools in traces.
-- [ ] Log timing information in traces.
-- [ ] Add `session_started` and `session_finished` trace events.
+- [x] Log timing information in traces.
+- [x] Add `session_started` and `session_finished` trace events.
 - [ ] Make it obvious why a tool was called where the model/action metadata supports it.
 - [ ] Make it obvious which memories were injected.
-- [ ] Add trace redaction tests.
+- [x] Add trace redaction tests.
 - [ ] Add artifact reader support for full truncated outputs saved under traces.
 - [ ] Add replay-friendly event coverage for regression tests.
 
@@ -1300,7 +1303,9 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add tool-level retry policy.
 - [ ] Add tool testing helpers such as `assert_tool_schema(...)` and `invoke_tool(...)`.
 - [x] Continue supporting async tools through the public decorator.
-- [ ] Add native async runtime later with async LLM calls, async tools, cancellation, timeouts, streaming events, concurrent read-only tools, and cleanup hooks.
+- [x] Add native async LLM and structured-action calls for built-in providers and fallback chains.
+- [x] Propagate native provider cancellation without wrapping it or advancing to a fallback provider.
+- [ ] Complete the async runtime with concurrent read-only tools and async provider cleanup hooks.
 - [ ] Add memory namespaces for user and workspace isolation.
 - [x] Add explicit memory modes: off, read-only, manual read/write, and automatic read/write.
 - [x] Default SDK inferred-memory writes to off or manual review unless the developer opts in.
@@ -1317,9 +1322,10 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [ ] Split docs by audience under `docs/`: index, quickstart, sdk, cli, tools, permissions, skills, memory, tracing, providers, mcp, safety, and release policy.
 - [ ] Add one end-to-end `examples/repo_review_bot/` killer example.
 - [ ] Include a sample trace export in the repo review example.
-- [ ] Add fake provider or fake LLM support for examples and CI.
-- [ ] Run examples with fake LLM in CI.
-- [ ] Add a small eval harness with deterministic evals for tool calling, memory retrieval, skill selection, plan approval, and safety refusal.
+- [x] Add fake provider or fake LLM support for examples and CI.
+- [x] Run examples with fake LLM in CI.
+- [x] Add a small deterministic, offline eval harness for agent outcomes, tool sequences, and trace sequences.
+- [ ] Add bundled eval scenarios for memory retrieval, skill selection, plan approval, and safety refusal.
 - [ ] Add optional live-model evals separately from deterministic CI.
 - [ ] Improve plan mode as a public workflow primitive with richer `Plan` and `PlanStep` objects.
 - [ ] Add plan step fields for risk, tools, and acceptance criteria in the public object.
@@ -1383,7 +1389,8 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [x] Add built-in permission profiles: read-only, workspace-write, trusted-local, and full-access.
 - [ ] Add custom permission profiles in config.
 - [ ] Add workspace root allowlists.
-- [ ] Add path deny rules for secrets, traces, SQLite stores, dependency folders, and build artifacts.
+- [x] Add default file-read deny rules for secrets, traces, Git metadata, SQLite/runtime state, and private keys.
+- [ ] Extend explicit-read deny rules to dependency folders and build artifacts.
 - [ ] Add network allow/deny domain rules.
 - [ ] Add command prefix rules: allow, prompt, deny.
 - [ ] Add trusted command catalog for low-risk read-only commands.
@@ -1589,7 +1596,7 @@ Feedback from the SDK/installability review changes the near-term priority. Befo
 - [ ] Add review against a base branch.
 - [ ] Add review of a selected commit.
 - [ ] Add custom review instructions.
-- [ ] Add eval scripts for agent workflows.
+- [x] Add eval scripts for agent workflows.
 - [ ] Add benchmark prompts for regression testing.
 - [ ] Add trace-based regression replay.
 - [ ] Add golden tests for tool-use loops.

@@ -333,4 +333,4 @@ def _coerce_retry_limit(value: Any) -> int:
         raise ActionParseError("plan step retry_limit must be an integer")
     if value < 0:
         raise ActionParseError("plan step retry_limit cannot be negative")
-    return 0
+    return value

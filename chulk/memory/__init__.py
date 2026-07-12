@@ -4,6 +4,7 @@ from chulk.memory.extraction import extract_memory_candidates, route_memory_cand
 from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord, MemoryRecord
 from chulk.memory.policy import MemoryPolicy, MemoryPolicyResult
 from chulk.memory.retrieval import text_to_embedding
+from chulk.memory.security import MemorySecretError
 from chulk.memory.sqlite_store import SQLiteMemoryStore, select_memories_for_prompt
 from chulk.memory.store import ConversationMemory, Memory, new_memory
 
@@ -15,6 +16,7 @@ __all__ = [
     "MemoryPolicyResult",
     "MemoryProposalRecord",
     "MemoryRecord",
+    "MemorySecretError",
     "SQLiteMemoryStore",
     "extract_memory_candidates",
     "new_memory",

@@ -21,6 +21,7 @@ from chulk.llm import (
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
     create_llm_client,
+    conservative_model_capabilities,
     resolve_model_capabilities,
 )
 from chulk.llm.tools import PLAN_TOOL_NAME
@@ -152,6 +153,15 @@ class ScriptedLLMClient(LLMClient):
         return self.responses.pop(0)
 
 
+class InternalTypeErrorLLMClient(LLMClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+        self.calls += 1
+        raise TypeError("provider implementation failed internally")
+
+
 class ScriptedStreamingLLMClient(LLMClient):
     capabilities = LLMCapabilities(supports_streaming=True)
 
@@ -170,7 +180,12 @@ class ScriptedStreamingLLMClient(LLMClient):
 
 class FailingLLMClient(LLMClient):
     def complete(self, messages: list[dict[str, str]]) -> str:
-        raise LLMError("provider unavailable")
+        raise LLMError(
+            "provider unavailable",
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class UsageFailingLLMClient(LLMClient):
@@ -186,7 +201,14 @@ class UsageFailingLLMClient(LLMClient):
             provider=self.provider,
             model=self.model,
         )
-        raise LLMActionError("provider charged then failed", usage=usage, cost=cost)
+        raise LLMActionError(
+            "provider charged then failed",
+            usage=usage,
+            cost=cost,
+            code="server_error",
+            retryable=True,
+            fallback_eligible=True,
+        )
 
 
 class UsageSuccessfulLLMClient(LLMClient):
@@ -283,6 +305,19 @@ def test_base_complete_response_estimates_usage_and_preserves_complete_compatibi
     assert response.usage.output_tokens > 0
     assert response.cost is not None
     assert response.cost.pricing_known is False
+
+
+def test_base_complete_response_does_not_retry_internal_type_error():
+    client = InternalTypeErrorLLMClient()
+
+    try:
+        client.complete_response([{"role": "user", "content": "Hello"}], max_output_tokens=50)
+    except TypeError as exc:
+        assert "internally" in str(exc)
+    else:
+        raise AssertionError("Expected the provider TypeError to escape")
+
+    assert client.calls == 1
 
 
 def test_openai_responses_client_streams_text_deltas():
@@ -697,6 +732,7 @@ def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "2 + 2"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert "parallel_tool_calls" not in fake_client.chat.completions.kwargs
     assert "tools" in fake_client.chat.completions.kwargs
     assert "response_format" not in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
@@ -806,7 +842,7 @@ def test_deepseek_client_uses_json_object_mode_for_actions():
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
 
 
-def test_deepseek_client_does_not_send_max_tokens():
+def test_deepseek_client_sends_only_explicit_max_tokens():
     fake_client = FakeDeepSeekClient(
         json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
     )
@@ -814,7 +850,7 @@ def test_deepseek_client_does_not_send_max_tokens():
 
     client.complete([{"role": "user", "content": "Hello"}], max_output_tokens=25)
 
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 25
 
     client.complete_action(
         [
@@ -824,7 +860,7 @@ def test_deepseek_client_does_not_send_max_tokens():
         max_output_tokens=250,
     )
 
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 250
 
 
 def test_deepseek_client_can_parse_plan_action_from_json_mode():
@@ -943,7 +979,7 @@ def test_local_client_actions_use_plain_chat_completion_contract():
     )
 
     assert result.action.content == "structured answer"
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 250
     assert "response_format" not in fake_client.chat.completions.kwargs
     assert fake_client.chat.completions.kwargs["messages"] == [
         {"role": "user", "content": "Instructions:\nReturn action JSON.\n\nUser message:\n\nHello"}
@@ -967,6 +1003,7 @@ def test_local_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "3 + 4"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert "parallel_tool_calls" not in fake_client.chat.completions.kwargs
     assert "tools" in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
     assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
@@ -1101,6 +1138,46 @@ def test_resolve_model_capabilities_returns_context_window_and_reserve():
     assert local_caps.default_response_reserve_tokens == 4_096
     assert local_qwen_caps.context_window_tokens == 262_144
     assert local_qwen_caps.default_response_reserve_tokens == 4_096
+
+
+def test_conservative_model_capabilities_use_smallest_context_and_largest_reserve():
+    openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
+    local_caps = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
+
+    combined = conservative_model_capabilities([openai_caps, local_caps])
+
+    assert combined.context_window_tokens == 131_072
+    assert combined.default_response_reserve_tokens == 8_192
+    assert combined.input_budget_tokens == 122_880
+
+
+def test_fallback_chain_exposes_conservative_bound_model_capabilities():
+    primary = ScriptedLLMClient(["primary"])
+    primary.model_capabilities = resolve_model_capabilities("openai", "gpt-4.1-mini")
+    fallback = ScriptedLLMClient(["fallback"])
+    fallback.model_capabilities = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
+
+    capabilities = FallbackChain([primary, fallback]).model_capabilities
+
+    assert capabilities is not None
+    assert capabilities.context_window_tokens == 131_072
+    assert capabilities.default_response_reserve_tokens == 8_192
+
+
+def test_factory_attaches_model_capabilities_to_bound_client():
+    client = create_llm_client(
+        provider="local",
+        model="custom-model",
+        openai_api_key=None,
+        deepseek_api_key=None,
+        deepseek_base_url="https://api.deepseek.com",
+        local_api_key="local",
+        local_base_url="http://localhost:1234/v1",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+
+    assert client.model_capabilities.context_window_tokens == 131_072
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():

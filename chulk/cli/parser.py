@@ -64,11 +64,17 @@ def _add_init_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_trace_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("trace", help="Inspect or export a JSONL trace.")
+    parser = subparsers.add_parser("trace", help="Inspect, replay, or export a JSONL trace.")
     trace_subparsers = parser.add_subparsers(dest="trace_command", required=True)
     inspect_parser = trace_subparsers.add_parser("inspect", help="Summarize a trace file.")
     inspect_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
     inspect_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
+    replay_parser = trace_subparsers.add_parser(
+        "replay",
+        help="Reconstruct recorded turns without executing them.",
+    )
+    replay_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
+    replay_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
     export_parser = trace_subparsers.add_parser("export", help="Export a trace report.")
     export_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
     export_parser.add_argument("--format", choices=("html",), default="html")

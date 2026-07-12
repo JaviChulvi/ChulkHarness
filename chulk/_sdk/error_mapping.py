@@ -19,6 +19,7 @@ from chulk.errors import (
 )
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.mcp.config import MCPConfigError
+from chulk.memory.security import MemorySecretError
 from chulk.tools.schema import ToolValidationError
 
 
@@ -38,6 +39,8 @@ def map_public_error(
         return ConfigurationError(str(exc), details=details)
     if isinstance(exc, LLMError):
         return ProviderError(str(exc), details=details)
+    if isinstance(exc, MemorySecretError):
+        return SafetyError(str(exc), details=details)
     if isinstance(exc, PermissionError):
         return PermissionDeniedError(str(exc), details=details)
     if isinstance(exc, ToolValidationError) or getattr(exc, "tool_name", None):
@@ -85,6 +88,9 @@ def _details(
     policy_name = getattr(exc, "policy_name", None)
     if policy_name:
         extensions["policy_name"] = policy_name
+    if isinstance(exc, LLMError):
+        extensions["error_code"] = exc.code
+        extensions["fallback_eligible"] = exc.fallback_eligible
     return ErrorDetails(
         provider=str(provider) if provider is not None else None,
         model=str(model) if model is not None else None,

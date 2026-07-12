@@ -6,6 +6,7 @@ from argparse import Namespace
 from collections.abc import Sequence
 import sys
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from chulk import __version__
 from chulk.cli import (
@@ -31,13 +32,19 @@ from chulk.cli.parser import build_parser
 from chulk.config import Config, load_cli_config
 from chulk.core import Agent
 from chulk.llm import (
+    AnthropicProvider,
+    BedrockProvider,
+    BindableLLM,
     DeepSeekProvider,
     FallbackChain,
+    GeminiProvider,
     LLMClient,
     LLMConfigurationError,
     LLMError,
     LocalProvider,
+    OpenAICompatibleProvider,
     OpenAIProvider,
+    OpenRouterProvider,
 )
 from chulk.presets import software_engineer
 from chulk.runtime import create_agent
@@ -62,9 +69,19 @@ def format_config(config: Config) -> str:
         "permission_profile": config.permission_profile,
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
-        "deepseek_base_url": config.deepseek_base_url,
+        "deepseek_base_url": _format_base_url(config.deepseek_base_url),
         "local_api_key": "set" if config.local_api_key else "not set",
-        "local_base_url": config.local_base_url,
+        "local_base_url": _format_base_url(config.local_base_url),
+        "openai_compatible_api_key": "set" if config.openai_compatible_api_key else "not set",
+        "openai_compatible_base_url": _format_base_url(config.openai_compatible_base_url),
+        "openrouter_api_key": "set" if config.openrouter_api_key else "not set",
+        "openrouter_base_url": _format_base_url(config.openrouter_base_url),
+        "anthropic_api_key": "set" if config.anthropic_api_key else "not set",
+        "anthropic_base_url": _format_base_url(config.anthropic_base_url),
+        "bedrock_api_key": "set" if config.bedrock_api_key else "not set",
+        "bedrock_base_url": _format_base_url(config.bedrock_base_url),
+        "gemini_api_key": "set" if config.gemini_api_key else "not set",
+        "gemini_base_url": _format_base_url(config.gemini_base_url),
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -81,6 +98,26 @@ def format_config(config: Config) -> str:
     lines = ["ChulkHarness configuration:"]
     lines.extend(f"  {key}: {value}" for key, value in values.items())
     return "\n".join(lines)
+
+
+def _format_base_url(value: str | None) -> str:
+    """Render a base URL without exposing credentials or URL parameters."""
+    if value is None or not value.strip():
+        return "not set"
+    clean_value = value.strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in clean_value):
+        return "set (value hidden)"
+    try:
+        parsed = urlsplit(clean_value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "set (value hidden)"
+        hostname = parsed.hostname
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        return "set (value hidden)"
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
 
 
 def create_cli_agent(
@@ -112,7 +149,7 @@ def create_cli_agent(
 
 def create_cli_llm(config: Config) -> FallbackChain:
     """Create the CLI LLM chain from public provider objects."""
-    providers: list[OpenAIProvider | DeepSeekProvider | LocalProvider] = [
+    providers: list[LLMClient | BindableLLM] = [
         _create_provider_spec(config.llm_provider, config.model)
     ]
     providers.extend(
@@ -122,13 +159,35 @@ def create_cli_llm(config: Config) -> FallbackChain:
     return FallbackChain(providers=providers)
 
 
-def _create_provider_spec(provider: str, model: str) -> OpenAIProvider | DeepSeekProvider | LocalProvider:
+def _create_provider_spec(
+    provider: str,
+    model: str,
+) -> (
+    OpenAIProvider
+    | DeepSeekProvider
+    | LocalProvider
+    | OpenAICompatibleProvider
+    | OpenRouterProvider
+    | AnthropicProvider
+    | BedrockProvider
+    | GeminiProvider
+):
     if provider == "openai":
         return OpenAIProvider(model=model)
     if provider == "deepseek":
         return DeepSeekProvider(model=model)
     if provider == "local":
         return LocalProvider(model=model)
+    if provider == "openai-compatible":
+        return OpenAICompatibleProvider(model=model)
+    if provider == "openrouter":
+        return OpenRouterProvider(model=model)
+    if provider == "anthropic":
+        return AnthropicProvider(model=model)
+    if provider == "bedrock":
+        return BedrockProvider(model=model)
+    if provider == "gemini":
+        return GeminiProvider(model=model)
     raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
 
 

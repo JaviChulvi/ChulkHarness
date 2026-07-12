@@ -1,5 +1,6 @@
 """Prompt templates for the agent loop."""
 
+from collections.abc import Iterable
 from html import escape
 import json
 
@@ -56,7 +57,8 @@ JSON_ACTION_PROMPT = """<response_protocol>
 <rule>For tool calls, use only argument fields from the listed tool schema.</rule>
 <rule>Use a plan only when the Planning section explicitly tells you to propose a plan.</rule>
 <rule>For plans, plan_json must be a JSON-encoded object string with summary and executable steps.</rule>
-<rule>Each plan step should include depends_on, acceptance_criteria, and retry_limit 0.</rule>
+<rule>Each plan step should include depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>
+<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts model recovery attempts after a failed tool call.</rule>
 <rule>When an approved plan is active, work only on the current executable step.</rule>
 <rule>After tool evidence satisfies that step's acceptance criteria, return plan_step_update instead of final_answer.</rule>
 <rule>Use final_answer only after the approved plan is completed.</rule>
@@ -75,7 +77,8 @@ NATIVE_ACTION_PROMPT = """<response_protocol>
 <rule>When you need a listed Chulk tool, call that tool through the native tool interface.</rule>
 <rule>For tool calls, use only argument fields from the listed tool schema.</rule>
 <rule>When the Planning section tells you to propose a plan, call chulk_propose_plan.</rule>
-<rule>For plans, provide a summary and executable steps with depends_on, acceptance_criteria, and retry_limit 0.</rule>
+<rule>For plans, provide a summary and executable steps with depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>
+<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts model recovery attempts after a failed tool call.</rule>
 <rule>When an approved plan is active, work only on the current executable step.</rule>
 <rule>After tool evidence satisfies that step's acceptance criteria, call chulk_plan_step_update instead of answering directly.</rule>
 <rule>Use a final answer only after the approved plan is completed.</rule>
@@ -293,13 +296,14 @@ def format_planning_for_prompt(
     plan_approved: bool,
     require_plan: bool,
     max_reconnaissance_tool_calls: int,
+    read_only_tool_names: Iterable[str] = (),
 ) -> str:
     """Format one-shot planning instructions for prompt injection."""
     if not planning_enabled:
         return "\n".join(["<planning>", "<status>Planning: not requested for this turn.</status>", "</planning>"])
 
     if require_plan and active_plan is None:
-        read_only_tools = format_read_only_planning_tools()
+        read_only_tools = format_read_only_planning_tools(read_only_tool_names)
         return "\n".join(
             [
                 "<planning>",
@@ -315,7 +319,8 @@ def format_planning_for_prompt(
                 "<rule>Do not call shell, write, memory-mutation, import/export, or other mutating tools before approval.</rule>",
                 "<rule>After reconnaissance, return a plan action. Do not execute implementation steps until the user approves the plan.</rule>",
                 "<rule>Keep the plan concrete, short, and executable, with specific files/modules when they are known.</rule>",
-                "<rule>For each plan step, include depends_on, acceptance_criteria, and retry_limit 0.</rule>",
+                "<rule>For each plan step, include depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>",
+                "<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts recovery attempts after a failed tool call.</rule>",
                 "<rule>Use dependencies only when a step truly cannot start until an earlier step is completed.</rule>",
                 "<rule>The approval plan must be an implementation plan. Do not make read/list/search/explore/inspect steps the plan.</rule>",
                 "<rule>Because the user explicitly requested /plan, do not answer directly. Return a plan action after any needed reconnaissance.</rule>",
@@ -330,6 +335,7 @@ def format_planning_for_prompt(
                 "<status>Planning: approved for this turn.</status>",
                 "<rule>Follow the approved plan while executing this turn.</rule>",
                 "<rule>Only work on the current executable step. Use tools until its acceptance criteria are satisfied.</rule>",
+                "<rule>If a tool fails and the step remains in_progress, inspect its retry budget and correct the next action. Do not claim the failed action succeeded.</rule>",
                 "<rule>When the current step is satisfied, return a plan_step_update action for that step.</rule>",
                 "<rule>Do not return a final_answer until every plan step is completed.</rule>",
                 "<active_plan>",

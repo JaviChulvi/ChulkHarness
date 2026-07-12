@@ -19,6 +19,7 @@ from typing import TextIO
 
 from chulk.config import Config
 from chulk.core import Agent, TraceEvent
+from chulk.llm.factory import provider_capabilities
 from chulk.sessions import ConversationRecord, MessageRecord
 from chulk.tools.permissions import PermissionDecisionRecord, PermissionRequest
 
@@ -410,8 +411,8 @@ def _mcp_provider_path(config: Config) -> str:
     if not config.mcp_servers:
         return "none"
     providers = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    has_hosted = any(provider == "openai" for provider in providers)
-    has_bridge = any(provider != "openai" for provider in providers)
+    has_hosted = any(provider_capabilities(provider).supports_hosted_mcp_tools for provider in providers)
+    has_bridge = any(not provider_capabilities(provider).supports_hosted_mcp_tools for provider in providers)
     if has_hosted and has_bridge:
         return "hosted+bridge"
     return "hosted" if has_hosted else "bridge"

@@ -9,7 +9,7 @@ import threading
 import time
 
 from chulk.memory import SQLiteMemoryStore
-from chulk.tools import Tool, ToolRegistry, calculator_tool, create_default_tool_registry
+from chulk.tools import FileReadPolicy, Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.output import preview_text
 from chulk.tools.permissions import (
@@ -595,6 +595,204 @@ def test_file_tools_read_write_list_and_search(tmp_path):
     assert read_result.observation == "hello chulk"
     assert "notes/example.txt" in list_result.observation
     assert "notes/example.txt" in search_result.observation
+
+
+def test_file_read_policy_blocks_sensitive_paths_but_keeps_source_and_templates_readable(tmp_path):
+    files = {
+        ".env": "OPENAI_API_KEY=secret-env",
+        ".env.production": "OPENAI_API_KEY=secret-production",
+        "config/credentials.json": "secret-credentials",
+        "keys/private.pem": "secret-private-key",
+        "keys/id_rsa.backup": "secret-backed-up-key",
+        ".git/config": "secret-git-state",
+        ".chulk/mcp.json": "secret-runtime-config",
+        ".chulk/store.sqlite": "secret-memory-state",
+        ".chulk/store.sqlite-wal": "secret-memory-wal",
+        ".chulk/traces/session.jsonl": "secret-sdk-trace",
+        "traces/session.jsonl": "secret-cli-trace",
+        "data/cache.db": "secret-database-state",
+        "data/cache.sqlite.bak": "secret-backed-up-database-state",
+        ".env.example": "OPENAI_API_KEY=",
+        ".chulk/skills/reviewer/SKILL.md": "Review project code.",
+        "src/example.py": "VALUE = 'normal source'\n",
+    }
+    for relative_path, content in files.items():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    registry = ToolRegistry()
+    registry.register(read_file_tool(tmp_path))
+
+    for relative_path in [
+        ".env",
+        ".env.production",
+        "config/credentials.json",
+        "keys/private.pem",
+        "keys/id_rsa.backup",
+        ".git/config",
+        ".chulk/mcp.json",
+        ".chulk/store.sqlite",
+        ".chulk/store.sqlite-wal",
+        ".chulk/traces/session.jsonl",
+        "traces/session.jsonl",
+        "data/cache.db",
+        "data/cache.sqlite.bak",
+    ]:
+        result = registry.run("read_file", {"path": relative_path})
+
+        assert not result.success
+        assert result.error == "sensitive_path"
+        assert files[relative_path] not in result.observation
+
+    env_template = registry.run("read_file", {"path": ".env.example"})
+    skill = registry.run("read_file", {"path": ".chulk/skills/reviewer/SKILL.md"})
+    source = registry.run("read_file", {"path": "src/example.py"})
+
+    assert env_template.success
+    assert env_template.observation == "OPENAI_API_KEY="
+    assert skill.success
+    assert source.success
+
+
+def test_file_read_policy_cannot_be_overridden_by_model_arguments(tmp_path):
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=secret", encoding="utf-8")
+    registry = ToolRegistry()
+    tool = read_file_tool(tmp_path)
+    registry.register(tool)
+
+    result = registry.run("read_file", {"path": ".env", "allow_sensitive_paths": True})
+
+    assert "allow_sensitive_paths" not in tool.args_schema["properties"]
+    assert not result.success
+    assert "secret" not in result.observation
+
+
+def test_file_read_policy_blocks_sensitive_symlink_aliases(tmp_path):
+    (tmp_path / "source.txt").write_text("safe source", encoding="utf-8")
+    (tmp_path / ".env").write_text("secret target", encoding="utf-8")
+    (tmp_path / ".env.production").symlink_to(tmp_path / "source.txt")
+    (tmp_path / "safe-link.txt").symlink_to(tmp_path / ".env")
+    registry = ToolRegistry()
+    registry.register(read_file_tool(tmp_path))
+
+    sensitive_alias = registry.run("read_file", {"path": ".env.production"})
+    sensitive_target = registry.run("read_file", {"path": "safe-link.txt"})
+
+    assert sensitive_alias.error == "sensitive_path"
+    assert sensitive_target.error == "sensitive_path"
+    assert "safe source" not in sensitive_alias.observation
+    assert "secret target" not in sensitive_target.observation
+
+
+def test_list_and_search_files_do_not_expose_sensitive_paths_or_contents(tmp_path):
+    files = {
+        ".env": "policy-needle secret-env-value",
+        "config/credentials.json": "policy-needle secret-credentials-value",
+        ".git/config": "policy-needle secret-git-value",
+        ".chulk/mcp.json": "policy-needle secret-runtime-value",
+        ".chulk/store.sqlite": "policy-needle secret-memory-value",
+        ".chulk/traces/session.jsonl": "policy-needle secret-sdk-trace-value",
+        "traces/session.jsonl": "policy-needle secret-cli-trace-value",
+        "data/cache.sqlite3": "policy-needle secret-database-value",
+        ".env.example": "policy-needle template-value",
+        ".chulk/skills/reviewer/SKILL.md": "policy-needle project-skill-value",
+        "src/example.py": "policy-needle normal-source-value",
+    }
+    for relative_path, content in files.items():
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    registry = ToolRegistry()
+    registry.register(list_files_tool(tmp_path))
+    registry.register(search_files_tool(tmp_path))
+
+    listed = registry.run("list_files", {"path": ".", "recursive": True, "max_results": 100})
+    searched = registry.run("search_files", {"query": "policy-needle", "path": ".", "max_results": 100})
+    sensitive_listing = registry.run("list_files", {"path": ".git", "recursive": True})
+    sensitive_search = registry.run("search_files", {"query": "policy-needle", "path": ".chulk/traces"})
+
+    assert listed.success
+    assert searched.success
+    assert ".env.example" in listed.observation
+    assert ".chulk/skills/reviewer/SKILL.md" in listed.observation
+    assert "src/example.py" in listed.observation
+    assert "template-value" in searched.observation
+    assert "project-skill-value" in searched.observation
+    assert "normal-source-value" in searched.observation
+    listed_paths = set(listed.observation.splitlines())
+    searched_paths = {line.split(":", 1)[0] for line in searched.observation.splitlines()}
+    for relative_path, content in files.items():
+        if relative_path in {".env.example", ".chulk/skills/reviewer/SKILL.md", "src/example.py"}:
+            continue
+        assert relative_path not in listed_paths
+        assert relative_path not in searched_paths
+        assert content.split()[-1] not in searched.observation
+    assert sensitive_listing.error == "sensitive_path"
+    assert sensitive_search.error == "sensitive_path"
+
+
+def test_python_file_search_fallback_applies_sensitive_read_policy(monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "example.py").write_text("fallback-needle safe", encoding="utf-8")
+    (tmp_path / ".env").write_text("fallback-needle secret", encoding="utf-8")
+    monkeypatch.setattr("chulk.tools.files.shutil.which", lambda _command: None)
+    registry = ToolRegistry()
+    registry.register(search_files_tool(tmp_path))
+
+    result = registry.run("search_files", {"query": "fallback-needle", "path": "."})
+
+    assert result.success
+    assert "src/example.py" in result.observation
+    assert ".env" not in result.observation
+    assert "secret" not in result.observation
+
+
+def test_list_and_python_search_patterns_cannot_escape_project_root(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project_root.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-needle outside-secret", encoding="utf-8")
+    monkeypatch.setattr("chulk.tools.files.shutil.which", lambda _command: None)
+    registry = ToolRegistry()
+    registry.register(list_files_tool(project_root))
+    registry.register(search_files_tool(project_root))
+
+    listed = registry.run("list_files", {"path": ".", "pattern": "../outside/*.txt"})
+    searched = registry.run(
+        "search_files",
+        {"query": "outside-needle", "path": ".", "pattern": "../outside/*.txt"},
+    )
+
+    assert listed.success
+    assert searched.success
+    assert "secret.txt" not in listed.observation
+    assert "outside-secret" not in searched.observation
+
+
+def test_host_can_explicitly_opt_in_to_sensitive_file_reads(tmp_path):
+    (tmp_path / ".env").write_text("host-approved-secret", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("host-approved-secret", encoding="utf-8")
+    read_policy = FileReadPolicy(allow_sensitive_paths=True)
+    registry = ToolRegistry()
+    registry.register(read_file_tool(tmp_path, read_policy=read_policy))
+    registry.register(list_files_tool(tmp_path, read_policy=read_policy))
+    registry.register(search_files_tool(tmp_path, read_policy=read_policy))
+
+    read_result = registry.run("read_file", {"path": ".env"})
+    list_result = registry.run("list_files", {"path": ".git", "recursive": True})
+    search_result = registry.run("search_files", {"query": "host-approved-secret", "path": "."})
+
+    assert read_result.success
+    assert read_result.observation == "host-approved-secret"
+    assert list_result.success
+    assert ".git/config" in list_result.observation
+    assert search_result.success
+    assert ".env" in search_result.observation
+    assert ".git/config" in search_result.observation
 
 
 def test_search_files_ignores_runtime_trace_artifacts(tmp_path):

@@ -283,13 +283,14 @@ def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch,
     assert calls == [["docs"]]
     assert agent.mcp_bridge_tool_names == ["mcp_docs_search_docs"]
     assert agent.tool_registry.get("mcp_docs_search_docs").requires_confirmation is True
-    assert [event["type"] for event in events[:3]] == [
+    assert [event["type"] for event in events[:4]] == [
+        "session_started",
         "mcp_config_loaded",
         "mcp_tool_discovery_completed",
         "turn_started",
     ]
-    assert events[0]["payload"]["provider_path"] == "bridge"
-    assert events[1]["payload"]["bridge_required"] is True
+    assert events[1]["payload"]["provider_path"] == "bridge"
+    assert events[2]["payload"]["bridge_required"] is True
 
 
 def test_create_agent_uses_hosted_mcp_without_bridge_for_openai_only(monkeypatch, tmp_path):

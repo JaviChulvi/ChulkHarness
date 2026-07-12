@@ -23,6 +23,7 @@ from chulk import (
 )
 from chulk.llm import LLMClient, LLMError
 from chulk.mcp import MCPConfigError
+from chulk.memory import MemorySecretError
 from chulk.tools import Tool, ToolRegistry
 from chulk.tools.permissions import TerminalPermissionDenied
 from chulk.tools.schema import ToolValidationError, ToolValidationIssue
@@ -93,6 +94,7 @@ def test_facade_maps_provider_tool_permission_safety_and_memory_failures(tmp_pat
         ),
         (TerminalPermissionDenied("write_file", "policy denied", policy_name="read-only"), PermissionDeniedError),
         (ValueError("Path is outside the project root"), SafetyError),
+        (MemorySecretError("Credential-like data is not allowed in durable memory."), SafetyError),
         (sqlite3.OperationalError("database is locked"), MemoryError),
     ]
 
@@ -140,7 +142,12 @@ def test_memory_proposal_operations_map_store_failures(
 
 def test_provider_and_tool_details_are_structured(tmp_path):
     facade = _agent(tmp_path)
-    provider_failure = LLMError("unavailable", retryable=True)
+    provider_failure = LLMError(
+        "unavailable",
+        code="rate_limit",
+        retryable=True,
+        fallback_eligible=True,
+    )
     facade._handle.run = lambda *args, **kwargs: _raise(provider_failure)  # type: ignore[method-assign]
 
     with pytest.raises(ProviderError) as provider_caught:
@@ -149,6 +156,8 @@ def test_provider_and_tool_details_are_structured(tmp_path):
     assert provider_caught.value.details.provider == "test-provider"
     assert provider_caught.value.details.model == "test-model"
     assert provider_caught.value.details.retryable is True
+    assert provider_caught.value.details.extensions["error_code"] == "rate_limit"
+    assert provider_caught.value.details.extensions["fallback_eligible"] is True
 
     validation_failure = ToolValidationError(
         "lookup",

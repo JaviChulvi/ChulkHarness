@@ -13,6 +13,14 @@ DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = 16_384
 LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072
 LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
 LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = 262_144
+COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
+COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
+ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
+ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
+BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
+BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
+GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576
+GEMINI_DEFAULT_RESPONSE_RESERVE_TOKENS = 8_192
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -30,6 +38,22 @@ LOCAL_QWEN_3_5_35B_LIMITS = (
     LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS,
     LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
+COMPATIBLE_DEFAULT_LIMITS = (
+    COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+ANTHROPIC_DEFAULT_LIMITS = (
+    ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+BEDROCK_DEFAULT_LIMITS = (
+    BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+GEMINI_DEFAULT_LIMITS = (
+    GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    GEMINI_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +65,12 @@ class LLMCapabilities:
     supports_streaming: bool = False
     supports_native_tool_calling: bool = False
     supports_hosted_mcp_tools: bool = False
-    api_style: Literal["responses", "chat_completions"] = "chat_completions"
+    api_style: Literal[
+        "responses",
+        "chat_completions",
+        "messages",
+        "generate_content",
+    ] = "chat_completions"
 
 
 @dataclass(frozen=True)
@@ -82,6 +111,27 @@ def register_model_capabilities(capabilities: LLMModelCapabilities) -> None:
     MODEL_CAPABILITIES[key] = capabilities
 
 
+def conservative_model_capabilities(
+    capabilities: list[LLMModelCapabilities] | tuple[LLMModelCapabilities, ...],
+) -> LLMModelCapabilities:
+    """Return limits that are safe for every model in a fallback path."""
+    if not capabilities:
+        raise ValueError("At least one model capability record is required")
+    context_window = min(item.context_window_tokens for item in capabilities)
+    response_reserve = min(
+        max(item.default_response_reserve_tokens for item in capabilities),
+        context_window,
+    )
+    providers = ",".join(dict.fromkeys(item.provider for item in capabilities))
+    models = ",".join(dict.fromkeys(item.model for item in capabilities))
+    return LLMModelCapabilities(
+        provider=providers,
+        model=models,
+        context_window_tokens=context_window,
+        default_response_reserve_tokens=response_reserve,
+    )
+
+
 def resolve_model_capabilities(provider: str, model: str) -> LLMModelCapabilities:
     """Return required token metadata for a configured model."""
     key = _model_key(provider, model)
@@ -108,6 +158,34 @@ def _model_key(provider: str, model: str) -> tuple[str, str]:
 
 def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCapabilities | None:
     normalized_provider, normalized_model = _model_key(provider, model)
+    if normalized_provider == "anthropic":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
+    if normalized_provider == "bedrock":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
+    if normalized_provider == "gemini":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=GEMINI_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
+    if normalized_provider in {"openai-compatible", "openrouter"}:
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
     if normalized_provider == "local":
         return LLMModelCapabilities(
             provider=normalized_provider,
