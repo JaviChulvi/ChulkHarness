@@ -180,7 +180,17 @@ def _memory_tool(factory: Callable[[Any], Tool]) -> Callable[[Any], Tool]:
 
 
 calculator = ToolRef("calculator", lambda _context: calculator_tool())
-run_cmd = ToolRef("run_cmd", lambda context: shell_tool(context.project_root, timeout_seconds=context.shell_timeout_seconds))
+run_cmd = ToolRef(
+    "run_cmd",
+    lambda context: shell_tool(
+        context.project_root,
+        timeout_seconds=context.shell_timeout_seconds,
+        stdout_limit_bytes=context.max_tool_stdout_bytes,
+        stderr_limit_bytes=context.max_tool_stderr_bytes,
+        execution_policy=context.shell_execution_policy,
+        require_containment=context.require_shell_containment,
+    ),
+)
 read_file = ToolRef("read_file", lambda context: read_file_tool(context.project_root))
 apply_patch = ToolRef("apply_patch", lambda context: apply_patch_tool(context.project_root))
 write_file = ToolRef("write_file", lambda context: write_file_tool(context.project_root))

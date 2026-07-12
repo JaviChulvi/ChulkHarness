@@ -59,7 +59,14 @@ from chulk.tools.public import (
     update_memory,
     write_file,
 )
-from chulk.tools.shell import run_shell_command, shell_tool
+from chulk.tools.shell import (
+    DirectShellExecutionPolicy,
+    ShellExecutionDecision,
+    ShellExecutionPolicy,
+    ShellExecutionRequest,
+    run_shell_command,
+    shell_tool,
+)
 
 __all__ = [
     "Tool",
@@ -71,6 +78,10 @@ __all__ = [
     "ToolContext",
     "ToolFailureKind",
     "FileReadPolicy",
+    "DirectShellExecutionPolicy",
+    "ShellExecutionDecision",
+    "ShellExecutionPolicy",
+    "ShellExecutionRequest",
     "ToolRegistry",
     "ToolResult",
     "PermissionDecision",

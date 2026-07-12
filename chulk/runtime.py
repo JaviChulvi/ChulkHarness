@@ -19,7 +19,7 @@ from chulk.mcp import create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
-from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
+from chulk.tools import ShellExecutionPolicy, Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
 from chulk.tools.permissions import (
     PermissionDecision,
     PermissionDecisionRecord,
@@ -42,6 +42,10 @@ class RuntimeToolContext:
 
     project_root: Path
     shell_timeout_seconds: int
+    max_tool_stdout_bytes: int
+    max_tool_stderr_bytes: int
+    shell_execution_policy: ShellExecutionPolicy | None = None
+    require_shell_containment: bool = False
     memory_store: SQLiteMemoryStore | None = None
     deps: object | None = None
 
@@ -74,6 +78,8 @@ def create_agent(
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -146,6 +152,8 @@ def create_agent(
         capabilities=selected_capabilities,
         memory_policy=memory_policy,
         deps=deps,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
     )
     if active_mcp_servers:
         trace_logger.log(
@@ -271,6 +279,8 @@ def _create_tool_registry(
     capabilities: Capabilities,
     memory_policy: MemoryPolicy,
     deps: object | None,
+    shell_execution_policy: ShellExecutionPolicy | None,
+    require_shell_containment: bool,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -279,12 +289,20 @@ def _create_tool_registry(
             memory_store=memory_store,
             capabilities=capabilities,
             memory_policy=memory_policy,
+            max_tool_stdout_bytes=config.max_tool_stdout_chars,
+            max_tool_stderr_bytes=config.max_tool_stderr_chars,
+            shell_execution_policy=shell_execution_policy,
+            require_shell_containment=require_shell_containment,
         )
         return _register_mcp_bridge_tools(config, registry, mcp_servers)
 
     context = RuntimeToolContext(
         project_root=config.project_root,
         shell_timeout_seconds=config.shell_timeout_seconds,
+        max_tool_stdout_bytes=config.max_tool_stdout_chars,
+        max_tool_stderr_bytes=config.max_tool_stderr_chars,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
         memory_store=memory_store,
         deps=deps,
     )
@@ -327,7 +345,6 @@ def _mcp_provider_path(config: Config, mcp_servers: Iterable[object]) -> str:
     if has_hosted and has_bridge:
         return "hosted+bridge"
     return "hosted" if has_hosted else "bridge"
-
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
     if isinstance(spec, Tool):

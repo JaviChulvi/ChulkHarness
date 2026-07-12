@@ -4,6 +4,53 @@ Declare tools with `@Tool`, expose only the smallest necessary list, and give
 each tool an accurate permission level. Model arguments are untrusted and are
 validated against the generated schema before the Python callable starts.
 
+## Built-in shell execution
+
+`run_cmd` keeps the existing shell capability, permission-profile, and approval
+checks. Once approved, it captures stdout and stderr through separate bounded
+byte buffers while the child is running. `CHULK_MAX_TOOL_STDOUT_CHARS` and
+`CHULK_MAX_TOOL_STDERR_CHARS` remain the configuration keys for compatibility;
+their numeric values are also enforced as the raw byte ceilings for shell
+capture. Crossing either ceiling stops the command, kills its process group,
+and returns `output_limit_exceeded` with a bounded head/tail preview and
+inspectable byte counts. A timeout follows the same process-group cleanup path
+and retains any bounded partial output.
+
+The built-in destructive-command checks are guardrails, not a sandbox. Direct
+local execution is still the default for the CLI. Embedding hosts that require
+containment can fail closed and inject a policy that wraps the model command in
+their own sandbox:
+
+```python
+from chulk import Agent, ShellExecutionDecision, ShellExecutionRequest, Tools
+
+class SandboxPolicy:
+    def prepare(self, request: ShellExecutionRequest) -> ShellExecutionDecision:
+        sandbox_argv = build_sandbox_command(
+            command=request.command,
+            project_root=request.cwd,
+        )
+        return ShellExecutionDecision.allow(
+            sandbox_argv,
+            policy_name="application-sandbox",
+            shell=False,
+            containment_applied=True,
+        )
+
+agent = Agent(
+    tools=[Tools.run_cmd],
+    shell_execution_policy=SandboxPolicy(),
+    require_shell_containment=True,
+)
+```
+
+`containment_applied=True` is a host assertion, not something Chulk can verify.
+Set it only after the wrapper establishes the filesystem, network, process, and
+credential boundaries your application requires. If containment is required
+and the policy does not assert it, Chulk returns `containment_required` before
+starting a child. A policy can also deny a request explicitly with
+`ShellExecutionDecision.deny(...)`.
+
 ## Trusted host dependencies
 
 `ToolContext[Deps]` carries application-owned state that the model cannot

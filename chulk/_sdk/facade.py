@@ -29,7 +29,7 @@ from chulk.events import AgentEvent, EventName
 from chulk.mcp import MCPServerConfig
 from chulk.results import MemoryProposal
 from chulk.runtime import create_agent as create_runtime_agent
-from chulk.tools import ToolExecutionContext
+from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 
 
@@ -424,6 +424,8 @@ class Agent:
         capabilities: Capabilities | None = None,
         memory_mode: MemoryMode | str | None = None,
         deps: object | None = None,
+        shell_execution_policy: ShellExecutionPolicy | None = None,
+        require_shell_containment: bool = False,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -442,6 +444,8 @@ class Agent:
                 redaction_fail_closed=redaction_fail_closed,
                 capabilities=selected_capabilities,
                 deps=deps,
+                shell_execution_policy=shell_execution_policy,
+                require_shell_containment=require_shell_containment,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -789,6 +793,8 @@ def _build_handle(
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -807,6 +813,8 @@ def _build_handle(
         redaction_fail_closed=redaction_fail_closed,
         capabilities=capabilities,
         deps=deps,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
     )
     return AgentHandle(runtime, on_event=on_event)
 
