@@ -14,7 +14,14 @@ from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
-from chulk.llm import LLMClient, LLMModelCapabilities, create_llm_client, resolve_model_capabilities
+from chulk.llm import (
+    LLMClient,
+    LLMModelCapabilities,
+    create_llm_client,
+    provider_capabilities,
+    provider_connection_from_config,
+    resolve_model_capabilities,
+)
 from chulk.mcp import create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
@@ -253,11 +260,7 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
     return create_llm_client(
         provider=config.llm_provider,
         model=config.model,
-        openai_api_key=config.openai_api_key,
-        deepseek_api_key=config.deepseek_api_key,
-        deepseek_base_url=config.deepseek_base_url,
-        local_api_key=config.local_api_key,
-        local_base_url=config.local_base_url,
+        connection=provider_connection_from_config(config.llm_provider, config),
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )
@@ -333,18 +336,23 @@ def _mcp_bridge_required(config: Config, mcp_servers: Iterable[object]) -> bool:
     if not tuple(mcp_servers):
         return False
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(provider != "openai" for provider in provider_path)
+    return any(not _supports_hosted_mcp(provider) for provider in provider_path)
 
 
 def _mcp_provider_path(config: Config, mcp_servers: Iterable[object]) -> str:
     if not tuple(mcp_servers):
         return "none"
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    has_hosted = any(provider == "openai" for provider in provider_path)
-    has_bridge = any(provider != "openai" for provider in provider_path)
+    has_hosted = any(_supports_hosted_mcp(provider) for provider in provider_path)
+    has_bridge = any(not _supports_hosted_mcp(provider) for provider in provider_path)
     if has_hosted and has_bridge:
         return "hosted+bridge"
     return "hosted" if has_hosted else "bridge"
+
+
+def _supports_hosted_mcp(provider: str) -> bool:
+    return provider_capabilities(provider).supports_hosted_mcp_tools
+
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
     if isinstance(spec, Tool):

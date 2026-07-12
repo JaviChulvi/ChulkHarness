@@ -120,8 +120,8 @@ def normalize_openai_usage(usage: object) -> LLMUsage | None:
     )
 
 
-def normalize_deepseek_usage(usage: object) -> LLMUsage | None:
-    """Return normalized usage from a DeepSeek chat-completions usage object."""
+def normalize_chat_completions_usage(usage: object) -> LLMUsage | None:
+    """Return normalized usage from an OpenAI-compatible chat-completions response."""
     if usage is None:
         return None
     prompt_tokens = _int_value(_value(usage, "prompt_tokens"))
@@ -150,6 +150,11 @@ def normalize_deepseek_usage(usage: object) -> LLMUsage | None:
         source="provider",
         raw=_public_dict(usage),
     )
+
+
+def normalize_deepseek_usage(usage: object) -> LLMUsage | None:
+    """Return normalized usage from a DeepSeek chat-completions usage object."""
+    return normalize_chat_completions_usage(usage)
 
 
 def estimate_usage(messages: list[dict[str, str]], content: str) -> LLMUsage:

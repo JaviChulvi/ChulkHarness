@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk, call_with_supported_kwargs
 from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
-from chulk.llm.factory import create_llm_client
+from chulk.llm.factory import create_llm_client, provider_connection_from_config
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 if TYPE_CHECKING:
@@ -40,12 +40,11 @@ class OpenAIProvider:
     provider: str = "openai"
 
     def bind_config(self, config: "Config") -> LLMClient:
+        connection = provider_connection_from_config(self.provider, config).with_overrides(api_key=self.api_key or None)
         return create_llm_client(
             provider=self.provider,
             model=self.model,
-            openai_api_key=self.api_key or config.openai_api_key,
-            deepseek_api_key=config.deepseek_api_key,
-            deepseek_base_url=config.deepseek_base_url,
+            connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
             max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
         )
@@ -63,12 +62,14 @@ class DeepSeekProvider:
     provider: str = "deepseek"
 
     def bind_config(self, config: Config) -> LLMClient:
+        connection = provider_connection_from_config(self.provider, config).with_overrides(
+            api_key=self.api_key or None,
+            base_url=self.base_url or None,
+        )
         return create_llm_client(
             provider=self.provider,
             model=self.model,
-            openai_api_key=config.openai_api_key,
-            deepseek_api_key=self.api_key or config.deepseek_api_key,
-            deepseek_base_url=self.base_url or config.deepseek_base_url,
+            connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
             max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
         )
@@ -86,14 +87,14 @@ class LocalProvider:
     provider: str = "local"
 
     def bind_config(self, config: Config) -> LLMClient:
+        connection = provider_connection_from_config(self.provider, config).with_overrides(
+            api_key=self.api_key or None,
+            base_url=self.base_url or None,
+        )
         return create_llm_client(
             provider=self.provider,
             model=self.model,
-            openai_api_key=config.openai_api_key,
-            deepseek_api_key=config.deepseek_api_key,
-            deepseek_base_url=config.deepseek_base_url,
-            local_api_key=self.api_key or config.local_api_key,
-            local_base_url=self.base_url or config.local_base_url,
+            connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
             max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
         )

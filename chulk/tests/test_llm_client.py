@@ -720,6 +720,7 @@ def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "2 + 2"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert fake_client.chat.completions.kwargs["parallel_tool_calls"] is False
     assert "tools" in fake_client.chat.completions.kwargs
     assert "response_format" not in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
@@ -829,7 +830,7 @@ def test_deepseek_client_uses_json_object_mode_for_actions():
     assert fake_client.chat.completions.kwargs["response_format"] == {"type": "json_object"}
 
 
-def test_deepseek_client_does_not_send_max_tokens():
+def test_deepseek_client_sends_only_explicit_max_tokens():
     fake_client = FakeDeepSeekClient(
         json.dumps({"type": "final_answer", "content": "structured answer", "tool_name": None, "arguments_json": "{}"})
     )
@@ -837,7 +838,7 @@ def test_deepseek_client_does_not_send_max_tokens():
 
     client.complete([{"role": "user", "content": "Hello"}], max_output_tokens=25)
 
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 25
 
     client.complete_action(
         [
@@ -847,7 +848,7 @@ def test_deepseek_client_does_not_send_max_tokens():
         max_output_tokens=250,
     )
 
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 250
 
 
 def test_deepseek_client_can_parse_plan_action_from_json_mode():
@@ -966,7 +967,7 @@ def test_local_client_actions_use_plain_chat_completion_contract():
     )
 
     assert result.action.content == "structured answer"
-    assert "max_tokens" not in fake_client.chat.completions.kwargs
+    assert fake_client.chat.completions.kwargs["max_tokens"] == 250
     assert "response_format" not in fake_client.chat.completions.kwargs
     assert fake_client.chat.completions.kwargs["messages"] == [
         {"role": "user", "content": "Instructions:\nReturn action JSON.\n\nUser message:\n\nHello"}
@@ -990,6 +991,7 @@ def test_local_client_uses_native_tool_calls_when_tools_are_provided():
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "3 + 4"})
     assert fake_client.chat.completions.kwargs["tool_choice"] == "auto"
+    assert fake_client.chat.completions.kwargs["parallel_tool_calls"] is False
     assert "tools" in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
     assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
