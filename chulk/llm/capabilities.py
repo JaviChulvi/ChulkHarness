@@ -17,6 +17,8 @@ COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
 COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
 ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
+BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
+BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -41,6 +43,10 @@ COMPATIBLE_DEFAULT_LIMITS = (
 ANTHROPIC_DEFAULT_LIMITS = (
     ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
     ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+BEDROCK_DEFAULT_LIMITS = (
+    BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
 
 
@@ -147,6 +153,13 @@ def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCap
             model=normalized_model,
             context_window_tokens=ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS,
             default_response_reserve_tokens=ANTHROPIC_DEFAULT_RESPONSE_RESERVE_TOKENS,
+        )
+    if normalized_provider == "bedrock":
+        return LLMModelCapabilities(
+            provider=normalized_provider,
+            model=normalized_model,
+            context_window_tokens=BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS,
+            default_response_reserve_tokens=BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS,
         )
     if normalized_provider in {"openai-compatible", "openrouter"}:
         return LLMModelCapabilities(

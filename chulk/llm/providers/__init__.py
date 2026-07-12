@@ -1,6 +1,7 @@
 """Hosted LLM provider implementations."""
 
 from chulk.llm.providers.anthropic import AnthropicMessagesClient
+from chulk.llm.providers.bedrock import BedrockOpenAICompatibleClient
 from chulk.llm.providers.chat_completions import (
     ChatCompletionsTransportProfile,
     OpenAICompatibleChatCompletionsClient,
@@ -15,6 +16,7 @@ from chulk.llm.providers.openai import OpenAIResponsesClient
 
 __all__ = [
     "AnthropicMessagesClient",
+    "BedrockOpenAICompatibleClient",
     "ChatCompletionsTransportProfile",
     "DeepSeekChatCompletionsClient",
     "HostedOpenAICompatibleClient",

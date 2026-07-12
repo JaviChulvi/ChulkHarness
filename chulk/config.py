@@ -70,6 +70,8 @@ class Config:
     openrouter_base_url: str = DEFAULT_OPENROUTER_BASE_URL
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
+    bedrock_api_key: str | None = None
+    bedrock_base_url: str | None = None
     llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
@@ -161,6 +163,21 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         raise ConfigValueError("CHULK_LLM_PROVIDER", f"CHULK_LLM_PROVIDER must be one of: {supported}")
 
     model = _configured_model(env, llm_provider)
+    bedrock_base_url = _bedrock_base_url(env)
+    llm_fallback_providers = _parse_fallback_providers(
+        env,
+        primary_provider=llm_provider,
+        primary_model=model,
+    )
+    bedrock_is_configured = llm_provider == "bedrock" or any(
+        fallback.provider == "bedrock" for fallback in llm_fallback_providers
+    )
+    if bedrock_is_configured and bedrock_base_url is None:
+        raise ConfigValueError(
+            "CHULK_BEDROCK_BASE_URL",
+            "CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL is required when Bedrock "
+            "is configured as a primary or fallback provider",
+        )
     runtime_dir = _resolve_config_path(env.get("CHULK_RUNTIME_DIR") or ".chulk", base=project_root)
     mcp_config_path = runtime_dir / "mcp.json"
     mcp_servers = load_mcp_servers(mcp_config_path, env)
@@ -188,11 +205,14 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         openrouter_base_url=env.get("CHULK_OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL,
         anthropic_api_key=env.get("CHULK_ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY") or None,
         anthropic_base_url=env.get("CHULK_ANTHROPIC_BASE_URL") or None,
-        llm_fallback_providers=_parse_fallback_providers(
-            env,
-            primary_provider=llm_provider,
-            primary_model=model,
+        bedrock_api_key=(
+            env.get("CHULK_BEDROCK_API_KEY")
+            or env.get("BEDROCK_API_KEY")
+            or env.get("AWS_BEARER_TOKEN_BEDROCK")
+            or None
         ),
+        bedrock_base_url=bedrock_base_url,
+        llm_fallback_providers=llm_fallback_providers,
         history_limit=_env_int(env, "CHULK_HISTORY_LIMIT", 20),
         max_tool_calls_per_turn=_env_int(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", 5),
         max_skills_per_turn=_env_int(env, "CHULK_MAX_SKILLS_PER_TURN", DEFAULT_MAX_SKILLS_PER_TURN),
@@ -263,6 +283,13 @@ def _default_model_for_provider(provider: str) -> str | None:
         "deepseek": DEFAULT_DEEPSEEK_MODEL,
         "local": DEFAULT_LOCAL_MODEL,
     }.get(provider)
+
+
+def _bedrock_base_url(env: Mapping[str, str]) -> str | None:
+    value = env.get("CHULK_BEDROCK_BASE_URL") or env.get("CHULK_BASE_URL")
+    if value is None or not value.strip():
+        return None
+    return value.strip()
 
 
 def _parse_fallback_providers(
