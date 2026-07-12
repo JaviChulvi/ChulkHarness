@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+import inspect
 import json
 from typing import Any, Literal
 
@@ -93,13 +94,8 @@ class LLMClient:
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         """Return text plus normalized usage metadata."""
-        try:
-            if max_output_tokens is None:
-                content = self.complete(messages)
-            else:
-                content = self.complete(messages, max_output_tokens=max_output_tokens)
-        except TypeError:
-            content = self.complete(messages)
+        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        content = call_with_supported_kwargs(self.complete, messages, **kwargs)
         return self._response_with_estimated_usage(messages, content)
 
     def stream_complete(
@@ -150,21 +146,18 @@ class LLMClient:
         usage_records: list[LLMUsage | None] = []
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
-            if max_output_tokens is None:
-                response = self._complete_action_response_once(
-                    action_messages,
-                    tools=tools,
-                    hosted_mcp_servers=hosted_mcp_servers,
-                    mcp_approval_callback=mcp_approval_callback,
-                )
-            else:
-                response = self._complete_action_response_once(
-                    action_messages,
-                    max_output_tokens=max_output_tokens,
-                    tools=tools,
-                    hosted_mcp_servers=hosted_mcp_servers,
-                    mcp_approval_callback=mcp_approval_callback,
-                )
+            response_kwargs: dict[str, Any] = {
+                "tools": tools,
+                "hosted_mcp_servers": hosted_mcp_servers,
+                "mcp_approval_callback": mcp_approval_callback,
+            }
+            if max_output_tokens is not None:
+                response_kwargs["max_output_tokens"] = max_output_tokens
+            response = call_with_supported_kwargs(
+                self._complete_action_response_once,
+                action_messages,
+                **response_kwargs,
+            )
             raw_response = response.content
             usage_records.append(response.usage)
             cost_records.append(response.cost)
@@ -213,13 +206,8 @@ class LLMClient:
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Return one raw action response attempt plus metadata."""
-        try:
-            if max_output_tokens is None:
-                content = self._complete_action_once(messages)
-            else:
-                content = self._complete_action_once(messages, max_output_tokens=max_output_tokens)
-        except TypeError:
-            content = self._complete_action_once(messages)
+        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        content = call_with_supported_kwargs(self._complete_action_once, messages, **kwargs)
         return self._response_with_estimated_usage(messages, content)
 
     def _response_with_estimated_usage(self, messages: list[dict[str, str]], content: str) -> LLMResponse:
@@ -254,3 +242,32 @@ def _format_json_repair_prompt(raw_response: str, error: str) -> str:
             raw_response[:2000],
         ]
     )
+
+
+def call_with_supported_kwargs(call: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Call a compatibility hook once, omitting only unsupported keyword arguments.
+
+    Older injected clients may implement the original, smaller Chulk method
+    signatures. Inspecting the callable before invocation preserves that
+    compatibility without catching an internal ``TypeError`` and accidentally
+    issuing the same provider request twice.
+    """
+    supported_kwargs = _supported_kwargs(call, kwargs)
+    return call(*args, **supported_kwargs)
+
+
+def _supported_kwargs(call: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    if not kwargs:
+        return {}
+    try:
+        parameters = inspect.signature(call).parameters.values()
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return dict(kwargs)
+    accepted = {
+        parameter.name
+        for parameter in parameters
+        if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+    }
+    return {name: value for name, value in kwargs.items() if name in accepted}

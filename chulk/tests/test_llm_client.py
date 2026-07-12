@@ -152,6 +152,15 @@ class ScriptedLLMClient(LLMClient):
         return self.responses.pop(0)
 
 
+class InternalTypeErrorLLMClient(LLMClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+        self.calls += 1
+        raise TypeError("provider implementation failed internally")
+
+
 class ScriptedStreamingLLMClient(LLMClient):
     capabilities = LLMCapabilities(supports_streaming=True)
 
@@ -283,6 +292,19 @@ def test_base_complete_response_estimates_usage_and_preserves_complete_compatibi
     assert response.usage.output_tokens > 0
     assert response.cost is not None
     assert response.cost.pricing_known is False
+
+
+def test_base_complete_response_does_not_retry_internal_type_error():
+    client = InternalTypeErrorLLMClient()
+
+    try:
+        client.complete_response([{"role": "user", "content": "Hello"}], max_output_tokens=50)
+    except TypeError as exc:
+        assert "internally" in str(exc)
+    else:
+        raise AssertionError("Expected the provider TypeError to escape")
+
+    assert client.calls == 1
 
 
 def test_openai_responses_client_streams_text_deltas():

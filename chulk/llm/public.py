@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk
+from chulk.llm.base import LLMActionResult, LLMClient, LLMError, LLMStreamChunk, call_with_supported_kwargs
 from chulk.llm.factory import create_llm_client
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
@@ -310,12 +310,8 @@ class FallbackChain(LLMClient):
 
 
 def _complete_response(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> LLMResponse:
-    try:
-        if max_output_tokens is None:
-            return provider.complete_response(messages)
-        return provider.complete_response(messages, max_output_tokens=max_output_tokens)
-    except TypeError:
-        return provider.complete_response(messages)
+    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+    return call_with_supported_kwargs(provider.complete_response, messages, **kwargs)
 
 
 def _stream_complete(
@@ -324,13 +320,8 @@ def _stream_complete(
     *,
     max_output_tokens: int | None,
 ) -> Iterator[LLMStreamChunk]:
-    try:
-        if max_output_tokens is None:
-            yield from provider.stream_complete(messages)
-            return
-        yield from provider.stream_complete(messages, max_output_tokens=max_output_tokens)
-    except TypeError:
-        yield from provider.stream_complete(messages)
+    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+    yield from call_with_supported_kwargs(provider.stream_complete, messages, **kwargs)
 
 
 def _complete_action_response_once(
@@ -342,20 +333,14 @@ def _complete_action_response_once(
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
     mcp_approval_callback: Callable[[dict], bool] | None = None,
 ) -> LLMResponse:
-    if max_output_tokens is None:
-        return provider._complete_action_response_once(
-            messages,
-            tools=tools,
-            hosted_mcp_servers=hosted_mcp_servers,
-            mcp_approval_callback=mcp_approval_callback,
-        )
-    return provider._complete_action_response_once(
-        messages,
-        max_output_tokens=max_output_tokens,
-        tools=tools,
-        hosted_mcp_servers=hosted_mcp_servers,
-        mcp_approval_callback=mcp_approval_callback,
-    )
+    kwargs = {
+        "tools": tools,
+        "hosted_mcp_servers": hosted_mcp_servers,
+        "mcp_approval_callback": mcp_approval_callback,
+    }
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    return call_with_supported_kwargs(provider._complete_action_response_once, messages, **kwargs)
 
 
 def _supports_hosted_mcp(provider: object) -> bool:
