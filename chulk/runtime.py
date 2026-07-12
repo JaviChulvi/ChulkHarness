@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import warnings
-from typing import Protocol
+from typing import Protocol, cast
 
 from chulk.capabilities import Capabilities
 from chulk.config import Config
@@ -22,7 +22,7 @@ from chulk.llm import (
     provider_connection_from_config,
     resolve_model_capabilities,
 )
-from chulk.mcp import create_mcp_bridge_tools
+from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
@@ -79,7 +79,7 @@ def create_agent(
         PermissionDecision | bool,
     ]
     | None = None,
-    mcp_servers: Iterable[object] | None = None,
+    mcp_servers: Iterable[MCPServerConfig] | None = None,
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
@@ -277,7 +277,7 @@ def _create_tool_registry(
     config: Config,
     memory_store: SQLiteMemoryStore,
     tool_specs: Iterable[object] | None,
-    mcp_servers: Iterable[object],
+    mcp_servers: Iterable[MCPServerConfig],
     *,
     capabilities: Capabilities,
     memory_policy: MemoryPolicy,
@@ -319,7 +319,7 @@ def _create_tool_registry(
 def _register_mcp_bridge_tools(
     config: Config,
     registry: ToolRegistry,
-    mcp_servers: Iterable[object],
+    mcp_servers: Iterable[MCPServerConfig],
 ) -> tuple[ToolRegistry, list[str]]:
     servers = tuple(mcp_servers)
     if not servers or not _mcp_bridge_required(config, servers):
@@ -430,7 +430,7 @@ def _coerce_skill_specs(skill_specs: object | Iterable[object] | None) -> list[o
     if isinstance(skill_specs, (str, SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef)):
         return [skill_specs]
     try:
-        return list(skill_specs)  # type: ignore[arg-type]
+        return list(cast(Iterable[object], skill_specs))
     except TypeError:
         return [skill_specs]
 

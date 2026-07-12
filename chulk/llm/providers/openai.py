@@ -234,7 +234,7 @@ class OpenAIResponsesClient(LLMClient):
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         instructions, response_input = split_instructions(messages)
-        request = {
+        request: dict[str, Any] = {
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,
@@ -280,7 +280,7 @@ class OpenAIResponsesClient(LLMClient):
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         instructions, response_input = split_instructions(messages)
-        request = {
+        request: dict[str, Any] = {
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,

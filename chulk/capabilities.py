@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 
 class FileAccess(StrEnum):
@@ -64,9 +64,9 @@ class Capabilities:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "files": self.files.value,
+            "files": cast(FileAccess, self.files).value,
             "shell": self.shell,
-            "memory": self.memory.value,
+            "memory": cast(MemoryMode, self.memory).value,
             "network": self.network,
             "external_services": self.external_services,
             "utilities": self.utilities,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -215,6 +215,7 @@ def aggregate_cost(costs: list[LLMCost | None]) -> LLMCost | None:
 def usage_from_dict(payload: object) -> LLMUsage | None:
     if not isinstance(payload, dict):
         return None
+    raw = payload.get("raw")
     return LLMUsage(
         input_tokens=_int_value(payload.get("input_tokens")),
         output_tokens=_int_value(payload.get("output_tokens")),
@@ -226,7 +227,7 @@ def usage_from_dict(payload: object) -> LLMUsage | None:
         estimated=bool(payload.get("estimated")),
         cache_split_estimated=bool(payload.get("cache_split_estimated")),
         source=str(payload.get("source") or "provider"),
-        raw=payload.get("raw") if isinstance(payload.get("raw"), dict) else {},
+        raw=cast(dict[str, Any], raw) if isinstance(raw, dict) else {},
     )
 
 
@@ -281,7 +282,7 @@ def _int_value(value: object) -> int:
     if value is None:
         return 0
     try:
-        return max(0, int(value))
+        return max(0, int(cast(Any, value)))
     except (TypeError, ValueError):
         return 0
 

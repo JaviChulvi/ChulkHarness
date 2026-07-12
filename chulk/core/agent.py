@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 import re
 import time
+from typing import Any, cast
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.actions import PlanAction, PlanStepUpdateAction
@@ -1461,7 +1462,7 @@ class Agent:
                     f"Current step id is {step.id}; the model tried to update {action.step_id}."
                 ),
             )
-            return
+            return None
 
         step.add_evidence(action.evidence, tool_name="plan_step_update")
         if action.status == "completed":
@@ -1897,7 +1898,9 @@ def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
     }
 
 
-def _coerce_turn_context_sections(values: list[TurnContextSection | dict | str] | None) -> list[TurnContextSection]:
+def _coerce_turn_context_sections(
+    values: list[TurnContextSection | dict[str, Any] | str] | None,
+) -> list[TurnContextSection]:
     if not values:
         return []
     sections: list[TurnContextSection] = []
@@ -1913,7 +1916,8 @@ def _coerce_turn_context_sections(values: list[TurnContextSection | dict | str] 
             if not isinstance(content, str) or not content.strip():
                 continue
             section_id = value.get("id") or value.get("source_id") or f"context-{index}"
-            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            raw_metadata = value.get("metadata")
+            metadata = cast(dict[str, Any], raw_metadata) if isinstance(raw_metadata, dict) else {}
             sections.append(
                 TurnContextSection(
                     id=str(section_id),
