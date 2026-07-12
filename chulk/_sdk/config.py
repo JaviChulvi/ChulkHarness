@@ -60,6 +60,8 @@ class AgentConfig:
     anthropic_base_url: str | None = None
     bedrock_api_key: str | None = None
     bedrock_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
     permission_profile: str | None = None
     store_path: str | Path | None = None
     traces_dir: str | Path | None = None
@@ -244,6 +246,26 @@ class AgentConfig:
             values["bedrock_base_url"] = base_url
         return cls.from_env(provider="bedrock", model=model, **values)
 
+    @classmethod
+    def gemini(
+        cls,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for Google Gemini-backed agents."""
+        resolved_model = model.strip()
+        if not resolved_model:
+            raise ValueError("AgentConfig.gemini requires a non-empty model")
+        values = dict(kwargs)
+        if api_key is not None:
+            values["gemini_api_key"] = api_key
+        if base_url is not None:
+            values["gemini_base_url"] = base_url
+        return cls.from_env(provider="gemini", model=resolved_model, **values)
+
     def to_config(self) -> Config:
         """Build the internal runtime config."""
         env = dict(os.environ)
@@ -266,6 +288,8 @@ class AgentConfig:
         _set_env(env, "CHULK_ANTHROPIC_BASE_URL", self.anthropic_base_url)
         _set_env(env, "CHULK_BEDROCK_API_KEY", self.bedrock_api_key)
         _set_env(env, "CHULK_BEDROCK_BASE_URL", self.bedrock_base_url)
+        _set_env(env, "CHULK_GEMINI_API_KEY", self.gemini_api_key)
+        _set_env(env, "CHULK_GEMINI_BASE_URL", self.gemini_base_url)
         _set_env(env, "CHULK_PERMISSION_PROFILE", self.permission_profile)
         _set_env(env, "CHULK_HISTORY_LIMIT", self.history_limit)
         _set_env(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", self.max_tool_calls_per_turn)

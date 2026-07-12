@@ -22,6 +22,7 @@ from chulk.llm.providers.deepseek import (
     DEEPSEEK_CAPABILITIES,
     DeepSeekChatCompletionsClient,
 )
+from chulk.llm.providers.gemini import GEMINI_CAPABILITIES, GeminiGenerateContentClient
 from chulk.llm.providers.local import (
     DEFAULT_LOCAL_BASE_URL,
     LOCAL_CAPABILITIES,
@@ -71,6 +72,12 @@ class LLMConnectionConfig(Protocol):
 
     @property
     def bedrock_base_url(self) -> str | None: ...
+
+    @property
+    def gemini_api_key(self) -> str | None: ...
+
+    @property
+    def gemini_base_url(self) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -195,6 +202,15 @@ LLM_PROVIDER_REGISTRY: dict[str, LLMProviderProfile] = {
         ),
         create_client=lambda settings: _create_bedrock_client(settings),
     ),
+    "gemini": LLMProviderProfile(
+        name="gemini",
+        capabilities=GEMINI_CAPABILITIES,
+        connection_from_config=lambda config: LLMProviderConnection(
+            api_key=config.gemini_api_key,
+            base_url=config.gemini_base_url,
+        ),
+        create_client=lambda settings: _create_gemini_client(settings),
+    ),
 }
 
 
@@ -236,6 +252,8 @@ def create_llm_client(
     anthropic_base_url: str | None = None,
     bedrock_api_key: str | None = None,
     bedrock_base_url: str | None = None,
+    gemini_api_key: str | None = None,
+    gemini_base_url: str | None = None,
 ) -> LLMClient:
     """Create an LLM client for the selected provider.
 
@@ -265,6 +283,8 @@ def create_llm_client(
         anthropic_base_url=anthropic_base_url,
         bedrock_api_key=bedrock_api_key,
         bedrock_base_url=bedrock_base_url,
+        gemini_api_key=gemini_api_key,
+        gemini_base_url=gemini_base_url,
     )
     selected_connection = provider_profile.default_connection.with_overrides(
         api_key=selected_connection.api_key,
@@ -306,6 +326,8 @@ def _legacy_connection(
     anthropic_base_url: str | None,
     bedrock_api_key: str | None,
     bedrock_base_url: str | None,
+    gemini_api_key: str | None,
+    gemini_base_url: str | None,
 ) -> LLMProviderConnection:
     if profile.name == "openai":
         return LLMProviderConnection(api_key=openai_api_key)
@@ -324,6 +346,8 @@ def _legacy_connection(
         return LLMProviderConnection(api_key=anthropic_api_key, base_url=anthropic_base_url)
     if profile.name == "bedrock":
         return LLMProviderConnection(api_key=bedrock_api_key, base_url=bedrock_base_url)
+    if profile.name == "gemini":
+        return LLMProviderConnection(api_key=gemini_api_key, base_url=gemini_base_url)
     return profile.default_connection
 
 
@@ -388,6 +412,16 @@ def _create_anthropic_client(settings: LLMClientSettings) -> LLMClient:
 
 def _create_bedrock_client(settings: LLMClientSettings) -> LLMClient:
     return BedrockOpenAICompatibleClient(
+        model=settings.model,
+        api_key=settings.connection.api_key,
+        base_url=settings.connection.base_url,
+        timeout_seconds=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+    )
+
+
+def _create_gemini_client(settings: LLMClientSettings) -> LLMClient:
+    return GeminiGenerateContentClient(
         model=settings.model,
         api_key=settings.connection.api_key,
         base_url=settings.connection.base_url,

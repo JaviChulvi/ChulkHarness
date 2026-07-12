@@ -72,6 +72,8 @@ class Config:
     anthropic_base_url: str | None = None
     bedrock_api_key: str | None = None
     bedrock_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
     llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
     history_limit: int = 20
     max_tool_calls_per_turn: int = 5
@@ -212,6 +214,13 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
             or None
         ),
         bedrock_base_url=bedrock_base_url,
+        gemini_api_key=_first_nonblank_env(
+            env,
+            "CHULK_GEMINI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ),
+        gemini_base_url=_first_nonblank_env(env, "CHULK_GEMINI_BASE_URL"),
         llm_fallback_providers=llm_fallback_providers,
         history_limit=_env_int(env, "CHULK_HISTORY_LIMIT", 20),
         max_tool_calls_per_turn=_env_int(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", 5),
@@ -290,6 +299,14 @@ def _bedrock_base_url(env: Mapping[str, str]) -> str | None:
     if value is None or not value.strip():
         return None
     return value.strip()
+
+
+def _first_nonblank_env(env: Mapping[str, str], *keys: str) -> str | None:
+    for key in keys:
+        value = env.get(key)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
 
 
 def _parse_fallback_providers(

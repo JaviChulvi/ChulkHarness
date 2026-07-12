@@ -7,6 +7,7 @@ from chulk.llm.providers.chat_completions import (
     OpenAICompatibleChatCompletionsClient,
 )
 from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
+from chulk.llm.providers.gemini import GeminiGenerateContentClient
 from chulk.llm.providers.compatible import (
     HostedOpenAICompatibleClient,
     OpenRouterChatCompletionsClient,
@@ -20,6 +21,7 @@ __all__ = [
     "ChatCompletionsTransportProfile",
     "DeepSeekChatCompletionsClient",
     "HostedOpenAICompatibleClient",
+    "GeminiGenerateContentClient",
     "LocalOpenAICompatibleClient",
     "OpenAICompatibleChatCompletionsClient",
     "OpenRouterChatCompletionsClient",

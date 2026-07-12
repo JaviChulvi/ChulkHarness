@@ -35,6 +35,7 @@ from chulk.llm import (
     BedrockProvider,
     DeepSeekProvider,
     FallbackChain,
+    GeminiProvider,
     LLMClient,
     LLMConfigurationError,
     LLMError,
@@ -77,6 +78,8 @@ def format_config(config: Config) -> str:
         "anthropic_base_url": config.anthropic_base_url or "not set",
         "bedrock_api_key": "set" if config.bedrock_api_key else "not set",
         "bedrock_base_url": config.bedrock_base_url or "not set",
+        "gemini_api_key": "set" if config.gemini_api_key else "not set",
+        "gemini_base_url": config.gemini_base_url or "not set",
         "history_limit": config.history_limit,
         "max_tool_calls_per_turn": config.max_tool_calls_per_turn,
         "max_skills_per_turn": config.max_skills_per_turn,
@@ -132,6 +135,7 @@ def create_cli_llm(config: Config) -> FallbackChain:
         | OpenRouterProvider
         | AnthropicProvider
         | BedrockProvider
+        | GeminiProvider
     ] = [
         _create_provider_spec(config.llm_provider, config.model)
     ]
@@ -153,6 +157,7 @@ def _create_provider_spec(
     | OpenRouterProvider
     | AnthropicProvider
     | BedrockProvider
+    | GeminiProvider
 ):
     if provider == "openai":
         return OpenAIProvider(model=model)
@@ -168,6 +173,8 @@ def _create_provider_spec(
         return AnthropicProvider(model=model)
     if provider == "bedrock":
         return BedrockProvider(model=model)
+    if provider == "gemini":
+        return GeminiProvider(model=model)
     raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
 
 
