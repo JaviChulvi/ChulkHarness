@@ -351,6 +351,11 @@ _ANTHROPIC_DEPRECATIONS_URL = (
 _GEMINI_PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
 _GEMINI_DEPRECATIONS_URL = "https://ai.google.dev/gemini-api/docs/deprecations"
 _GEMINI_CHANGELOG_URL = "https://ai.google.dev/gemini-api/docs/changelog"
+_GEMINI_MODELS_URL = "https://ai.google.dev/gemini-api/docs/models"
+_GEMINI_FLASH_LITE_ALIAS_URL = (
+    "https://developers.googleblog.com/en/continuing-to-bring-you-our-latest-"
+    "models-with-an-improved-gemini-2-5-flash-and-flash-lite-release/"
+)
 _DEEPSEEK_V4_URL = "https://api-docs.deepseek.com/quick_start/pricing/"
 _DEEPSEEK_V4_LIMIT_URLS = (
     _DEEPSEEK_V4_URL,
@@ -362,14 +367,20 @@ _DEEPSEEK_V4_ANNOUNCEMENT_URL = (
 )
 _GEMMA_4_API_LIMIT_URLS = (
     "https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api",
-    "https://ai.google.dev/api/models",
-)
-_GEMMA_4_URLS = (
     "https://ai.google.dev/gemma/docs/core/model_card_4",
-    "https://www.ollama.com/library/gemma4",
 )
-_GEMMA_3_URL = "https://ai.google.dev/gemma/docs/core/model_card_3"
-_QWEN_3_5_URL = "https://huggingface.co/Qwen/Qwen3.5-35B-A3B"
+_LM_STUDIO_GEMMA_4_12B_URLS = (
+    "https://lmstudio.ai/models/google/gemma-4-12b-qat",
+    "https://lmstudio.ai/models/gemma-4",
+)
+_OLLAMA_GEMMA_4_12B_URL = "https://ollama.com/library/gemma4:12b"
+_OLLAMA_GEMMA_4_12B_QAT_URL = (
+    "https://ollama.com/library/gemma4:12b-it-qat"
+)
+_OLLAMA_GEMMA_3_12B_URL = "https://ollama.com/library/gemma3:12b"
+_LM_STUDIO_QWEN_3_5_URL = (
+    "https://lmstudio.ai/models/qwen/qwen3.5-35b-a3b"
+)
 
 
 def _pricing(
@@ -531,7 +542,7 @@ def _gemini_spec(
     model: str,
     *,
     context_window_tokens: int,
-    max_output_tokens: int,
+    max_output_tokens: int | None,
     source_model: str | None = None,
     limits_source_urls: tuple[str, ...] | None = None,
     aliases: tuple[str, ...] = (),
@@ -674,6 +685,13 @@ _OPENAI_MODEL_SPECS = (
         max_output_tokens=128_000,
         input_rate="30.00",
         output_rate="180.00",
+        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        long_context=_long_context_pricing(
+            above_input_tokens=272_000,
+            input_rate="60.00",
+            cached_input_rate=None,
+            output_rate="270.00",
+        ),
     ),
     _openai_spec(
         "gpt-5.4",
@@ -969,16 +987,18 @@ _OPENAI_MODEL_SPECS = (
         "gpt-4o-2024-05-13",
         source_model="gpt-4o",
         limits_source_urls=(
-            "https://developers.openai.com/api/docs/models/gpt-4o",
-            "https://learn.microsoft.com/en-us/azure/foundry/"
-            "foundry-models/concepts/models-sold-directly-by-azure"
+            "https://learn.microsoft.com/en-us/azure/ai-foundry/"
+            "foundry-models/concepts/models"
             "?view=azure-node-latest",
+            "https://developers.openai.com/api/docs/models/gpt-4o",
         ),
         context_window_tokens=128_000,
         max_output_tokens=4_096,
         input_rate="5.00",
         output_rate="15.00",
-        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        pricing_source_urls=(
+            "https://openai.com/index/introducing-structured-outputs-in-the-api/",
+        ),
         status="deprecated",
         replacement_model="gpt-5.5",
         retired_on=date(2026, 10, 23),
@@ -1204,6 +1224,10 @@ _GEMINI_MODEL_SPECS = (
         input_rate="0.25",
         cached_input_rate="0.025",
         output_rate="1.50",
+        lifecycle_source_urls=(
+            _GEMINI_FLASH_LITE_ALIAS_URL,
+            _GEMINI_MODELS_URL,
+        ),
     ),
     _gemini_spec(
         "gemini-3.1-pro-preview",
@@ -1275,8 +1299,8 @@ _GEMINI_MODEL_SPECS = (
     ),
     _gemini_spec(
         "gemini-2.5-computer-use-preview-10-2025",
-        context_window_tokens=131_072,
-        max_output_tokens=65_536,
+        context_window_tokens=128_000,
+        max_output_tokens=64_000,
         input_rate="1.25",
         output_rate="10.00",
         status="preview",
@@ -1292,7 +1316,7 @@ _GEMINI_MODEL_SPECS = (
     _gemini_spec(
         "gemma-4-26b-a4b-it",
         context_window_tokens=262_144,
-        max_output_tokens=32_768,
+        max_output_tokens=None,
         limits_source_urls=_GEMMA_4_API_LIMIT_URLS,
         input_rate="0",
         cached_input_rate="0",
@@ -1301,7 +1325,7 @@ _GEMINI_MODEL_SPECS = (
     _gemini_spec(
         "gemma-4-31b-it",
         context_window_tokens=262_144,
-        max_output_tokens=32_768,
+        max_output_tokens=None,
         limits_source_urls=_GEMMA_4_API_LIMIT_URLS,
         input_rate="0",
         cached_input_rate="0",
@@ -1377,11 +1401,30 @@ _LOCAL_MODEL_SPECS = (
     ModelSpec(
         provider="local",
         model="google/gemma-4-12b-qat",
-        aliases=("gemma4:12b",),
         limits=ModelLimits(
             context_window_tokens=262_144,
             default_response_reserve_tokens=4_096,
-            source_urls=_GEMMA_4_URLS,
+            source_urls=_LM_STUDIO_GEMMA_4_12B_URLS,
+            last_checked=_LOCAL_LIMITS_CHECKED_ON,
+        ),
+    ),
+    ModelSpec(
+        provider="local",
+        model="gemma4:12b",
+        limits=ModelLimits(
+            context_window_tokens=262_144,
+            default_response_reserve_tokens=4_096,
+            source_urls=(_OLLAMA_GEMMA_4_12B_URL,),
+            last_checked=_LOCAL_LIMITS_CHECKED_ON,
+        ),
+    ),
+    ModelSpec(
+        provider="local",
+        model="gemma4:12b-it-qat",
+        limits=ModelLimits(
+            context_window_tokens=262_144,
+            default_response_reserve_tokens=4_096,
+            source_urls=(_OLLAMA_GEMMA_4_12B_QAT_URL,),
             last_checked=_LOCAL_LIMITS_CHECKED_ON,
         ),
     ),
@@ -1391,7 +1434,7 @@ _LOCAL_MODEL_SPECS = (
         limits=ModelLimits(
             context_window_tokens=131_072,
             default_response_reserve_tokens=4_096,
-            source_urls=(_GEMMA_3_URL,),
+            source_urls=(_OLLAMA_GEMMA_3_12B_URL,),
             last_checked=_LOCAL_LIMITS_CHECKED_ON,
         ),
     ),
@@ -1401,7 +1444,7 @@ _LOCAL_MODEL_SPECS = (
         limits=ModelLimits(
             context_window_tokens=262_144,
             default_response_reserve_tokens=4_096,
-            source_urls=(_QWEN_3_5_URL,),
+            source_urls=(_LM_STUDIO_QWEN_3_5_URL,),
             last_checked=_LOCAL_LIMITS_CHECKED_ON,
         ),
     ),

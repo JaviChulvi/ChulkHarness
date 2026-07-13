@@ -94,6 +94,7 @@ class LocalProvider:
     model: str
     api_key: str | None = None
     base_url: str | None = None
+    context_window_tokens: int | None = field(default=None, kw_only=True)
     timeout_seconds: float | None = None
     max_retries: int | None = None
     provider: str = "local"
@@ -107,6 +108,11 @@ class LocalProvider:
             provider=self.provider,
             model=self.model,
             connection=connection,
+            local_context_window_tokens=(
+                self.context_window_tokens
+                if self.context_window_tokens is not None
+                else config.local_context_window_tokens
+            ),
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
             max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
         )

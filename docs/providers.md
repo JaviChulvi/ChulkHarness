@@ -66,7 +66,19 @@ export OPENAI_API_KEY=...
 export CHULK_LLM_PROVIDER=local
 export CHULK_MODEL=your-loaded-model
 export CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
+export CHULK_LOCAL_CONTEXT_WINDOW_TOKENS=131072
 ```
+
+`CHULK_LOCAL_CONTEXT_WINDOW_TOKENS` is the effective context loaded by the
+local server, not the model architecture maximum. Chulk defaults it to a
+conservative `131072` tokens. Set it to the loaded instance's context; for LM
+Studio, use `loaded_instances[].config.context_length`, not
+`max_context_length`. Runtime budgeting uses the smaller of this setting and a
+catalogued architecture limit. For an uncatalogued local artifact, the setting
+is the effective limit. Chulk applies the cap before fallback limits are
+aggregated. SDK callers can use
+`AgentConfig.local(context_window_tokens=...)` or
+`LocalProvider(..., context_window_tokens=...)`.
 
 A generic hosted OpenAI-compatible endpoint requires a key, base URL, and
 explicit model:
@@ -118,7 +130,7 @@ use `CHULK_BEDROCK_BASE_URL`.
 ## Model metadata catalog
 
 Bundled pricing and token limits live in the immutable Python catalog at
-`chulk/llm/model_catalog.py`. Each model family is represented by one
+`chulk/llm/model_catalog.py`. Each canonical model is represented by one
 `ModelSpec`; pricing, limits, aliases, lifecycle state, and provenance therefore
 resolve to the same record instead of being maintained in parallel tables.
 Exact model and explicit alias lookups use a prebuilt dictionary. Resolution
@@ -205,6 +217,11 @@ normalizes `input_tokens_details.cache_write_tokens` into the distinct
 dimensions Chulk cannot account for exactly, such as multiple cache-write
 durations, a scheduled price transition, or a non-token fee. Unknown pricing is
 preferable to a plausible but incorrect cost.
+
+Cost estimates cover token charges represented by provider usage metadata.
+They do not claim to be a complete account bill and exclude separately managed
+charges such as explicit Gemini cache storage duration. Chulk's Gemini provider
+does not create explicit caches itself.
 
 Add aliases only for explicitly published identifiers that have the same
 pricing, limits, and lifecycle. Do not use an open-ended model-name prefix: add

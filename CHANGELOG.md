@@ -43,6 +43,8 @@ API is still pre-1.0.
   fallback provider.
 - Routed capability and provider-neutral cost lookups through the shared model
   catalog while retaining exact custom capability overrides.
+- Added a conservative local-server context setting so runtime prompt budgets
+  never assume a model's architecture maximum exceeds the loaded deployment.
 
 ### Security
 

@@ -1,10 +1,13 @@
 """Tests for configuration loading."""
 
+import inspect
 import json
 
 from chulk.config import (
+    Config,
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_LOCAL_BASE_URL,
+    DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_MAX_OBSERVATION_CHARS,
     DEFAULT_MAX_REFLECTION_ATTEMPTS,
@@ -17,6 +20,12 @@ from chulk.config import (
     DEFAULT_TRACE_MAX_PROMPT_CHARS,
     load_config,
 )
+
+
+def test_local_context_config_field_is_keyword_only() -> None:
+    parameter = inspect.signature(Config).parameters["local_context_window_tokens"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_load_config_uses_defaults(tmp_path):
@@ -33,6 +42,7 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.deepseek_api_key is None
     assert config.local_api_key is None
     assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
+    assert config.local_context_window_tokens == DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
     assert config.history_limit == 20
     assert config.max_skills_per_turn == DEFAULT_MAX_SKILLS_PER_TURN
     assert config.max_skill_content_chars == DEFAULT_MAX_SKILL_CONTENT_CHARS
@@ -64,6 +74,7 @@ def test_load_config_reads_dotenv(tmp_path):
                 "DEEPSEEK_API_KEY=deepseek-key",
                 "CHULK_LOCAL_API_KEY=local-key",
                 "CHULK_LOCAL_BASE_URL=http://localhost:11434/v1",
+                "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS=65536",
             ]
         ),
         encoding="utf-8",
@@ -76,6 +87,7 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.deepseek_api_key == "deepseek-key"
     assert config.local_api_key == "local-key"
     assert config.local_base_url == "http://localhost:11434/v1"
+    assert config.local_context_window_tokens == 65_536
     assert config.model == "dotenv-model"
     assert config.history_limit == 7
     assert config.max_skills_per_turn == 2
@@ -181,6 +193,22 @@ def test_invalid_integer_config_raises(tmp_path):
         raise AssertionError("Expected invalid integer config to fail")
 
 
+def test_invalid_local_context_window_config_raises(tmp_path):
+    for value in ("1", "4096"):
+        try:
+            load_config(
+                {
+                    "CHULK_PROJECT_ROOT": str(tmp_path),
+                    "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS": value,
+                }
+            )
+        except ValueError as exc:
+            assert "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS" in str(exc)
+            assert "greater than the local response reserve" in str(exc)
+        else:
+            raise AssertionError("Expected invalid local context window config to fail")
+
+
 def test_invalid_reflection_attempts_config_raises(tmp_path):
     try:
         load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_MAX_REFLECTION_ATTEMPTS": "-1"})
@@ -230,6 +258,7 @@ def test_local_provider_uses_local_default_model_and_base_url(tmp_path):
     assert config.model == DEFAULT_LOCAL_MODEL
     assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
     assert config.local_api_key is None
+    assert config.local_context_window_tokens == DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
 
 
 def test_load_config_parses_fallback_providers(tmp_path):

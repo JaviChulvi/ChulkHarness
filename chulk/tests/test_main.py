@@ -781,6 +781,7 @@ def test_main_prints_resolved_config(monkeypatch, tmp_path, capsys):
     assert "permission_profile: read-only" in output
     assert "deepseek_api_key: set" in output
     assert "local_base_url: http://localhost:1234/v1" in output
+    assert "local_context_window_tokens: 131072" in output
     assert "trace_max_prompt_chars: 50000" in output
     assert "max_observation_chars: 12000" in output
     assert "max_tool_stdout_chars: 8000" in output

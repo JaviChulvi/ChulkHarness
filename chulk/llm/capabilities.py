@@ -230,6 +230,61 @@ def resolve_model_capabilities(provider: str, model: str) -> LLMModelCapabilitie
     )
 
 
+def resolve_runtime_model_capabilities(
+    provider: str,
+    model: str,
+    *,
+    local_context_window_tokens: int = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+) -> LLMModelCapabilities:
+    """Return token limits after applying deployment-specific constraints.
+
+    Catalog limits for local models describe the model architecture. The
+    effective context configured by a local server can be smaller, so runtime
+    clients use the configured deployment limit before fallback limits are
+    aggregated. For uncatalogued local artifacts, that explicit deployment
+    value is the only available context metadata.
+    """
+    capabilities = resolve_model_capabilities(provider, model)
+    normalized_provider, normalized_model = _model_key(provider, model)
+    if normalized_provider != "local":
+        return capabilities
+    if (
+        isinstance(local_context_window_tokens, bool)
+        or not isinstance(local_context_window_tokens, int)
+        or local_context_window_tokens < 1
+    ):
+        raise ValueError("local_context_window_tokens must be a positive integer")
+
+    has_architecture_limit = (
+        resolve_model_spec(normalized_provider, normalized_model) is not None
+        or (normalized_provider, normalized_model) in MODEL_CAPABILITIES
+    )
+    effective_context = (
+        min(capabilities.context_window_tokens, local_context_window_tokens)
+        if has_architecture_limit
+        else local_context_window_tokens
+    )
+    if effective_context <= capabilities.default_response_reserve_tokens:
+        raise ValueError(
+            "local_context_window_tokens must exceed the model's default "
+            f"response reserve ({capabilities.default_response_reserve_tokens})"
+        )
+    return LLMModelCapabilities(
+        provider=capabilities.provider,
+        model=capabilities.model,
+        context_window_tokens=effective_context,
+        default_response_reserve_tokens=capabilities.default_response_reserve_tokens,
+        max_input_tokens=_cap_optional_limit(
+            capabilities.max_input_tokens,
+            effective_context,
+        ),
+        max_output_tokens=_cap_optional_limit(
+            capabilities.max_output_tokens,
+            effective_context,
+        ),
+    )
+
+
 def _model_key(provider: str, model: str) -> tuple[str, str]:
     return provider.lower().strip(), model.lower().strip()
 
@@ -312,3 +367,7 @@ def _minimum_known_optional_limit(
         if (value := getattr(item, field_name)) is not None
     ]
     return min(values) if values else None
+
+
+def _cap_optional_limit(value: int | None, upper_bound: int) -> int | None:
+    return min(value, upper_bound) if value is not None else None

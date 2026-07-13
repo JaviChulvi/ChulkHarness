@@ -24,6 +24,7 @@ from chulk.llm import (
     conservative_model_capabilities,
     resolve_model_capabilities,
 )
+from chulk.llm.capabilities import resolve_runtime_model_capabilities
 from chulk.llm.tools import PLAN_TOOL_NAME
 from chulk.mcp import MCPServerConfig
 
@@ -1130,6 +1131,7 @@ def test_create_llm_client_selects_local_provider():
 
     assert isinstance(client, LocalOpenAICompatibleClient)
     assert client.base_url == "http://localhost:1234/v1"
+    assert client.model_capabilities.context_window_tokens == 131_072
 
 
 def test_llm_provider_registry_exposes_provider_capabilities():
@@ -1211,6 +1213,60 @@ def test_factory_attaches_model_capabilities_to_bound_client():
     )
 
     assert client.model_capabilities.context_window_tokens == 131_072
+
+
+def test_factory_applies_local_context_before_fallback_aggregation():
+    local = create_llm_client(
+        provider="local",
+        model="google/gemma-4-12b-qat",
+        local_api_key="local",
+        local_base_url="http://localhost:1234/v1",
+        local_context_window_tokens=65_536,
+        timeout_seconds=1,
+        max_retries=0,
+    )
+    hosted = ScriptedLLMClient(["hosted"])
+    hosted.model_capabilities = resolve_model_capabilities("openai", "gpt-4.1-mini")
+
+    capabilities = FallbackChain([hosted, local]).model_capabilities
+
+    assert local.model_capabilities.context_window_tokens == 65_536
+    assert capabilities is not None
+    assert capabilities.context_window_tokens == 65_536
+
+
+def test_runtime_local_context_uses_deployment_limit_for_unknown_models():
+    capabilities = resolve_runtime_model_capabilities(
+        "local",
+        "custom-model",
+        local_context_window_tokens=262_144,
+    )
+
+    assert capabilities.context_window_tokens == 262_144
+
+
+def test_runtime_local_context_never_exceeds_known_architecture_limit():
+    capabilities = resolve_runtime_model_capabilities(
+        "local",
+        "gemma3:12b",
+        local_context_window_tokens=262_144,
+    )
+
+    assert capabilities.context_window_tokens == 131_072
+
+
+def test_runtime_local_context_rejects_zero_input_budget():
+    try:
+        resolve_runtime_model_capabilities(
+            "local",
+            "custom-model",
+            local_context_window_tokens=4_096,
+        )
+    except ValueError as exc:
+        assert "must exceed" in str(exc)
+        assert "4096" in str(exc)
+    else:
+        raise AssertionError("Expected local context equal to the reserve to fail")
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():

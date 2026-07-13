@@ -121,6 +121,8 @@ EXPECTED_CANONICAL_MODELS = {
     },
     "local": {
         "google/gemma-4-12b-qat",
+        "gemma4:12b",
+        "gemma4:12b-it-qat",
         "gemma3:12b",
         "qwen/qwen3.5-35b-a3b",
     },
@@ -170,9 +172,31 @@ def test_catalog_contains_every_verified_direct_provider_model() -> None:
     }
 
     assert actual == EXPECTED_CANONICAL_MODELS
-    assert len(MODEL_CATALOG) == 77
+    assert len(MODEL_CATALOG) == sum(
+        len(models) for models in EXPECTED_CANONICAL_MODELS.values()
+    )
     assert all(spec.limits.source_urls for spec in MODEL_CATALOG)
-    assert all(spec.limits.last_checked == date(2026, 7, 13) for spec in MODEL_CATALOG)
+    assert all(
+        checked_on is not None and checked_on >= date(2026, 7, 13)
+        for spec in MODEL_CATALOG
+        for checked_on in (spec.limits.last_checked,)
+    )
+    assert all(
+        spec.pricing is None
+        or (
+            spec.pricing.last_checked is not None
+            and spec.pricing.last_checked >= date(2026, 7, 13)
+        )
+        for spec in MODEL_CATALOG
+    )
+    assert all(
+        not spec.lifecycle_source_urls
+        or (
+            spec.lifecycle_last_checked is not None
+            and spec.lifecycle_last_checked >= date(2026, 7, 13)
+        )
+        for spec in MODEL_CATALOG
+    )
 
 
 @pytest.mark.parametrize(
@@ -197,6 +221,18 @@ def test_published_aliases_resolve_to_their_canonical_records(
     resolved = resolve_model_spec(provider, alias)
 
     assert resolved is resolve_model_spec(provider, canonical)
+
+
+def test_moving_flash_lite_alias_has_current_official_provenance() -> None:
+    spec = resolve_model_spec("gemini", "gemini-flash-lite-latest")
+
+    assert spec is not None
+    assert spec.lifecycle_source_urls == (
+        "https://developers.googleblog.com/en/continuing-to-bring-you-our-latest-"
+        "models-with-an-improved-gemini-2-5-flash-and-flash-lite-release/",
+        "https://ai.google.dev/gemini-api/docs/models",
+    )
+    assert spec.lifecycle_last_checked == date(2026, 7, 13)
 
 
 def test_catalog_rejects_unlisted_snapshots_and_sibling_names() -> None:
@@ -426,15 +462,26 @@ def test_published_limits_and_section_provenance_are_available() -> None:
     assert deepseek.status == "preview"
 
     assert gemma is not None
-    assert gemma.model == "google/gemma-4-12b-qat"
+    assert gemma.model == "gemma4:12b"
     assert gemma.limits.context_window_tokens == 262_144
     assert gemma.limits.max_output_tokens is None
-    assert len(gemma.limits.source_urls) == 2
+    assert gemma.limits.source_urls == (
+        "https://ollama.com/library/gemma4:12b",
+    )
+
+    lm_studio_gemma = resolve_model_spec("local", "google/gemma-4-12b-qat")
+    assert lm_studio_gemma is not None
+    assert lm_studio_gemma is not gemma
+    assert lm_studio_gemma.limits.source_urls == (
+        "https://lmstudio.ai/models/google/gemma-4-12b-qat",
+        "https://lmstudio.ai/models/gemma-4",
+    )
 
 
 def test_newest_provider_models_keep_exact_limits_and_pricing() -> None:
     chat_latest = resolve_model_spec("openai", "chat-latest")
     sol = resolve_model_spec("openai", "gpt-5.6-sol")
+    gpt_5_5_pro = resolve_model_spec("openai", "gpt-5.5-pro")
     gemma = resolve_model_spec("gemini", "gemma-4-26b-a4b-it")
     robotics = resolve_model_spec("gemini", "gemini-robotics-er-1.6-preview")
     computer_use = resolve_model_spec(
@@ -457,12 +504,23 @@ def test_newest_provider_models_keep_exact_limits_and_pricing() -> None:
         "12.50"
     )
 
+    assert gpt_5_5_pro is not None
+    assert gpt_5_5_pro.pricing is not None
+    assert gpt_5_5_pro.pricing.source_urls == (
+        "https://developers.openai.com/api/docs/pricing",
+    )
+    assert gpt_5_5_pro.pricing.long_context is not None
+    assert gpt_5_5_pro.pricing.long_context.applies_above_input_tokens == 272_000
+    assert gpt_5_5_pro.pricing.long_context.input_per_million == Decimal("60.00")
+    assert gpt_5_5_pro.pricing.long_context.cached_input_per_million is None
+    assert gpt_5_5_pro.pricing.long_context.output_per_million == Decimal("270.00")
+
     assert gemma is not None
     assert gemma.limits.context_window_tokens == 262_144
-    assert gemma.limits.max_output_tokens == 32_768
+    assert gemma.limits.max_output_tokens is None
     assert gemma.limits.source_urls == (
         "https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api",
-        "https://ai.google.dev/api/models",
+        "https://ai.google.dev/gemma/docs/core/model_card_4",
     )
     assert gemma.pricing is not None
     assert gemma.pricing.input_per_million == Decimal("0")
@@ -474,8 +532,9 @@ def test_newest_provider_models_keep_exact_limits_and_pricing() -> None:
     assert robotics.pricing.output_per_million == Decimal("5.00")
 
     assert computer_use is not None
-    assert computer_use.limits.context_window_tokens == 131_072
-    assert computer_use.limits.max_output_tokens == 65_536
+    assert computer_use.limits.context_window_tokens == 128_000
+    assert computer_use.limits.max_input_tokens == 128_000
+    assert computer_use.limits.max_output_tokens == 64_000
 
     assert openai_computer_use is not None
     assert openai_computer_use.limits.default_response_reserve_tokens == 1_024

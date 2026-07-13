@@ -5,6 +5,7 @@ import gc
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import version as distribution_version
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -49,7 +50,15 @@ from chulk import (
 from chulk._version import __version__ as source_version
 from chulk.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MODEL, load_config
 from chulk.core.actions import FinalAnswerAction
-from chulk.llm import FallbackChain, LLMActionResult, LLMCapabilities, LLMClient, LLMError, LLMModelCapabilities
+from chulk.llm import (
+    FallbackChain,
+    LLMActionResult,
+    LLMCapabilities,
+    LLMClient,
+    LLMError,
+    LLMModelCapabilities,
+    LocalProvider,
+)
 from chulk.presets import SoftwareEngineer, software_engineer
 from chulk.presets.software_engineer import DEFAULT_AGENT_PLAYBOOK, SOFTWARE_ENGINEER_SYSTEM_PROMPT
 from chulk.tools import (
@@ -910,6 +919,7 @@ def test_public_agent_config_supports_programmatic_values_and_env_fallback(monke
         skills_dir=tmp_path / "custom-skills",
         permission_profile="read-only",
         local_api_key="local",
+        local_context_window_tokens=65_536,
     )
     handle = Agent(
         config=config,
@@ -925,7 +935,7 @@ def test_public_agent_config_supports_programmatic_values_and_env_fallback(monke
     assert handle.trace_path.parent == tmp_path / "custom-traces"
     assert handle.runtime.skill_registry.skills_dir == tmp_path / "custom-skills"
     assert handle.runtime.permission_policy.name == "read-only"
-    assert handle.runtime.context_budget.max_prompt_tokens == 131_072
+    assert handle.runtime.context_budget.max_prompt_tokens == 65_536
 
 
 def test_injected_client_model_capabilities_drive_runtime_budget(tmp_path):
@@ -1246,6 +1256,7 @@ def test_public_agent_config_provider_constructors_ignore_cross_provider_env_mod
         model="local-model",
         base_url="http://localhost:1234/v1",
         api_key="local",
+        context_window_tokens=65_536,
     )
 
     assert openai_config.to_config().llm_provider == "openai"
@@ -1259,9 +1270,31 @@ def test_public_agent_config_provider_constructors_ignore_cross_provider_env_mod
     assert local_config.to_config().model == "local-model"
     assert local_config.to_config().local_base_url == "http://localhost:1234/v1"
     assert local_config.to_config().local_api_key == "local"
+    assert local_config.to_config().local_context_window_tokens == 65_536
 
     default_local = AgentConfig.local(project_root=tmp_path, runtime_dir=tmp_path / "default-local").to_config()
     assert default_local.model == DEFAULT_LOCAL_MODEL
+
+
+def test_local_context_overrides_do_not_shift_public_positional_arguments():
+    agent_parameter = inspect.signature(AgentConfig).parameters[
+        "local_context_window_tokens"
+    ]
+    provider_parameter = inspect.signature(LocalProvider).parameters[
+        "context_window_tokens"
+    ]
+    provider = LocalProvider(
+        "local-model",
+        "local-key",
+        "http://localhost:1234/v1",
+        12.0,
+        3,
+    )
+
+    assert agent_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert provider_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert provider.timeout_seconds == 12.0
+    assert provider.max_retries == 3
 
 
 def test_public_agent_config_with_overrides_for_app_agents(tmp_path):

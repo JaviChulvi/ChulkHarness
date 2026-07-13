@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from chulk.llm.base import LLMClient, LLMConfigurationError
-from chulk.llm.capabilities import LLMCapabilities, resolve_model_capabilities
+from chulk.llm.capabilities import (
+    LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    LLMCapabilities,
+    resolve_runtime_model_capabilities,
+)
 from chulk.llm.providers.anthropic import ANTHROPIC_CAPABILITIES, AnthropicMessagesClient
 from chulk.llm.providers.bedrock import BEDROCK_CAPABILITIES, BedrockOpenAICompatibleClient
 from chulk.llm.providers.compatible import (
@@ -282,6 +286,7 @@ def create_llm_client(
     deepseek_base_url: str | None = None,
     local_api_key: str | None = None,
     local_base_url: str | None = None,
+    local_context_window_tokens: int = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
     openai_compatible_api_key: str | None = None,
     openai_compatible_base_url: str | None = None,
     openrouter_api_key: str | None = None,
@@ -302,7 +307,11 @@ def create_llm_client(
     normalized_provider = provider.lower()
     provider_profile = _provider_profile(normalized_provider)
     try:
-        model_capabilities = resolve_model_capabilities(normalized_provider, model)
+        model_capabilities = resolve_runtime_model_capabilities(
+            normalized_provider,
+            model,
+            local_context_window_tokens=local_context_window_tokens,
+        )
     except ValueError as exc:
         raise LLMConfigurationError(str(exc)) from exc
 

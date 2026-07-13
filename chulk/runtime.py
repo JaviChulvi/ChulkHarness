@@ -20,8 +20,8 @@ from chulk.llm import (
     create_llm_client,
     provider_capabilities,
     provider_connection_from_config,
-    resolve_model_capabilities,
 )
+from chulk.llm.capabilities import resolve_runtime_model_capabilities
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
@@ -262,6 +262,7 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
         provider=config.llm_provider,
         model=config.model,
         connection=provider_connection_from_config(config.llm_provider, config),
+        local_context_window_tokens=config.local_context_window_tokens,
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,
     )
@@ -271,7 +272,11 @@ def _client_model_capabilities(client: LLMClient, config: Config) -> LLMModelCap
     capabilities = getattr(client, "model_capabilities", None)
     if isinstance(capabilities, LLMModelCapabilities):
         return capabilities
-    return resolve_model_capabilities(config.llm_provider, config.model)
+    return resolve_runtime_model_capabilities(
+        config.llm_provider,
+        config.model,
+        local_context_window_tokens=config.local_context_window_tokens,
+    )
 
 
 def _create_tool_registry(
