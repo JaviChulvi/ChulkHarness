@@ -125,7 +125,17 @@ Exact model and explicit alias lookups use a prebuilt dictionary. Resolution
 returns the existing frozen record and does not allocate model objects per
 request.
 
-To add a released model, append a `ModelSpec` to `MODEL_SPECS`:
+The bundled records cover verified direct-provider IDs for OpenAI general
+text/reasoning models, callable Anthropic Claude models, Gemini
+GenerateContent models, DeepSeek API models, and a small set of explicitly
+identified local models. Do not copy these prices or limits to OpenRouter,
+Bedrock, generic compatible, or arbitrary local IDs: those values depend on the
+selected endpoint and deployment.
+
+To add a released model, append its record to the matching provider tuple;
+`MODEL_SPECS` combines those tuples into the immutable catalog. Provider helpers
+keep repeated URLs and internal reserve policies concise, while the underlying
+record has this shape:
 
 ```python
 ModelSpec(
@@ -157,6 +167,20 @@ section. For an unpriced local model, only `ModelLimits` is configured. The
 limits provenance establishes the published hard limits; it does not establish
 Chulk's `default_response_reserve_tokens`, which remains an internal prompt
 budget policy.
+
+Provider helper defaults represent a documented batch verification. When one
+record is checked or changed independently, pass that helper's
+`limits_last_checked`, `pricing_last_checked`, or
+`lifecycle_last_checked` override instead of changing a date shared by the
+rest of the batch.
+
+For providers that apply one published long-context threshold to the full
+request, `TokenPricing.long_context` accepts a `LongContextPricing` record.
+The estimator selects it with one comparison against normalized input tokens,
+so lookup and calculation remain constant-time. Leave `pricing=None` when the
+provider requires dimensions Chulk cannot account for exactly, such as
+cache-write duration/rates, a scheduled price transition, or a non-token fee.
+Unknown pricing is preferable to a plausible but incorrect cost.
 
 Add aliases only for explicitly published identifiers that have the same
 pricing, limits, and lifecycle. Do not use an open-ended model-name prefix: add

@@ -537,11 +537,14 @@ def normalize_gemini_usage(usage: object) -> LLMUsage | None:
     """Normalize Gemini ``usage_metadata`` into Chulk usage accounting."""
     if usage is None:
         return None
-    input_tokens = _int_value(_value(usage, "prompt_token_count"))
-    output_tokens = _int_value(_value(usage, "candidates_token_count"))
+    prompt_tokens = _int_value(_value(usage, "prompt_token_count"))
+    tool_use_tokens = _int_value(_value(usage, "tool_use_prompt_token_count"))
+    input_tokens = prompt_tokens + tool_use_tokens
+    candidate_tokens = _int_value(_value(usage, "candidates_token_count"))
+    reasoning_tokens = _int_value(_value(usage, "thoughts_token_count"))
+    output_tokens = candidate_tokens + reasoning_tokens
     total_tokens = _int_value(_value(usage, "total_token_count")) or input_tokens + output_tokens
     cached_tokens = _int_value(_value(usage, "cached_content_token_count"))
-    reasoning_tokens = _int_value(_value(usage, "thoughts_token_count"))
     if not any([input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens]):
         return None
     raw = public_value(usage)

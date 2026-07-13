@@ -178,7 +178,7 @@ def conservative_model_capabilities(
     )
     providers = ",".join(dict.fromkeys(item.provider for item in capabilities))
     models = ",".join(dict.fromkeys(item.model for item in capabilities))
-    max_input_tokens = _conservative_optional_limit(
+    max_input_tokens = _minimum_known_optional_limit(
         capabilities,
         "max_input_tokens",
     )
@@ -300,3 +300,15 @@ def _conservative_optional_limit(
     if any(value is None for value in values):
         return None
     return min(value for value in values if value is not None)
+
+
+def _minimum_known_optional_limit(
+    capabilities: list[LLMModelCapabilities] | tuple[LLMModelCapabilities, ...],
+    field_name: Literal["max_input_tokens", "max_output_tokens"],
+) -> int | None:
+    values = [
+        value
+        for item in capabilities
+        if (value := getattr(item, field_name)) is not None
+    ]
+    return min(values) if values else None

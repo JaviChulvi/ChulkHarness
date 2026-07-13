@@ -40,14 +40,24 @@ def estimate_cost(
     pricing = spec.pricing
 
     cached_tokens, uncached_tokens, split_estimated = _input_token_split(usage)
-    cached_rate = (
-        pricing.cached_input_per_million
-        if pricing.cached_input_per_million is not None
-        else pricing.input_per_million
-    )
-    input_cost = _token_cost(uncached_tokens, pricing.input_per_million)
+    input_rate = pricing.input_per_million
+    cached_rate = pricing.cached_input_per_million
+    output_rate = pricing.output_per_million
+    long_context = pricing.long_context
+    if (
+        long_context is not None
+        and cached_tokens + uncached_tokens
+        > long_context.applies_above_input_tokens
+    ):
+        input_rate = long_context.input_per_million
+        cached_rate = long_context.cached_input_per_million
+        output_rate = long_context.output_per_million
+    if cached_rate is None:
+        cached_rate = input_rate
+
+    input_cost = _token_cost(uncached_tokens, input_rate)
     cached_input_cost = _token_cost(cached_tokens, cached_rate)
-    output_cost = _token_cost(usage.output_tokens, pricing.output_per_million)
+    output_cost = _token_cost(usage.output_tokens, output_rate)
     amount = input_cost + cached_input_cost + output_cost
     return LLMCost(
         amount=amount,
