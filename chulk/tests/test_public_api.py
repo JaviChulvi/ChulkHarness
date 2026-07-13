@@ -935,6 +935,7 @@ def test_injected_client_model_capabilities_drive_runtime_budget(tmp_path):
         model="small-context",
         context_window_tokens=8_192,
         default_response_reserve_tokens=1_024,
+        max_input_tokens=4_096,
     )
 
     handle = Agent(
@@ -944,8 +945,15 @@ def test_injected_client_model_capabilities_drive_runtime_budget(tmp_path):
         skills=[],
     )
 
+    result = handle.run_result("hello")
+
     assert handle.runtime.context_budget.max_prompt_tokens == 8_192
-    assert handle.runtime.context_budget.input_token_budget == 7_168
+    assert handle.runtime.context_budget.max_input_tokens == 4_096
+    assert handle.runtime.context_budget.input_token_budget == 4_096
+    assert handle.runtime.context_budget.to_dict()["max_input_tokens"] == 4_096
+    assert result.context_report is not None
+    assert result.context_report.budget.max_input_tokens == 4_096
+    assert result.context_report.budget.input_token_budget == 4_096
 
 
 def test_public_agent_default_config_uses_cwd_runtime_and_read_only(monkeypatch, tmp_path):

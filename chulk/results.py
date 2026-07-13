@@ -147,6 +147,7 @@ class ContextBudget:
     max_prompt_tokens: int = 0
     response_reserve_tokens: int = 0
     input_token_budget: int | None = None
+    max_input_tokens: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return plain_data(self)

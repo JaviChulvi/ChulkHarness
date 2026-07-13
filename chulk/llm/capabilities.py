@@ -5,14 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from chulk.llm.model_catalog import MODEL_CATALOG, ModelSpec, resolve_model_spec
 
-OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS = 1_047_576
-OPENAI_GPT_4_1_DEFAULT_RESPONSE_RESERVE_TOKENS = 8_192
-DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
-DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = 16_384
 LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072
 LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS = 4_096
-LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = 262_144
 COMPATIBLE_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
 COMPATIBLE_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
 ANTHROPIC_DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
@@ -21,6 +17,27 @@ BEDROCK_DEFAULT_CONTEXT_WINDOW_TOKENS = 8_192
 BEDROCK_DEFAULT_RESPONSE_RESERVE_TOKENS = 2_048
 GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576
 GEMINI_DEFAULT_RESPONSE_RESERVE_TOKENS = 8_192
+
+_OPENAI_GPT_4_1_SPEC = resolve_model_spec("openai", "gpt-4.1")
+_DEEPSEEK_V4_SPEC = resolve_model_spec("deepseek", "deepseek-v4-flash")
+_LOCAL_QWEN_SPEC = resolve_model_spec("local", "qwen/qwen3.5-35b-a3b")
+assert _OPENAI_GPT_4_1_SPEC is not None
+assert _DEEPSEEK_V4_SPEC is not None
+assert _LOCAL_QWEN_SPEC is not None
+
+OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS = (
+    _OPENAI_GPT_4_1_SPEC.limits.context_window_tokens
+)
+OPENAI_GPT_4_1_DEFAULT_RESPONSE_RESERVE_TOKENS = (
+    _OPENAI_GPT_4_1_SPEC.limits.default_response_reserve_tokens
+)
+DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = _DEEPSEEK_V4_SPEC.limits.context_window_tokens
+DEEPSEEK_V4_DEFAULT_RESPONSE_RESERVE_TOKENS = (
+    _DEEPSEEK_V4_SPEC.limits.default_response_reserve_tokens
+)
+LOCAL_QWEN_3_5_35B_CONTEXT_WINDOW_TOKENS = (
+    _LOCAL_QWEN_SPEC.limits.context_window_tokens
+)
 
 OPENAI_GPT_4_1_LIMITS = (
     OPENAI_GPT_4_1_CONTEXT_WINDOW_TOKENS,
@@ -81,23 +98,60 @@ class LLMModelCapabilities:
     model: str
     context_window_tokens: int
     default_response_reserve_tokens: int
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        if self.context_window_tokens < 1:
-            raise ValueError("context_window_tokens must be greater than zero")
-        if self.default_response_reserve_tokens < 1:
-            raise ValueError("default_response_reserve_tokens must be greater than zero")
+        for name, required_value in (
+            ("context_window_tokens", self.context_window_tokens),
+            (
+                "default_response_reserve_tokens",
+                self.default_response_reserve_tokens,
+            ),
+        ):
+            if (
+                isinstance(required_value, bool)
+                or not isinstance(required_value, int)
+                or required_value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+        if self.default_response_reserve_tokens > self.context_window_tokens:
+            raise ValueError(
+                "default_response_reserve_tokens cannot exceed context_window_tokens"
+            )
+        for name, optional_value in (
+            ("max_input_tokens", self.max_input_tokens),
+            ("max_output_tokens", self.max_output_tokens),
+        ):
+            if optional_value is None:
+                continue
+            if (
+                isinstance(optional_value, bool)
+                or not isinstance(optional_value, int)
+                or optional_value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+            if optional_value > self.context_window_tokens:
+                raise ValueError(f"{name} cannot exceed context_window_tokens")
 
     @property
     def input_budget_tokens(self) -> int:
-        return max(0, self.context_window_tokens - self.default_response_reserve_tokens)
+        context_budget = max(
+            0,
+            self.context_window_tokens - self.default_response_reserve_tokens,
+        )
+        if self.max_input_tokens is None:
+            return context_budget
+        return min(context_budget, self.max_input_tokens)
 
-    def to_dict(self) -> dict[str, int | str]:
+    def to_dict(self) -> dict[str, int | str | None]:
         return {
             "provider": self.provider,
             "model": self.model,
             "context_window_tokens": self.context_window_tokens,
             "default_response_reserve_tokens": self.default_response_reserve_tokens,
+            "max_input_tokens": self.max_input_tokens,
+            "max_output_tokens": self.max_output_tokens,
             "input_budget_tokens": self.input_budget_tokens,
         }
 
@@ -124,11 +178,29 @@ def conservative_model_capabilities(
     )
     providers = ",".join(dict.fromkeys(item.provider for item in capabilities))
     models = ",".join(dict.fromkeys(item.model for item in capabilities))
+    max_input_tokens = _conservative_optional_limit(
+        capabilities,
+        "max_input_tokens",
+    )
+    max_output_tokens = _conservative_optional_limit(
+        capabilities,
+        "max_output_tokens",
+    )
     return LLMModelCapabilities(
         provider=providers,
         model=models,
         context_window_tokens=context_window,
         default_response_reserve_tokens=response_reserve,
+        max_input_tokens=(
+            min(max_input_tokens, context_window)
+            if max_input_tokens is not None
+            else None
+        ),
+        max_output_tokens=(
+            min(max_output_tokens, context_window)
+            if max_output_tokens is not None
+            else None
+        ),
     )
 
 
@@ -139,16 +211,22 @@ def resolve_model_capabilities(provider: str, model: str) -> LLMModelCapabilitie
     if capabilities is not None:
         return capabilities
 
+    spec = resolve_model_spec(provider, model)
+    if spec is not None:
+        return _capabilities_from_spec(provider, model, spec)
+
     capabilities = _resolve_model_family_capabilities(provider, model)
     if capabilities is not None:
         return capabilities
 
+    supported_keys = set(MODEL_CATALOG.canonical_keys) | set(MODEL_CAPABILITIES)
     supported = ", ".join(
-        f"{item_provider}/{item_model}" for item_provider, item_model in sorted(MODEL_CAPABILITIES)
+        f"{item_provider}/{item_model}"
+        for item_provider, item_model in sorted(supported_keys)
     )
     raise ValueError(
         f"No token capability metadata configured for {provider}/{model}. "
-        f"Add this model to chulk/llm/capabilities.py. Supported models: {supported}"
+        f"Add this model to chulk/llm/model_catalog.py. Supported models: {supported}"
     )
 
 
@@ -193,43 +271,32 @@ def _resolve_model_family_capabilities(provider: str, model: str) -> LLMModelCap
             context_window_tokens=LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
             default_response_reserve_tokens=LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
         )
-    family_prefixes = [
-        ("openai", "gpt-4.1-mini-", *OPENAI_GPT_4_1_LIMITS),
-        ("openai", "gpt-4.1-nano-", *OPENAI_GPT_4_1_LIMITS),
-        ("openai", "gpt-4.1-", *OPENAI_GPT_4_1_LIMITS),
-        ("deepseek", "deepseek-v4-flash-", *DEEPSEEK_V4_LIMITS),
-        ("deepseek", "deepseek-v4-pro-", *DEEPSEEK_V4_LIMITS),
-    ]
-    for family_provider, prefix, context_window, response_reserve in family_prefixes:
-        if normalized_provider == family_provider and normalized_model.startswith(prefix):
-            return LLMModelCapabilities(
-                provider=normalized_provider,
-                model=normalized_model,
-                context_window_tokens=context_window,
-                default_response_reserve_tokens=response_reserve,
-            )
     return None
 
 
-for _provider, _model, _context_window, _response_reserve in [
-    ("openai", "gpt-4.1", *OPENAI_GPT_4_1_LIMITS),
-    ("openai", "gpt-4.1-mini", *OPENAI_GPT_4_1_LIMITS),
-    ("openai", "gpt-4.1-mini-2025-04-14", *OPENAI_GPT_4_1_LIMITS),
-    ("openai", "gpt-4.1-nano", *OPENAI_GPT_4_1_LIMITS),
-    ("deepseek", "deepseek-v4-flash", *DEEPSEEK_V4_LIMITS),
-    ("deepseek", "deepseek-v4-pro", *DEEPSEEK_V4_LIMITS),
-    ("deepseek", "deepseek-chat", *DEEPSEEK_V4_LIMITS),
-    ("deepseek", "deepseek-reasoner", *DEEPSEEK_V4_LIMITS),
-    ("local", "google/gemma-4-12b-qat", *LOCAL_DEFAULT_LIMITS),
-    ("local", "gemma4:12b", *LOCAL_DEFAULT_LIMITS),
-    ("local", "gemma3:12b", *LOCAL_DEFAULT_LIMITS),
-    ("local", "qwen/qwen3.5-35b-a3b", *LOCAL_QWEN_3_5_35B_LIMITS),
-]:
-    register_model_capabilities(
-        LLMModelCapabilities(
-            provider=_provider,
-            model=_model,
-            context_window_tokens=_context_window,
-            default_response_reserve_tokens=_response_reserve,
-        )
+def _capabilities_from_spec(
+    provider: str,
+    model: str,
+    spec: ModelSpec,
+) -> LLMModelCapabilities:
+    normalized_provider, normalized_model = _model_key(provider, model)
+    return LLMModelCapabilities(
+        provider=normalized_provider,
+        model=normalized_model,
+        context_window_tokens=spec.limits.context_window_tokens,
+        default_response_reserve_tokens=(
+            spec.limits.default_response_reserve_tokens
+        ),
+        max_input_tokens=spec.limits.max_input_tokens,
+        max_output_tokens=spec.limits.max_output_tokens,
     )
+
+
+def _conservative_optional_limit(
+    capabilities: list[LLMModelCapabilities] | tuple[LLMModelCapabilities, ...],
+    field_name: Literal["max_input_tokens", "max_output_tokens"],
+) -> int | None:
+    values = [getattr(item, field_name) for item in capabilities]
+    if any(value is None for value in values):
+        return None
+    return min(value for value in values if value is not None)

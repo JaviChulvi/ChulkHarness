@@ -27,6 +27,8 @@ API is still pre-1.0.
 - Added GitHub Actions CI for Python 3.11, 3.12, and 3.13.
 - Added clean-wheel install validation for public imports, packaged presets,
   bundled skills, runtime defaults, and example imports.
+- Added an immutable, validated model catalog for pricing, context and output
+  limits, aliases, lifecycle metadata, and independently verified provenance.
 
 ### Changed
 
@@ -39,6 +41,8 @@ API is still pre-1.0.
   implementation and retained the original custom-provider factory contract.
 - Extended `chulk doctor` to validate requirements for every primary and
   fallback provider.
+- Routed capability and provider-neutral cost lookups through the shared model
+  catalog while retaining exact custom capability overrides.
 
 ### Security
 

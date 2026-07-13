@@ -115,6 +115,66 @@ export CHULK_BEDROCK_BASE_URL=https://your-bedrock-openai-endpoint/openai/v1
 `CHULK_BASE_URL` remains a legacy base-URL alias, but new configuration should
 use `CHULK_BEDROCK_BASE_URL`.
 
+## Model metadata catalog
+
+Bundled pricing and token limits live in the immutable Python catalog at
+`chulk/llm/model_catalog.py`. Each model family is represented by one
+`ModelSpec`; pricing, limits, aliases, lifecycle state, and provenance therefore
+resolve to the same record instead of being maintained in parallel tables.
+Exact model and explicit alias lookups use a prebuilt dictionary. Resolution
+returns the existing frozen record and does not allocate model objects per
+request.
+
+To add a released model, append a `ModelSpec` to `MODEL_SPECS`:
+
+```python
+ModelSpec(
+    provider="example",
+    model="example-model",
+    aliases=("example-model-2026-07-01",),
+    limits=ModelLimits(
+        context_window_tokens=128_000,
+        default_response_reserve_tokens=8_192,
+        max_input_tokens=128_000,   # Optional when not published independently.
+        max_output_tokens=16_384,   # Optional when the provider does not specify it.
+        source_urls=("https://provider.example/models/example-model",),
+        last_checked=date(2026, 7, 12),
+    ),
+    pricing=TokenPricing(
+        input_per_million=Decimal("0.50"),
+        cached_input_per_million=Decimal("0.10"),
+        output_per_million=Decimal("1.50"),
+        source_urls=("https://provider.example/pricing",),
+        last_checked=date(2026, 7, 13),
+    ),
+)
+```
+
+Use `Decimal` strings for every price. Limits and pricing each own an independent
+`source_urls` tuple and `last_checked` date because providers often publish and
+update them separately. Both provenance fields are required on every present
+section. For an unpriced local model, only `ModelLimits` is configured. The
+limits provenance establishes the published hard limits; it does not establish
+Chulk's `default_response_reserve_tokens`, which remains an internal prompt
+budget policy.
+
+Add aliases only for explicitly published identifiers that have the same
+pricing, limits, and lifecycle. Do not use an open-ended model-name prefix: add
+each new snapshot when it is released so an unknown sibling cannot inherit the
+wrong prices. Use separate specs when an old identifier is deprecated or
+otherwise differs. Non-stable entries also record `lifecycle_source_urls` and
+`lifecycle_last_checked` alongside `status`, `replacement_model`, and
+`retired_on`. Catalog construction rejects malformed records, duplicate
+identities, invalid replacements, and missing provenance.
+
+`max_input_tokens` and `max_output_tokens` capture independently published hard
+limits when available. A known input maximum bounds Chulk's prompt budget. The
+output maximum remains inspectable metadata; Chulk does not automatically clamp
+a provider request to `max_output_tokens`. The existing
+`default_response_reserve_tokens` also continues to control prompt budgeting.
+Leave an optional limit as `None` when the provider or local serving
+configuration does not publish a reliable value.
+
 ## SDK construction
 
 The matching builders are `AgentConfig.openai(...)`, `.deepseek(...)`,

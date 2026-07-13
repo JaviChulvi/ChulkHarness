@@ -148,6 +148,7 @@ def create_agent(
     context_budget = ContextBudget(
         max_prompt_tokens=model_capabilities.context_window_tokens,
         response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
+        max_input_tokens=model_capabilities.max_input_tokens,
     )
     configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
     active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()

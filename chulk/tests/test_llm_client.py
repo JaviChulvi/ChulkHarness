@@ -1130,11 +1130,15 @@ def test_resolve_model_capabilities_returns_context_window_and_reserve():
 
     assert openai_caps.context_window_tokens == 1_047_576
     assert openai_caps.default_response_reserve_tokens == 8_192
+    assert openai_caps.max_input_tokens is None
+    assert openai_caps.max_output_tokens == 32_768
     assert openai_caps.input_budget_tokens == 1_039_384
     assert deepseek_caps.context_window_tokens == 1_000_000
     assert deepseek_caps.default_response_reserve_tokens == 16_384
+    assert deepseek_caps.max_input_tokens is None
+    assert deepseek_caps.max_output_tokens == 384_000
     assert deepseek_caps.input_budget_tokens == 983_616
-    assert local_caps.context_window_tokens == 131_072
+    assert local_caps.context_window_tokens == 262_144
     assert local_caps.default_response_reserve_tokens == 4_096
     assert local_qwen_caps.context_window_tokens == 262_144
     assert local_qwen_caps.default_response_reserve_tokens == 4_096
@@ -1146,9 +1150,9 @@ def test_conservative_model_capabilities_use_smallest_context_and_largest_reserv
 
     combined = conservative_model_capabilities([openai_caps, local_caps])
 
-    assert combined.context_window_tokens == 131_072
+    assert combined.context_window_tokens == 262_144
     assert combined.default_response_reserve_tokens == 8_192
-    assert combined.input_budget_tokens == 122_880
+    assert combined.input_budget_tokens == 253_952
 
 
 def test_fallback_chain_exposes_conservative_bound_model_capabilities():
@@ -1160,7 +1164,7 @@ def test_fallback_chain_exposes_conservative_bound_model_capabilities():
     capabilities = FallbackChain([primary, fallback]).model_capabilities
 
     assert capabilities is not None
-    assert capabilities.context_window_tokens == 131_072
+    assert capabilities.context_window_tokens == 262_144
     assert capabilities.default_response_reserve_tokens == 8_192
 
 
@@ -1181,9 +1185,9 @@ def test_factory_attaches_model_capabilities_to_bound_client():
 
 
 def test_resolve_model_capabilities_supports_known_family_aliases():
-    caps = resolve_model_capabilities("openai", "gpt-4.1-mini-2099-01-01")
+    caps = resolve_model_capabilities("openai", "gpt-4.1-mini-2025-04-14")
 
-    assert caps.model == "gpt-4.1-mini-2099-01-01"
+    assert caps.model == "gpt-4.1-mini-2025-04-14"
     assert caps.context_window_tokens == 1_047_576
 
 
@@ -1199,6 +1203,6 @@ def test_resolve_model_capabilities_rejects_unknown_models():
         resolve_model_capabilities("openai", "unknown-model")
     except ValueError as exc:
         assert "No token capability metadata" in str(exc)
-        assert "chulk/llm/capabilities.py" in str(exc)
+        assert "chulk/llm/model_catalog.py" in str(exc)
     else:
         raise AssertionError("Expected unknown model capability lookup to fail")

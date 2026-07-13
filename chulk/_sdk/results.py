@@ -112,6 +112,7 @@ def context_report_snapshot(value: object) -> ContextReport | None:
         context_window_tokens=_int(budget_payload.get("context_window_tokens")),
         max_prompt_tokens=_int(budget_payload.get("max_prompt_tokens")),
         response_reserve_tokens=_int(budget_payload.get("response_reserve_tokens")),
+        max_input_tokens=_optional_int(budget_payload.get("max_input_tokens")),
         input_token_budget=_optional_int(budget_payload.get("input_token_budget")),
     )
     sections = tuple(
