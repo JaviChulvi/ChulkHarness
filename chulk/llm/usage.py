@@ -22,6 +22,7 @@ class LLMUsage:
     cache_split_estimated: bool = False
     source: str = "provider"
     raw: dict[str, Any] = field(default_factory=dict)
+    cache_write_input_tokens: int = 0
 
     def __post_init__(self) -> None:
         total = self.total_tokens or self.input_tokens + self.output_tokens
@@ -30,6 +31,11 @@ class LLMUsage:
         object.__setattr__(self, "total_tokens", max(0, int(total)))
         object.__setattr__(self, "cached_input_tokens", max(0, int(self.cached_input_tokens)))
         object.__setattr__(self, "cache_hit_input_tokens", max(0, int(self.cache_hit_input_tokens)))
+        object.__setattr__(
+            self,
+            "cache_write_input_tokens",
+            max(0, int(self.cache_write_input_tokens)),
+        )
         object.__setattr__(self, "cache_miss_input_tokens", max(0, int(self.cache_miss_input_tokens)))
         object.__setattr__(self, "reasoning_tokens", max(0, int(self.reasoning_tokens)))
 
@@ -40,6 +46,7 @@ class LLMUsage:
             "total_tokens": self.total_tokens,
             "cached_input_tokens": self.cached_input_tokens,
             "cache_hit_input_tokens": self.cache_hit_input_tokens,
+            "cache_write_input_tokens": self.cache_write_input_tokens,
             "cache_miss_input_tokens": self.cache_miss_input_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "estimated": self.estimated,
@@ -64,6 +71,7 @@ class LLMCost:
     model: str | None = None
     pricing_source: str | None = None
     pricing_last_checked: str | None = None
+    cache_write_input_cost: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +81,7 @@ class LLMCost:
             "estimated": self.estimated,
             "input_cost": _decimal_text(self.input_cost),
             "cached_input_cost": _decimal_text(self.cached_input_cost),
+            "cache_write_input_cost": _decimal_text(self.cache_write_input_cost),
             "output_cost": _decimal_text(self.output_cost),
             "provider": self.provider,
             "model": self.model,
@@ -103,8 +112,18 @@ def normalize_openai_usage(usage: object) -> LLMUsage | None:
     input_details = _value(usage, "input_tokens_details")
     output_details = _value(usage, "output_tokens_details")
     cached_tokens = _int_value(_value(input_details, "cached_tokens"))
+    cache_write_tokens = _int_value(_value(input_details, "cache_write_tokens"))
     reasoning_tokens = _int_value(_value(output_details, "reasoning_tokens"))
-    if not any([input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens]):
+    if not any(
+        [
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        ]
+    ):
         return None
     return LLMUsage(
         input_tokens=input_tokens,
@@ -112,7 +131,11 @@ def normalize_openai_usage(usage: object) -> LLMUsage | None:
         total_tokens=total_tokens,
         cached_input_tokens=cached_tokens,
         cache_hit_input_tokens=cached_tokens,
-        cache_miss_input_tokens=max(input_tokens - cached_tokens, 0),
+        cache_write_input_tokens=cache_write_tokens,
+        cache_miss_input_tokens=max(
+            input_tokens - cached_tokens - cache_write_tokens,
+            0,
+        ),
         reasoning_tokens=reasoning_tokens,
         estimated=False,
         source="provider",
@@ -127,15 +150,33 @@ def normalize_chat_completions_usage(usage: object) -> LLMUsage | None:
     prompt_tokens = _int_value(_value(usage, "prompt_tokens"))
     completion_tokens = _int_value(_value(usage, "completion_tokens"))
     total_tokens = _int_value(_value(usage, "total_tokens")) or prompt_tokens + completion_tokens
-    cache_hit = _int_value(_value(usage, "prompt_cache_hit_tokens"))
+    prompt_details = _value(usage, "prompt_tokens_details")
+    cache_hit = _int_value(_value(usage, "prompt_cache_hit_tokens")) or _int_value(
+        _value(prompt_details, "cached_tokens")
+    )
+    cache_write = _int_value(_value(prompt_details, "cache_write_tokens"))
     cache_miss = _int_value(_value(usage, "prompt_cache_miss_tokens"))
     cache_split_estimated = False
-    if prompt_tokens and not cache_hit and not cache_miss:
-        cache_miss = prompt_tokens
-        cache_split_estimated = True
+    if prompt_tokens and not cache_miss:
+        if prompt_details is not None:
+            cache_miss = max(prompt_tokens - cache_hit - cache_write, 0)
+            cache_split_estimated = cache_hit + cache_write > prompt_tokens
+        elif not cache_hit:
+            cache_miss = prompt_tokens
+            cache_split_estimated = True
     completion_details = _value(usage, "completion_tokens_details")
     reasoning_tokens = _int_value(_value(completion_details, "reasoning_tokens"))
-    if not any([prompt_tokens, completion_tokens, total_tokens, cache_hit, cache_miss, reasoning_tokens]):
+    if not any(
+        [
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cache_hit,
+            cache_write,
+            cache_miss,
+            reasoning_tokens,
+        ]
+    ):
         return None
     return LLMUsage(
         input_tokens=prompt_tokens,
@@ -143,6 +184,7 @@ def normalize_chat_completions_usage(usage: object) -> LLMUsage | None:
         total_tokens=total_tokens,
         cached_input_tokens=cache_hit,
         cache_hit_input_tokens=cache_hit,
+        cache_write_input_tokens=cache_write,
         cache_miss_input_tokens=cache_miss,
         reasoning_tokens=reasoning_tokens,
         estimated=False,
@@ -185,6 +227,9 @@ def aggregate_usage(usages: list[LLMUsage | None], *, source: str = "aggregate")
         total_tokens=sum(item.total_tokens for item in records),
         cached_input_tokens=sum(item.cached_input_tokens for item in records),
         cache_hit_input_tokens=sum(item.cache_hit_input_tokens for item in records),
+        cache_write_input_tokens=sum(
+            item.cache_write_input_tokens for item in records
+        ),
         cache_miss_input_tokens=sum(item.cache_miss_input_tokens for item in records),
         reasoning_tokens=sum(item.reasoning_tokens for item in records),
         estimated=any(item.estimated for item in records),
@@ -206,6 +251,9 @@ def aggregate_cost(costs: list[LLMCost | None]) -> LLMCost | None:
         estimated=any(cost.estimated for cost in records),
         input_cost=_sum_optional(cost.input_cost for cost in records),
         cached_input_cost=_sum_optional(cost.cached_input_cost for cost in records),
+        cache_write_input_cost=_sum_optional(
+            cost.cache_write_input_cost for cost in records
+        ),
         output_cost=_sum_optional(cost.output_cost for cost in records),
         provider="mixed" if len({cost.provider for cost in records}) > 1 else records[0].provider,
         model="mixed" if len({cost.model for cost in records}) > 1 else records[0].model,
@@ -222,6 +270,9 @@ def usage_from_dict(payload: object) -> LLMUsage | None:
         total_tokens=_int_value(payload.get("total_tokens")),
         cached_input_tokens=_int_value(payload.get("cached_input_tokens")),
         cache_hit_input_tokens=_int_value(payload.get("cache_hit_input_tokens")),
+        cache_write_input_tokens=_int_value(
+            payload.get("cache_write_input_tokens")
+        ),
         cache_miss_input_tokens=_int_value(payload.get("cache_miss_input_tokens")),
         reasoning_tokens=_int_value(payload.get("reasoning_tokens")),
         estimated=bool(payload.get("estimated")),
@@ -242,6 +293,9 @@ def cost_from_dict(payload: object) -> LLMCost | None:
         estimated=bool(payload.get("estimated")),
         input_cost=_decimal_value(payload.get("input_cost")),
         cached_input_cost=_decimal_value(payload.get("cached_input_cost")),
+        cache_write_input_cost=_decimal_value(
+            payload.get("cache_write_input_cost")
+        ),
         output_cost=_decimal_value(payload.get("output_cost")),
         provider=payload.get("provider"),
         model=payload.get("model"),

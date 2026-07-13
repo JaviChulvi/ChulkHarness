@@ -125,12 +125,32 @@ Exact model and explicit alias lookups use a prebuilt dictionary. Resolution
 returns the existing frozen record and does not allocate model objects per
 request.
 
-The bundled records cover verified direct-provider IDs for OpenAI general
-text/reasoning models, callable Anthropic Claude models, Gemini
-GenerateContent models, DeepSeek API models, and a small set of explicitly
-identified local models. Do not copy these prices or limits to OpenRouter,
-Bedrock, generic compatible, or arbitrary local IDs: those values depend on the
-selected endpoint and deployment.
+The bundled records cover currently callable direct-provider IDs that can use
+Chulk's text/action transport: OpenAI Responses models with function calling,
+Anthropic Claude models, Gemini GenerateContent models, DeepSeek API models,
+and a small set of explicitly identified local models. The catalog also keeps
+deprecated IDs until their published shutdown date so existing configurations
+retain accurate migration metadata. Retired IDs and endpoint-specific audio,
+realtime, image, embedding, moderation, video, search, and managed-agent models
+are intentionally excluded when they cannot satisfy Chulk's action contract.
+
+OpenRouter, Bedrock, generic compatible, and arbitrary local model namespaces
+are deployment-scoped rather than one stable global inventory. Do not copy
+direct-provider prices or limits into those namespaces. Discover their current
+IDs from the configured endpoint instead:
+
+- OpenRouter publishes `GET /api/v1/models`, including context, output, and
+  endpoint pricing metadata.
+- Bedrock exposes model discovery and documents which models support its
+  OpenAI-compatible APIs; availability and identifiers vary by region.
+- LM Studio and other OpenAI-compatible local servers normally expose
+  `GET /v1/models`; limits and prices remain properties of the selected local
+  artifact and serving configuration.
+
+See the [OpenRouter models API](https://openrouter.ai/docs/api/api-reference/models/get-models),
+[Bedrock model catalog](https://docs.aws.amazon.com/bedrock/latest/userguide/models.html),
+[Bedrock OpenAI compatibility table](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html),
+and [LM Studio model-list API](https://lmstudio.ai/docs/developer/openai-compat/models).
 
 To add a released model, append its record to the matching provider tuple;
 `MODEL_SPECS` combines those tuples into the immutable catalog. Provider helpers
@@ -153,6 +173,7 @@ ModelSpec(
     pricing=TokenPricing(
         input_per_million=Decimal("0.50"),
         cached_input_per_million=Decimal("0.10"),
+        cache_write_input_per_million=Decimal("0.625"),  # Optional.
         output_per_million=Decimal("1.50"),
         source_urls=("https://provider.example/pricing",),
         last_checked=date(2026, 7, 13),
@@ -177,16 +198,21 @@ rest of the batch.
 For providers that apply one published long-context threshold to the full
 request, `TokenPricing.long_context` accepts a `LongContextPricing` record.
 The estimator selects it with one comparison against normalized input tokens,
-so lookup and calculation remain constant-time. Leave `pricing=None` when the
-provider requires dimensions Chulk cannot account for exactly, such as
-cache-write duration/rates, a scheduled price transition, or a non-token fee.
-Unknown pricing is preferable to a plausible but incorrect cost.
+so lookup and calculation remain constant-time. OpenAI Responses usage also
+normalizes `input_tokens_details.cache_write_tokens` into the distinct
+`cache_write_input_tokens` bucket and prices it with
+`cache_write_input_per_million`. Leave `pricing=None` when the provider requires
+dimensions Chulk cannot account for exactly, such as multiple cache-write
+durations, a scheduled price transition, or a non-token fee. Unknown pricing is
+preferable to a plausible but incorrect cost.
 
 Add aliases only for explicitly published identifiers that have the same
 pricing, limits, and lifecycle. Do not use an open-ended model-name prefix: add
 each new snapshot when it is released so an unknown sibling cannot inherit the
-wrong prices. Use separate specs when an old identifier is deprecated or
-otherwise differs. Non-stable entries also record `lifecycle_source_urls` and
+wrong prices. A moving `latest` alias records the provider's published target at
+its `last_checked` date and must be reverified when that provider changes the
+family. Use separate specs when an old identifier is deprecated or otherwise
+differs. Non-stable entries also record `lifecycle_source_urls` and
 `lifecycle_last_checked` alongside `status`, `replacement_model`, and
 `retired_on`. Catalog construction rejects malformed records, duplicate
 identities, invalid replacements, and missing provenance.

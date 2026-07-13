@@ -108,6 +108,7 @@ class LongContextPricing:
     input_per_million: Decimal
     output_per_million: Decimal
     cached_input_per_million: Decimal | None = None
+    cache_write_input_per_million: Decimal | None = None
 
     def __post_init__(self) -> None:
         _require_positive_int(
@@ -119,6 +120,10 @@ class LongContextPricing:
                 ("input_per_million", self.input_per_million),
                 ("output_per_million", self.output_per_million),
                 ("cached_input_per_million", self.cached_input_per_million),
+                (
+                    "cache_write_input_per_million",
+                    self.cache_write_input_per_million,
+                ),
             )
         )
 
@@ -146,6 +151,7 @@ class TokenPricing:
     source_urls: tuple[str, ...] = ()
     last_checked: date | None = None
     long_context: LongContextPricing | None = None
+    cache_write_input_per_million: Decimal | None = None
 
     def __post_init__(self) -> None:
         _validate_decimal_rates(
@@ -153,6 +159,10 @@ class TokenPricing:
                 ("input_per_million", self.input_per_million),
                 ("output_per_million", self.output_per_million),
                 ("cached_input_per_million", self.cached_input_per_million),
+                (
+                    "cache_write_input_per_million",
+                    self.cache_write_input_per_million,
+                ),
             )
         )
         if self.long_context is not None and not isinstance(
@@ -210,6 +220,14 @@ class ModelSpec:
                 raise ValueError(
                     "long-context pricing threshold must be below the model's "
                     "published input bound"
+                )
+            if (
+                self.pricing.cache_write_input_per_million is not None
+                and self.pricing.long_context.cache_write_input_per_million is None
+            ):
+                raise ValueError(
+                    "long-context cache-write pricing is required when the "
+                    "standard tier has a cache-write rate"
                 )
         if not isinstance(self.aliases, tuple):
             raise TypeError("aliases must be a tuple")
@@ -321,6 +339,7 @@ _DEEPSEEK_LIMITS_CHECKED_ON = date(2026, 7, 13)
 _DEEPSEEK_PRICING_CHECKED_ON = date(2026, 7, 13)
 _DEEPSEEK_LIFECYCLE_CHECKED_ON = date(2026, 7, 13)
 _LOCAL_LIMITS_CHECKED_ON = date(2026, 7, 13)
+_OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
 _OPENAI_DEPRECATIONS_URL = "https://developers.openai.com/api/docs/deprecations"
 _ANTHROPIC_LIMIT_URLS = (
     "https://platform.claude.com/docs/en/about-claude/models/overview",
@@ -333,6 +352,18 @@ _GEMINI_PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
 _GEMINI_DEPRECATIONS_URL = "https://ai.google.dev/gemini-api/docs/deprecations"
 _GEMINI_CHANGELOG_URL = "https://ai.google.dev/gemini-api/docs/changelog"
 _DEEPSEEK_V4_URL = "https://api-docs.deepseek.com/quick_start/pricing/"
+_DEEPSEEK_V4_LIMIT_URLS = (
+    _DEEPSEEK_V4_URL,
+    "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json",
+    "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json",
+)
+_DEEPSEEK_V4_ANNOUNCEMENT_URL = (
+    "https://api-docs.deepseek.com/news/news260424/"
+)
+_GEMMA_4_API_LIMIT_URLS = (
+    "https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api",
+    "https://ai.google.dev/api/models",
+)
 _GEMMA_4_URLS = (
     "https://ai.google.dev/gemma/docs/core/model_card_4",
     "https://www.ollama.com/library/gemma4",
@@ -348,12 +379,18 @@ def _pricing(
     cached_input_rate: str | None,
     source_urls: tuple[str, ...],
     last_checked: date,
+    cache_write_input_rate: str | None = None,
     long_context: LongContextPricing | None = None,
 ) -> TokenPricing:
     return TokenPricing(
         input_per_million=Decimal(input_rate),
         cached_input_per_million=(
             Decimal(cached_input_rate) if cached_input_rate is not None else None
+        ),
+        cache_write_input_per_million=(
+            Decimal(cache_write_input_rate)
+            if cache_write_input_rate is not None
+            else None
         ),
         output_per_million=Decimal(output_rate),
         source_urls=source_urls,
@@ -368,12 +405,18 @@ def _long_context_pricing(
     input_rate: str,
     output_rate: str,
     cached_input_rate: str | None,
+    cache_write_input_rate: str | None = None,
 ) -> LongContextPricing:
     return LongContextPricing(
         applies_above_input_tokens=above_input_tokens,
         input_per_million=Decimal(input_rate),
         cached_input_per_million=(
             Decimal(cached_input_rate) if cached_input_rate is not None else None
+        ),
+        cache_write_input_per_million=(
+            Decimal(cache_write_input_rate)
+            if cache_write_input_rate is not None
+            else None
         ),
         output_per_million=Decimal(output_rate),
     )
@@ -384,11 +427,15 @@ def _openai_spec(
     *,
     context_window_tokens: int,
     max_output_tokens: int,
+    default_response_reserve_tokens: int = 8_192,
     source_model: str | None = None,
+    limits_source_urls: tuple[str, ...] | None = None,
     aliases: tuple[str, ...] = (),
     input_rate: str | None = None,
     cached_input_rate: str | None = None,
+    cache_write_input_rate: str | None = None,
     output_rate: str | None = None,
+    pricing_source_urls: tuple[str, ...] | None = None,
     long_context: LongContextPricing | None = None,
     status: ModelStatus = "stable",
     replacement_model: str | None = None,
@@ -404,12 +451,15 @@ def _openai_spec(
     )
     if (input_rate is None) != (output_rate is None):
         raise ValueError("OpenAI input and output pricing must be configured together")
+    if cache_write_input_rate is not None and input_rate is None:
+        raise ValueError("OpenAI cache-write pricing requires token pricing")
     pricing = (
         _pricing(
             input_rate=input_rate,
             cached_input_rate=cached_input_rate,
+            cache_write_input_rate=cache_write_input_rate,
             output_rate=output_rate,
-            source_urls=(source_url,),
+            source_urls=pricing_source_urls or (source_url,),
             last_checked=pricing_last_checked,
             long_context=long_context,
         )
@@ -424,9 +474,9 @@ def _openai_spec(
         aliases=aliases,
         limits=ModelLimits(
             context_window_tokens=context_window_tokens,
-            default_response_reserve_tokens=8_192,
+            default_response_reserve_tokens=default_response_reserve_tokens,
             max_output_tokens=max_output_tokens,
-            source_urls=(source_url,),
+            source_urls=limits_source_urls or (source_url,),
             last_checked=limits_last_checked,
         ),
         pricing=pricing,
@@ -483,6 +533,7 @@ def _gemini_spec(
     context_window_tokens: int,
     max_output_tokens: int,
     source_model: str | None = None,
+    limits_source_urls: tuple[str, ...] | None = None,
     aliases: tuple[str, ...] = (),
     input_rate: str | None = None,
     cached_input_rate: str | None = None,
@@ -527,7 +578,7 @@ def _gemini_spec(
             default_response_reserve_tokens=8_192,
             max_input_tokens=context_window_tokens,
             max_output_tokens=max_output_tokens,
-            source_urls=(source_url,),
+            source_urls=limits_source_urls or (source_url,),
             last_checked=limits_last_checked,
         ),
         pricing=pricing,
@@ -546,16 +597,60 @@ _OPENAI_MODEL_SPECS = (
         aliases=("gpt-5.6",),
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
+        input_rate="5.00",
+        cached_input_rate="0.50",
+        cache_write_input_rate="6.25",
+        output_rate="30.00",
+        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        long_context=_long_context_pricing(
+            above_input_tokens=272_000,
+            input_rate="10.00",
+            cached_input_rate="1.00",
+            cache_write_input_rate="12.50",
+            output_rate="45.00",
+        ),
     ),
     _openai_spec(
         "gpt-5.6-terra",
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
+        input_rate="2.50",
+        cached_input_rate="0.25",
+        cache_write_input_rate="3.125",
+        output_rate="15.00",
+        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        long_context=_long_context_pricing(
+            above_input_tokens=272_000,
+            input_rate="5.00",
+            cached_input_rate="0.50",
+            cache_write_input_rate="6.25",
+            output_rate="22.50",
+        ),
     ),
     _openai_spec(
         "gpt-5.6-luna",
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
+        input_rate="1.00",
+        cached_input_rate="0.10",
+        cache_write_input_rate="1.25",
+        output_rate="6.00",
+        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        long_context=_long_context_pricing(
+            above_input_tokens=272_000,
+            input_rate="2.00",
+            cached_input_rate="0.20",
+            cache_write_input_rate="2.50",
+            output_rate="9.00",
+        ),
+    ),
+    _openai_spec(
+        "chat-latest",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="5.00",
+        cached_input_rate="0.50",
+        output_rate="30.00",
     ),
     _openai_spec(
         "gpt-5.5",
@@ -577,6 +672,8 @@ _OPENAI_MODEL_SPECS = (
         aliases=("gpt-5.5-pro-2026-04-23",),
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
+        input_rate="30.00",
+        output_rate="180.00",
     ),
     _openai_spec(
         "gpt-5.4",
@@ -725,6 +822,7 @@ _OPENAI_MODEL_SPECS = (
     ),
     _openai_spec(
         "gpt-4o",
+        aliases=("gpt-4o-2024-08-06", "gpt-4o-2024-11-20"),
         context_window_tokens=128_000,
         max_output_tokens=16_384,
         input_rate="2.50",
@@ -744,7 +842,147 @@ _OPENAI_MODEL_SPECS = (
         cached_input_rate="0.075",
         output_rate="0.60",
     ),
-    # These snapshots remain callable but retire before their moving canonical IDs.
+    # These identities remain callable but retire before current recommended models.
+    _openai_spec(
+        "gpt-5.3-chat-latest",
+        context_window_tokens=128_000,
+        max_output_tokens=16_384,
+        input_rate="1.75",
+        cached_input_rate="0.175",
+        output_rate="14.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 8, 10),
+    ),
+    _openai_spec(
+        "gpt-5.2-chat-latest",
+        context_window_tokens=128_000,
+        max_output_tokens=16_384,
+        input_rate="1.75",
+        cached_input_rate="0.175",
+        output_rate="14.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 8, 10),
+    ),
+    _openai_spec(
+        "gpt-5.2-codex",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="1.75",
+        cached_input_rate="0.175",
+        output_rate="14.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5.1-chat-latest",
+        context_window_tokens=128_000,
+        max_output_tokens=16_384,
+        input_rate="1.25",
+        cached_input_rate="0.125",
+        output_rate="10.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5.1-codex",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="1.25",
+        cached_input_rate="0.125",
+        output_rate="10.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5.1-codex-max",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="1.25",
+        cached_input_rate="0.125",
+        output_rate="10.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5.1-codex-mini",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="0.25",
+        cached_input_rate="0.025",
+        output_rate="2.00",
+        status="deprecated",
+        replacement_model="gpt-5.4-mini",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5-chat-latest",
+        context_window_tokens=128_000,
+        max_output_tokens=16_384,
+        input_rate="1.25",
+        cached_input_rate="0.125",
+        output_rate="10.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-5-codex",
+        context_window_tokens=400_000,
+        max_output_tokens=128_000,
+        input_rate="1.25",
+        cached_input_rate="0.125",
+        output_rate="10.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "computer-use-preview",
+        aliases=("computer-use-preview-2025-03-11",),
+        context_window_tokens=8_192,
+        max_output_tokens=1_024,
+        default_response_reserve_tokens=1_024,
+        input_rate="3.00",
+        output_rate="12.00",
+        status="deprecated",
+        replacement_model="gpt-5.4-mini",
+        retired_on=date(2026, 7, 23),
+    ),
+    _openai_spec(
+        "gpt-4-turbo",
+        aliases=("gpt-4-turbo-2024-04-09",),
+        context_window_tokens=128_000,
+        max_output_tokens=4_096,
+        input_rate="10.00",
+        output_rate="30.00",
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 10, 23),
+    ),
+    _openai_spec(
+        "gpt-4o-2024-05-13",
+        source_model="gpt-4o",
+        limits_source_urls=(
+            "https://developers.openai.com/api/docs/models/gpt-4o",
+            "https://learn.microsoft.com/en-us/azure/foundry/"
+            "foundry-models/concepts/models-sold-directly-by-azure"
+            "?view=azure-node-latest",
+        ),
+        context_window_tokens=128_000,
+        max_output_tokens=4_096,
+        input_rate="5.00",
+        output_rate="15.00",
+        pricing_source_urls=(_OPENAI_PRICING_URL,),
+        status="deprecated",
+        replacement_model="gpt-5.5",
+        retired_on=date(2026, 10, 23),
+    ),
     _openai_spec(
         "gpt-5-2025-08-07",
         source_model="gpt-5",
@@ -960,6 +1198,7 @@ _GEMINI_MODEL_SPECS = (
     ),
     _gemini_spec(
         "gemini-3.1-flash-lite",
+        aliases=("gemini-flash-lite-latest",),
         context_window_tokens=1_048_576,
         max_output_tokens=65_536,
         input_rate="0.25",
@@ -968,7 +1207,7 @@ _GEMINI_MODEL_SPECS = (
     ),
     _gemini_spec(
         "gemini-3.1-pro-preview",
-        aliases=("gemini-3-pro-preview",),
+        aliases=("gemini-3-pro-preview", "gemini-pro-latest"),
         context_window_tokens=1_048_576,
         max_output_tokens=65_536,
         input_rate="2.00",
@@ -1036,8 +1275,8 @@ _GEMINI_MODEL_SPECS = (
     ),
     _gemini_spec(
         "gemini-2.5-computer-use-preview-10-2025",
-        context_window_tokens=128_000,
-        max_output_tokens=64_000,
+        context_window_tokens=131_072,
+        max_output_tokens=65_536,
         input_rate="1.25",
         output_rate="10.00",
         status="preview",
@@ -1046,15 +1285,35 @@ _GEMINI_MODEL_SPECS = (
         "gemini-robotics-er-1.6-preview",
         context_window_tokens=131_072,
         max_output_tokens=65_536,
+        input_rate="1.00",
+        output_rate="5.00",
         status="preview",
+    ),
+    _gemini_spec(
+        "gemma-4-26b-a4b-it",
+        context_window_tokens=262_144,
+        max_output_tokens=32_768,
+        limits_source_urls=_GEMMA_4_API_LIMIT_URLS,
+        input_rate="0",
+        cached_input_rate="0",
+        output_rate="0",
+    ),
+    _gemini_spec(
+        "gemma-4-31b-it",
+        context_window_tokens=262_144,
+        max_output_tokens=32_768,
+        limits_source_urls=_GEMMA_4_API_LIMIT_URLS,
+        input_rate="0",
+        cached_input_rate="0",
+        output_rate="0",
     ),
 )
 
 _DEEPSEEK_V4_LIMITS = ModelLimits(
-    context_window_tokens=1_000_000,
+    context_window_tokens=1_048_576,
     default_response_reserve_tokens=16_384,
-    max_output_tokens=384_000,
-    source_urls=(_DEEPSEEK_V4_URL,),
+    max_output_tokens=393_216,
+    source_urls=_DEEPSEEK_V4_LIMIT_URLS,
     last_checked=_DEEPSEEK_LIMITS_CHECKED_ON,
 )
 _DEEPSEEK_FLASH_PRICING = _pricing(
@@ -1077,12 +1336,18 @@ _DEEPSEEK_MODEL_SPECS = (
         model="deepseek-v4-flash",
         limits=_DEEPSEEK_V4_LIMITS,
         pricing=_DEEPSEEK_FLASH_PRICING,
+        status="preview",
+        lifecycle_source_urls=(_DEEPSEEK_V4_ANNOUNCEMENT_URL,),
+        lifecycle_last_checked=_DEEPSEEK_LIFECYCLE_CHECKED_ON,
     ),
     ModelSpec(
         provider="deepseek",
         model="deepseek-v4-pro",
         limits=_DEEPSEEK_V4_LIMITS,
         pricing=_DEEPSEEK_PRO_PRICING,
+        status="preview",
+        lifecycle_source_urls=(_DEEPSEEK_V4_ANNOUNCEMENT_URL,),
+        lifecycle_last_checked=_DEEPSEEK_LIFECYCLE_CHECKED_ON,
     ),
     ModelSpec(
         provider="deepseek",

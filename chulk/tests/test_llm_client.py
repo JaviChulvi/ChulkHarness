@@ -366,6 +366,35 @@ def test_openai_responses_client_extracts_usage_and_cost():
     assert response.cost.estimated is False
 
 
+def test_openai_responses_client_extracts_cache_write_usage_and_cost():
+    usage = SimpleNamespace(
+        input_tokens=1000,
+        output_tokens=200,
+        total_tokens=1200,
+        input_tokens_details=SimpleNamespace(
+            cached_tokens=100,
+            cache_write_tokens=200,
+        ),
+    )
+    fake_client = FakeOpenAIClient(usage=usage)
+    client = OpenAIResponsesClient(model="gpt-5.6-sol", client=fake_client)
+
+    response = client.complete_response([{"role": "user", "content": "Hello"}])
+
+    assert response.usage is not None
+    assert response.usage.cache_hit_input_tokens == 100
+    assert response.usage.cache_write_input_tokens == 200
+    assert response.usage.cache_miss_input_tokens == 700
+    assert response.cost is not None
+    assert response.cost.input_cost == Decimal("0.0035")
+    assert response.cost.cached_input_cost == Decimal("0.00005")
+    assert response.cost.cache_write_input_cost == Decimal("0.00125")
+    assert response.cost.output_cost == Decimal("0.006")
+    assert response.cost.amount == Decimal("0.0108")
+    assert response.cost.pricing_known is True
+    assert response.cost.estimated is False
+
+
 def test_openai_responses_client_uses_native_tool_calls_when_tools_are_provided():
     fake_client = FakeOpenAIClient(
         output_text="",
@@ -1133,11 +1162,11 @@ def test_resolve_model_capabilities_returns_context_window_and_reserve():
     assert openai_caps.max_input_tokens is None
     assert openai_caps.max_output_tokens == 32_768
     assert openai_caps.input_budget_tokens == 1_039_384
-    assert deepseek_caps.context_window_tokens == 1_000_000
+    assert deepseek_caps.context_window_tokens == 1_048_576
     assert deepseek_caps.default_response_reserve_tokens == 16_384
     assert deepseek_caps.max_input_tokens is None
-    assert deepseek_caps.max_output_tokens == 384_000
-    assert deepseek_caps.input_budget_tokens == 983_616
+    assert deepseek_caps.max_output_tokens == 393_216
+    assert deepseek_caps.input_budget_tokens == 1_032_192
     assert local_caps.context_window_tokens == 262_144
     assert local_caps.default_response_reserve_tokens == 4_096
     assert local_qwen_caps.context_window_tokens == 262_144

@@ -48,6 +48,7 @@ def cost_snapshot(value: object) -> Cost | None:
         estimated=bool(payload.get("estimated")),
         input_cost=_decimal(payload.get("input_cost")),
         cached_input_cost=_decimal(payload.get("cached_input_cost")),
+        cache_write_input_cost=_decimal(payload.get("cache_write_input_cost")),
         output_cost=_decimal(payload.get("output_cost")),
         provider=_optional_str(payload.get("provider")),
         model=_optional_str(payload.get("model")),
