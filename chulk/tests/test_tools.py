@@ -608,6 +608,9 @@ def test_file_read_policy_blocks_sensitive_paths_but_keeps_source_and_templates_
         ".chulk/mcp.json": "secret-runtime-config",
         ".chulk/store.sqlite": "secret-memory-state",
         ".chulk/store.sqlite-wal": "secret-memory-wal",
+        ".chulk/store.sqlite-shm": "secret-memory-shm",
+        ".chulk/store.sqlite-journal": "secret-memory-journal",
+        ".chulk/store.sqlite.backup-v1-20260716.sqlite": "secret-memory-backup",
         ".chulk/traces/session.jsonl": "secret-sdk-trace",
         "traces/session.jsonl": "secret-cli-trace",
         "data/cache.db": "secret-database-state",
@@ -634,6 +637,9 @@ def test_file_read_policy_blocks_sensitive_paths_but_keeps_source_and_templates_
         ".chulk/mcp.json",
         ".chulk/store.sqlite",
         ".chulk/store.sqlite-wal",
+        ".chulk/store.sqlite-shm",
+        ".chulk/store.sqlite-journal",
+        ".chulk/store.sqlite.backup-v1-20260716.sqlite",
         ".chulk/traces/session.jsonl",
         "traces/session.jsonl",
         "data/cache.db",
@@ -692,6 +698,10 @@ def test_list_and_search_files_do_not_expose_sensitive_paths_or_contents(tmp_pat
         ".git/config": "policy-needle secret-git-value",
         ".chulk/mcp.json": "policy-needle secret-runtime-value",
         ".chulk/store.sqlite": "policy-needle secret-memory-value",
+        ".chulk/store.sqlite-wal": "policy-needle secret-memory-wal-value",
+        ".chulk/store.sqlite-shm": "policy-needle secret-memory-shm-value",
+        ".chulk/store.sqlite-journal": "policy-needle secret-memory-journal-value",
+        ".chulk/store.sqlite.backup-v1-20260716.sqlite": "policy-needle secret-memory-backup-value",
         ".chulk/traces/session.jsonl": "policy-needle secret-sdk-trace-value",
         "traces/session.jsonl": "policy-needle secret-cli-trace-value",
         "data/cache.sqlite3": "policy-needle secret-database-value",
@@ -871,7 +881,17 @@ def test_apply_patch_tool_blocks_unsafe_paths(tmp_path):
     registry = ToolRegistry()
     registry.register(apply_patch_tool(tmp_path))
 
-    for path in [".env", "chulk/store.sqlite", ".git/config", "secrets.txt", "traces/output.txt"]:
+    for path in [
+        ".env",
+        "chulk/store.sqlite",
+        "data/cache.sqlite-wal",
+        "data/cache.sqlite-shm",
+        "data/cache.sqlite-journal",
+        "data/cache.sqlite.backup-v1-20260716.sqlite",
+        ".git/config",
+        "secrets.txt",
+        "traces/output.txt",
+    ]:
         result = registry.run(
             "apply_patch",
             {

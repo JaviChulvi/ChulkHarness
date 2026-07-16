@@ -100,22 +100,22 @@ ordering.
 
 Acceptance criteria:
 
-- [ ] Centralize connection policy, transactions, migrations, and backups in a
+- [x] Centralize connection policy, transactions, migrations, and backups in a
   small shared storage boundary used by memory and session stores.
-- [ ] Adopt unversioned legacy databases, run ordered forward-only migrations
+- [x] Adopt unversioned legacy databases, run ordered forward-only migrations
   atomically, and reject schema versions newer than the running package.
-- [ ] Configure foreign keys, explicit busy timeout, WAL, synchronous mode, and
+- [x] Configure foreign keys, explicit busy timeout, WAL, synchronous mode, and
   checkpoint policy deliberately on every applicable connection.
-- [ ] Create and validate a private online backup before upgrading an existing
+- [x] Create and validate a private online backup before upgrading an existing
   database; never raw-copy a live WAL database.
-- [ ] Repair existing duplicate message ordinals and enforce unique
+- [x] Repair existing duplicate message ordinals and enforce unique
   `(conversation_id, ordinal)` ordering.
-- [ ] Allocate message ordinals and other read-modify-write updates inside
+- [x] Allocate message ordinals and other read-modify-write updates inside
   explicit write transactions.
-- [ ] Cover migration rollback, future versions, simultaneous initialization,
+- [x] Cover migration rollback, future versions, simultaneous initialization,
   lock waiting/timeouts, WAL readers, cross-store writers, exact concurrent
   message ordering, and backup consistency.
-- [ ] Keep database sidecars and backups private, ignored, and unavailable to
+- [x] Keep database sidecars and backups private, ignored, and unavailable to
   model-facing file tools.
 
 ### US-M4: Make Orchestration Policy Single-Sourced

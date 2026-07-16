@@ -751,7 +751,7 @@ def safe_write_error(path: Path, project_root: Path) -> str | None:
     suffix = path.suffix.lower()
     if name in UNSAFE_SECRET_NAMES or name.startswith(".env."):
         return "Refusing to write secret or credential file"
-    if suffix in UNSAFE_SQLITE_SUFFIXES:
+    if _looks_like_sqlite_state(name):
         return "Refusing to write SQLite/database file"
     if suffix in UNSAFE_SECRET_SUFFIXES and _looks_secret_like_name(name):
         return "Refusing to write secret or credential file"

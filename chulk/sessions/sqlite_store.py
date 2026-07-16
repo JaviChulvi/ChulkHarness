@@ -14,6 +14,7 @@ from uuid import uuid4
 from chulk.core.context import TurnContextSection
 from chulk.core.state import ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
 from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
+from chulk.storage import initialize_sqlite_database, sqlite_connection
 
 
 class SessionNotFoundError(ValueError):
@@ -32,160 +33,8 @@ class SQLiteSessionStore:
         self.initialize()
 
     def initialize(self) -> None:
-        """Create session tables if needed."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    title TEXT,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    trace_path TEXT,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    metadata TEXT NOT NULL DEFAULT '{}'
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status)")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_messages (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    turn_id TEXT,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    ordinal INTEGER NOT NULL,
-                    message_key TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_conversation_messages_lookup
-                ON conversation_messages(conversation_id, ordinal)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_turns (
-                    turn_id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    user_message TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    final_answer TEXT,
-                    model_request_count INTEGER NOT NULL DEFAULT 0,
-                    tool_call_count INTEGER NOT NULL DEFAULT 0,
-                    loaded_memory_ids TEXT NOT NULL DEFAULT '[]',
-                    loaded_skill_names TEXT NOT NULL DEFAULT '[]',
-                    errors TEXT NOT NULL DEFAULT '[]',
-                    active_plan TEXT,
-                    turn_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation
-                ON conversation_turns(conversation_id, started_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_model_requests (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    turn_id TEXT,
-                    request_index INTEGER NOT NULL,
-                    message_count INTEGER NOT NULL DEFAULT 0,
-                    prompt_char_count INTEGER NOT NULL DEFAULT 0,
-                    returned_prompt_char_count INTEGER NOT NULL DEFAULT 0,
-                    truncated INTEGER NOT NULL DEFAULT 0,
-                    loaded_memory_ids TEXT NOT NULL DEFAULT '[]',
-                    loaded_skill_names TEXT NOT NULL DEFAULT '[]',
-                    available_tool_names TEXT NOT NULL DEFAULT '[]',
-                    request_json TEXT NOT NULL,
-                    raw_response TEXT,
-                    usage_json TEXT,
-                    cost_json TEXT,
-                    created_at TEXT NOT NULL,
-                    response_created_at TEXT,
-                    UNIQUE (conversation_id, turn_id, request_index),
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            _ensure_column(conn, "conversation_model_requests", "usage_json", "TEXT")
-            _ensure_column(conn, "conversation_model_requests", "cost_json", "TEXT")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_tool_calls (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    turn_id TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    resolved_tool_name TEXT,
-                    arguments TEXT NOT NULL DEFAULT '{}',
-                    iteration INTEGER NOT NULL,
-                    phase TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    success INTEGER,
-                    error TEXT,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    tool_call_json TEXT NOT NULL,
-                    UNIQUE (conversation_id, turn_id, phase, iteration),
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_observations (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    turn_id TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    output_metadata TEXT NOT NULL DEFAULT '{}',
-                    observation_key TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS conversation_summaries (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    source_message_count INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_conversation_summaries_lookup
-                ON conversation_summaries(conversation_id, updated_at)
-                """
-            )
+        """Create or migrate the shared memory and session database."""
+        initialize_sqlite_database(self.db_path)
 
     def create_conversation(
         self,
@@ -292,13 +141,15 @@ class SQLiteSessionStore:
         now = created_at or _utc_now()
         key = message_key or f"{conversation_id}:{uuid4()}"
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             next_ordinal = _next_message_ordinal(conn, conversation_id)
             conn.execute(
                 """
-                INSERT OR IGNORE INTO conversation_messages (
+                INSERT INTO conversation_messages (
                     id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_key) DO NOTHING
                 """,
                 (
                     str(uuid4()),
@@ -628,14 +479,8 @@ class SQLiteSessionStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        try:
+        with sqlite_connection(self.db_path) as conn:
             yield conn
-            conn.commit()
-        finally:
-            conn.close()
 
 
 def _conversation_select_sql(suffix: str) -> str:
@@ -904,12 +749,6 @@ def _safe_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
-
-
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
-    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _utc_now() -> str:
