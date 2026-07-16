@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -41,3 +43,19 @@ def test_release_policy_covers_public_internal_async_and_external_boundaries() -
     assert "chulk._sdk" in policy and "internal" in policy
     assert "thread-backed" in sdk and "Cancellation" in sdk
     assert "trust boundary" in mcp and "external services" in mcp
+
+
+def test_roadmap_stays_compact_ordered_and_deduplicated() -> None:
+    roadmap = (ROOT / "TODO.md").read_text(encoding="utf-8")
+    lines = roadmap.splitlines()
+
+    assert len(lines) < 400
+    assert "## Now: Maintenance Reliability" in roadmap
+    assert "## Next: Reliability And SDK Depth" in roadmap
+    assert "## Later: Product Directions" in roadmap
+
+    task_pattern = re.compile(r"^\s*- \[[ xX]\]\s+(.*)$")
+    tasks = [match.group(1).strip().casefold() for line in lines if (match := task_pattern.match(line))]
+    duplicates = [task for task, count in Counter(tasks).items() if count > 1]
+
+    assert not duplicates, f"Roadmap tasks must have one canonical owner: {duplicates}"
