@@ -11,7 +11,7 @@ import subprocess
 from typing import Any
 
 from chulk.config import Config, load_config, resolve_cli_environment
-from chulk.llm import resolve_model_capabilities
+from chulk.llm.capabilities import resolve_runtime_model_capabilities
 from chulk.tracing import Trace, TraceFormatError
 
 
@@ -387,7 +387,13 @@ def _model_check(config: Config) -> DiagnosticCheck:
     invalid: list[str] = []
     for label, provider, model in providers:
         try:
-            capabilities.append(resolve_model_capabilities(provider, model))
+            capabilities.append(
+                resolve_runtime_model_capabilities(
+                    provider,
+                    model,
+                    local_context_window_tokens=config.local_context_window_tokens,
+                )
+            )
         except ValueError as exc:
             invalid.append(f"{label} {provider}/{model}: {exc}")
     if invalid:

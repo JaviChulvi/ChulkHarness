@@ -17,12 +17,19 @@ class ContextBudget:
 
     max_prompt_tokens: int = 0
     response_reserve_tokens: int = 1024
+    max_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_prompt_tokens < 0:
             raise ValueError("max_prompt_tokens cannot be negative")
         if self.response_reserve_tokens < 0:
             raise ValueError("response_reserve_tokens cannot be negative")
+        if self.max_input_tokens is not None and (
+            isinstance(self.max_input_tokens, bool)
+            or not isinstance(self.max_input_tokens, int)
+            or self.max_input_tokens < 1
+        ):
+            raise ValueError("max_input_tokens must be a positive integer")
 
     @property
     def enabled(self) -> bool:
@@ -32,7 +39,13 @@ class ContextBudget:
     def input_token_budget(self) -> int | None:
         if not self.enabled:
             return None
-        return max(0, self.max_prompt_tokens - self.response_reserve_tokens)
+        context_budget = max(
+            0,
+            self.max_prompt_tokens - self.response_reserve_tokens,
+        )
+        if self.max_input_tokens is None:
+            return context_budget
+        return min(context_budget, self.max_input_tokens)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +53,7 @@ class ContextBudget:
             "context_window_tokens": self.max_prompt_tokens,
             "max_prompt_tokens": self.max_prompt_tokens,
             "response_reserve_tokens": self.response_reserve_tokens,
+            "max_input_tokens": self.max_input_tokens,
             "input_token_budget": self.input_token_budget,
         }
 

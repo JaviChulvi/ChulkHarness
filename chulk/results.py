@@ -59,6 +59,7 @@ class Usage:
     cache_split_estimated: bool = False
     source: str = "provider"
     raw: Mapping[str, Any] = field(default_factory=dict)
+    cache_write_input_tokens: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw", freeze_mapping(self.raw))
@@ -80,6 +81,7 @@ class Cost:
     model: str | None = None
     pricing_source: str | None = None
     pricing_last_checked: str | None = None
+    cache_write_input_cost: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return plain_data(self)
@@ -147,6 +149,7 @@ class ContextBudget:
     max_prompt_tokens: int = 0
     response_reserve_tokens: int = 0
     input_token_budget: int | None = None
+    max_input_tokens: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return plain_data(self)

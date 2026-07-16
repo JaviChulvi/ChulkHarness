@@ -26,7 +26,8 @@ from chulk import (
     ToolCall,
     Usage,
 )
-from chulk.llm import LLMClient
+from chulk._sdk.results import cost_snapshot, usage_snapshot
+from chulk.llm import LLMClient, LLMCost, LLMUsage
 
 
 class FakeLLM(LLMClient):
@@ -183,6 +184,69 @@ def test_unknown_cost_remains_distinct_from_zero_cost():
     assert free.amount == Decimal("0")
     assert unknown.to_dict()["amount"] is None
     assert free.to_dict()["amount"] == "0"
+
+
+def test_cache_write_fields_survive_public_snapshots_and_old_payloads():
+    usage = usage_snapshot(
+        LLMUsage(
+            input_tokens=100,
+            cache_write_input_tokens=20,
+        )
+    )
+    cost = cost_snapshot(
+        LLMCost(
+            amount=Decimal("0.5"),
+            pricing_known=True,
+            cache_write_input_cost=Decimal("0.1"),
+        )
+    )
+    old_usage = usage_snapshot({"input_tokens": 10})
+    old_cost = cost_snapshot({"amount": "0.2", "pricing_known": True})
+
+    assert usage is not None
+    assert usage.cache_write_input_tokens == 20
+    assert cost is not None
+    assert cost.cache_write_input_cost == Decimal("0.1")
+    assert old_usage is not None
+    assert old_usage.cache_write_input_tokens == 0
+    assert old_cost is not None
+    assert old_cost.cache_write_input_cost is None
+
+
+def test_cache_write_fields_preserve_public_positional_constructors():
+    usage = Usage(
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        True,
+        True,
+        "legacy",
+        {"old": True},
+    )
+    cost = Cost(
+        Decimal("1"),
+        "EUR",
+        True,
+        True,
+        Decimal("0.2"),
+        Decimal("0.1"),
+        Decimal("0.7"),
+        "test",
+        "legacy",
+        "https://models.example/pricing",
+        "2026-07-13",
+    )
+
+    assert usage.cache_miss_input_tokens == 6
+    assert usage.reasoning_tokens == 7
+    assert usage.cache_write_input_tokens == 0
+    assert cost.output_cost == Decimal("0.7")
+    assert cost.pricing_last_checked == "2026-07-13"
+    assert cost.cache_write_input_cost is None
 
 
 def test_every_nested_contract_collection_is_immutable():

@@ -82,6 +82,7 @@ class AgentConfig:
     max_reflection_attempts: int | None = None
     capabilities: Capabilities | None = None
     memory_mode: MemoryMode | str | None = None
+    local_context_window_tokens: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.mcp_servers is not None:
@@ -169,6 +170,7 @@ class AgentConfig:
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        context_window_tokens: int | None = None,
         **kwargs: Any,
     ) -> "AgentConfig":
         """Create config for local OpenAI-compatible providers."""
@@ -177,6 +179,8 @@ class AgentConfig:
             values["local_api_key"] = api_key
         if base_url is not None:
             values["local_base_url"] = base_url
+        if context_window_tokens is not None:
+            values["local_context_window_tokens"] = context_window_tokens
         return cls.from_env(provider="local", model=model or DEFAULT_LOCAL_MODEL, **values)
 
     @classmethod
@@ -281,6 +285,11 @@ class AgentConfig:
         _set_env(env, "CHULK_DEEPSEEK_BASE_URL", self.deepseek_base_url)
         _set_env(env, "CHULK_LOCAL_API_KEY", self.local_api_key)
         _set_env(env, "CHULK_LOCAL_BASE_URL", self.local_base_url)
+        _set_env(
+            env,
+            "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS",
+            self.local_context_window_tokens,
+        )
         _set_env(env, "CHULK_OPENAI_COMPATIBLE_API_KEY", self.openai_compatible_api_key)
         _set_env(env, "CHULK_OPENAI_COMPATIBLE_BASE_URL", self.openai_compatible_base_url)
         _set_env(env, "CHULK_OPENROUTER_API_KEY", self.openrouter_api_key)

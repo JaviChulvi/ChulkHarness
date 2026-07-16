@@ -72,6 +72,7 @@ def format_config(config: Config) -> str:
         "deepseek_base_url": _format_base_url(config.deepseek_base_url),
         "local_api_key": "set" if config.local_api_key else "not set",
         "local_base_url": _format_base_url(config.local_base_url),
+        "local_context_window_tokens": config.local_context_window_tokens,
         "openai_compatible_api_key": "set" if config.openai_compatible_api_key else "not set",
         "openai_compatible_base_url": _format_base_url(config.openai_compatible_base_url),
         "openrouter_api_key": "set" if config.openrouter_api_key else "not set",

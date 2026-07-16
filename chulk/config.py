@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
 from chulk.llm import supported_llm_providers
+from chulk.llm.capabilities import (
+    LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
 from chulk.llm.providers.compatible import DEFAULT_OPENROUTER_BASE_URL
 from chulk.mcp import MCPServerConfig, load_mcp_servers
 from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
@@ -19,6 +23,7 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_LOCAL_MODEL = "google/gemma-4-12b-qat"
 DEFAULT_LOCAL_BASE_URL = "http://localhost:1234/v1"
+DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS
 DEFAULT_MAX_SKILLS_PER_TURN = 3
 DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
 DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
@@ -64,6 +69,10 @@ class Config:
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
     local_api_key: str | None = None
     local_base_url: str = DEFAULT_LOCAL_BASE_URL
+    local_context_window_tokens: int = field(
+        default=DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS,
+        kw_only=True,
+    )
     openai_compatible_api_key: str | None = None
     openai_compatible_base_url: str | None = None
     openrouter_api_key: str | None = None
@@ -116,6 +125,18 @@ def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
     if parsed < 1:
         raise ConfigValueError(key, f"{key} must be greater than zero")
     return parsed
+
+
+def _local_context_window_tokens(env: Mapping[str, str]) -> int:
+    key = "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS"
+    value = _env_int(env, key, DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS)
+    if value <= LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS:
+        raise ConfigValueError(
+            key,
+            f"{key} must be greater than the local response reserve "
+            f"({LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS})",
+        )
+    return value
 
 
 def _env_nonnegative_int(env: Mapping[str, str], key: str, default: int) -> int:
@@ -201,6 +222,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
         local_api_key=env.get("CHULK_LOCAL_API_KEY") or None,
         local_base_url=env.get("CHULK_LOCAL_BASE_URL") or DEFAULT_LOCAL_BASE_URL,
+        local_context_window_tokens=_local_context_window_tokens(env),
         openai_compatible_api_key=env.get("CHULK_OPENAI_COMPATIBLE_API_KEY") or None,
         openai_compatible_base_url=env.get("CHULK_OPENAI_COMPATIBLE_BASE_URL") or None,
         openrouter_api_key=env.get("CHULK_OPENROUTER_API_KEY") or env.get("OPENROUTER_API_KEY") or None,

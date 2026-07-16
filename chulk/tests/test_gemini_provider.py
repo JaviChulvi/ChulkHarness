@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import json
 from pathlib import Path
 import sys
@@ -71,9 +72,13 @@ class FakeModels:
         return iter(self.stream_chunks)
 
 
-def _client(models: FakeModels) -> GeminiGenerateContentClient:
+def _client(
+    models: FakeModels,
+    *,
+    model: str = "gemini-test",
+) -> GeminiGenerateContentClient:
     return GeminiGenerateContentClient(
-        model="gemini-test",
+        model=model,
         client=SimpleNamespace(models=models),
     )
 
@@ -186,7 +191,7 @@ def test_gemini_normalizes_provider_usage() -> None:
     assert response.model == "gemini-test"
     assert response.usage == LLMUsage(
         input_tokens=30,
-        output_tokens=9,
+        output_tokens=11,
         total_tokens=41,
         cached_input_tokens=12,
         cache_hit_input_tokens=12,
@@ -202,6 +207,34 @@ def test_gemini_normalizes_provider_usage() -> None:
             "total_token_count": 41,
         },
     )
+
+
+def test_gemini_bills_tool_use_and_thinking_tokens_in_the_right_buckets() -> None:
+    usage = SimpleNamespace(
+        prompt_token_count=199_999,
+        tool_use_prompt_token_count=2,
+        candidates_token_count=1,
+        thoughts_token_count=1,
+        total_token_count=200_003,
+        cached_content_token_count=0,
+    )
+    models = FakeModels(responses=[_response(text="answer", usage=usage)])
+
+    response = _client(
+        models,
+        model="gemini-3.1-pro-preview",
+    ).complete_response(MESSAGES)
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 200_001
+    assert response.usage.cache_miss_input_tokens == 200_001
+    assert response.usage.output_tokens == 2
+    assert response.usage.reasoning_tokens == 1
+    assert response.usage.total_tokens == 200_003
+    assert response.cost is not None
+    assert response.cost.input_cost == Decimal("0.800004")
+    assert response.cost.output_cost == Decimal("0.000036")
+    assert response.cost.amount == Decimal("0.800040")
 
 
 def test_gemini_native_streaming_yields_text_and_final_usage() -> None:

@@ -48,6 +48,7 @@ def cost_snapshot(value: object) -> Cost | None:
         estimated=bool(payload.get("estimated")),
         input_cost=_decimal(payload.get("input_cost")),
         cached_input_cost=_decimal(payload.get("cached_input_cost")),
+        cache_write_input_cost=_decimal(payload.get("cache_write_input_cost")),
         output_cost=_decimal(payload.get("output_cost")),
         provider=_optional_str(payload.get("provider")),
         model=_optional_str(payload.get("model")),
@@ -112,6 +113,7 @@ def context_report_snapshot(value: object) -> ContextReport | None:
         context_window_tokens=_int(budget_payload.get("context_window_tokens")),
         max_prompt_tokens=_int(budget_payload.get("max_prompt_tokens")),
         response_reserve_tokens=_int(budget_payload.get("response_reserve_tokens")),
+        max_input_tokens=_optional_int(budget_payload.get("max_input_tokens")),
         input_token_budget=_optional_int(budget_payload.get("input_token_budget")),
     )
     sections = tuple(

@@ -51,6 +51,9 @@ returned to the caller.
 
 Unknown pricing is represented by `Cost(amount=None, pricing_known=False)`.
 That is distinct from a known free operation whose amount is `Decimal("0")`.
+When a provider reports prompt-cache writes separately, `Usage` exposes
+`cache_write_input_tokens` and `Cost` exposes `cache_write_input_cost` instead
+of folding that billed bucket into ordinary input.
 
 ## Serialization
 

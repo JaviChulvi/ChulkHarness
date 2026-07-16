@@ -66,7 +66,19 @@ export OPENAI_API_KEY=...
 export CHULK_LLM_PROVIDER=local
 export CHULK_MODEL=your-loaded-model
 export CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
+export CHULK_LOCAL_CONTEXT_WINDOW_TOKENS=131072
 ```
+
+`CHULK_LOCAL_CONTEXT_WINDOW_TOKENS` is the effective context loaded by the
+local server, not the model architecture maximum. Chulk defaults it to a
+conservative `131072` tokens. Set it to the loaded instance's context; for LM
+Studio, use `loaded_instances[].config.context_length`, not
+`max_context_length`. Runtime budgeting uses the smaller of this setting and a
+catalogued architecture limit. For an uncatalogued local artifact, the setting
+is the effective limit. Chulk applies the cap before fallback limits are
+aggregated. SDK callers can use
+`AgentConfig.local(context_window_tokens=...)` or
+`LocalProvider(..., context_window_tokens=...)`.
 
 A generic hosted OpenAI-compatible endpoint requires a key, base URL, and
 explicit model:
@@ -114,6 +126,121 @@ export CHULK_BEDROCK_BASE_URL=https://your-bedrock-openai-endpoint/openai/v1
 `BEDROCK_API_KEY` and `AWS_BEARER_TOKEN_BEDROCK` are supported key aliases.
 `CHULK_BASE_URL` remains a legacy base-URL alias, but new configuration should
 use `CHULK_BEDROCK_BASE_URL`.
+
+## Model metadata catalog
+
+Bundled pricing and token limits live in the immutable Python catalog at
+`chulk/llm/model_catalog.py`. Each canonical model is represented by one
+`ModelSpec`; pricing, limits, aliases, lifecycle state, and provenance therefore
+resolve to the same record instead of being maintained in parallel tables.
+Exact model and explicit alias lookups use a prebuilt dictionary. Resolution
+returns the existing frozen record and does not allocate model objects per
+request.
+
+The bundled records cover currently callable direct-provider IDs that can use
+Chulk's text/action transport: OpenAI Responses models with function calling,
+Anthropic Claude models, Gemini GenerateContent models, DeepSeek API models,
+and a small set of explicitly identified local models. The catalog also keeps
+deprecated IDs until their published shutdown date so existing configurations
+retain accurate migration metadata. Retired IDs and endpoint-specific audio,
+realtime, image, embedding, moderation, video, search, and managed-agent models
+are intentionally excluded when they cannot satisfy Chulk's action contract.
+
+OpenRouter, Bedrock, generic compatible, and arbitrary local model namespaces
+are deployment-scoped rather than one stable global inventory. Do not copy
+direct-provider prices or limits into those namespaces. Discover their current
+IDs from the configured endpoint instead:
+
+- OpenRouter publishes `GET /api/v1/models`, including context, output, and
+  endpoint pricing metadata.
+- Bedrock exposes model discovery and documents which models support its
+  OpenAI-compatible APIs; availability and identifiers vary by region.
+- LM Studio and other OpenAI-compatible local servers normally expose
+  `GET /v1/models`; limits and prices remain properties of the selected local
+  artifact and serving configuration.
+
+See the [OpenRouter models API](https://openrouter.ai/docs/api/api-reference/models/get-models),
+[Bedrock model catalog](https://docs.aws.amazon.com/bedrock/latest/userguide/models.html),
+[Bedrock OpenAI compatibility table](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html),
+and [LM Studio model-list API](https://lmstudio.ai/docs/developer/openai-compat/models).
+
+To add a released model, append its record to the matching provider tuple;
+`MODEL_SPECS` combines those tuples into the immutable catalog. Provider helpers
+keep repeated URLs and internal reserve policies concise, while the underlying
+record has this shape:
+
+```python
+ModelSpec(
+    provider="example",
+    model="example-model",
+    aliases=("example-model-2026-07-01",),
+    limits=ModelLimits(
+        context_window_tokens=128_000,
+        default_response_reserve_tokens=8_192,
+        max_input_tokens=128_000,   # Optional when not published independently.
+        max_output_tokens=16_384,   # Optional when the provider does not specify it.
+        source_urls=("https://provider.example/models/example-model",),
+        last_checked=date(2026, 7, 12),
+    ),
+    pricing=TokenPricing(
+        input_per_million=Decimal("0.50"),
+        cached_input_per_million=Decimal("0.10"),
+        cache_write_input_per_million=Decimal("0.625"),  # Optional.
+        output_per_million=Decimal("1.50"),
+        source_urls=("https://provider.example/pricing",),
+        last_checked=date(2026, 7, 13),
+    ),
+)
+```
+
+Use `Decimal` strings for every price. Limits and pricing each own an independent
+`source_urls` tuple and `last_checked` date because providers often publish and
+update them separately. Both provenance fields are required on every present
+section. For an unpriced local model, only `ModelLimits` is configured. The
+limits provenance establishes the published hard limits; it does not establish
+Chulk's `default_response_reserve_tokens`, which remains an internal prompt
+budget policy.
+
+Provider helper defaults represent a documented batch verification. When one
+record is checked or changed independently, pass that helper's
+`limits_last_checked`, `pricing_last_checked`, or
+`lifecycle_last_checked` override instead of changing a date shared by the
+rest of the batch.
+
+For providers that apply one published long-context threshold to the full
+request, `TokenPricing.long_context` accepts a `LongContextPricing` record.
+The estimator selects it with one comparison against normalized input tokens,
+so lookup and calculation remain constant-time. OpenAI Responses usage also
+normalizes `input_tokens_details.cache_write_tokens` into the distinct
+`cache_write_input_tokens` bucket and prices it with
+`cache_write_input_per_million`. Leave `pricing=None` when the provider requires
+dimensions Chulk cannot account for exactly, such as multiple cache-write
+durations, a scheduled price transition, or a non-token fee. Unknown pricing is
+preferable to a plausible but incorrect cost.
+
+Cost estimates cover token charges represented by provider usage metadata.
+They do not claim to be a complete account bill and exclude separately managed
+charges such as explicit Gemini cache storage duration. Chulk's Gemini provider
+does not create explicit caches itself.
+
+Add aliases only for explicitly published identifiers that have the same
+pricing, limits, and lifecycle. Do not use an open-ended model-name prefix: add
+each new snapshot when it is released so an unknown sibling cannot inherit the
+wrong prices. A moving `latest` alias records the provider's published target at
+its `last_checked` date and must be reverified when that provider changes the
+family. Use separate specs when an old identifier is deprecated or otherwise
+differs. Non-stable entries also record `lifecycle_source_urls` and
+`lifecycle_last_checked` alongside `status`, `replacement_model`, and
+`retired_on`. Catalog construction rejects malformed records, duplicate
+identities, invalid replacements, and missing provenance.
+
+`max_input_tokens` and `max_output_tokens` capture independently published hard
+limits when available. A known input maximum bounds Chulk's prompt budget. The
+output maximum remains inspectable metadata; Chulk does not automatically clamp
+a provider request to `max_output_tokens`. The existing
+`default_response_reserve_tokens` also continues to control prompt budgeting.
+Leave an optional limit as `None` when the provider or local serving
+configuration does not publish a reliable value.
 
 ## SDK construction
 

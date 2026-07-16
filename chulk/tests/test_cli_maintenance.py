@@ -110,6 +110,22 @@ def test_doctor_json_reports_local_runtime_without_requiring_network(monkeypatch
     }
 
 
+def test_doctor_reports_effective_local_context_window(tmp_path):
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "custom-local-model",
+            "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS": "32768",
+        }
+    )
+
+    model_check = next(check for check in report.checks if check.name == "model")
+
+    assert model_check.status == "pass"
+    assert "32768 token context" in model_check.detail
+
+
 def test_doctor_reports_invalid_configuration_without_traceback(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CHULK_LLM_PROVIDER", "invalid")
