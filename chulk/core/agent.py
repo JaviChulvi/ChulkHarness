@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -37,6 +38,7 @@ from chulk.tools.permissions import (
 )
 from chulk.tools.registry import ToolExecutionContext
 from chulk.tracing import JSONLTraceLogger
+from chulk.redaction import redact_text
 
 
 class Agent:
@@ -299,23 +301,29 @@ class Agent:
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
         self._refresh_action_runtime()
-        turn_or_response = self._start_user_turn(
-            clean_message,
-            context_sections=context_sections,
-            prompt_profile=prompt_profile,
-            locale=locale,
-            extension_metadata=extension_metadata,
-            tool_context=tool_context,
-        )
-        if isinstance(turn_or_response, str):
-            return turn_or_response
+        turn: TurnState | None = None
+        previous_turn_count = len(self.state.turns)
         try:
-            result = self._run_action_loop(turn_or_response, require_plan=require_plan)
-        except BaseException:
-            self._release_tool_context(turn_or_response)
+            turn_or_response = self._start_user_turn(
+                clean_message,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            )
+            if isinstance(turn_or_response, str):
+                return turn_or_response
+            turn = turn_or_response
+            result = self._run_action_loop(turn, require_plan=require_plan)
+        except BaseException as exc:
+            turn = turn or self._turn_started_after(previous_turn_count)
+            if turn is not None:
+                self._terminalize_exception(turn, exc)
+                self._release_tool_context(turn)
             raise
-        if turn_or_response.status != "waiting_for_approval":
-            self._release_tool_context(turn_or_response)
+        if turn.status != "waiting_for_approval":
+            self._release_tool_context(turn)
         return result
 
     async def _run_user_turn_async(
@@ -331,23 +339,29 @@ class Agent:
     ) -> str:
         """Start a user turn and run it with async tool execution."""
         self._refresh_action_runtime()
-        turn_or_response = self._start_user_turn(
-            clean_message,
-            context_sections=context_sections,
-            prompt_profile=prompt_profile,
-            locale=locale,
-            extension_metadata=extension_metadata,
-            tool_context=tool_context,
-        )
-        if isinstance(turn_or_response, str):
-            return turn_or_response
+        turn: TurnState | None = None
+        previous_turn_count = len(self.state.turns)
         try:
-            result = await self._run_action_loop_async(turn_or_response, require_plan=require_plan)
-        except BaseException:
-            self._release_tool_context(turn_or_response)
+            turn_or_response = self._start_user_turn(
+                clean_message,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            )
+            if isinstance(turn_or_response, str):
+                return turn_or_response
+            turn = turn_or_response
+            result = await self._run_action_loop_async(turn, require_plan=require_plan)
+        except BaseException as exc:
+            turn = turn or self._turn_started_after(previous_turn_count)
+            if turn is not None:
+                self._terminalize_exception(turn, exc)
+                self._release_tool_context(turn)
             raise
-        if turn_or_response.status != "waiting_for_approval":
-            self._release_tool_context(turn_or_response)
+        if turn.status != "waiting_for_approval":
+            self._release_tool_context(turn)
         return result
 
     def _start_user_turn(
@@ -422,25 +436,39 @@ class Agent:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn_or_response = self._approve_pending_plan()
-        if isinstance(turn_or_response, str):
-            return turn_or_response
+        turn = self._pending_plan_turn()
         try:
-            return self._run_action_loop(turn_or_response, require_plan=False)
+            turn_or_response = self._approve_pending_plan()
+            if isinstance(turn_or_response, str):
+                return turn_or_response
+            turn = turn_or_response
+            return self._run_action_loop(turn, require_plan=False)
+        except BaseException as exc:
+            if turn is not None:
+                self._terminalize_exception(turn, exc)
+            raise
         finally:
-            self._release_tool_context(turn_or_response)
+            if turn is not None:
+                self._release_tool_context(turn)
 
     async def approve_plan_async(self) -> str:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn_or_response = self._approve_pending_plan()
-        if isinstance(turn_or_response, str):
-            return turn_or_response
+        turn = self._pending_plan_turn()
         try:
-            return await self._run_action_loop_async(turn_or_response, require_plan=False)
+            turn_or_response = self._approve_pending_plan()
+            if isinstance(turn_or_response, str):
+                return turn_or_response
+            turn = turn_or_response
+            return await self._run_action_loop_async(turn, require_plan=False)
+        except BaseException as exc:
+            if turn is not None:
+                self._terminalize_exception(turn, exc)
+            raise
         finally:
-            self._release_tool_context(turn_or_response)
+            if turn is not None:
+                self._release_tool_context(turn)
 
     def _approve_pending_plan(self) -> TurnState | str:
         """Mark the pending plan approved and return its paused turn."""
@@ -662,6 +690,47 @@ class Agent:
                 ],
             },
         )
+
+    def _turn_started_after(self, previous_turn_count: int) -> TurnState | None:
+        if len(self.state.turns) <= previous_turn_count:
+            return None
+        return self.state.turns[-1]
+
+    def _terminalize_exception(self, turn: TurnState, exc: BaseException) -> None:
+        """Finish an active turn without masking the exception that escaped it."""
+        if turn.status not in {"in_progress", "waiting_for_approval"}:
+            return
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        if cancelled:
+            message = "Turn cancelled."
+            turn.cancel(message)
+        else:
+            detail = redact_text(str(exc)).strip()
+            message = f"Turn failed with {type(exc).__name__}"
+            if detail:
+                message = f"{message}: {detail}"
+            turn.fail(message)
+        self.state.errors.append(message)
+        self.state.final_answer = message
+        self.memory.add_assistant_message(message)
+        self.state.messages = self.memory.recent()
+        self._plan_execution.clear(turn)
+        failure_payload = {
+            "turn_id": turn.turn_id,
+            "message": message,
+            "status": turn.status,
+            "exception_type": type(exc).__name__,
+        }
+        for event_type, payload in (
+            (TraceEvent.TURN_FAILED, failure_payload),
+            (TraceEvent.TURN_FINISHED, self._turn_effects.state_snapshot(turn)),
+        ):
+            try:
+                self._trace(event_type, payload)
+            except BaseException:
+                # The original failure remains authoritative. A healthy sink can
+                # still receive the other terminal event on the next iteration.
+                continue
 
     def _record_model_accounting(
         self,

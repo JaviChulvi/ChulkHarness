@@ -32,6 +32,12 @@ API is still pre-1.0.
 
 ### Changed
 
+- Replaced duplicated synchronous and asynchronous orchestration with shared
+  transition, transport, tool, plan, and turn-effect components.
+- Added versioned SQLite migrations, explicit WAL and busy-timeout policy,
+  validated backups, and concurrent-writer coverage for runtime stores.
+- Exceptional provider, callback, and cancellation exits now terminalize and
+  persist active turns before propagating the original exception.
 - Centralized validated model-action parsing inside the LLM boundary and kept
   synchronous custom clients compatible through explicit adapter paths.
 - Improved fallback behavior with shared context budgets, duplicate-request

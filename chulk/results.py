@@ -18,6 +18,7 @@ class RunStatus(StrEnum):
     BLOCKED = "blocked"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     PLAN_REJECTED = "plan_rejected"
+    CANCELLED = "cancelled"
     NO_PENDING_PLAN = "no_pending_plan"
     UNKNOWN = "unknown"
 

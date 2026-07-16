@@ -112,6 +112,8 @@ def exhaustive_run_status(status: RunStatus) -> str:
             return "waiting"
         case RunStatus.PLAN_REJECTED:
             return "rejected"
+        case RunStatus.CANCELLED:
+            return "cancelled"
         case RunStatus.NO_PENDING_PLAN:
             return "no_plan"
         case RunStatus.UNKNOWN:

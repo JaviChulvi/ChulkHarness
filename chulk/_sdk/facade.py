@@ -573,13 +573,13 @@ class Agent:
             try:
                 result = self.run_result(message, on_event=on_event, **kwargs)
             except Exception as exc:
-                event = failure_event(
-                    exc,
-                    conversation_id=self.conversation_id,
-                    turn_id=self.state.current_turn_id,
+                terminalized = _terminalized_failure_event(self.runtime)
+                event = terminalized or failure_event(
+                    exc, conversation_id=self.conversation_id, turn_id=self.state.current_turn_id
                 )
                 channel.finish(event)
-                _notify_event_callback_safely(caller_on_event, event)
+                if terminalized is None:
+                    _notify_event_callback_safely(caller_on_event, event)
             else:
                 channel.finish(terminal_event(result))
 
@@ -727,13 +727,13 @@ class AsyncAgent:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                event = failure_event(
-                    exc,
-                    conversation_id=self.conversation_id,
-                    turn_id=self.state.current_turn_id,
+                terminalized = _terminalized_failure_event(self.runtime)
+                event = terminalized or failure_event(
+                    exc, conversation_id=self.conversation_id, turn_id=self.state.current_turn_id
                 )
                 channel.finish(event)
-                _notify_event_callback_safely(caller_on_event, event)
+                if terminalized is None:
+                    _notify_event_callback_safely(caller_on_event, event)
             else:
                 channel.finish(terminal_event(result))
 
@@ -783,6 +783,13 @@ def _notify_event_callback_safely(callback: EventCallback | None, event: AgentEv
         callback(event)
     except Exception:
         return
+
+
+def _terminalized_failure_event(runtime: CoreAgent) -> AgentEvent | None:
+    result = run_result_from_runtime(runtime)
+    if result.status in {RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.CANCELLED}:
+        return terminal_event(result)
+    return None
 
 
 def _build_handle(

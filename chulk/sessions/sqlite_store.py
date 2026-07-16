@@ -701,6 +701,8 @@ def _conversation_status_from_turn(turn: dict[str, Any]) -> str:
         return "waiting_for_approval"
     if status == "failed":
         return "failed"
+    if status == "cancelled":
+        return "cancelled"
     if status == "blocked":
         return "blocked"
     if status == "plan_rejected":
