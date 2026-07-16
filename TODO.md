@@ -126,22 +126,52 @@ without duplicating control flow.
 
 Acceptance criteria:
 
-- [ ] Introduce a reducer that maps a small immutable control snapshot and an
+- [x] Introduce a reducer that maps a small immutable control snapshot and an
   input signal to an explicit transition/effect.
-- [ ] Keep the reducer free of provider, tool, SQLite, callback, trace, and
+- [x] Keep the reducer free of provider, tool, SQLite, callback, trace, and
   `Agent` dependencies.
-- [ ] Apply state mutation, observations, accounting, and trace emission through
-  one explicit transition application boundary.
-- [ ] Keep native sync and async transport drivers, but restrict their
+- [x] Apply reducer-selected state mutation and observations through one
+  transition boundary; keep model request accounting and transport traces in
+  the focused model transport service.
+- [x] Keep native sync and async transport drivers, but restrict their
   differences to blocking versus awaiting model, tool, text, and backoff work.
-- [ ] Remove duplicated action-policy branches and recursive loop re-entry.
-- [ ] Keep `Agent` focused on composition, lifecycle, plan approval/rejection,
+- [x] Remove duplicated action-policy branches and recursive loop re-entry.
+- [x] Keep `Agent` focused on composition, lifecycle, plan approval/rejection,
   and resource ownership.
-- [ ] Preserve public signatures, serialized `TurnState`, trace schema/order,
+- [x] Preserve public signatures, serialized `TurnState`, trace schema/order,
   plan semantics, model accounting, cancellation propagation, and dependency
   cleanup.
-- [ ] Pass reducer branch tests, normalized sync/async parity tests, and all
+- [x] Pass reducer branch tests, normalized sync/async parity tests, and all
   existing core, SDK, CLI, session, and trace tests.
+
+### US-M5: Replace The Agent God Object With Focused Runtime Services
+
+As a maintainer, I want the public Agent to assemble small runtime services so
+that prompt/model, tool, plan, and turn-effect behavior can evolve without
+growing one central class or coupling the loop to its private methods.
+
+Acceptance criteria:
+
+- [x] Extract prompt construction, context compaction, action requests, and
+  reflection requests into an explicit model transport service.
+- [x] Extract permission-aware sync/async tool execution and retry/backoff into
+  an explicit tool executor.
+- [x] Extract plan mutations/evidence and reducer-selected turn effects into
+  focused plan and turn-effect services.
+- [x] Assemble the services in `Agent`, preserve intentionally mutable runtime
+  configuration, and keep `Agent` focused on public lifecycle, memory/skill
+  selection, plan approval/rejection, and resource ownership.
+- [x] Make the action loop depend only on a narrow runtime port and `TurnState`,
+  with no concrete `Agent` import or private-`Agent` calls.
+- [x] Feed protocol failures, plan preparation/results, tool results, and
+  reflection results back through the reducer; consume and validate its outcome
+  at the single turn-effect boundary.
+- [x] Add architecture guards for reducer purity, runtime-port coupling, and
+  service independence from `Agent`.
+- [x] Preserve public signatures, serialized state, traces/order, planning,
+  accounting, cancellation, request dependency cleanup, and sync/async parity.
+- [x] Pass focused service/reducer tests and the complete repository test and
+  static-validation suite.
 
 ## Next: Reliability And SDK Depth
 
@@ -157,6 +187,8 @@ These stories are ordered after the maintenance tranche above.
 
 ### US-N2: Add A Sandbox And Richer Permission Policy
 
+- [ ] Distinguish fatal safety-policy violations from recoverable tool failures
+  and stop the turn immediately when a fatal violation occurs.
 - [ ] Add custom permission profiles, workspace-root allowlists, command prefix
   rules, trusted read-only commands, and durable permission audit records.
 - [ ] Define a sandbox backend interface before expanding shell-heavy tools.
@@ -199,7 +231,7 @@ These stories are ordered after the maintenance tranche above.
   cancellation semantics are explicit.
 - [ ] Add provider and MCP async cleanup hooks.
 - [ ] Expand deterministic eval scenarios for memory, skills, plans, safety,
-  retries, and trace replay; keep live-model evals optional.
+  and retries; keep live-model evals optional.
 
 ## Later: Product Directions
 
