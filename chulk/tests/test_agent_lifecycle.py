@@ -225,6 +225,77 @@ def test_callback_failure_terminalizes_turn_and_preserves_original_exception():
     assert events[-2:] == [TraceEvent.TURN_FAILED, TraceEvent.TURN_FINISHED]
 
 
+def test_exception_terminalization_applies_configured_redaction_before_retention():
+    secret = "customer-447-private"
+    redaction_calls: list[tuple[str, dict]] = []
+
+    def redact(event_type: str, text: str, metadata: dict) -> str:
+        redaction_calls.append((event_type, metadata))
+        return text.replace(secret, "[tenant-redacted]")
+
+    def fail_callback(event_type: str, payload: dict) -> None:
+        if event_type == TraceEvent.MODEL_REQUEST_STARTED:
+            raise RuntimeError(f"observer exposed {secret}")
+
+    agent = CoreAgent(
+        FakeLLMClient(),
+        event_callback=fail_callback,
+        redaction_callback=redact,
+    )
+
+    with pytest.raises(RuntimeError, match=secret):
+        agent.run_turn("trigger redacted failure")
+
+    retained = json.dumps(
+        {
+            "turn": agent.state.turns[-1].to_dict(),
+            "state_errors": agent.state.errors,
+            "state_final_answer": agent.state.final_answer,
+            "messages": agent.memory.recent(),
+        }
+    )
+    assert secret not in retained
+    assert "[tenant-redacted]" in retained
+    assert any(
+        event_type == TraceEvent.TURN_FAILED and metadata.get("path") == "exception.message"
+        for event_type, metadata in redaction_calls
+    )
+
+
+def test_exception_terminalization_honors_fail_closed_redaction():
+    secret = "customer-992-private"
+
+    def redact(_event_type: str, text: str, metadata: dict) -> str:
+        if metadata.get("path") == "exception.message":
+            raise RuntimeError("redactor unavailable")
+        return text
+
+    def fail_callback(event_type: str, payload: dict) -> None:
+        if event_type == TraceEvent.MODEL_REQUEST_STARTED:
+            raise RuntimeError(f"observer exposed {secret}")
+
+    agent = CoreAgent(
+        FakeLLMClient(),
+        event_callback=fail_callback,
+        redaction_callback=redact,
+        redaction_fail_closed=True,
+    )
+
+    with pytest.raises(RuntimeError, match=secret):
+        agent.run_turn("trigger fail-closed redaction")
+
+    retained = json.dumps(
+        {
+            "turn": agent.state.turns[-1].to_dict(),
+            "state_errors": agent.state.errors,
+            "state_final_answer": agent.state.final_answer,
+            "messages": agent.memory.recent(),
+        }
+    )
+    assert secret not in retained
+    assert "[redaction failed]" in retained
+
+
 @pytest.mark.asyncio
 async def test_async_cancellation_terminalizes_and_persists_turn(tmp_path):
     started = asyncio.Event()

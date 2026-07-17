@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sqlite3
+import time
 from uuid import uuid4
 
 from chulk.storage.migrations import SQLITE_MIGRATIONS, SQLiteMigration
@@ -20,6 +21,7 @@ SQLITE_SYNCHRONOUS = "normal"
 SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1_000
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
+_SQLITE_POLICY_RETRY_INTERVAL_SECONDS = 0.01
 
 
 class UnsupportedSQLiteSchemaVersionError(RuntimeError):
@@ -76,6 +78,10 @@ def initialize_sqlite_database(
     _validate_migration_plan(migration_plan)
     latest_version = migration_plan[-1].version if migration_plan else 0
 
+    existing_version = _read_existing_user_version(path)
+    if existing_version is not None:
+        _reject_future_version(path, existing_version, latest_version)
+
     _prepare_private_file(path)
     with sqlite_connection(path) as conn:
         observed_version = _user_version(conn)
@@ -124,11 +130,7 @@ def sqlite_connection(db_path: Path | str) -> Iterator[sqlite3.Connection]:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys = ON")
-        journal_mode = str(conn.execute(f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}").fetchone()[0]).lower()
-        if journal_mode != SQLITE_JOURNAL_MODE:
-            raise sqlite3.OperationalError(
-                f"SQLite journal mode is {journal_mode!r}; expected {SQLITE_JOURNAL_MODE!r}"
-            )
+        _ensure_journal_mode(conn)
         conn.execute(f"PRAGMA synchronous = {SQLITE_SYNCHRONOUS}")
         conn.execute(f"PRAGMA wal_autocheckpoint = {SQLITE_WAL_AUTOCHECKPOINT_PAGES}")
         yield conn
@@ -241,6 +243,55 @@ def _read_user_version(path: Path) -> int:
         return _user_version(conn)
 
 
+def _read_existing_user_version(path: Path) -> int | None:
+    """Read an existing schema version without creating or reconfiguring it."""
+    if not path.exists():
+        return None
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        return _user_version(conn)
+
+
+def _ensure_journal_mode(conn: sqlite3.Connection) -> None:
+    """Activate WAL, retrying transient races between concurrent openers."""
+    deadline = time.monotonic() + (SQLITE_BUSY_TIMEOUT_MS / 1_000)
+    last_mode = "unknown"
+    while True:
+        try:
+            last_mode = _current_journal_mode(conn)
+            if last_mode == SQLITE_JOURNAL_MODE:
+                return
+            last_mode = _set_journal_mode(conn)
+            if last_mode == SQLITE_JOURNAL_MODE:
+                return
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_busy(exc) or time.monotonic() >= deadline:
+                raise
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise sqlite3.OperationalError(
+                f"SQLite journal mode is {last_mode!r}; expected {SQLITE_JOURNAL_MODE!r}"
+            )
+        time.sleep(min(_SQLITE_POLICY_RETRY_INTERVAL_SECONDS, remaining))
+
+
+def _current_journal_mode(conn: sqlite3.Connection) -> str:
+    return str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+
+
+def _set_journal_mode(conn: sqlite3.Connection) -> str:
+    return str(conn.execute(f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}").fetchone()[0]).lower()
+
+
+def _is_sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def _new_backup_path(path: Path, version: int) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     nonce = uuid4().hex[:8]
@@ -258,8 +309,12 @@ def _database_runtime_paths(path: Path) -> tuple[Path, ...]:
 
 def _restrict_database_files(path: Path) -> None:
     for candidate in _database_runtime_paths(path):
-        if candidate.exists():
+        try:
             _restrict_private_file(candidate)
+        except FileNotFoundError:
+            # SQLite removes WAL/SHM sidecars when the final connection closes.
+            # Permission repair must not turn a committed operation into failure.
+            continue
 
 
 def _remove_database_files(path: Path) -> None:

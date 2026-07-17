@@ -133,9 +133,12 @@ def test_legacy_database_is_backed_up_migrated_and_deterministically_renumbered(
 def test_store_rejects_a_database_from_a_newer_schema_version(tmp_path, store_type):
     path = tmp_path / f"{store_type.__name__}.sqlite"
     with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         conn.execute("CREATE TABLE marker (value TEXT NOT NULL)")
         conn.execute("INSERT INTO marker VALUES ('preserved')")
         conn.execute(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION + 1}")
+    if os.name == "posix":
+        os.chmod(path, 0o640)
 
     with pytest.raises(UnsupportedSQLiteSchemaVersionError) as exc_info:
         store_type(path)
@@ -144,7 +147,55 @@ def test_store_rejects_a_database_from_a_newer_schema_version(tmp_path, store_ty
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone()[0] == "preserved"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION + 1
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
     assert list(tmp_path.glob("*.backup-*.sqlite")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="chmod race only applies on POSIX")
+def test_permission_repair_tolerates_a_disappearing_wal_sidecar(monkeypatch, tmp_path):
+    path = tmp_path / "sidecar-race.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+    wal_path = Path(f"{path}-wal")
+    wal_path.touch(mode=0o600)
+    original_restrict = sqlite_policy_module._restrict_private_file
+
+    def remove_before_chmod(candidate: Path) -> None:
+        if candidate == wal_path:
+            candidate.unlink()
+        original_restrict(candidate)
+
+    monkeypatch.setattr(sqlite_policy_module, "_restrict_private_file", remove_before_chmod)
+
+    sqlite_policy_module._restrict_database_files(path)
+
+    assert not wal_path.exists()
+
+
+def test_journal_mode_policy_retries_transient_locked_errors(monkeypatch, tmp_path):
+    path = tmp_path / "journal-mode-retry.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+    original_set_journal_mode = sqlite_policy_module._set_journal_mode
+    attempts = 0
+
+    def transiently_locked(conn: sqlite3.Connection) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return original_set_journal_mode(conn)
+
+    monkeypatch.setattr(sqlite_policy_module, "_set_journal_mode", transiently_locked)
+
+    with sqlite_connection(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    assert attempts == 3
 
 
 def test_failed_migration_rolls_back_and_retains_validated_private_backup(tmp_path):

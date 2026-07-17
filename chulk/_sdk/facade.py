@@ -562,8 +562,12 @@ class Agent:
         """Yield one run's ordered public events, including its terminal result."""
         channel = RunEventChannel()
         caller_on_event = kwargs.pop("on_event", None)
+        attempted_turn_id: str | None = None
 
         def on_event(event: AgentEvent) -> None:
+            nonlocal attempted_turn_id
+            if event.name == EventName.RUN_STARTED.value:
+                attempted_turn_id = event.turn_id
             if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
             if caller_on_event is not None:
@@ -573,9 +577,9 @@ class Agent:
             try:
                 result = self.run_result(message, on_event=on_event, **kwargs)
             except Exception as exc:
-                terminalized = _terminalized_failure_event(self.runtime)
+                terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
                 event = terminalized or failure_event(
-                    exc, conversation_id=self.conversation_id, turn_id=self.state.current_turn_id
+                    exc, conversation_id=self.conversation_id, turn_id=attempted_turn_id
                 )
                 channel.finish(event)
                 if terminalized is None:
@@ -714,8 +718,12 @@ class AsyncAgent:
         """Asynchronously yield one run's ordered public events and terminal result."""
         channel = RunEventChannel()
         caller_on_event = kwargs.pop("on_event", None)
+        attempted_turn_id: str | None = None
 
         def on_event(event: AgentEvent) -> None:
+            nonlocal attempted_turn_id
+            if event.name == EventName.RUN_STARTED.value:
+                attempted_turn_id = event.turn_id
             if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
             if caller_on_event is not None:
@@ -727,9 +735,9 @@ class AsyncAgent:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                terminalized = _terminalized_failure_event(self.runtime)
+                terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
                 event = terminalized or failure_event(
-                    exc, conversation_id=self.conversation_id, turn_id=self.state.current_turn_id
+                    exc, conversation_id=self.conversation_id, turn_id=attempted_turn_id
                 )
                 channel.finish(event)
                 if terminalized is None:
@@ -785,9 +793,14 @@ def _notify_event_callback_safely(callback: EventCallback | None, event: AgentEv
         return
 
 
-def _terminalized_failure_event(runtime: CoreAgent) -> AgentEvent | None:
+def _terminalized_failure_event(runtime: CoreAgent, attempted_turn_id: str | None) -> AgentEvent | None:
+    if attempted_turn_id is None:
+        return None
     result = run_result_from_runtime(runtime)
-    if result.status in {RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.CANCELLED}:
+    if (
+        result.turn_id == attempted_turn_id
+        and result.status in {RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.CANCELLED}
+    ):
         return terminal_event(result)
     return None
 

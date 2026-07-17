@@ -709,6 +709,16 @@ class Agent:
             message = f"Turn failed with {type(exc).__name__}"
             if detail:
                 message = f"{message}: {detail}"
+            message, _redaction_metadata = self._redact_text(
+                TraceEvent.TURN_FAILED,
+                message,
+                {
+                    "path": "exception.message",
+                    "exception_type": type(exc).__name__,
+                    "turn_id": turn.turn_id,
+                },
+            )
+            message = message.strip() or "Turn failed."
             turn.fail(message)
         self.state.errors.append(message)
         self.state.final_answer = message
