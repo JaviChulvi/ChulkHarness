@@ -161,7 +161,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
         return None
     if event_type == TraceEvent.TURN_FINISHED:
         result = run_result_from_runtime(runtime)
-        if result.status in {"failed", "blocked"}:
+        if result.status in {"failed", "blocked", "cancelled"}:
             message = result.errors[-1] if result.errors else result.content or "The run failed."
             return _event(
                 EventName.RUN_FAILED,
@@ -183,7 +183,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
 def terminal_event(result: Any) -> AgentEvent:
     """Create the exact in-band terminal event for a generator run result."""
     payload: RunFailedPayload | RunCompletedPayload
-    if getattr(result, "status", None) in {"failed", "blocked"}:
+    if getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
         errors = getattr(result, "errors", ())
         message = errors[-1] if errors else getattr(result, "content", "The run failed.")
         payload = RunFailedPayload({"category": "run", "message": message, "result": result.to_dict()})

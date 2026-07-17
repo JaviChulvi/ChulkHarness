@@ -11,7 +11,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.11"
+            extras: "providers,mcp"
+            coverage: true
+          - python-version: "3.12"
+            extras: "openai"
+            coverage: false
+          - python-version: "3.13"
+            extras: "openai"
+            coverage: false
 
     steps:
       - name: Check out repository
@@ -25,9 +34,14 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,openai]"
+          python -m pip install -e ".[dev,${{ matrix.extras }}]"
+
+      - name: Run tests with production coverage
+        if: matrix.coverage
+        run: python -m pytest --cov=chulk --cov-report=term-missing
 
       - name: Run tests
+        if: ${{ !matrix.coverage }}
         run: python -m pytest
 
       - name: Compile package

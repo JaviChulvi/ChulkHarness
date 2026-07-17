@@ -37,6 +37,7 @@ from chulk.memory.retrieval import (
     text_to_embedding,
     tokenize as _tokenize,
 )
+from chulk.storage import initialize_sqlite_database, sqlite_connection
 
 
 class SQLiteMemoryStore:
@@ -48,68 +49,10 @@ class SQLiteMemoryStore:
         self.initialize()
 
     def initialize(self) -> None:
-        """Create the memory database and schema if needed."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        """Create or migrate the shared database and activate optional FTS."""
+        initialize_sqlite_database(self.db_path)
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '[]',
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    importance INTEGER NOT NULL DEFAULT 1
-                )
-                """
-            )
-            _ensure_column(conn, "memories", "source", "TEXT NOT NULL DEFAULT 'manual'")
-            _ensure_column(conn, "memories", "confidence", "REAL NOT NULL DEFAULT 1.0")
-            _ensure_column(conn, "memories", "embedding", "TEXT")
-            _ensure_column(conn, "memories", "archived_at", "TEXT")
-            _ensure_column(conn, "memories", "access_count", "INTEGER NOT NULL DEFAULT 0")
-            _ensure_column(conn, "memories", "last_accessed_at", "TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_archived_at ON memories(archived_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_tags (
-                    memory_id TEXT NOT NULL,
-                    tag TEXT NOT NULL,
-                    PRIMARY KEY (memory_id, tag),
-                    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_proposals (
-                    id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '[]',
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    importance INTEGER NOT NULL DEFAULT 1,
-                    source TEXT NOT NULL,
-                    confidence REAL NOT NULL DEFAULT 1.0,
-                    evidence TEXT,
-                    conversation_id TEXT,
-                    turn_id TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL,
-                    reviewed_at TEXT,
-                    accepted_memory_id TEXT
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_proposals_status_created "
-                "ON memory_proposals(status, created_at)"
-            )
-            _backfill_memory_tags(conn)
+            conn.execute("BEGIN IMMEDIATE")
             self.fts_enabled = _ensure_fts(conn)
             if self.fts_enabled:
                 _backfill_memory_fts(conn)
@@ -265,31 +208,33 @@ class SQLiteMemoryStore:
         archived_at: str | None = None,
     ) -> bool:
         """Update an existing memory. Returns False when the id is unknown."""
-        existing = self.get_memory(memory_id, include_archived=True)
-        if existing is None:
-            return False
-
-        next_content = existing.content if content is None else content.strip()
-        if not next_content:
-            raise ValueError("Memory content cannot be empty")
-
-        next_tags = existing.tags if tags is None else _normalize_tags(tags)
-        next_metadata = existing.metadata if metadata is None else metadata
-        next_importance = existing.importance if importance is None else _normalize_importance(importance)
-        next_source = existing.source if source is None else _normalize_source(source)
-        next_confidence = existing.confidence if confidence is None else _normalize_confidence(confidence)
-        next_embedding = existing.embedding if embedding is None else _normalize_embedding(embedding)
-        next_archived_at = existing.archived_at if archived_at is None else archived_at
-        if next_embedding is None:
-            next_embedding = text_to_embedding(next_content)
-        ensure_memory_payload_safe(
-            content=next_content,
-            tags=next_tags,
-            metadata=next_metadata,
-            source=next_source,
-        )
-
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            if row is None:
+                return False
+            existing = _row_to_memory(row)
+
+            next_content = existing.content if content is None else content.strip()
+            if not next_content:
+                raise ValueError("Memory content cannot be empty")
+
+            next_tags = existing.tags if tags is None else _normalize_tags(tags)
+            next_metadata = existing.metadata if metadata is None else metadata
+            next_importance = existing.importance if importance is None else _normalize_importance(importance)
+            next_source = existing.source if source is None else _normalize_source(source)
+            next_confidence = existing.confidence if confidence is None else _normalize_confidence(confidence)
+            next_embedding = existing.embedding if embedding is None else _normalize_embedding(embedding)
+            next_archived_at = existing.archived_at if archived_at is None else archived_at
+            if next_embedding is None:
+                next_embedding = text_to_embedding(next_content)
+            ensure_memory_payload_safe(
+                content=next_content,
+                tags=next_tags,
+                metadata=next_metadata,
+                source=next_source,
+            )
+
             cursor = conn.execute(
                 """
                 UPDATE memories
@@ -830,20 +775,11 @@ class SQLiteMemoryStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         try:
-            conn = sqlite3.connect(self.db_path)
-        except sqlite3.Error as exc:
-            _annotate_memory_error(exc, "connect")
-            raise
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        try:
-            yield conn
-            conn.commit()
+            with sqlite_connection(self.db_path) as conn:
+                yield conn
         except sqlite3.Error as exc:
             _annotate_memory_error(exc, "transaction")
             raise
-        finally:
-            conn.close()
 
 
 def select_memories_for_prompt(
@@ -931,12 +867,6 @@ def _find_duplicate_memory_in_connection(
     return None
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    existing_columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column not in existing_columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-
 def _ensure_fts(conn: sqlite3.Connection) -> bool:
     try:
         conn.execute(
@@ -983,12 +913,6 @@ def _replace_memory_fts(
 def _delete_memory_fts(conn: sqlite3.Connection, *, enabled: bool, memory_id: str) -> None:
     if enabled:
         conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
-
-
-def _backfill_memory_tags(conn: sqlite3.Connection) -> None:
-    rows = conn.execute("SELECT id, tags FROM memories").fetchall()
-    for row in rows:
-        _replace_memory_tags(conn, row["id"], _normalize_tags(_safe_json_list(row["tags"])))
 
 
 def _backfill_memory_fts(conn: sqlite3.Connection) -> None:

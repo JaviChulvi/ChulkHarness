@@ -37,6 +37,8 @@ coverage.xml
 .chulk/
 *.sqlite
 *.sqlite3
+*.sqlite-*
+*.sqlite3-*
 examples/runtime/
 chulk/store.sqlite
 logs/

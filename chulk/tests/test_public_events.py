@@ -188,6 +188,56 @@ def test_generator_failure_is_reported_in_band(tmp_path):
     assert events[0].payload.error["category"] == "configuration"
 
 
+def test_sync_generator_does_not_reuse_a_previous_failed_turn(tmp_path):
+    facade = _agent(tmp_path)
+
+    def fail_first_run(event: AgentEvent) -> None:
+        if event.name == EventName.RUN_STARTED.value:
+            raise RuntimeError("first run failed")
+
+    first_events = list(facade.run_events("first", on_event=fail_first_run))
+    previous_turn_id = first_events[-1].turn_id
+
+    events = list(facade.run_events(""))
+
+    assert len(events) == 1
+    assert events[0].name == EventName.RUN_FAILED.value
+    assert events[0].turn_id is None
+    assert isinstance(events[0].payload, RunFailedPayload)
+    assert events[0].payload.error["category"] == "configuration"
+    assert "user_message cannot be empty" in events[0].payload.error["message"]
+    assert "result" not in events[0].payload.error
+    assert previous_turn_id is not None
+
+
+@pytest.mark.asyncio
+async def test_async_generator_does_not_reuse_a_previous_failed_turn_after_close(tmp_path):
+    facade = AsyncAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=StreamingLLM(),
+        tools=[],
+        skills=[],
+    )
+
+    def fail_first_run(event: AgentEvent) -> None:
+        if event.name == EventName.RUN_STARTED.value:
+            raise RuntimeError("first run failed")
+
+    first_events = [event async for event in facade.run_events_async("first", on_event=fail_first_run)]
+    previous_turn_id = first_events[-1].turn_id
+    await facade.close()
+
+    events = [event async for event in facade.run_events_async("second")]
+
+    assert len(events) == 1
+    assert events[0].name == EventName.RUN_FAILED.value
+    assert events[0].turn_id is None
+    assert isinstance(events[0].payload, RunFailedPayload)
+    assert events[0].payload.error["category"] == "configuration"
+    assert "result" not in events[0].payload.error
+    assert previous_turn_id is not None
+
+
 def test_sync_generator_terminates_when_run_callback_raises(tmp_path):
     facade = _agent(tmp_path)
     callback_events: list[str] = []

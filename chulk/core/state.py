@@ -358,6 +358,12 @@ class TurnState:
         self.errors.append(message)
         self.ended_at = utc_now()
 
+    def cancel(self, message: str) -> None:
+        self.status = "cancelled"
+        self.final_answer = message
+        self.errors.append(message)
+        self.ended_at = utc_now()
+
     def block(self, message: str) -> None:
         self.status = "blocked"
         self.final_answer = message

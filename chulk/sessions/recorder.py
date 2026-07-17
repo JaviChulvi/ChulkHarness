@@ -171,6 +171,7 @@ class SessionRecorder:
 
         if event_type == TraceEvent.TURN_FAILED:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
+            status = "cancelled" if payload.get("status") == "cancelled" else "failed"
             self.store.save_message(
                 self.conversation_id,
                 turn_id=turn_id,
@@ -179,7 +180,7 @@ class SessionRecorder:
                 message_key=f"{turn_id}:assistant:failed" if turn_id else None,
                 metadata={"event": event_type},
             )
-            self.store.update_conversation_status(self.conversation_id, "failed")
+            self.store.update_conversation_status(self.conversation_id, status)
             return
 
         if event_type == TraceEvent.TURN_FINISHED:
