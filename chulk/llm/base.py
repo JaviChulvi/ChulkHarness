@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
 from chulk.core.prompts import JSON_REPAIR_PROMPT
 from chulk.llm.pricing import estimate_cost
+from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggregate_usage, estimate_usage
 
 if TYPE_CHECKING:
     from chulk.llm.capabilities import LLMModelCapabilities
-    from chulk.llm.tools import PlanningToolAvailability
 
 
 LLMErrorCode = Literal[
@@ -278,9 +278,13 @@ class LLMClient:
                 )
             except ActionParseError as exc:
                 errors.append(str(exc))
-                if attempt >= max_repair_attempts:
+                repair_blocked = _action_repair_blocked(response)
+                if repair_blocked or attempt >= max_repair_attempts:
+                    message = f"Model response was not valid action JSON: {exc}"
+                    if repair_blocked:
+                        message += " (repair disabled because a hosted MCP call may have executed)"
                     raise LLMActionError(
-                        f"Model response was not valid action JSON: {exc}",
+                        message,
                         repair_attempts=attempt,
                         errors=errors,
                         raw_response=response.content,
@@ -367,9 +371,13 @@ class LLMClient:
                 )
             except ActionParseError as exc:
                 errors.append(str(exc))
-                if attempt >= max_repair_attempts:
+                repair_blocked = _action_repair_blocked(response)
+                if repair_blocked or attempt >= max_repair_attempts:
+                    message = f"Model response was not valid action JSON: {exc}"
+                    if repair_blocked:
+                        message += " (repair disabled because a hosted MCP call may have executed)"
                     raise LLMActionError(
-                        f"Model response was not valid action JSON: {exc}",
+                        message,
                         repair_attempts=attempt,
                         errors=errors,
                         raw_response=response.content,
@@ -448,6 +456,10 @@ class LLMClient:
             provider=provider,
             model=model,
         )
+
+
+def _action_repair_blocked(response: LLMResponse) -> bool:
+    return response.metadata.get("hosted_mcp_execution_possible") is True
 
 
 def _parse_json_object(raw_response: str, *, client: LLMClient) -> dict[str, Any]:

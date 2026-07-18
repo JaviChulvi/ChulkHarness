@@ -58,6 +58,7 @@ from chulk.llm import (
     LLMError,
     LLMModelCapabilities,
     LocalProvider,
+    PlanningToolAvailability,
 )
 from chulk.presets import SoftwareEngineer, software_engineer
 from chulk.presets.software_engineer import DEFAULT_AGENT_PLAYBOOK, SOFTWARE_ENGINEER_SYSTEM_PROMPT
@@ -101,6 +102,11 @@ class FailingLLMClient(LLMClient):
 
 
 class HostedMCPRecordingLLM(LLMClient):
+    capabilities = LLMCapabilities(
+        supports_native_tool_calling=True,
+        supports_hosted_mcp_tools=True,
+    )
+
     def __init__(self) -> None:
         self.hosted_mcp_servers = None
 
@@ -172,6 +178,13 @@ def test_runtime_create_agent_type_hints_resolve():
     hints = get_type_hints(runtime_module.create_agent)
 
     assert "event_sink" in hints
+
+
+@pytest.mark.parametrize("method_name", ["complete_action", "acomplete_action"])
+def test_public_llm_action_type_hints_resolve(method_name):
+    hints = get_type_hints(getattr(LLMClient, method_name))
+
+    assert hints["planning_tools"] == PlanningToolAvailability | None
 
 
 def test_public_chat_agent_disables_default_tools_and_skills(tmp_path):

@@ -547,17 +547,36 @@ def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(t
 
 def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
     class NativeFailingClient(LLMClient):
-        capabilities = LLMCapabilities(supports_native_tool_calling=True)
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
         provider = "native-primary"
         model = "native-model"
 
         def __init__(self) -> None:
             self.requests: list[list[dict[str, str]]] = []
-            self.tool_batches: list[list[object] | None] = []
+            self.native_options: list[dict] = []
 
-        def _complete_action_response_once(self, messages, *, tools=None, **kwargs):
+        def _complete_action_response_once(
+            self,
+            messages,
+            *,
+            tools=None,
+            planning_tools=None,
+            hosted_mcp_servers=None,
+            mcp_approval_callback=None,
+            **kwargs,
+        ):
             self.requests.append(messages)
-            self.tool_batches.append(tools)
+            self.native_options.append(
+                {
+                    "tools": tools,
+                    "planning_tools": planning_tools,
+                    "hosted_mcp_servers": hosted_mcp_servers,
+                    "mcp_approval_callback": mcp_approval_callback,
+                }
+            )
             raise LLMError(
                 "primary unavailable",
                 code="server_error",
@@ -566,17 +585,54 @@ def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
             )
 
     primary = NativeFailingClient()
+    plan_payload = {
+        "summary": "Use the JSON transport.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Complete the change",
+                "description": "Complete the requested change.",
+            }
+        ],
+    }
     secondary = RecordingLLMClient(
-        [json.dumps({"type": "final_answer", "content": "fallback ok"})]
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                    "step_update_json": "{}",
+                }
+            )
+        ]
     )
     registry = ToolRegistry()
     registry.register(calculator_tool())
-    agent = Agent(FallbackChain([primary, secondary]), tool_registry=registry)
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+    agent = Agent(
+        FallbackChain([primary, secondary]),
+        tool_registry=registry,
+        mcp_servers=(server,),
+    )
 
-    response = agent.run_turn("hello")
+    response = agent.run_planned_turn("hello")
 
-    assert response == "fallback ok"
-    assert primary.tool_batches == [None]
+    assert "Use /approve" in response
+    assert primary.native_options == [
+        {
+            "tools": None,
+            "planning_tools": None,
+            "hosted_mcp_servers": None,
+            "mcp_approval_callback": None,
+        }
+    ]
     for request in [primary.requests[0], secondary.requests[0]]:
         system_prompt = request[0]["content"]
         assert "<transport>json_object</transport>" in system_prompt
@@ -584,6 +640,95 @@ def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
         assert system_prompt.count("<name>calculator</name>") == 1
         assert system_prompt.count("<arguments_schema_json>") == 1
     assert agent.state.last_context_report["request_overhead_estimated_tokens"] == 0
+
+
+def test_agent_async_keeps_native_options_off_for_a_mixed_fallback_chain():
+    class AsyncNativeFailingClient(LLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+        provider = "async-native-primary"
+        model = "async-native-model"
+
+        def __init__(self) -> None:
+            self.requests: list[list[dict[str, str]]] = []
+            self.native_options: list[dict] = []
+
+        async def _acomplete_action_response_once(
+            self,
+            messages,
+            *,
+            tools=None,
+            planning_tools=None,
+            hosted_mcp_servers=None,
+            mcp_approval_callback=None,
+            **kwargs,
+        ):
+            self.requests.append(messages)
+            self.native_options.append(
+                {
+                    "tools": tools,
+                    "planning_tools": planning_tools,
+                    "hosted_mcp_servers": hosted_mcp_servers,
+                    "mcp_approval_callback": mcp_approval_callback,
+                }
+            )
+            raise LLMError(
+                "primary unavailable",
+                code="server_error",
+                retryable=True,
+                fallback_eligible=True,
+            )
+
+    primary = AsyncNativeFailingClient()
+    plan_payload = {
+        "summary": "Use the async JSON transport.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Complete the change",
+                "description": "Complete the requested change.",
+            }
+        ],
+    }
+    secondary = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan_payload),
+                    "step_update_json": "{}",
+                }
+            )
+        ]
+    )
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+    agent = Agent(
+        FallbackChain([primary, secondary]),
+        mcp_servers=(server,),
+    )
+
+    response = asyncio.run(agent.run_planned_turn_async("hello"))
+
+    assert "Use /approve" in response
+    assert primary.native_options == [
+        {
+            "tools": None,
+            "planning_tools": None,
+            "hosted_mcp_servers": None,
+            "mcp_approval_callback": None,
+        }
+    ]
+    for request in [primary.requests[0], secondary.requests[0]]:
+        assert "<transport>json_object</transport>" in request[0]["content"]
 
 
 def test_native_planning_tools_follow_the_plan_lifecycle():

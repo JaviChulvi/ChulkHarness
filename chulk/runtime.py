@@ -374,9 +374,17 @@ def _mcp_bridge_required(
         return False
     client_path = _fallback_client_path(llm_client)
     if client_path is not None:
-        return any(not _client_supports_hosted_mcp(client) for client in client_path)
+        return any(
+            not _client_supports_native_tool_calling(client)
+            or not _client_supports_hosted_mcp(client)
+            for client in client_path
+        )
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(not _supports_hosted_mcp(provider) for provider in provider_path)
+    return any(
+        not _supports_native_tool_calling(provider)
+        or not _supports_hosted_mcp(provider)
+        for provider in provider_path
+    )
 
 
 def _mcp_provider_path(
@@ -390,9 +398,13 @@ def _mcp_provider_path(
     client_path = _fallback_client_path(llm_client)
     if client_path is None:
         provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
+        native_support = [_supports_native_tool_calling(provider) for provider in provider_path]
         support = [_supports_hosted_mcp(provider) for provider in provider_path]
     else:
+        native_support = [_client_supports_native_tool_calling(client) for client in client_path]
         support = [_client_supports_hosted_mcp(client) for client in client_path]
+    if not all(native_support):
+        return "bridge"
     has_hosted = any(support)
     has_bridge = any(not item for item in support)
     if has_hosted and has_bridge:
@@ -412,8 +424,17 @@ def _client_supports_hosted_mcp(client: object) -> bool:
     return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
 
 
+def _client_supports_native_tool_calling(client: object) -> bool:
+    capabilities = getattr(client, "capabilities", None)
+    return bool(getattr(capabilities, "supports_native_tool_calling", False))
+
+
 def _supports_hosted_mcp(provider: str) -> bool:
     return provider_capabilities(provider).supports_hosted_mcp_tools
+
+
+def _supports_native_tool_calling(provider: str) -> bool:
+    return provider_capabilities(provider).supports_native_tool_calling
 
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:

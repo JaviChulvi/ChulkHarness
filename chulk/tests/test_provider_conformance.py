@@ -458,7 +458,10 @@ def test_custom_provider_callback_receives_original_settings_fields(monkeypatch)
 def test_mcp_routing_uses_provider_capability_instead_of_provider_name(monkeypatch):
     profile = LLMProviderProfile(
         name="hosted-compatible",
-        capabilities=LLMCapabilities(supports_hosted_mcp_tools=True),
+        capabilities=LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        ),
         create_client=lambda settings: None,  # type: ignore[arg-type, return-value]
     )
     monkeypatch.setitem(LLM_PROVIDER_REGISTRY, profile.name, profile)
@@ -475,10 +478,16 @@ def test_mcp_routing_uses_provider_capability_instead_of_provider_name(monkeypat
 
 def test_mcp_routing_registers_a_bridge_for_an_injected_mixed_fallback_chain():
     class HostedClient(LLMClient):
-        capabilities = LLMCapabilities(supports_hosted_mcp_tools=True)
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
 
     class BridgeClient(LLMClient):
-        capabilities = LLMCapabilities(supports_hosted_mcp_tools=False)
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=False,
+        )
 
     config = SimpleNamespace(
         llm_provider="openai",
@@ -497,3 +506,35 @@ def test_mcp_routing_registers_a_bridge_for_an_injected_mixed_fallback_chain():
         servers,
         llm_client=chain,
     ) == "hosted+bridge"
+
+
+def test_mcp_routing_uses_bridge_when_a_fallback_client_cannot_use_native_tools():
+    class NativeHostedClient(LLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
+    class JsonHostedClient(LLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=False,
+            supports_hosted_mcp_tools=True,
+        )
+
+    config = SimpleNamespace(
+        llm_provider="openai",
+        llm_fallback_providers=(),
+    )
+    chain = FallbackChain([NativeHostedClient(), JsonHostedClient()])
+    servers = (object(),)
+
+    assert runtime_module._mcp_bridge_required(
+        config,
+        servers,
+        llm_client=chain,
+    ) is True
+    assert runtime_module._mcp_provider_path(
+        config,
+        servers,
+        llm_client=chain,
+    ) == "bridge"

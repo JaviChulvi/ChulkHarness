@@ -10,12 +10,13 @@ import pytest
 
 from chulk import AgentConfig, AsyncAgent
 from chulk.core.actions import FinalAnswerAction
-from chulk.llm.base import LLMActionResult, LLMClient, classify_provider_exception
+from chulk.llm.base import LLMActionError, LLMActionResult, LLMClient, LLMError, classify_provider_exception
 from chulk.llm.providers.anthropic import AnthropicMessagesClient
 from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
 from chulk.llm.providers.gemini import GeminiGenerateContentClient
 from chulk.llm.providers.openai import OpenAIResponsesClient
 from chulk.llm.public import FallbackChain
+from chulk.llm.tools import PLAN_TOOL_NAME
 from chulk.llm import public as public_llm
 from chulk.llm.usage import LLMResponse, LLMUsage
 from chulk.mcp import MCPServerConfig
@@ -62,6 +63,16 @@ class _AsyncEndpoint:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class _AsyncClientWithOptions:
+    def __init__(self, responses: _AsyncEndpoint) -> None:
+        self.responses = responses
+        self.retry_options: list[dict] = []
+
+    def with_options(self, **kwargs):
+        self.retry_options.append(kwargs)
+        return self
 
 
 class _AsyncModels:
@@ -260,6 +271,212 @@ async def test_openai_malformed_hosted_mcp_approval_advances_async_fallback() ->
     assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
     assert fallback.last_attempts[0].error_code == "invalid_response"
     assert len(secondary.async_messages) == 1
+    assert sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_hosted_mcp_call_without_final_action_does_not_replay_async_fallback() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_call",
+                        id="call_1",
+                        server_label="write_api",
+                        name="create_record",
+                        arguments=json.dumps({"value": "created"}),
+                        output="created",
+                        status="completed",
+                    )
+                ],
+            )
+        ]
+    )
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=SimpleNamespace(responses=async_endpoint),
+    )
+    secondary = _AsyncActionScript([_final_answer("must not run")])
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await fallback.acomplete_action(
+            MESSAGES,
+            tools=[],
+            hosted_mcp_servers=[server],
+        )
+
+    assert raised.value.code == "action_shape_error"
+    assert raised.value.retryable is False
+    assert raised.value.fallback_eligible is False
+    assert len(fallback.last_attempts) == 1
+    assert secondary.async_messages == []
+    assert sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_timeout_after_approved_mcp_call_does_not_replay_async_fallback() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="write_api",
+                        name="create_record",
+                        arguments=json.dumps({"value": "created"}),
+                    )
+                ],
+            ),
+            TimeoutError("response timed out after approval"),
+        ]
+    )
+    async_client = _AsyncClientWithOptions(async_endpoint)
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=async_client,
+    )
+    secondary = _AsyncActionScript([_final_answer("must not run")])
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await fallback.acomplete_action(
+            MESSAGES,
+            tools=[],
+            hosted_mcp_servers=[server],
+            mcp_approval_callback=lambda _approval: True,
+        )
+
+    assert raised.value.code == "timeout"
+    assert raised.value.retryable is False
+    assert raised.value.fallback_eligible is False
+    assert "may have executed" in str(raised.value)
+    assert len(async_endpoint.calls) == 2
+    assert async_client.retry_options == [{"max_retries": 0}]
+    assert len(fallback.last_attempts) == 1
+    assert secondary.async_messages == []
+    assert sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_pre_execution_mcp_rejection_can_advance_async_fallback() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            LLMError(
+                "hosted MCP tools are unsupported",
+                provider="openai",
+                model="openai-test",
+                code="unsupported_feature",
+                fallback_eligible=True,
+            )
+        ]
+    )
+    async_client = _AsyncClientWithOptions(async_endpoint)
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=async_client,
+    )
+    secondary = _AsyncActionScript([_final_answer("fallback ok")])
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        approval="never",
+    )
+
+    result = await FallbackChain([primary, secondary]).acomplete_action(
+        MESSAGES,
+        tools=[],
+        hosted_mcp_servers=[server],
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
+    assert async_client.retry_options == [{"max_retries": 0}]
+    assert len(secondary.async_messages) == 1
+    assert sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_mcp_execution_blocks_async_action_repair_and_fallback() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_call",
+                        id="call_1",
+                        server_label="write_api",
+                        name="create_record",
+                        arguments=json.dumps({"value": "created"}),
+                        output="created",
+                        status="completed",
+                    ),
+                    SimpleNamespace(
+                        type="function_call",
+                        name=PLAN_TOOL_NAME,
+                        arguments="{}",
+                    ),
+                ],
+            )
+        ]
+    )
+    async_client = _AsyncClientWithOptions(async_endpoint)
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=async_client,
+    )
+    secondary = _AsyncActionScript([_final_answer("must not run")])
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        approval="never",
+    )
+
+    with pytest.raises(LLMActionError) as raised:
+        await fallback.acomplete_action(
+            MESSAGES,
+            tools=[],
+            hosted_mcp_servers=[server],
+        )
+
+    assert raised.value.repair_attempts == 0
+    assert "repair disabled" in str(raised.value)
+    assert raised.value.fallback_eligible is False
+    assert len(async_endpoint.calls) == 1
+    assert async_client.retry_options == [{"max_retries": 0}]
+    assert len(fallback.last_attempts) == 1
+    assert secondary.async_messages == []
     assert sync.calls == 0
 
 

@@ -58,7 +58,10 @@ class FakeResponsesResource:
         if kwargs.get("stream"):
             return iter(self.stream_events)
         if self.responses:
-            return self.responses.pop(0)
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
         return SimpleNamespace(id="resp_static", output_text=self.output_text, usage=self.usage, output=self.output)
 
 
@@ -80,6 +83,16 @@ class FakeOpenAIClient:
             responses=responses,
             fail_with_tools=fail_with_tools,
         )
+
+
+class RetryOptionsRecordingOpenAIClient(FakeOpenAIClient):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.retry_options: list[dict] = []
+
+    def with_options(self, **kwargs):
+        self.retry_options.append(kwargs)
+        return self
 
 
 class FakeChatCompletionsResource:
@@ -586,6 +599,191 @@ def test_openai_hosted_mcp_shape_error_advances_fallback_chain():
 
     assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
     assert len(secondary.requests) == 1
+
+
+def test_openai_hosted_mcp_call_without_final_action_does_not_replay_on_fallback():
+    primary = OpenAIResponsesClient(
+        model="gpt-4.1-mini",
+        client=FakeOpenAIClient(
+            output_text="",
+            output=[
+                SimpleNamespace(
+                    type="mcp_call",
+                    id="call_1",
+                    server_label="write_api",
+                    name="create_record",
+                    arguments=json.dumps({"value": "created"}),
+                    output="created",
+                    status="completed",
+                )
+            ],
+        ),
+    )
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "must not run"})]
+    )
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    try:
+        fallback.complete_action(
+            [{"role": "user", "content": "create a record"}],
+            tools=[],
+            hosted_mcp_servers=[server],
+        )
+    except LLMError as exc:
+        assert exc.code == "action_shape_error"
+        assert exc.retryable is False
+        assert exc.fallback_eligible is False
+    else:
+        raise AssertionError("Expected a hosted MCP response without a final action to fail closed")
+
+    assert len(fallback.last_attempts) == 1
+    assert secondary.requests == []
+
+
+def test_openai_timeout_after_approved_mcp_call_does_not_replay_on_fallback():
+    fake_client = RetryOptionsRecordingOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="write_api",
+                        name="create_record",
+                        arguments=json.dumps({"value": "created"}),
+                    )
+                ],
+            ),
+            TimeoutError("response timed out after approval"),
+        ]
+    )
+    primary = OpenAIResponsesClient(
+        model="gpt-4.1-mini",
+        client=fake_client,
+    )
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "must not run"})]
+    )
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    try:
+        fallback.complete_action(
+            [{"role": "user", "content": "create a record"}],
+            tools=[],
+            hosted_mcp_servers=[server],
+            mcp_approval_callback=lambda _approval: True,
+        )
+    except LLMError as exc:
+        assert exc.code == "timeout"
+        assert exc.retryable is False
+        assert exc.fallback_eligible is False
+        assert "may have executed" in str(exc)
+    else:
+        raise AssertionError("Expected an ambiguous post-approval failure to fail closed")
+
+    assert len(primary._client.responses.calls) == 2
+    assert fake_client.retry_options == [{"max_retries": 0}]
+    assert len(fallback.last_attempts) == 1
+    assert secondary.requests == []
+
+
+def test_openai_pre_execution_mcp_rejection_can_advance_fallback():
+    fake_client = RetryOptionsRecordingOpenAIClient(
+        responses=[
+            LLMError(
+                "hosted MCP tools are unsupported",
+                provider="openai",
+                model="gpt-4.1-mini",
+                code="unsupported_feature",
+                fallback_eligible=True,
+            )
+        ]
+    )
+    primary = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "fallback ok"})]
+    )
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        approval="never",
+    )
+
+    result = FallbackChain([primary, secondary]).complete_action(
+        [{"role": "user", "content": "search docs"}],
+        tools=[],
+        hosted_mcp_servers=[server],
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
+    assert fake_client.retry_options == [{"max_retries": 0}]
+    assert len(secondary.requests) == 1
+
+
+def test_openai_mcp_execution_blocks_action_repair_and_fallback():
+    fake_client = RetryOptionsRecordingOpenAIClient(
+        output_text="",
+        output=[
+            SimpleNamespace(
+                type="mcp_call",
+                id="call_1",
+                server_label="write_api",
+                name="create_record",
+                arguments=json.dumps({"value": "created"}),
+                output="created",
+                status="completed",
+            ),
+            SimpleNamespace(
+                type="function_call",
+                name=PLAN_TOOL_NAME,
+                arguments="{}",
+            ),
+        ],
+    )
+    primary = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "must not run"})]
+    )
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="write_api",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        approval="never",
+    )
+
+    try:
+        fallback.complete_action(
+            [{"role": "user", "content": "create a record"}],
+            tools=[],
+            hosted_mcp_servers=[server],
+        )
+    except LLMActionError as exc:
+        assert exc.repair_attempts == 0
+        assert "repair disabled" in str(exc)
+        assert exc.fallback_eligible is False
+    else:
+        raise AssertionError("Expected invalid post-MCP action to fail without repair")
+
+    assert len(fake_client.responses.calls) == 1
+    assert fake_client.retry_options == [{"max_retries": 0}]
+    assert len(fallback.last_attempts) == 1
+    assert secondary.requests == []
 
 
 def test_openai_malformed_hosted_mcp_approval_advances_fallback_chain():

@@ -175,16 +175,24 @@ class ModelTransport:
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
         messages = self._record_model_request(turn, prompt)
-        native_action_protocol = self._native_tool_calling_enabled()
+        native_action_protocol = prompt.action_transport == "provider_native"
         try:
             result = call_with_supported_kwargs(
                 self.llm_client.complete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
                 tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
-                planning_tools=self._planning_tool_availability(turn, require_plan=require_plan),
-                hosted_mcp_servers=self.mcp_servers,
-                mcp_approval_callback=lambda request: self.resolve_mcp_approval(request, turn),
+                planning_tools=(
+                    self._planning_tool_availability(turn, require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
+                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                mcp_approval_callback=(
+                    (lambda request: self.resolve_mcp_approval(request, turn))
+                    if native_action_protocol
+                    else None
+                ),
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
@@ -199,16 +207,24 @@ class ModelTransport:
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
         messages = self._record_model_request(turn, prompt)
-        native_action_protocol = self._native_tool_calling_enabled()
+        native_action_protocol = prompt.action_transport == "provider_native"
         try:
             result = await call_async_with_supported_kwargs(
                 self.llm_client.acomplete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
                 tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
-                planning_tools=self._planning_tool_availability(turn, require_plan=require_plan),
-                hosted_mcp_servers=self.mcp_servers,
-                mcp_approval_callback=lambda request: self.resolve_mcp_approval(request, turn),
+                planning_tools=(
+                    self._planning_tool_availability(turn, require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
+                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                mcp_approval_callback=(
+                    (lambda request: self.resolve_mcp_approval(request, turn))
+                    if native_action_protocol
+                    else None
+                ),
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)

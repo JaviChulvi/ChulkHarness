@@ -1073,6 +1073,11 @@ def test_main_exec_tracks_hosted_mcp_approval_without_tool_record(monkeypatch, t
     monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "workspace-write")
 
     class HostedApprovalFakeLLM(LLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
         def complete_action(
             self,
             messages: list[dict[str, str]],
