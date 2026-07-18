@@ -18,8 +18,10 @@ from chulk.core.state import AgentState, TurnState
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
+from chulk.llm.capabilities import client_requires_mcp_bridge
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.mcp import MCPServerConfig
+from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory import (
     ConversationMemory,
     MemoryPolicy,
@@ -131,6 +133,7 @@ class Agent:
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
+        self._restore_pending_turn_context()
         self.state.conversation_summary = self.memory.conversation_summary
         self._tool_executor = ToolExecutor(
             registry=self.tool_registry,
@@ -545,6 +548,7 @@ class Agent:
 
     def _refresh_action_runtime(self) -> None:
         """Reflect mutable public runtime configuration in focused services."""
+        self._validate_mcp_route()
         model = self._model_transport
         model.llm_client = self.llm_client
         model.state = self.state
@@ -577,6 +581,58 @@ class Agent:
         effects.max_observation_chars = self.max_observation_chars
         effects.max_tool_stdout_chars = self.max_tool_stdout_chars
         effects.max_tool_stderr_chars = self.max_tool_stderr_chars
+
+    def _restore_pending_turn_context(self) -> None:
+        """Restore the exact skills and memories that shaped a pending plan."""
+        pending_id = self.state.pending_plan_turn_id
+        if pending_id is None:
+            return
+        turn = next(
+            (item for item in self.state.turns if item.turn_id == pending_id),
+            None,
+        )
+        if turn is None:
+            return
+
+        if self.skill_registry is not None:
+            for name in turn.loaded_skill_names:
+                skill = self.skill_registry.get_skill(name)
+                if skill is None:
+                    continue
+                self.skill_registry.load_content(skill.name)
+                self._selected_skills.append(
+                    SkillSelection(
+                        skill=skill,
+                        score=10_000,
+                        matched_keywords=["restored_pending_plan"],
+                    )
+                )
+
+        if self.memory_store is not None:
+            for memory_id in turn.loaded_memory_ids:
+                memory = self.memory_store.get_memory(
+                    memory_id,
+                    include_archived=True,
+                )
+                if memory is None:
+                    continue
+                if set(memory.tags) & PROFILE_MEMORY_TAGS:
+                    self._profile_memories.append(memory)
+                else:
+                    self._relevant_memories.append(memory)
+
+    def _validate_mcp_route(self) -> None:
+        """Fail closed when mutable runtime state lacks a required MCP bridge."""
+        if not self.mcp_servers or not client_requires_mcp_bridge(self.llm_client):
+            return
+        registered_names = {tool.name for tool in self.tool_registry.list_tools()}
+        bridge_names = set(self.mcp_bridge_tool_names)
+        if bridge_names and bridge_names.issubset(registered_names):
+            return
+        raise RuntimeError(
+            "The current LLM client requires MCP bridge tools, but this agent was "
+            "not assembled with them. Rebuild the agent for the replacement client."
+        )
 
     def _pending_plan_turn(self) -> TurnState | None:
         pending_turn_id = self.state.pending_plan_turn_id
@@ -836,9 +892,18 @@ class Agent:
     def _tool_context_for_turn(self, turn: TurnState) -> ToolExecutionContext | None:
         if turn.turn_id in self._tool_contexts:
             return self._tool_contexts[turn.turn_id]
-        if turn.tool_context_metadata:
-            return ToolExecutionContext(metadata=turn.tool_context_metadata)
-        return None
+        default_context = self.default_tool_context
+        if not turn.tool_context_metadata and default_context is None:
+            return None
+        return ToolExecutionContext(
+            metadata={
+                **(default_context.metadata if default_context is not None else {}),
+                **turn.tool_context_metadata,
+                "conversation_id": self.state.conversation_id,
+                "turn_id": turn.turn_id,
+            },
+            deps=default_context.deps if default_context is not None else None,
+        )
 
     def _release_tool_context(self, turn: TurnState) -> None:
         """Release request-scoped host dependencies after terminal work."""

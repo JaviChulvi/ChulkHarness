@@ -202,10 +202,16 @@ def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatc
     monkeypatch.setenv("DOCS_MCP_TOKEN", "super-secret-token")
     inputs = iter(["/mcp", "/q"])
 
+    class HostedMCPFakeLLM(FakeLLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
     exit_code = main(
         [],
         input_func=lambda _prompt: next(inputs),
-        llm_client_factory=fake_factory,
+        llm_client_factory=lambda _config: HostedMCPFakeLLM(),
     )
 
     output = strip_ansi(capsys.readouterr().out)

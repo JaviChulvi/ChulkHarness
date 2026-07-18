@@ -21,7 +21,12 @@ from chulk.llm import (
     provider_capabilities,
     provider_connection_from_config,
 )
-from chulk.llm.capabilities import resolve_runtime_model_capabilities
+from chulk.llm.capabilities import (
+    client_requires_mcp_bridge,
+    client_supports_hosted_mcp_tools,
+    client_supports_native_tool_calling,
+    resolve_runtime_model_capabilities,
+)
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
@@ -63,6 +68,14 @@ class SkillSpecResolution:
 
     pinned_skill_names: list[str]
     warnings: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class MCPRoute:
+    """Effective MCP transport across the clients that may handle a request."""
+
+    provider_path: str
+    bridge_required: bool
 
 
 def create_agent(
@@ -370,21 +383,11 @@ def _mcp_bridge_required(
     *,
     llm_client: LLMClient | None = None,
 ) -> bool:
-    if not tuple(mcp_servers):
-        return False
-    client_path = _fallback_client_path(llm_client)
-    if client_path is not None:
-        return any(
-            not _client_supports_native_tool_calling(client)
-            or not _client_supports_hosted_mcp(client)
-            for client in client_path
-        )
-    provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(
-        not _supports_native_tool_calling(provider)
-        or not _supports_hosted_mcp(provider)
-        for provider in provider_path
-    )
+    return resolve_mcp_route(
+        config,
+        mcp_servers,
+        llm_client=llm_client,
+    ).bridge_required
 
 
 def _mcp_provider_path(
@@ -393,40 +396,46 @@ def _mcp_provider_path(
     *,
     llm_client: LLMClient | None = None,
 ) -> str:
+    return resolve_mcp_route(
+        config,
+        mcp_servers,
+        llm_client=llm_client,
+    ).provider_path
+
+
+def resolve_mcp_route(
+    config: Config,
+    mcp_servers: Iterable[object],
+    *,
+    llm_client: LLMClient | None = None,
+) -> MCPRoute:
+    """Resolve one MCP route from the effective bound client path when available."""
     if not tuple(mcp_servers):
-        return "none"
-    client_path = _fallback_client_path(llm_client)
-    if client_path is None:
-        provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-        native_support = [_supports_native_tool_calling(provider) for provider in provider_path]
-        support = [_supports_hosted_mcp(provider) for provider in provider_path]
+        return MCPRoute(provider_path="none", bridge_required=False)
+
+    if llm_client is not None:
+        native_protocol = client_supports_native_tool_calling(llm_client)
+        has_hosted = client_supports_hosted_mcp_tools(llm_client)
+        has_bridge = client_requires_mcp_bridge(llm_client)
     else:
-        native_support = [_client_supports_native_tool_calling(client) for client in client_path]
-        support = [_client_supports_hosted_mcp(client) for client in client_path]
-    if not all(native_support):
-        return "bridge"
-    has_hosted = any(support)
-    has_bridge = any(not item for item in support)
+        provider_names = [
+            config.llm_provider,
+            *(provider.provider for provider in config.llm_fallback_providers),
+        ]
+        native_support = [_supports_native_tool_calling(provider) for provider in provider_names]
+        hosted_support = [_supports_hosted_mcp(provider) for provider in provider_names]
+        native_protocol = all(native_support)
+        has_hosted = any(hosted_support)
+        has_bridge = any(not item for item in hosted_support)
+
+    if not native_protocol:
+        return MCPRoute(provider_path="bridge", bridge_required=True)
+
     if has_hosted and has_bridge:
-        return "hosted+bridge"
-    return "hosted" if has_hosted else "bridge"
-
-
-def _fallback_client_path(llm_client: LLMClient | None) -> list[object] | None:
-    providers = getattr(llm_client, "providers", None)
-    if isinstance(providers, list) and providers:
-        return list(providers)
-    return None
-
-
-def _client_supports_hosted_mcp(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
-
-
-def _client_supports_native_tool_calling(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_native_tool_calling", False))
+        route_path = "hosted+bridge"
+    else:
+        route_path = "hosted" if has_hosted else "bridge"
+    return MCPRoute(provider_path=route_path, bridge_required=has_bridge)
 
 
 def _supports_hosted_mcp(provider: str) -> bool:

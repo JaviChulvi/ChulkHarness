@@ -19,7 +19,8 @@ from typing import TextIO
 
 from chulk.config import Config
 from chulk.core import Agent, TraceEvent
-from chulk.llm.factory import provider_capabilities
+from chulk.llm import LLMClient
+from chulk.runtime import resolve_mcp_route
 from chulk.sessions import ConversationRecord, MessageRecord
 from chulk.tools.permissions import PermissionDecisionRecord, PermissionRequest
 
@@ -191,7 +192,7 @@ class TerminalUI:
         """Return configured MCP server and bridge status."""
         lines = [self.heading("MCP")]
         lines.append(f"  config    {_short_path(config.mcp_config_path)}")
-        lines.append(f"  path      {_mcp_provider_path(config)}")
+        lines.append(f"  path      {_mcp_provider_path(config, llm_client=agent.llm_client)}")
         if not config.mcp_servers:
             lines.append("  servers   none")
             return "\n".join(lines)
@@ -226,6 +227,11 @@ class TerminalUI:
 
     def history(self, messages: list[MessageRecord]) -> str:
         """Return recent persisted conversation messages."""
+        messages = [
+            message
+            for message in messages
+            if not bool(message.metadata.get("internal"))
+        ]
         lines = [self.heading("History")]
         if not messages:
             lines.append("  none")
@@ -404,18 +410,18 @@ def _mcp_status_text(config: Config, agent: Agent) -> str:
         return "none"
     bridge_count = len(getattr(agent, "mcp_bridge_tool_names", []) or [])
     bridge_suffix = f", {bridge_count} bridge tool(s)" if bridge_count else ""
-    return f"{count} server(s), {_mcp_provider_path(config)}{bridge_suffix}"
+    return (
+        f"{count} server(s), "
+        f"{_mcp_provider_path(config, llm_client=agent.llm_client)}{bridge_suffix}"
+    )
 
 
-def _mcp_provider_path(config: Config) -> str:
-    if not config.mcp_servers:
-        return "none"
-    providers = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    has_hosted = any(provider_capabilities(provider).supports_hosted_mcp_tools for provider in providers)
-    has_bridge = any(not provider_capabilities(provider).supports_hosted_mcp_tools for provider in providers)
-    if has_hosted and has_bridge:
-        return "hosted+bridge"
-    return "hosted" if has_hosted else "bridge"
+def _mcp_provider_path(config: Config, *, llm_client: LLMClient | None = None) -> str:
+    return resolve_mcp_route(
+        config,
+        config.mcp_servers,
+        llm_client=llm_client,
+    ).provider_path
 
 
 def _mcp_auth_status(server: object) -> str:
