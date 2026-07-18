@@ -28,7 +28,12 @@ class PlanExecution:
         response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
         self.trace(
             TraceEvent.PLAN_CREATED,
-            {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()},
+            {
+                "turn_id": turn.turn_id,
+                "plan": plan.to_dict(),
+                "display_message": response,
+                "turn": turn.to_dict(),
+            },
         )
         return response
 

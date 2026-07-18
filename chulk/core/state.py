@@ -402,6 +402,15 @@ class TurnState:
         self.plan_approved = True
         self.status = "in_progress"
 
+    def can_continue_approved_plan(self) -> bool:
+        """Return whether this durable turn can safely re-enter plan execution."""
+        return bool(
+            self.status == "in_progress"
+            and self.plan_approved
+            and self.active_plan is not None
+            and self.active_plan.status() in {"approved", "completed"}
+        )
+
     def reject_plan(self, message: str) -> None:
         if self.active_plan is not None:
             self.active_plan.reject()

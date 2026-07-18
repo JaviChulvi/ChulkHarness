@@ -129,7 +129,7 @@ class TerminalUI:
             f"  tools     {len(agent.tool_registry.list_tools())}",
             f"  mcp       {_mcp_status_text(config, agent)}",
             f"  turns     {len(agent.state.turns)}",
-            f"  plan      {'pending' if agent.has_pending_plan() else 'none'}",
+            f"  plan      {_plan_status_text(agent)}",
             f"  context   {_context_status(agent.state.last_context_report, getattr(agent, 'context_budget', None))}",
             f"  usage     {_usage_summary_text(agent.state.last_usage_report)}",
         ]
@@ -402,6 +402,14 @@ def _context_status(report, budget=None) -> str:
     omitted = int(report.get("omitted_message_count") or 0)
     suffix = f", {omitted} omitted" if omitted else ""
     return f"{_format_count(tokens)} est tokens{suffix}"
+
+
+def _plan_status_text(agent: Agent) -> str:
+    if agent.has_pending_plan():
+        return "pending"
+    if agent.has_resumable_plan():
+        return "resumable"
+    return "none"
 
 
 def _mcp_status_text(config: Config, agent: Agent) -> str:

@@ -192,7 +192,7 @@ class SQLiteSessionStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT role, content
+                SELECT role, content, metadata
                 FROM conversation_messages
                 WHERE conversation_id = ?
                   AND ordinal > ?
@@ -203,6 +203,7 @@ class SQLiteSessionStore:
         messages = [
             {"role": str(row["role"]), "content": str(row["content"])}
             for row in rows
+            if not _message_is_prompt_excluded(row["metadata"])
         ]
         return select_recent_conversation_messages(
             messages,
@@ -223,6 +224,14 @@ class SQLiteSessionStore:
             return
         now = _utc_now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            clean_source_message_count = max(0, source_message_count)
+            clean_metadata = dict(metadata or {})
+            clean_metadata["source_message_ordinal"] = _prompt_source_ordinal(
+                conn,
+                conversation_id,
+                clean_source_message_count,
+            )
             conn.execute(
                 """
                 INSERT INTO conversation_summaries (
@@ -234,10 +243,10 @@ class SQLiteSessionStore:
                     str(uuid4()),
                     conversation_id,
                     clean_content,
-                    max(0, source_message_count),
+                    clean_source_message_count,
                     now,
                     now,
-                    json.dumps(metadata or {}, sort_keys=True),
+                    json.dumps(clean_metadata, sort_keys=True),
                 ),
             )
             _touch_conversation(conn, conversation_id, now)
@@ -358,14 +367,17 @@ class SQLiteSessionStore:
             )
 
     def save_tool_call(self, conversation_id: str, payload: dict[str, Any]) -> None:
-        """Upsert a tool-call lifecycle record."""
+        """Upsert a tool-call lifecycle record and any matching intent checkpoint."""
         turn_id = str(payload.get("turn_id", "")).strip()
         iteration = int(payload.get("iteration") or 0)
         phase = str(payload.get("phase") or "execution")
         tool_name = str(payload.get("tool_name") or payload.get("resolved_tool_name") or "").strip()
         if not turn_id or not iteration or not tool_name:
             return
+        turn = payload.get("turn")
+        now = _utc_now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO conversation_tool_calls (
@@ -393,7 +405,7 @@ class SQLiteSessionStore:
                     json.dumps(payload.get("arguments") or {}, sort_keys=True),
                     iteration,
                     phase,
-                    str(payload.get("started_at") or _utc_now()),
+                    str(payload.get("started_at") or now),
                     payload.get("ended_at"),
                     _optional_bool_to_int(payload.get("success")),
                     payload.get("error"),
@@ -401,6 +413,40 @@ class SQLiteSessionStore:
                     json.dumps(payload, sort_keys=True),
                 ),
             )
+            if (
+                isinstance(turn, dict)
+                and _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+            ):
+                _save_turn_snapshot(conn, conversation_id, turn, now)
+
+    def load_unresolved_tool_calls(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> list[dict[str, object]]:
+        """Return persisted tool intents that never recorded a result."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT tool_name, arguments, iteration, phase, started_at
+                FROM conversation_tool_calls
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND success IS NULL
+                ORDER BY iteration
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+        return [
+            {
+                "tool_name": str(row["tool_name"]),
+                "arguments": _safe_json_dict(row["arguments"]),
+                "iteration": int(row["iteration"]),
+                "phase": str(row["phase"]),
+                "started_at": str(row["started_at"]),
+            }
+            for row in rows
+        ]
 
     def save_observation(
         self,
@@ -835,6 +881,38 @@ def _next_message_ordinal(conn: sqlite3.Connection, conversation_id: str) -> int
         (conversation_id,),
     ).fetchone()
     return int(row["next_ordinal"])
+
+
+def _prompt_source_ordinal(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    source_message_count: int,
+) -> int:
+    """Map a logical prompt-history count to its durable message ordinal."""
+    if source_message_count <= 0:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT ordinal, metadata
+        FROM conversation_messages
+        WHERE conversation_id = ?
+        ORDER BY ordinal
+        """,
+        (conversation_id,),
+    ).fetchall()
+    prompt_ordinals = [
+        int(row["ordinal"])
+        for row in rows
+        if not _message_is_prompt_excluded(row["metadata"])
+    ]
+    if not prompt_ordinals:
+        return 0
+    index = min(source_message_count, len(prompt_ordinals)) - 1
+    return prompt_ordinals[index]
+
+
+def _message_is_prompt_excluded(metadata: Any) -> bool:
+    return _safe_json_dict(metadata).get("prompt_excluded") is True
 
 
 def _touch_conversation(conn: sqlite3.Connection, conversation_id: str, updated_at: str) -> None:

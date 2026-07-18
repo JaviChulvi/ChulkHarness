@@ -126,10 +126,22 @@ class SessionRecorder:
         if event_type == TraceEvent.PLAN_CREATED:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
             turn = payload.get("turn")
+            display_message = payload.get("display_message")
             if turn_id is not None:
                 self.current_turn_id = turn_id
             if isinstance(turn, dict):
                 self.store.save_turn_snapshot(self.conversation_id, turn)
+            if isinstance(display_message, str) and display_message.strip():
+                self.store.save_message(
+                    self.conversation_id,
+                    turn_id=turn_id,
+                    role="assistant",
+                    content=display_message,
+                    message_key=(
+                        f"{turn_id}:assistant:plan_display" if turn_id else None
+                    ),
+                    metadata={"event": event_type, "prompt_excluded": True},
+                )
             self.store.update_conversation_status(self.conversation_id, "waiting_for_approval")
             return
 

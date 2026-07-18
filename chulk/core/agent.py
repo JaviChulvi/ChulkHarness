@@ -133,7 +133,7 @@ class Agent:
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
-        self._restore_pending_turn_context()
+        self._restore_plan_turn_context()
         self.state.conversation_summary = self.memory.conversation_summary
         self._tool_executor = ToolExecutor(
             registry=self.tool_registry,
@@ -380,6 +380,11 @@ class Agent:
         """Create and trace a user turn before model/tool execution."""
         if self.has_pending_plan():
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
+        if self.has_resumable_plan():
+            return (
+                "An approved plan is waiting to continue. Use /approve to resume it "
+                "before starting a new turn."
+            )
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
         execution_context = _coerce_tool_execution_context(tool_context) or self.default_tool_context
@@ -435,13 +440,17 @@ class Agent:
         turn = self._pending_plan_turn()
         return bool(turn and turn.active_plan and not turn.plan_approved)
 
+    def has_resumable_plan(self) -> bool:
+        """Return True when an approved durable plan can continue after restart."""
+        return self._resumable_plan_turn() is not None
+
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn = self._pending_plan_turn()
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
-            turn_or_response = self._approve_pending_plan()
+            turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
@@ -458,9 +467,9 @@ class Agent:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn = self._pending_plan_turn()
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
-            turn_or_response = self._approve_pending_plan()
+            turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
@@ -473,10 +482,18 @@ class Agent:
             if turn is not None:
                 self._release_tool_context(turn)
 
-    def _approve_pending_plan(self) -> TurnState | str:
-        """Mark the pending plan approved and return its paused turn."""
+    def _prepare_plan_execution(self) -> TurnState | str:
+        """Approve a pending plan or continue an already-approved durable plan."""
         turn = self._pending_plan_turn()
-        if turn is None or turn.active_plan is None:
+        if turn is None:
+            resumed_turn = self._resumable_plan_turn()
+            if resumed_turn is None or resumed_turn.active_plan is None:
+                return "No plan is waiting for approval."
+            self.state.current_turn_id = resumed_turn.turn_id
+            self.state.active_plan = resumed_turn.active_plan
+            self.state.messages = self.memory.recent()
+            return resumed_turn
+        if turn.active_plan is None:
             return "No plan is waiting for approval."
 
         try:
@@ -585,15 +602,9 @@ class Agent:
         effects.max_tool_stdout_chars = self.max_tool_stdout_chars
         effects.max_tool_stderr_chars = self.max_tool_stderr_chars
 
-    def _restore_pending_turn_context(self) -> None:
-        """Restore the exact skills and memories that shaped a pending plan."""
-        pending_id = self.state.pending_plan_turn_id
-        if pending_id is None:
-            return
-        turn = next(
-            (item for item in self.state.turns if item.turn_id == pending_id),
-            None,
-        )
+    def _restore_plan_turn_context(self) -> None:
+        """Restore context that shaped a pending or resumable approved plan."""
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
         if turn is None:
             return
 
@@ -644,6 +655,17 @@ class Agent:
         for turn in self.state.turns:
             if turn.turn_id == pending_turn_id:
                 return turn
+        return None
+
+    def _resumable_plan_turn(self) -> TurnState | None:
+        if self.state.active_plan is None or not self.state.turns:
+            return None
+        turn = self.state.turns[-1]
+        if (
+            turn.active_plan is self.state.active_plan
+            and turn.can_continue_approved_plan()
+        ):
+            return turn
         return None
 
     def _extract_long_term_memories(self, user_message: str) -> None:

@@ -304,6 +304,7 @@ class TurnEffects:
                 **record.to_dict(),
                 "turn_id": turn.turn_id,
                 "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                "turn": turn.to_dict(),
             },
         )
         return PendingToolExecution(effect=effect, record=record, plan_step=step)

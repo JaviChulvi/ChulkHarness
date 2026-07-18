@@ -10,7 +10,7 @@ from typing import Protocol, cast
 
 from chulk.capabilities import Capabilities
 from chulk.config import Config
-from chulk.core import Agent, AgentState
+from chulk.core import Agent, AgentState, TurnState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
@@ -29,7 +29,7 @@ from chulk.llm.capabilities import (
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
-from chulk.sessions import SQLiteSessionStore, SessionRecorder
+from chulk.sessions import ConversationSummaryRecord, SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
 from chulk.tools import ShellExecutionPolicy, Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
 from chulk.tools.permissions import (
@@ -136,7 +136,7 @@ def create_agent(
         recent_messages = session_store.load_recent_messages(
             state.conversation_id,
             config.history_limit,
-            after_ordinal=latest_summary.source_message_count if latest_summary is not None else 0,
+            after_ordinal=_summary_source_ordinal(latest_summary),
         )
         conversation_memory.replace(
             recent_messages,
@@ -248,6 +248,20 @@ def create_agent(
     return agent
 
 
+def _summary_source_ordinal(summary: ConversationSummaryRecord | None) -> int:
+    """Return the durable ordinal covered by a logical conversation summary."""
+    if summary is None:
+        return 0
+    source_ordinal = summary.metadata.get("source_message_ordinal")
+    if (
+        isinstance(source_ordinal, int)
+        and not isinstance(source_ordinal, bool)
+        and source_ordinal >= 0
+    ):
+        return source_ordinal
+    return summary.source_message_count
+
+
 def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str | None) -> AgentState:
     """Create fresh state or rebuild state for an existing conversation."""
     if conversation_id is None:
@@ -260,6 +274,24 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         return state
 
     latest_turn = state.turns[-1]
+    if latest_turn.status == "in_progress":
+        unresolved_calls = [
+            record.to_dict()
+            for record in latest_turn.tool_calls
+            if record.success is None or record.ended_at is None
+        ]
+        if not unresolved_calls:
+            unresolved_calls = session_store.load_unresolved_tool_calls(
+                conversation.id,
+                latest_turn.turn_id,
+            )
+        if unresolved_calls:
+            _block_unresolved_tool_intent(
+                session_store,
+                conversation.id,
+                latest_turn,
+                unresolved_calls,
+            )
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
     state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
@@ -271,12 +303,52 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         state.last_context_report = latest_turn.context_reports[-1]
     if latest_turn.model_usage_totals:
         state.last_usage_report = latest_turn.model_usage_totals
-    for turn in reversed(state.turns):
-        if turn.status == "waiting_for_approval" and turn.active_plan is not None and not turn.plan_approved:
-            state.active_plan = turn.active_plan
-            state.pending_plan_turn_id = turn.turn_id
-            break
+    if (
+        latest_turn.status == "waiting_for_approval"
+        and latest_turn.active_plan is not None
+        and not latest_turn.plan_approved
+    ):
+        state.active_plan = latest_turn.active_plan
+        state.pending_plan_turn_id = latest_turn.turn_id
+    elif latest_turn.can_continue_approved_plan():
+        state.active_plan = latest_turn.active_plan
     return state
+
+
+def _block_unresolved_tool_intent(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    unresolved_calls: list[dict[str, object]],
+) -> None:
+    """Fail closed when execution stopped after intent but before a result."""
+    latest = unresolved_calls[-1]
+    tool_name = str(latest.get("tool_name") or "tool")
+    raw_iteration = latest.get("iteration")
+    iteration = (
+        raw_iteration
+        if isinstance(raw_iteration, int) and not isinstance(raw_iteration, bool)
+        else 0
+    )
+    reason = (
+        "Turn execution stopped after restart because "
+        f"tool call {tool_name} (iteration {iteration}) started without a recorded result. "
+        "Chulk will not replay it automatically; inspect external state before retrying."
+    )
+    plan = turn.active_plan
+    active_step = plan.active_step() if plan is not None else None
+    if active_step is not None:
+        active_step.block(reason)
+    turn.block(reason)
+    session_store.save_turn_snapshot(conversation_id, turn.to_dict())
+    session_store.save_message(
+        conversation_id,
+        turn_id=turn.turn_id,
+        role="assistant",
+        content=reason,
+        message_key=f"{turn.turn_id}:assistant:unresolved_tool_intent",
+        metadata={"recovery": "unresolved_tool_intent"},
+    )
 
 
 def _default_llm_client_factory(config: Config) -> LLMClient:

@@ -7,12 +7,20 @@ import chulk.main as main_module
 import chulk.runtime as runtime_module
 import chulk.sessions.sqlite_store as session_store_module
 import pytest
+from chulk import AgentHandle
 from chulk.config import load_config
 from chulk.cli.terminal import TerminalUI
 from chulk.core import Agent as CoreAgent
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import TraceEvent
-from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, TurnState
+from chulk.core.state import (
+    AgentState,
+    ObservationRecord,
+    Plan,
+    PlanStep,
+    ToolCallRecord,
+    TurnState,
+)
 from chulk.llm import LLMCapabilities, LLMClient
 from chulk.main import create_agent, main
 from chulk.memory import ConversationMemory, SQLiteMemoryStore
@@ -366,6 +374,13 @@ def test_session_store_saves_summary_and_loads_unsummarized_messages(tmp_path):
     store = SQLiteSessionStore(tmp_path / "store.sqlite")
     store.create_conversation("conversation-1", provider="test", model="mock")
     store.save_message("conversation-1", role="user", content="old question", message_key="m1")
+    store.save_message(
+        "conversation-1",
+        role="assistant",
+        content="Plan display for the user only.",
+        message_key="plan-display",
+        metadata={"prompt_excluded": True},
+    )
     store.save_message("conversation-1", role="assistant", content="old answer", message_key="m2")
     store.save_message("conversation-1", role="user", content="latest question", message_key="m3")
 
@@ -377,11 +392,22 @@ def test_session_store_saves_summary_and_loads_unsummarized_messages(tmp_path):
 
     summary = store.load_latest_summary("conversation-1")
     assert summary is not None
-    messages = store.load_recent_messages("conversation-1", limit=10, after_ordinal=summary.source_message_count)
+    messages = store.load_recent_messages(
+        "conversation-1",
+        limit=10,
+        after_ordinal=summary.metadata["source_message_ordinal"],
+    )
 
     assert summary.content == "Old question and answer were about context compaction."
     assert summary.source_message_count == 2
+    assert summary.metadata["source_message_ordinal"] == 3
     assert messages == [{"role": "user", "content": "latest question"}]
+    assert [message.content for message in store.list_messages("conversation-1")] == [
+        "old question",
+        "Plan display for the user only.",
+        "old answer",
+        "latest question",
+    ]
 
 
 def test_session_store_restores_pending_plan_turn(tmp_path):
@@ -557,6 +583,358 @@ def test_session_store_preserves_blocked_plan_status(tmp_path):
     assert restored_turn.active_plan.steps[0].blocked_reason == "Tool failed with deliberate_failure."
 
 
+def test_create_agent_continues_latest_approved_plan_after_restart(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-approved-plan"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    plan = Plan(
+        summary="Continue durable approved work.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Finish durable work",
+                description="Complete the work after restart.",
+            )
+        ],
+    )
+    turn = TurnState(user_message="run the durable work", turn_id="turn-approved")
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].mark("in_progress")
+    store.save_message(
+        conversation_id,
+        turn_id=turn.turn_id,
+        role="user",
+        content=turn.user_message,
+        message_key=f"{turn.turn_id}:user",
+    )
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+    llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "Durable work completed after restart.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "resumed work complete"}),
+        ]
+    )
+    agent = create_agent(
+        config,
+        lambda _config: llm,
+        conversation_id=conversation_id,
+    )
+
+    assert agent.has_pending_plan() is False
+    assert agent.has_resumable_plan() is True
+    assert "plan      resumable" in TerminalUI(color_enabled=False).status(config, agent)
+    assert agent.run_turn("start unrelated work") == (
+        "An approved plan is waiting to continue. Use /approve to resume it "
+        "before starting a new turn."
+    )
+    assert llm.requests == []
+
+    result = AgentHandle(agent).approve_result()
+
+    assert result.content == "resumed work complete"
+    assert result.status == "completed"
+    assert result.plan is not None
+    assert result.plan.status == "completed"
+    assert len(agent.state.turns) == 1
+    assert agent.has_resumable_plan() is False
+
+
+def test_create_agent_does_not_resume_older_approved_plan(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-newer-turn"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    old_plan = Plan(
+        summary="Old approved work.",
+        steps=[PlanStep(id="1", title="Old work", description="Do old work.")],
+    )
+    old_turn = TurnState(
+        user_message="old request",
+        turn_id="turn-old",
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    old_turn.wait_for_plan_approval(old_plan)
+    old_turn.approve_plan()
+    store.save_turn_snapshot(conversation_id, old_turn.to_dict())
+    latest_turn = TurnState(
+        user_message="new request",
+        turn_id="turn-new",
+        started_at="2026-01-02T00:00:00+00:00",
+    )
+    latest_turn.complete("new request complete")
+    store.save_turn_snapshot(conversation_id, latest_turn.to_dict())
+
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(),
+        conversation_id=conversation_id,
+    )
+
+    assert agent.has_resumable_plan() is False
+    assert agent.state.active_plan is None
+
+
+def test_tool_intent_is_durable_before_callable_runs(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    observed_intents = []
+
+    def inspect_intent(_arguments):
+        with sqlite3.connect(config.store_path) as conn:
+            conn.row_factory = sqlite3.Row
+            tool_call = conn.execute(
+                "SELECT success, ended_at FROM conversation_tool_calls"
+            ).fetchone()
+            turn_row = conn.execute(
+                "SELECT turn_json FROM conversation_turns"
+            ).fetchone()
+        turn_payload = json.loads(turn_row["turn_json"])
+        observed_intents.append(
+            (
+                tool_call["success"],
+                tool_call["ended_at"],
+                turn_payload["tool_calls"][-1]["success"],
+                turn_payload["tool_calls"][-1]["ended_at"],
+            )
+        )
+        return ToolResult("inspect_intent", True, "intent was durable")
+
+    llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "inspect_intent",
+                    "arguments_json": "{}",
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "done"}),
+        ]
+    )
+    agent = create_agent(
+        config,
+        lambda _config: llm,
+        tool_specs=[
+            Tool(
+                name="inspect_intent",
+                description="Inspect the durable tool intent.",
+                args_schema={"type": "object", "properties": {}},
+                callable=inspect_intent,
+            )
+        ],
+    )
+
+    assert agent.run_turn("inspect the intent checkpoint") == "done"
+    assert observed_intents == [(None, None, None, None)]
+
+
+def test_restart_blocks_unresolved_non_plan_tool_intent(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-unresolved-turn"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    turn = TurnState(user_message="mutate outside a plan", turn_id="turn-unresolved")
+    turn.tool_call_count = 1
+    turn.tool_calls.append(
+        ToolCallRecord(
+            tool_name="external_mutation",
+            arguments={"value": "once"},
+            iteration=1,
+        )
+    )
+    store.save_message(
+        conversation_id,
+        turn_id=turn.turn_id,
+        role="user",
+        content=turn.user_message,
+        message_key=f"{turn.turn_id}:user",
+    )
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(),
+        conversation_id=conversation_id,
+    )
+
+    restored_turn = agent.state.turns[-1]
+    assert restored_turn.status == "blocked"
+    assert restored_turn.active_plan is None
+    assert "will not replay it automatically" in (restored_turn.final_answer or "")
+    assert SQLiteSessionStore(config.store_path).get_conversation(conversation_id).status == "blocked"
+
+
+def test_restart_finds_later_unresolved_intent_missing_from_legacy_turn_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-legacy-unresolved-turn"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    turn = TurnState(user_message="run two mutations", turn_id="turn-legacy")
+    completed_call = ToolCallRecord(
+        tool_name="first_mutation",
+        arguments={},
+        iteration=1,
+    )
+    completed_call.finish(ToolResult("first_mutation", True, "done"))
+    turn.tool_call_count = 2
+    turn.tool_calls.append(completed_call)
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+    second_call = ToolCallRecord(
+        tool_name="second_mutation",
+        arguments={},
+        iteration=2,
+    )
+    store.save_tool_call(
+        conversation_id,
+        {**second_call.to_dict(), "turn_id": turn.turn_id},
+    )
+
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(),
+        conversation_id=conversation_id,
+    )
+
+    restored_turn = agent.state.turns[-1]
+    assert restored_turn.status == "blocked"
+    assert "second_mutation (iteration 2)" in (restored_turn.final_answer or "")
+
+
+def test_restart_blocks_unresolved_tool_intent_even_if_call_row_completed(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-unresolved-intent"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    plan = Plan(
+        summary="Perform one external mutation.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Mutate external state",
+                description="Run the mutation exactly once.",
+            )
+        ],
+    )
+    turn = TurnState(user_message="mutate once", turn_id="turn-unresolved")
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].mark("in_progress")
+    record = ToolCallRecord(
+        tool_name="external_mutation",
+        arguments={"value": "once"},
+        iteration=1,
+        plan_step_id="1",
+    )
+    turn.tool_call_count = 1
+    turn.tool_calls.append(record)
+    store.save_message(
+        conversation_id,
+        turn_id=turn.turn_id,
+        role="user",
+        content=turn.user_message,
+        message_key=f"{turn.turn_id}:user",
+    )
+    store.save_tool_call(
+        conversation_id,
+        {**record.to_dict(), "turn_id": turn.turn_id, "turn": turn.to_dict()},
+    )
+    completed_call = record.to_dict()
+    completed_call.update(
+        {
+            "turn_id": turn.turn_id,
+            "ended_at": "2026-01-01T00:00:01+00:00",
+            "success": True,
+        }
+    )
+    store.save_tool_call(
+        conversation_id,
+        completed_call,
+    )
+    with sqlite3.connect(config.store_path) as conn:
+        assert conn.execute(
+            "SELECT success FROM conversation_tool_calls"
+        ).fetchone()[0] == 1
+    mutations = []
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(),
+        conversation_id=conversation_id,
+        tool_specs=[
+            Tool(
+                name="external_mutation",
+                description="Mutate external state.",
+                args_schema={"type": "object", "properties": {"value": {"type": "string"}}},
+                callable=lambda arguments: mutations.append(arguments)
+                or ToolResult("external_mutation", True, "mutated"),
+            )
+        ],
+    )
+
+    restored_turn = agent.state.turns[-1]
+    assert restored_turn.status == "blocked"
+    assert restored_turn.active_plan is not None
+    assert restored_turn.active_plan.steps[0].status == "blocked"
+    assert "will not replay it automatically" in (restored_turn.final_answer or "")
+    assert agent.has_resumable_plan() is False
+    assert agent.approve_plan() == "No plan is waiting for approval."
+    assert mutations == []
+    assert SQLiteSessionStore(config.store_path).get_conversation(conversation_id).status == "blocked"
+    assert any(
+        "will not replay it automatically" in message.content
+        for message in SQLiteSessionStore(config.store_path).list_messages(conversation_id)
+    )
+
+
 def test_create_agent_resumes_short_term_history(monkeypatch, tmp_path):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     config = load_config()
@@ -604,6 +982,71 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     assert "Summary: first turn established the compaction approach." in resumed_prompt
     assert "old context" not in resumed_payload
     assert resumed_agent.memory.summary_message_count == 2
+
+
+def test_create_agent_resumes_summary_across_prompt_excluded_display_message(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-summary-plan-display"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    store.save_message(
+        conversation_id,
+        role="user",
+        content="OLD_COVERED_QUESTION",
+        message_key="covered-user",
+    )
+    store.save_message(
+        conversation_id,
+        role="assistant",
+        content="Plan display that must remain user-visible only.",
+        message_key="plan-display",
+        metadata={"prompt_excluded": True},
+    )
+    store.save_message(
+        conversation_id,
+        role="assistant",
+        content="covered answer",
+        message_key="covered-assistant",
+    )
+    store.save_message(
+        conversation_id,
+        role="user",
+        content="uncovered question",
+        message_key="uncovered-user",
+    )
+    store.save_conversation_summary(
+        conversation_id,
+        content="The covered exchange established durable context.",
+        source_message_count=2,
+    )
+    llm = FakeLLMClient(
+        [json.dumps({"type": "final_answer", "content": "used summary"})]
+    )
+
+    agent = create_agent(
+        config,
+        lambda _config: llm,
+        conversation_id=conversation_id,
+    )
+    assert agent.memory.recent() == [
+        {"role": "user", "content": "uncovered question"}
+    ]
+
+    assert agent.run_turn("continue") == "used summary"
+    request_payload = json.dumps(llm.requests[0])
+    assert "The covered exchange established durable context." in request_payload
+    assert "uncovered question" in request_payload
+    assert "OLD_COVERED_QUESTION" not in request_payload
+    assert "covered answer" not in request_payload
+    assert "Plan display that must remain user-visible only." not in request_payload
 
 
 def test_create_agent_requires_model_token_capabilities(monkeypatch, tmp_path):
@@ -767,11 +1210,23 @@ def test_create_agent_resumes_pending_plan_and_approves(monkeypatch, tmp_path):
 
     first_agent.run_planned_turn("plan a change")
 
-    stored_plan_messages = SQLiteSessionStore(config.store_path).load_recent_messages(
+    session_store = SQLiteSessionStore(config.store_path)
+    stored_plan_messages = session_store.load_recent_messages(
         first_agent.state.conversation_id,
         limit=10,
     )
     assert stored_plan_messages == [{"role": "user", "content": "plan a change"}]
+    visible_history = TerminalUI(color_enabled=False).history(
+        session_store.list_messages(first_agent.state.conversation_id, limit=10)
+    )
+    assert "Make a small change." in visible_history
+    assert any(
+        "Use /approve to execute this plan" in message.content
+        for message in session_store.list_messages(
+            first_agent.state.conversation_id,
+            limit=10,
+        )
+    )
 
     resumed_llm = FakeLLMClient(
         [
@@ -806,6 +1261,68 @@ def test_create_agent_resumes_pending_plan_and_approves(monkeypatch, tmp_path):
     assert "Make a small change." in approved_prompt
     assert not any("Use /approve to execute this plan" in message["content"] for message in approved_messages)
     assert not any("User approved the plan" in message["content"] for message in approved_messages)
+
+
+def test_plan_display_is_excluded_from_live_execution_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(
+                        {
+                            "summary": "Keep display text out of model history.",
+                            "steps": [
+                                {
+                                    "id": "1",
+                                    "title": "Finish work",
+                                    "description": "Complete the planned work.",
+                                    "status": "pending",
+                                }
+                            ],
+                        }
+                    ),
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The work completed.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "done"}),
+        ]
+    )
+    agent = create_agent(config, lambda _config: llm)
+
+    plan_display = agent.run_planned_turn("plan this work")
+
+    assert "Use /approve to execute this plan" in plan_display
+    assert agent.memory.recent() == [{"role": "user", "content": "plan this work"}]
+    assert agent.approve_plan() == "done"
+    execution_requests = llm.requests[1:]
+    assert execution_requests
+    assert not any(
+        "Use /approve to execute this plan" in message["content"]
+        for request in execution_requests
+        for message in request
+    )
 
 
 def test_resumed_low_history_limit_keeps_turn_anchor_and_tool_result(monkeypatch, tmp_path):
