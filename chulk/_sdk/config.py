@@ -31,7 +31,7 @@ class AgentPreset:
 
     system_prompt: str | None = None
     tools: tuple[object, ...] = field(default_factory=tuple)
-    skills: tuple[object, ...] = field(default_factory=tuple)
+    skills: tuple[object, ...] | None = None
 
     @classmethod
     def chat(cls, *, system_prompt: str | None = None) -> "AgentPreset":

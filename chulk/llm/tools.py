@@ -8,12 +8,15 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-from chulk.core.prompts import JSON_ACTION_PROMPT, format_tools_for_prompt
-from chulk.tools.registry import tool_descriptions_for_prompt
+from chulk.core.prompts import format_action_protocol_for_prompt, format_tools_for_prompt
+from chulk.tools.registry import (
+    PLAN_STEP_UPDATE_TOOL_NAME,
+    PLAN_TOOL_NAME,
+    RESERVED_TOOL_NAMES,
+    tool_descriptions_for_prompt,
+)
 
 
-PLAN_TOOL_NAME = "chulk_propose_plan"
-PLAN_STEP_UPDATE_TOOL_NAME = "chulk_plan_step_update"
 JSON_FALLBACK_WRAPPER = "chulk_action_fallback"
 
 
@@ -37,6 +40,16 @@ def provider_action_tools(
 ) -> list[dict[str, Any]]:
     """Return provider-neutral native tool declarations for Chulk actions."""
     declarations = [_tool_declaration(tool) for tool in tools or []]
+    reserved_names = sorted(
+        declaration["name"]
+        for declaration in declarations
+        if declaration["name"] in RESERVED_TOOL_NAMES
+    )
+    if reserved_names:
+        raise ValueError(
+            "Tool names are reserved for internal Chulk actions: "
+            + ", ".join(reserved_names)
+        )
     availability = planning_tools or PlanningToolAvailability()
     if availability.propose_plan:
         declarations.append(_plan_tool_declaration())
@@ -160,47 +173,94 @@ def with_json_action_prompt(
     messages: list[dict[str, str]],
     *,
     tools: list[object] | None = None,
+    planning_tools: PlanningToolAvailability | None = None,
 ) -> list[dict[str, str]]:
     """Return fallback messages with one JSON protocol and a full safe tool catalog."""
-    tool_catalog = format_tools_for_prompt(tool_descriptions_for_prompt(tools or []))
+    available_tools = list(tools or [])
+    tool_catalog = (
+        format_tools_for_prompt(tool_descriptions_for_prompt(available_tools))
+        if available_tools
+        else None
+    )
+    planning = planning_tools or PlanningToolAvailability()
+    action_protocol = format_action_protocol_for_prompt(
+        native=False,
+        allow_final_answer=not planning.enabled,
+        allow_tool_call=bool(available_tools),
+        allow_plan=planning.propose_plan,
+        allow_plan_step_update=planning.update_plan_step,
+    )
     if not messages:
-        return [{"role": "system", "content": _json_fallback_prompt("", tool_catalog)}]
+        return [
+            {
+                "role": "system",
+                "content": _json_fallback_prompt("", tool_catalog, action_protocol),
+            }
+        ]
     first = messages[0]
     if first.get("role") == "system":
         return [
             {
                 **first,
-                "content": _json_fallback_prompt(first.get("content", ""), tool_catalog),
+                "content": _json_fallback_prompt(
+                    first.get("content", ""),
+                    tool_catalog,
+                    action_protocol,
+                ),
             },
             *messages[1:],
         ]
     return [
-        {"role": "system", "content": _json_fallback_prompt("", tool_catalog)},
+        {
+            "role": "system",
+            "content": _json_fallback_prompt("", tool_catalog, action_protocol),
+        },
         *messages,
     ]
 
 
-def _json_fallback_prompt(content: str, tool_catalog: str) -> str:
+def _json_fallback_prompt(
+    content: str,
+    tool_catalog: str | None,
+    action_protocol: str,
+) -> str:
     if _is_chulk_prompt(content):
-        updated, tools_replaced = _replace_xml_section(content, "tools", tool_catalog)
+        updated = content
+        if tool_catalog is None:
+            updated = _remove_xml_section(updated, "tools")
+        else:
+            updated, tools_replaced = _replace_xml_section(
+                updated,
+                "tools",
+                tool_catalog,
+            )
+            if not tools_replaced:
+                updated = _insert_xml_section_before(
+                    updated,
+                    "action_protocol",
+                    _xml_section("tools", tool_catalog),
+                )
         updated, protocol_replaced = _replace_xml_section(
             updated,
             "action_protocol",
-            JSON_ACTION_PROMPT,
+            action_protocol,
         )
-        if tools_replaced and protocol_replaced:
+        if protocol_replaced:
             return updated.strip()
 
-    updated_wrapper = _replace_json_fallback_wrapper(content, tool_catalog)
+    updated_wrapper = _replace_json_fallback_wrapper(
+        content,
+        tool_catalog,
+        action_protocol,
+    )
     if updated_wrapper is not None:
         return updated_wrapper.strip()
 
-    wrapper_content = "\n".join(
-        [
-            _xml_section("tools", tool_catalog),
-            _xml_section("action_protocol", JSON_ACTION_PROMPT),
-        ]
-    )
+    wrapper_parts = []
+    if tool_catalog is not None:
+        wrapper_parts.append(_xml_section("tools", tool_catalog))
+    wrapper_parts.append(_xml_section("action_protocol", action_protocol))
+    wrapper_content = "\n".join(wrapper_parts)
     wrapper = _xml_section(JSON_FALLBACK_WRAPPER, wrapper_content)
     return "\n\n".join(part for part in [content.strip(), wrapper] if part).strip()
 
@@ -210,7 +270,11 @@ def _is_chulk_prompt(content: str) -> bool:
     return stripped.startswith("<chulk_prompt>") and stripped.endswith("</chulk_prompt>")
 
 
-def _replace_json_fallback_wrapper(content: str, tool_catalog: str) -> str | None:
+def _replace_json_fallback_wrapper(
+    content: str,
+    tool_catalog: str | None,
+    action_protocol: str,
+) -> str | None:
     start_tag = f"<{JSON_FALLBACK_WRAPPER}>"
     end_tag = f"</{JSON_FALLBACK_WRAPPER}>"
     before, separator, remainder = content.partition(start_tag)
@@ -219,15 +283,55 @@ def _replace_json_fallback_wrapper(content: str, tool_catalog: str) -> str | Non
     body, end_separator, after = remainder.partition(end_tag)
     if not end_separator:
         return None
-    updated, tools_replaced = _replace_xml_section(body, "tools", tool_catalog)
+    updated = body
+    if tool_catalog is None:
+        updated = _remove_xml_section(updated, "tools")
+        tools_replaced = True
+    else:
+        updated, tools_replaced = _replace_xml_section(
+            updated,
+            "tools",
+            tool_catalog,
+        )
+        if not tools_replaced:
+            updated = "\n".join(
+                [_xml_section("tools", tool_catalog), updated.strip()]
+            )
+            tools_replaced = True
     updated, protocol_replaced = _replace_xml_section(
         updated,
         "action_protocol",
-        JSON_ACTION_PROMPT,
+        action_protocol,
     )
     if not tools_replaced or not protocol_replaced:
         return None
     return f"{before}{start_tag}{updated}{end_tag}{after}"
+
+
+def _remove_xml_section(content: str, name: str) -> str:
+    start_tag = f"<{name}>"
+    end_tag = f"</{name}>"
+    before, separator, remainder = content.partition(start_tag)
+    if not separator:
+        return content
+    _current, end_separator, after = remainder.partition(end_tag)
+    if not end_separator:
+        return content
+    return "\n".join(part for part in [before.rstrip(), after.lstrip()] if part)
+
+
+def _insert_xml_section_before(
+    content: str,
+    name: str,
+    section: str,
+) -> str:
+    marker = f"<{name}>"
+    before, separator, after = content.partition(marker)
+    if not separator:
+        return content
+    return "\n".join(
+        part for part in [before.rstrip(), section, marker + after] if part
+    )
 
 
 def _replace_xml_section(content: str, name: str, replacement: str) -> tuple[str, bool]:
@@ -320,10 +424,6 @@ def _plan_tool_declaration() -> dict[str, Any]:
                             "id": {"type": "string"},
                             "title": {"type": "string"},
                             "description": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "blocked"],
-                            },
                             "depends_on": {"type": "array", "items": {"type": "string"}},
                             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                             "retry_limit": {"type": "integer", "minimum": 0},
@@ -332,7 +432,6 @@ def _plan_tool_declaration() -> dict[str, Any]:
                             "id",
                             "title",
                             "description",
-                            "status",
                             "depends_on",
                             "acceptance_criteria",
                             "retry_limit",

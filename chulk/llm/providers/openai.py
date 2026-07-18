@@ -242,6 +242,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -270,8 +271,13 @@ class OpenAIResponsesClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
+                    action_schema=action_schema,
                 )
                 fallback.metadata.update(
                     {
@@ -280,13 +286,18 @@ class OpenAIResponsesClient(LLMClient):
                     }
                 )
                 return fallback
-        return self._complete_json_action_response_once(messages, max_output_tokens=max_output_tokens)
+        return self._complete_json_action_response_once(
+            messages,
+            max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
+        )
 
     async def _acomplete_action_response_once(
         self,
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -296,6 +307,7 @@ class OpenAIResponsesClient(LLMClient):
             return await super()._acomplete_action_response_once(
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -323,8 +335,13 @@ class OpenAIResponsesClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
+                    action_schema=action_schema,
                 )
                 fallback.metadata.update(
                     {
@@ -336,6 +353,7 @@ class OpenAIResponsesClient(LLMClient):
         return await self._acomplete_json_action_response_once(
             messages,
             max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
         )
 
     def _complete_json_action_response_once(
@@ -343,6 +361,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         instructions, response_input = split_instructions(messages)
         request: dict[str, Any] = {
@@ -354,7 +373,7 @@ class OpenAIResponsesClient(LLMClient):
                     "type": "json_schema",
                     "name": "agent_action",
                     "strict": True,
-                    "schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                    "schema": action_schema or STRICT_AGENT_ACTION_JSON_SCHEMA,
                 }
             },
         }
@@ -386,6 +405,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         instructions, response_input = split_instructions(messages)
         request: dict[str, Any] = {
@@ -397,7 +417,7 @@ class OpenAIResponsesClient(LLMClient):
                     "type": "json_schema",
                     "name": "agent_action",
                     "strict": True,
-                    "schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                    "schema": action_schema or STRICT_AGENT_ACTION_JSON_SCHEMA,
                 }
             },
         }
@@ -449,7 +469,17 @@ class OpenAIResponsesClient(LLMClient):
             planning_tools=planning_tools,
         )
         if native_tools:
-            request.update({"tools": native_tools, "tool_choice": "auto"})
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": (
+                        "required"
+                        if planning_tools is not None and planning_tools.enabled
+                        else "auto"
+                    ),
+                    "parallel_tool_calls": False,
+                }
+            )
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
@@ -498,7 +528,17 @@ class OpenAIResponsesClient(LLMClient):
             planning_tools=planning_tools,
         )
         if native_tools:
-            request.update({"tools": native_tools, "tool_choice": "auto"})
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": (
+                        "required"
+                        if planning_tools is not None and planning_tools.enabled
+                        else "auto"
+                    ),
+                    "parallel_tool_calls": False,
+                }
+            )
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
@@ -612,6 +652,7 @@ class OpenAIResponsesClient(LLMClient):
                 ],
                 "tools": request["tools"],
                 "tool_choice": "auto",
+                "parallel_tool_calls": False,
             }
             current_request_can_execute_mcp = (
                 approved or _request_can_execute_mcp_without_approval(current_request)
@@ -717,6 +758,7 @@ class OpenAIResponsesClient(LLMClient):
                 ],
                 "tools": request["tools"],
                 "tool_choice": "auto",
+                "parallel_tool_calls": False,
             }
             current_request_can_execute_mcp = (
                 approved or _request_can_execute_mcp_without_approval(current_request)
@@ -877,14 +919,25 @@ def _normalize_openai_native_action_response(
     metadata: dict[str, Any] = {"provider_tool_call": None, "provider_mcp_output": []}
     output = _event_value(response, "output")
     if isinstance(output, list):
+        function_calls = [
+            item for item in output if _event_value(item, "type") == "function_call"
+        ]
         for item in output:
             item_type = _event_value(item, "type")
             if isinstance(item_type, str) and item_type.startswith("mcp_"):
                 metadata["provider_mcp_output"].append(public_value(item))
-                continue
-            if item_type != "function_call":
-                continue
-            name = _event_value(item, "name")
+        if len(function_calls) > 1:
+            raise LLMError(
+                "OpenAI native action response included multiple function calls; "
+                "Chulk accepts one action per turn",
+                provider=provider,
+                model=model,
+                code="action_shape_error",
+                fallback_eligible=not mcp_execution_possible,
+            )
+        if function_calls:
+            function_call = function_calls[0]
+            name = _event_value(function_call, "name")
             if not isinstance(name, str) or not name:
                 raise LLMError(
                     "OpenAI native tool call did not include a function name",
@@ -894,7 +947,9 @@ def _normalize_openai_native_action_response(
                     fallback_eligible=not mcp_execution_possible,
                 )
             try:
-                arguments = parse_native_arguments(_event_value(item, "arguments"))
+                arguments = parse_native_arguments(
+                    _event_value(function_call, "arguments")
+                )
             except ValueError as exc:
                 raise LLMError(
                     str(exc),
@@ -904,7 +959,7 @@ def _normalize_openai_native_action_response(
                     fallback_eligible=not mcp_execution_possible,
                 ) from exc
             payload = native_tool_action_payload(name, arguments)
-            metadata["provider_tool_call"] = public_value(item)
+            metadata["provider_tool_call"] = public_value(function_call)
             return action_payload_json(payload), metadata
 
     output_text = _event_value(response, "output_text")

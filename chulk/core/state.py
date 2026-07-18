@@ -11,6 +11,7 @@ from chulk.core.context import TurnContextSection
 
 
 PLAN_STEP_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+MAX_PLAN_PROMPT_EVIDENCE_CHARS = 400
 
 
 def utc_now() -> str:
@@ -218,7 +219,16 @@ class Plan:
                 )
             if step.evidence:
                 latest = step.evidence[-1]
-                lines.append(f"  Evidence: {latest.content}")
+                source = latest.tool_name or "plan_step_update"
+                if latest.tool_call_iteration is not None:
+                    source = f"{source} call #{latest.tool_call_iteration}"
+                preview = _prompt_preview(
+                    latest.content,
+                    max_chars=MAX_PLAN_PROMPT_EVIDENCE_CHARS,
+                )
+                lines.append(
+                    f"  Evidence: {len(step.evidence)} record(s); latest from {source}: {preview}"
+                )
             if step.blocked_reason:
                 lines.append(f"  Blocked reason: {step.blocked_reason}")
         active = self.active_step()
@@ -250,6 +260,17 @@ class Plan:
             "rejected_at": self.rejected_at,
             "status": self.status(),
         }
+
+
+def _prompt_preview(text: str, *, max_chars: int) -> str:
+    """Return a compact single-line preview for repeated prompt state."""
+    clean_text = " ".join(text.split())
+    if len(clean_text) <= max_chars:
+        return clean_text
+    suffix = "... [truncated; see recorded observation]"
+    if max_chars <= len(suffix):
+        return clean_text[:max_chars]
+    return clean_text[: max_chars - len(suffix)].rstrip() + suffix
 
 
 @dataclass

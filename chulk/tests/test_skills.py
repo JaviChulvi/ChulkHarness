@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from chulk.core.prompts import format_skills_for_prompt
 from chulk.skills import Skill, SkillRegistry, bundled_skills_dir
 
 
@@ -57,6 +58,13 @@ def test_skill_registry_supports_simple_front_matter(tmp_path):
     assert skill.description == "Python implementation workflow."
     assert {"python", "pytest", "refactor"} <= set(skill.keywords)
     assert skill.metadata == {"owner": "core"}
+    assert registry.load_content("python-coding") == "# Python Coding"
+
+    selected = registry.load_selected_skills("python pytest")
+    prompt = format_skills_for_prompt(selected)
+
+    assert prompt.count("Python implementation workflow.") == 1
+    assert prompt.count("# Python Coding") == 1
 
 
 def test_skill_registry_selects_and_lazy_loads_relevant_skill(tmp_path):

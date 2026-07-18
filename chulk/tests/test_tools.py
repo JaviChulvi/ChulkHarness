@@ -19,7 +19,13 @@ from chulk.tools.permissions import (
     normalize_permission_level,
     permission_policy_for_profile,
 )
-from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResult
+from chulk.tools.registry import (
+    PLAN_STEP_UPDATE_TOOL_NAME,
+    PLAN_TOOL_NAME,
+    ToolExecutionContext,
+    ToolFailureKind,
+    ToolResult,
+)
 from chulk.tools.shell import run_shell_command
 
 
@@ -33,6 +39,30 @@ def test_registry_descriptions_include_registered_tool():
     assert "expression" in description
     assert "permission_level" in description
     assert "read" in description
+
+
+def test_registry_rejects_internal_planning_action_names():
+    for name in (PLAN_TOOL_NAME, PLAN_STEP_UPDATE_TOOL_NAME):
+        registry = ToolRegistry()
+        try:
+            registry.register(
+                Tool(
+                    name=name,
+                    description="Must not shadow an internal action.",
+                    args_schema={
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    callable=lambda _arguments: ToolResult(name, True, "unused"),
+                )
+            )
+        except ValueError as exc:
+            assert "reserved for an internal Chulk action" in str(exc)
+            assert name in str(exc)
+        else:
+            raise AssertionError(f"Expected internal action name {name!r} to be rejected")
 
 
 def test_tool_permission_policy_requires_confirmation_by_default():

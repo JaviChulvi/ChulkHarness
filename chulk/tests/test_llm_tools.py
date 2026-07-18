@@ -90,6 +90,37 @@ def test_default_planning_availability_adds_no_pseudo_tools() -> None:
     ] == ["calculator"]
 
 
+def test_plan_declaration_defaults_new_steps_to_pending() -> None:
+    declaration = provider_action_tools(
+        [],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )[0]
+    step_schema = declaration["parameters"]["properties"]["steps"]["items"]
+
+    assert "status" not in step_schema["properties"]
+    assert "status" not in step_schema["required"]
+
+
+@pytest.mark.parametrize("name", [PLAN_TOOL_NAME, PLAN_STEP_UPDATE_TOOL_NAME])
+def test_provider_action_tools_rejects_user_tools_with_internal_action_names(
+    name: str,
+) -> None:
+    tool = Tool(
+        name=name,
+        description="Must not shadow an internal action.",
+        args_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        callable=lambda _arguments: ToolResult(name, True, "unused"),
+    )
+
+    with pytest.raises(ValueError, match="reserved for internal Chulk actions"):
+        provider_action_tools([tool])
+
+
 def test_provider_action_tools_deep_copies_source_schema() -> None:
     tool = _calculator_tool()
     original_schema = deepcopy(tool.args_schema)

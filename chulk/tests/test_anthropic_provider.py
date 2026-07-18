@@ -216,6 +216,10 @@ def test_anthropic_planning_policy_enables_native_transport_without_regular_tool
     assert [item["name"] for item in fake.messages.calls[0]["tools"]] == [
         PLAN_TOOL_NAME
     ]
+    assert fake.messages.calls[0]["tool_choice"] == {
+        "type": "any",
+        "disable_parallel_tool_use": True,
+    }
     assert result.metadata["action_transport"] == "provider_native"
 
 

@@ -10,7 +10,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
-from chulk.core.prompts import JSON_REPAIR_PROMPT
+from chulk.core.prompts import format_action_protocol_for_prompt
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggregate_usage, estimate_usage
@@ -239,6 +239,7 @@ class LLMClient:
         *,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -250,12 +251,19 @@ class LLMClient:
         if max_output_tokens is not None and max_output_tokens < 1:
             raise ValueError("max_output_tokens must be greater than zero")
 
-        action_messages = list(messages)
+        base_action_messages = list(messages)
+        action_messages = list(base_action_messages)
+        has_action_protocol = _messages_include_action_protocol(base_action_messages)
+        repair_protocol = _repair_action_protocol(
+            tools=tools,
+            planning_tools=planning_tools,
+        )
         errors: list[str] = []
         usage_records: list[LLMUsage | None] = []
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
+                "action_schema": action_schema,
                 "tools": tools,
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
@@ -294,10 +302,14 @@ class LLMClient:
                         model=_model_name(self),
                     ) from exc
                 action_messages = [
-                    *action_messages,
+                    *base_action_messages,
                     {
                         "role": "user",
-                        "content": _format_json_repair_prompt(response.content, str(exc)),
+                        "content": _format_json_repair_prompt(
+                            response.content,
+                            str(exc),
+                            protocol=(None if has_action_protocol else repair_protocol),
+                        ),
                     },
                 ]
 
@@ -313,6 +325,7 @@ class LLMClient:
         *,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -325,6 +338,7 @@ class LLMClient:
         ):
             compatibility_kwargs: dict[str, Any] = {
                 "max_repair_attempts": max_repair_attempts,
+                "action_schema": action_schema,
                 "tools": tools,
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
@@ -343,12 +357,19 @@ class LLMClient:
         if max_output_tokens is not None and max_output_tokens < 1:
             raise ValueError("max_output_tokens must be greater than zero")
 
-        action_messages = list(messages)
+        base_action_messages = list(messages)
+        action_messages = list(base_action_messages)
+        has_action_protocol = _messages_include_action_protocol(base_action_messages)
+        repair_protocol = _repair_action_protocol(
+            tools=tools,
+            planning_tools=planning_tools,
+        )
         errors: list[str] = []
         usage_records: list[LLMUsage | None] = []
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
+                "action_schema": action_schema,
                 "tools": tools,
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
@@ -387,10 +408,14 @@ class LLMClient:
                         model=_model_name(self),
                     ) from exc
                 action_messages = [
-                    *action_messages,
+                    *base_action_messages,
                     {
                         "role": "user",
-                        "content": _format_json_repair_prompt(response.content, str(exc)),
+                        "content": _format_json_repair_prompt(
+                            response.content,
+                            str(exc),
+                            protocol=(None if has_action_protocol else repair_protocol),
+                        ),
                     },
                 ]
 
@@ -409,6 +434,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -424,6 +450,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -431,6 +458,7 @@ class LLMClient:
     ) -> LLMResponse:
         """Compatibility hook for sync-only custom clients."""
         kwargs: dict[str, Any] = {
+            "action_schema": action_schema,
             "tools": tools,
             "planning_tools": planning_tools,
             "hosted_mcp_servers": hosted_mcp_servers,
@@ -650,14 +678,51 @@ def _has_connection_class(class_names: set[str]) -> bool:
     return bool(class_names & known_names) or any(name.endswith("ConnectionError") for name in class_names)
 
 
-def _format_json_repair_prompt(raw_response: str, error: str) -> str:
+def _format_json_repair_prompt(
+    raw_response: str,
+    error: str,
+    *,
+    protocol: str | None,
+) -> str:
+    instructions = (
+        "Your previous response could not be parsed. Return exactly one valid JSON object "
+        "using this action protocol:\n" + protocol
+        if protocol is not None
+        else (
+            "Your previous response could not be parsed. Correct it using the action protocol "
+            "in the system message and return only one valid action."
+        )
+    )
     return "\n".join(
         [
-            JSON_REPAIR_PROMPT,
+            instructions,
             f"Parse error: {error}",
             "Previous invalid response:",
             raw_response[:2000],
         ]
+    )
+
+
+def _messages_include_action_protocol(messages: list[dict[str, str]]) -> bool:
+    return any(
+        message.get("role") == "system"
+        and "<response_protocol>" in message.get("content", "")
+        for message in messages
+    )
+
+
+def _repair_action_protocol(
+    *,
+    tools: list[object] | None,
+    planning_tools: PlanningToolAvailability | None,
+) -> str:
+    planning = planning_tools or PlanningToolAvailability()
+    return format_action_protocol_for_prompt(
+        native=False,
+        allow_final_answer=not planning.enabled,
+        allow_tool_call=bool(tools),
+        allow_plan=planning.propose_plan,
+        allow_plan_step_update=planning.update_plan_step,
     )
 
 

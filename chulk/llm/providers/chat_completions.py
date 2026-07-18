@@ -228,11 +228,16 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
+        self._reject_hosted_mcp_arguments(
+            hosted_mcp_servers=hosted_mcp_servers,
+            mcp_approval_callback=mcp_approval_callback,
+        )
         if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return self._complete_native_action_response_once(
@@ -245,7 +250,11 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -262,15 +271,21 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
+        self._reject_hosted_mcp_arguments(
+            hosted_mcp_servers=hosted_mcp_servers,
+            mcp_approval_callback=mcp_approval_callback,
+        )
         if self._async_client is None:
             return await super()._acomplete_action_response_once(
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -288,7 +303,11 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -302,6 +321,26 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             messages,
             max_output_tokens=max_output_tokens,
         )
+
+    def _reject_hosted_mcp_arguments(
+        self,
+        *,
+        hosted_mcp_servers: list[object] | tuple[object, ...] | None,
+        mcp_approval_callback: Callable[[dict[str, Any]], bool] | None,
+    ) -> None:
+        unsupported: list[str] = []
+        if hosted_mcp_servers:
+            unsupported.append("hosted_mcp_servers")
+        if mcp_approval_callback is not None:
+            unsupported.append("mcp_approval_callback")
+        if unsupported:
+            raise LLMError(
+                f"{self.profile.display_name} Chat Completions does not support "
+                + " or ".join(unsupported),
+                provider=self.provider,
+                model=self.model,
+                code="unsupported_feature",
+            )
 
     def _complete_json_action_response_once(
         self,
@@ -347,7 +386,16 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             planning_tools=planning_tools,
         )
         if native_tools:
-            request.update({"tools": native_tools, "tool_choice": "auto"})
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": (
+                        "required"
+                        if planning_tools is not None and planning_tools.enabled
+                        else "auto"
+                    ),
+                }
+            )
         response = self._create(request, operation="native tool action request", action_transport=True)
         message = _response_message(
             response,
@@ -384,7 +432,16 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             planning_tools=planning_tools,
         )
         if native_tools:
-            request.update({"tools": native_tools, "tool_choice": "auto"})
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": (
+                        "required"
+                        if planning_tools is not None and planning_tools.enabled
+                        else "auto"
+                    ),
+                }
+            )
         response = await self._acreate(
             request,
             operation="native tool action request",

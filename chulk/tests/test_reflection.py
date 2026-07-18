@@ -2,7 +2,12 @@
 
 import json
 
-from chulk.core.reflection import ReflectionParseError, parse_reflection_response
+from chulk.core.reflection import (
+    ReflectionParseError,
+    build_reflection_messages,
+    parse_reflection_response,
+)
+from chulk.core.state import MAX_PLAN_PROMPT_EVIDENCE_CHARS, Plan, PlanStep, TurnState
 
 
 def test_parse_reflection_response_accepts_json_fence():
@@ -24,3 +29,42 @@ def test_parse_reflection_response_requires_feedback_when_rejected():
         assert "feedback" in str(exc)
     else:
         raise AssertionError("Expected rejected reflection without feedback to fail")
+
+
+def test_reflection_references_plan_evidence_without_copying_its_content() -> None:
+    evidence = "RAW_PLAN_EVIDENCE_MARKER " + ("x" * 4000)
+    step = PlanStep(id="1", title="Implement change", description="Update the behavior.")
+    step.add_evidence(evidence, tool_name="lookup", tool_call_iteration=2)
+    step.mark("in_progress")
+    plan = Plan(summary="Make the requested change.", steps=[step])
+    plan.approve()
+    turn = TurnState(
+        user_message="Please make the change.",
+        active_plan=plan,
+        plan_approved=True,
+    )
+
+    messages = build_reflection_messages(turn, "The change is complete.")
+    reflection_request = messages[-1]["content"]
+
+    assert "RAW_PLAN_EVIDENCE_MARKER" not in reflection_request
+    assert "evidence_records=1" in reflection_request
+    assert "evidence_sources=lookup" in reflection_request
+    assert "Make the requested change." in reflection_request
+
+
+def test_plan_prompt_bounds_latest_evidence_preview() -> None:
+    evidence = "EVIDENCE_PREVIEW_MARKER " + ("x" * 4000)
+    step = PlanStep(id="1", title="Implement change", description="Update the behavior.")
+    step.add_evidence(evidence, tool_name="lookup", tool_call_iteration=2)
+    plan = Plan(summary="Make the requested change.", steps=[step])
+
+    prompt = plan.to_prompt()
+    evidence_line = next(line for line in prompt.splitlines() if line.startswith("  Evidence:"))
+    preview = evidence_line.rsplit(": ", maxsplit=1)[-1]
+
+    assert "Evidence: 1 record(s); latest from lookup call #2:" in evidence_line
+    assert "EVIDENCE_PREVIEW_MARKER" in preview
+    assert len(preview) <= MAX_PLAN_PROMPT_EVIDENCE_CHARS
+    assert evidence not in prompt
+    assert preview.endswith("... [truncated; see recorded observation]")

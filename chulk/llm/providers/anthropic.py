@@ -244,6 +244,7 @@ class AnthropicMessagesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -269,7 +270,11 @@ class AnthropicMessagesClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -286,6 +291,7 @@ class AnthropicMessagesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -296,6 +302,7 @@ class AnthropicMessagesClient(LLMClient):
             return await super()._acomplete_action_response_once(
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -319,7 +326,11 @@ class AnthropicMessagesClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -391,7 +402,14 @@ class AnthropicMessagesClient(LLMClient):
             request.update(
                 {
                     "tools": native_tools,
-                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                    "tool_choice": {
+                        "type": (
+                            "any"
+                            if planning_tools is not None and planning_tools.enabled
+                            else "auto"
+                        ),
+                        "disable_parallel_tool_use": True,
+                    },
                 }
             )
         response = self._create(
@@ -430,7 +448,14 @@ class AnthropicMessagesClient(LLMClient):
             request.update(
                 {
                     "tools": native_tools,
-                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                    "tool_choice": {
+                        "type": (
+                            "any"
+                            if planning_tools is not None and planning_tools.enabled
+                            else "auto"
+                        ),
+                        "disable_parallel_tool_use": True,
+                    },
                 }
             )
         response = await self._acreate(

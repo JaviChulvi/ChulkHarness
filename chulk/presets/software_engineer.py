@@ -6,7 +6,6 @@ from importlib.resources import files
 
 from chulk.api import AgentPreset
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
-import chulk.skills as skills
 import chulk.tools as tools
 
 
@@ -25,7 +24,7 @@ def software_engineer() -> AgentPreset:
     return AgentPreset(
         system_prompt=SOFTWARE_ENGINEER_SYSTEM_PROMPT,
         tools=tuple(tools.default_software_engineer()),
-        skills=(skills.files, skills.shell, skills.memory),
+        skills=None,
     )
 
 

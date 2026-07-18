@@ -569,7 +569,7 @@ def test_main_plan_prefix_creates_one_shot_pending_plan(monkeypatch, tmp_path, c
     assert ".. plan waiting for approval - 1 step(s)" in output
     assert "Use /approve to execute this plan or /reject to cancel it." in output
     assert "Model proposed a new plan after execution had already been approved." not in output
-    assert "Before proposing the plan, you may call only these read-only reconnaissance tools" in first_prompt
+    assert "Before proposing the plan, you may call only these read-only tools" in first_prompt
     assert "Planning: approved for this turn." in approved_prompt
     assert "Subagent design approved." in output
 
@@ -917,7 +917,8 @@ def test_create_cli_llm_supports_local_provider_specs(tmp_path):
     ]
 
 
-def test_main_runs_one_message_with_fake_llm(capsys):
+def test_main_runs_one_message_with_fake_llm(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     exit_code = main(["--once", "hello"], llm_client_factory=fake_factory)
 
     output = capsys.readouterr().out
@@ -1152,7 +1153,7 @@ def test_main_exec_does_not_treat_policy_denial_as_approval_required(monkeypatch
     assert payload["tool_calls"][0]["error"] == "permission_denied"
 
 
-def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp_path, capsys):
+def test_main_injects_only_the_selected_skill(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     skill_dir = tmp_path / ".chulk" / "skills" / "shell"
     skill_dir.mkdir(parents=True)
@@ -1166,16 +1167,15 @@ def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp
             system_prompt = messages[0]["content"]
             xml_sections_present = (
                 system_prompt.startswith("<chulk_prompt>")
-                and "<available_skills>" in system_prompt
-                and "</available_skills>" in system_prompt
+                and "<available_skills>" not in system_prompt
                 and "<skills>" in system_prompt
                 and "</skills>" in system_prompt
                 and system_prompt.endswith("</chulk_prompt>")
             )
-            catalog_visible = "- shell: Use this skill when command execution is needed." in system_prompt
-            skill_loaded = "Skill: shell" in system_prompt and "# Shell Skill" in system_prompt
-            if xml_sections_present and catalog_visible and skill_loaded:
-                return json.dumps({"type": "final_answer", "content": "shell skill listed and loaded"})
+            selected_once = system_prompt.count("Use this skill when command execution is needed.") == 1
+            skill_loaded = "<name>shell</name>" in system_prompt and "# Shell Skill" in system_prompt
+            if xml_sections_present and selected_once and skill_loaded:
+                return json.dumps({"type": "final_answer", "content": "shell skill loaded once"})
             return json.dumps({"type": "final_answer", "content": "missing skill"})
 
     def factory(_config):
@@ -1186,7 +1186,7 @@ def test_main_lists_available_skills_and_injects_selected_skill(monkeypatch, tmp
     output = capsys.readouterr().out
 
     assert exit_code == 0
-    assert output.strip() == "shell skill listed and loaded"
+    assert output.strip() == "shell skill loaded once"
 
 
 def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):
@@ -1210,7 +1210,7 @@ def test_main_writes_full_model_request_trace(monkeypatch, tmp_path, capsys):
     assert output.strip() == "hello from fake llm"
     assert request_payload["truncated"] is False
     assert request_payload["messages"][0]["role"] == "system"
-    assert "Skill: shell" in request_payload["messages"][0]["content"]
+    assert "<name>shell</name>" in request_payload["messages"][0]["content"]
     assert request_payload["messages"][-1]["content"] == "run a shell command"
 
 
