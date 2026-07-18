@@ -493,6 +493,7 @@ class OpenAIResponsesClient(LLMClient):
             provider=self.provider,
             model=self.model,
             mcp_execution_possible=mcp_execution_possible,
+            planning_action_required=bool(planning_tools and planning_tools.enabled),
         )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
@@ -552,6 +553,7 @@ class OpenAIResponsesClient(LLMClient):
             provider=self.provider,
             model=self.model,
             mcp_execution_possible=mcp_execution_possible,
+            planning_action_required=bool(planning_tools and planning_tools.enabled),
         )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
@@ -640,25 +642,15 @@ class OpenAIResponsesClient(LLMClient):
                 model=self.model,
                 fallback_eligible=not mcp_execution_possible,
             )
-            current_request = {
-                "model": self.model,
-                "previous_response_id": previous_response_id,
-                "input": [
-                    {
-                        "type": "mcp_approval_response",
-                        "approval_request_id": approval_id,
-                        "approve": approved,
-                    }
-                ],
-                "tools": request["tools"],
-                "tool_choice": "auto",
-                "parallel_tool_calls": False,
-            }
+            current_request = _mcp_approval_continuation_request(
+                request,
+                previous_response_id=previous_response_id,
+                approval_id=approval_id,
+                approved=approved,
+            )
             current_request_can_execute_mcp = (
                 approved or _request_can_execute_mcp_without_approval(current_request)
             )
-            if request.get("max_output_tokens") is not None:
-                current_request["max_output_tokens"] = request["max_output_tokens"]
 
         raise LLMError(
             "OpenAI MCP approval loop exceeded the maximum continuation count",
@@ -746,25 +738,15 @@ class OpenAIResponsesClient(LLMClient):
                 model=self.model,
                 fallback_eligible=not mcp_execution_possible,
             )
-            current_request = {
-                "model": self.model,
-                "previous_response_id": previous_response_id,
-                "input": [
-                    {
-                        "type": "mcp_approval_response",
-                        "approval_request_id": approval_id,
-                        "approve": approved,
-                    }
-                ],
-                "tools": request["tools"],
-                "tool_choice": "auto",
-                "parallel_tool_calls": False,
-            }
+            current_request = _mcp_approval_continuation_request(
+                request,
+                previous_response_id=previous_response_id,
+                approval_id=approval_id,
+                approved=approved,
+            )
             current_request_can_execute_mcp = (
                 approved or _request_can_execute_mcp_without_approval(current_request)
             )
-            if request.get("max_output_tokens") is not None:
-                current_request["max_output_tokens"] = request["max_output_tokens"]
 
         raise LLMError(
             "OpenAI MCP approval loop exceeded the maximum continuation count",
@@ -883,6 +865,41 @@ def _request_can_execute_mcp_without_approval(request: dict[str, Any]) -> bool:
     )
 
 
+def _mcp_approval_continuation_request(
+    request: dict[str, Any],
+    *,
+    previous_response_id: str,
+    approval_id: str,
+    approved: bool,
+) -> dict[str, Any]:
+    """Continue an approval turn without weakening its action contract."""
+    continuation: dict[str, Any] = {
+        key: request[key]
+        for key in (
+            "model",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "max_output_tokens",
+        )
+        if key in request
+    }
+    continuation.update(
+        {
+            "previous_response_id": previous_response_id,
+            "input": [
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": approval_id,
+                    "approve": approved,
+                }
+            ],
+        }
+    )
+    return continuation
+
+
 def _request_max_output_tokens(model_limit: int | None, request_limit: int | None) -> int | None:
     if model_limit is None:
         return _validate_max_output_tokens(request_limit)
@@ -915,6 +932,7 @@ def _normalize_openai_native_action_response(
     provider: str,
     model: str,
     mcp_execution_possible: bool = False,
+    planning_action_required: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     metadata: dict[str, Any] = {"provider_tool_call": None, "provider_mcp_output": []}
     output = _event_value(response, "output")
@@ -964,6 +982,14 @@ def _normalize_openai_native_action_response(
 
     output_text = _event_value(response, "output_text")
     if isinstance(output_text, str) and output_text.strip():
+        if planning_action_required:
+            raise LLMError(
+                "OpenAI native action response returned text while a planning action was required",
+                provider=provider,
+                model=model,
+                code="action_shape_error",
+                fallback_eligible=not mcp_execution_possible,
+            )
         return action_payload_json(native_final_answer_payload(output_text.strip())), metadata
     raise LLMError(
         "OpenAI native action response did not include a function call or output_text",

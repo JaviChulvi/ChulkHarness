@@ -10,6 +10,7 @@ from chulk.core.actions import (
     ToolCallAction,
     action_json_schema_for,
 )
+from chulk.core.state import Plan, PlanStep
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
     FallbackChain,
@@ -605,6 +606,67 @@ def test_openai_responses_client_continues_after_mcp_approval_request():
     ]
 
 
+def test_openai_mcp_approval_continuation_keeps_planning_contract_and_fails_closed_on_text():
+    fake_client = FakeOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                id="resp_2",
+                output_text="phase-illegal final text",
+                usage=None,
+                output=[],
+            ),
+        ]
+    )
+    primary = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "must not run"})]
+    )
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    try:
+        fallback.complete_action(
+            [
+                {"role": "system", "content": "Finish with a plan step update."},
+                {"role": "user", "content": "Search the docs and update the step."},
+            ],
+            planning_tools=PlanningToolAvailability(update_plan_step=True),
+            hosted_mcp_servers=[server],
+            mcp_approval_callback=lambda _approval: True,
+        )
+    except LLMError as exc:
+        assert exc.code == "action_shape_error"
+        assert exc.retryable is False
+        assert exc.fallback_eligible is False
+        assert "planning action was required" in str(exc)
+    else:
+        raise AssertionError("Expected post-MCP text to fail closed during plan execution")
+
+    continuation = fake_client.responses.calls[1]
+    assert continuation["tool_choice"] == "required"
+    assert continuation["instructions"] == "Finish with a plan step update."
+    assert len(fallback.last_attempts) == 1
+    assert secondary.requests == []
+
+
 def test_openai_hosted_mcp_approval_requires_callback():
     fake_client = FakeOpenAIClient(
         responses=[
@@ -1047,6 +1109,43 @@ def test_fallback_chain_honors_a_custom_public_complete_action():
     assert result.action == FinalAnswerAction(type="final_answer", content="custom action")
     assert provider.planning_tools == policy
     assert result.raw_response == '{"type":"custom"}'
+
+
+def test_fallback_chain_serializes_custom_plan_action_as_a_strict_proposal():
+    plan = Plan(
+        summary="Inspect and update the file.",
+        steps=[
+            PlanStep(
+                id="inspect",
+                title="Inspect",
+                description="Read the current implementation.",
+                acceptance_criteria=["The implementation is understood."],
+            ),
+            PlanStep(
+                id="update",
+                title="Update",
+                description="Apply the requested change.",
+                depends_on=["inspect"],
+                acceptance_criteria=["The requested behavior is implemented."],
+                retry_limit=1,
+            ),
+        ],
+    )
+
+    class PublicPlanActionClient(LLMClient):
+        def complete_action(self, messages, **kwargs):
+            return LLMActionResult(
+                action=PlanAction(type="plan", plan=plan),
+                raw_response='{"type":"custom-plan"}',
+            )
+
+    result = FallbackChain([PublicPlanActionClient()]).complete_action(
+        [{"role": "user", "content": "Plan this"}],
+        action_schema=action_json_schema_for(["plan"]),
+    )
+
+    assert result.action == PlanAction(type="plan", plan=plan)
+    assert result.raw_response == '{"type":"custom-plan"}'
 
 
 def test_custom_public_action_provider_does_not_collapse_other_provider_repairs():

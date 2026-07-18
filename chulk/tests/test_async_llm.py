@@ -16,7 +16,7 @@ from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
 from chulk.llm.providers.gemini import GeminiGenerateContentClient
 from chulk.llm.providers.openai import OpenAIResponsesClient
 from chulk.llm.public import FallbackChain
-from chulk.llm.tools import PLAN_TOOL_NAME
+from chulk.llm.tools import PLAN_TOOL_NAME, PlanningToolAvailability
 from chulk.llm import public as public_llm
 from chulk.llm.usage import LLMResponse, LLMUsage
 from chulk.mcp import MCPServerConfig
@@ -271,6 +271,69 @@ async def test_openai_malformed_hosted_mcp_approval_advances_async_fallback() ->
     assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
     assert fallback.last_attempts[0].error_code == "invalid_response"
     assert len(secondary.async_messages) == 1
+    assert sync.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_mcp_approval_continuation_keeps_async_planning_contract_and_fails_closed_on_text() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                id="resp_2",
+                output_text="phase-illegal final text",
+                usage=None,
+                output=[],
+            ),
+        ]
+    )
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=SimpleNamespace(responses=async_endpoint),
+    )
+    secondary = _AsyncActionScript([_final_answer("must not run")])
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await fallback.acomplete_action(
+            [
+                {"role": "system", "content": "Finish with a plan step update."},
+                {"role": "user", "content": "Search the docs and update the step."},
+            ],
+            planning_tools=PlanningToolAvailability(update_plan_step=True),
+            hosted_mcp_servers=[server],
+            mcp_approval_callback=lambda _approval: True,
+        )
+
+    assert raised.value.code == "action_shape_error"
+    assert raised.value.retryable is False
+    assert raised.value.fallback_eligible is False
+    assert "planning action was required" in str(raised.value)
+    continuation = async_endpoint.calls[1]
+    assert continuation["tool_choice"] == "required"
+    assert continuation["instructions"] == "Finish with a plan step update."
+    assert len(fallback.last_attempts) == 1
+    assert secondary.async_messages == []
     assert sync.calls == 0
 
 
