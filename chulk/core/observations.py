@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from typing import Any
 
 from chulk.tools.output import TextPreview, preview_text
@@ -10,6 +11,58 @@ from chulk.tools.registry import ToolResult
 
 
 ArtifactWriter = Callable[[str, str], dict[str, Any] | None]
+MAX_TOOL_ACTION_CONTEXT_CHARS = 2000
+
+
+def format_tool_action_context(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    phase: str,
+    iteration: int,
+    plan_step_id: str | None,
+    max_chars: int = MAX_TOOL_ACTION_CONTEXT_CHARS,
+) -> tuple[str, dict[str, Any]]:
+    """Format a bounded, provider-neutral record of an executed tool action."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be greater than zero")
+
+    arguments_json = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    argument_limit = max(1, min(len(arguments_json), max_chars))
+    context = ""
+    argument_preview = preview_text(arguments_json, argument_limit)
+    while True:
+        argument_preview = preview_text(arguments_json, argument_limit)
+        payload = {
+            "type": "tool_call",
+            "tool_name": tool_name,
+            "arguments_json": argument_preview.text,
+            "arguments_truncated": argument_preview.truncated,
+            "phase": phase,
+            "iteration": iteration,
+            "plan_step_id": plan_step_id,
+        }
+        context = (
+            "<executed_tool_action>\n"
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n</executed_tool_action>"
+        )
+        if len(context) <= max_chars or argument_limit == 1:
+            break
+        overflow = len(context) - max_chars
+        argument_limit = max(1, argument_limit - overflow - 1)
+
+    context_preview = preview_text(context, max_chars)
+    return context_preview.text, {
+        "arguments": argument_preview.to_metadata(),
+        "context": context_preview.to_metadata(),
+    }
 
 
 def format_tool_observation(

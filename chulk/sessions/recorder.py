@@ -88,45 +88,48 @@ class SessionRecorder:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
             if turn_id is None:
                 return
-            count = self._observation_counts.get(turn_id, 0) + 1
-            self._observation_counts[turn_id] = count
+            payload_index = payload.get("observation_index")
+            if (
+                isinstance(payload_index, int)
+                and not isinstance(payload_index, bool)
+                and payload_index > 0
+            ):
+                count = payload_index
+            else:
+                previous_count = self._observation_counts.get(turn_id)
+                if previous_count is None:
+                    previous_count = self.store.max_observation_index(
+                        self.conversation_id,
+                        turn_id,
+                    )
+                count = previous_count + 1
             observation = str(payload.get("observation") or "")
             tool_name = str(payload.get("tool_name") or "tool")
-            key = f"{turn_id}:observation:{count}"
-            self.store.save_observation(
+            action_context = payload.get("tool_action_context")
+            turn = payload.get("turn")
+            self.store.save_tool_observation_bundle(
                 self.conversation_id,
                 turn_id=turn_id,
+                observation_index=count,
                 tool_name=tool_name,
                 content=observation,
                 output_metadata=_safe_dict(payload.get("output_metadata")),
-                observation_key=key,
+                action_context=action_context if isinstance(action_context, str) else None,
+                turn=turn if isinstance(turn, dict) else None,
             )
-            self.store.save_message(
-                self.conversation_id,
-                turn_id=turn_id,
-                role="observation",
-                content=observation,
-                message_key=key,
-                metadata={"tool_name": tool_name},
+            self._observation_counts[turn_id] = max(
+                count,
+                self._observation_counts.get(turn_id, 0),
             )
             return
 
         if event_type == TraceEvent.PLAN_CREATED:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
-            plan = _safe_dict(payload.get("plan"))
             turn = payload.get("turn")
             if turn_id is not None:
                 self.current_turn_id = turn_id
             if isinstance(turn, dict):
                 self.store.save_turn_snapshot(self.conversation_id, turn)
-            self.store.save_message(
-                self.conversation_id,
-                turn_id=turn_id,
-                role="assistant",
-                content=_plan_response_text(plan),
-                message_key=f"{turn_id}:assistant:plan" if turn_id else None,
-                metadata={"event": event_type},
-            )
             self.store.update_conversation_status(self.conversation_id, "waiting_for_approval")
             return
 
@@ -134,15 +137,23 @@ class SessionRecorder:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
             if turn_id is not None:
                 self.current_turn_id = turn_id
-            self.store.save_message(
-                self.conversation_id,
-                turn_id=turn_id,
-                role="user",
-                content="User approved the plan. Continue executing the approved plan.",
-                message_key=f"{turn_id}:user:plan_approved" if turn_id else None,
-                metadata={"event": event_type, "internal": True},
-            )
+            turn = payload.get("turn")
+            if isinstance(turn, dict):
+                self.store.save_turn_snapshot(self.conversation_id, turn)
             self.store.update_conversation_status(self.conversation_id, "active")
+            return
+
+        if event_type in {
+            TraceEvent.PLAN_STEP_STARTED,
+            TraceEvent.PLAN_STEP_COMPLETED,
+            TraceEvent.PLAN_STEP_BLOCKED,
+        }:
+            turn_id = _payload_turn_id(payload, self.current_turn_id)
+            if turn_id is not None:
+                self.current_turn_id = turn_id
+            turn = payload.get("turn")
+            if isinstance(turn, dict):
+                self.store.save_turn_snapshot(self.conversation_id, turn)
             return
 
         if event_type == TraceEvent.PLAN_REJECTED:
@@ -207,18 +218,3 @@ def _payload_turn_id(payload: dict[str, Any], fallback: str | None) -> str | Non
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _plan_response_text(plan: dict[str, Any]) -> str:
-    summary = str(plan.get("summary") or "")
-    raw_steps = plan.get("steps")
-    steps = raw_steps if isinstance(raw_steps, list) else []
-    lines = ["Plan", f"  summary  {summary}", "  steps"]
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        status = step.get("status") or "pending"
-        title = step.get("title") or "Untitled step"
-        description = step.get("description") or ""
-        lines.append(f"  - [{status}] {title}: {description}")
-    return "\n".join(lines) + "\n\nUse /approve to execute this plan or /reject to cancel it."

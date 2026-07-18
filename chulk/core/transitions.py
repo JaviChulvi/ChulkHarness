@@ -61,8 +61,7 @@ class ActionLoopSnapshot:
     approved_plan_incomplete: bool = False
     active_plan_step_id: str | None = None
     planning_tool_names: frozenset[str] = field(default_factory=frozenset)
-    planning_tool_call_count: int = 0
-    execution_tool_call_count: int = 0
+    tool_call_count: int = 0
     max_tool_calls_per_turn: int = 5
     reflection_count: int = 0
     max_reflection_attempts: int = 0
@@ -382,12 +381,7 @@ def _reduce_tool_call(
             "Return a plan action or retry with one of the allowed tools."
         )
 
-    tool_call_count = (
-        snapshot.planning_tool_call_count
-        if phase == "planning"
-        else snapshot.execution_tool_call_count
-    )
-    if tool_call_count >= snapshot.max_tool_calls_per_turn:
+    if snapshot.tool_call_count >= snapshot.max_tool_calls_per_turn:
         if phase == "planning" and not snapshot.planning_tool_limit_feedback_sent:
             return ActionTransition(
                 effect=RequestPlanRevisionEffect(
@@ -466,7 +460,7 @@ def _reduce_tool_result(
     retry_number = snapshot.active_plan_step_retry_count + 1
     tool_calls_remaining = max(
         0,
-        snapshot.max_tool_calls_per_turn - snapshot.execution_tool_call_count,
+        snapshot.max_tool_calls_per_turn - snapshot.tool_call_count,
     )
     retry_scheduled = (
         retry_number <= snapshot.active_plan_step_retry_limit
@@ -516,7 +510,7 @@ def _reduce_tool_result(
             )
         else:
             blocked_reason = (
-                f"{reason} No step retry could run because the execution tool-call limit "
+                f"{reason} No step retry could run because the turn tool-call limit "
                 f"({snapshot.max_tool_calls_per_turn}) was reached."
             )
     return ActionTransition(

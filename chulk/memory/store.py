@@ -49,15 +49,23 @@ class ConversationMemory:
         self.add("observation", content)
 
     def trim_to_limit(self) -> None:
-        if len(self.messages) > self.max_messages:
-            dropped_count = len(self.messages) - self.max_messages
-            self._pending_summary_messages.extend(self.messages[:dropped_count])
-            self.messages = self.messages[-self.max_messages :]
+        selected = select_recent_conversation_messages(
+            self.messages,
+            max_messages=self.max_messages,
+        )
+        if len(selected) == len(self.messages):
+            return
+        dropped_count = len(self.messages) - len(selected)
+        self._pending_summary_messages.extend(self.messages[:dropped_count])
+        self.messages = selected
 
     def recent(self, limit: int | None = None) -> list[dict[str, str]]:
         if limit is None:
             limit = self.max_messages
-        return self.messages[-limit:]
+        return select_recent_conversation_messages(
+            self.messages,
+            max_messages=limit,
+        )
 
     def replace(
         self,
@@ -101,6 +109,77 @@ class ConversationMemory:
             self._total_message_count,
             self.summary_message_count + max(0, summarized_message_count),
         )
+
+
+def select_recent_conversation_messages(
+    messages: list[dict[str, str]],
+    *,
+    max_messages: int,
+) -> list[dict[str, str]]:
+    """Select a recent suffix without splitting the active turn or a tool result."""
+    if max_messages < 1:
+        raise ValueError("max_messages must be greater than zero")
+    if not messages:
+        return []
+
+    blocks = _conversation_message_blocks(messages)
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if messages[index].get("role") == "user"
+        ),
+        None,
+    )
+
+    if latest_user_index is None:
+        selected_start = blocks[-1][0]
+        selected_count = blocks[-1][1] - blocks[-1][0]
+        earlier_blocks = reversed(blocks[:-1])
+    else:
+        protected_block_index = next(
+            index
+            for index, (start, end) in enumerate(blocks)
+            if start <= latest_user_index < end
+        )
+        selected_start = blocks[protected_block_index][0]
+        selected_count = len(messages) - selected_start
+        earlier_blocks = reversed(blocks[:protected_block_index])
+
+    for start, end in earlier_blocks:
+        block_size = end - start
+        if selected_count + block_size > max_messages:
+            break
+        selected_start = start
+        selected_count += block_size
+
+    return list(messages[selected_start:])
+
+
+def _conversation_message_blocks(
+    messages: list[dict[str, str]],
+) -> list[tuple[int, int]]:
+    """Return half-open message ranges, pairing executed actions with observations."""
+    blocks: list[tuple[int, int]] = []
+    index = 0
+    while index < len(messages):
+        next_index = index + 1
+        if (
+            _is_executed_tool_action(messages[index])
+            and next_index < len(messages)
+            and messages[next_index].get("role") == "observation"
+        ):
+            next_index += 1
+        blocks.append((index, next_index))
+        index = next_index
+    return blocks
+
+
+def _is_executed_tool_action(message: dict[str, str]) -> bool:
+    return (
+        message.get("role") == "assistant"
+        and message.get("content", "").lstrip().startswith("<executed_tool_action>")
+    )
 
 
 def new_memory(content: str, tags: list[str] | None = None, metadata: dict[str, Any] | None = None) -> Memory:

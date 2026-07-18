@@ -5,13 +5,20 @@ import sqlite3
 
 import chulk.main as main_module
 import chulk.runtime as runtime_module
+import chulk.sessions.sqlite_store as session_store_module
+import pytest
 from chulk.config import load_config
+from chulk.cli.terminal import TerminalUI
+from chulk.core import Agent as CoreAgent
 from chulk.core.context import ContextBudget, TurnContextSection
-from chulk.core.state import Plan, PlanStep, TurnState
-from chulk.llm import LLMClient
+from chulk.core.events import TraceEvent
+from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, TurnState
+from chulk.llm import LLMCapabilities, LLMClient
 from chulk.main import create_agent, main
-from chulk.sessions import SQLiteSessionStore
-from chulk.tools import Tool, ToolResult
+from chulk.memory import ConversationMemory, SQLiteMemoryStore
+from chulk.sessions import SQLiteSessionStore, SessionRecorder
+from chulk.skills import SkillRegistry
+from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, ToolResult
 
 
 class FakeLLMClient(LLMClient):
@@ -72,6 +79,255 @@ def test_session_store_saves_messages_and_turn_snapshots(tmp_path):
     assert turns[0].final_answer == "hi back"
     assert turns[0].reflection_count == 1
     assert turns[0].reflections[0]["approved"] is True
+
+
+def test_session_recorder_persists_tool_action_before_observation(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    recorder = SessionRecorder(
+        store,
+        "conversation-1",
+        provider="test",
+        model="mock",
+    )
+    turn = TurnState(user_message="Use lookup.", turn_id="turn-1")
+    recorder.callback(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+
+    recorder.callback(
+        TraceEvent.TOOL_OBSERVATION,
+        {
+            "turn_id": turn.turn_id,
+            "tool_name": "lookup",
+            "tool_action_context": (
+                '<executed_tool_action>\n{"tool_name":"lookup","arguments_json":"{}"}'
+                "\n</executed_tool_action>"
+            ),
+            "observation": "Lookup completed.",
+            "output_metadata": {},
+        },
+    )
+
+    assert store.load_recent_messages("conversation-1", limit=10) == [
+        {
+            "role": "assistant",
+            "content": (
+                '<executed_tool_action>\n{"tool_name":"lookup","arguments_json":"{}"}'
+                "\n</executed_tool_action>"
+            ),
+        },
+        {"role": "observation", "content": "Lookup completed."},
+    ]
+    rendered_history = TerminalUI(color_enabled=False).history(
+        store.list_messages("conversation-1", limit=10)
+    )
+    assert "executed_tool_action" not in rendered_history
+    assert "Lookup completed." in rendered_history
+
+
+def test_session_recorders_atomically_dedupe_replayed_tool_observations(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "store.sqlite"
+    first_store = SQLiteSessionStore(path)
+    first_recorder = SessionRecorder(
+        first_store,
+        "conversation-1",
+        provider="test",
+        model="mock",
+    )
+    turn = TurnState(user_message="Use lookup.", turn_id="turn-1")
+    first_recorder.callback(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+    turn.observations.append(
+        ObservationRecord(tool_name="lookup", content="First lookup completed.")
+    )
+    first_payload = {
+        "turn_id": turn.turn_id,
+        "observation_index": 1,
+        "tool_name": "lookup",
+        "tool_action_context": "Executed lookup with query one.",
+        "observation": "First lookup completed.",
+        "output_metadata": {},
+        "turn": turn.to_dict(),
+    }
+
+    original_insert_message = session_store_module._insert_message
+
+    def fail_before_observation_message(*args, **kwargs):
+        if kwargs.get("role") == "observation":
+            raise RuntimeError("simulated crash")
+        return original_insert_message(*args, **kwargs)
+
+    monkeypatch.setattr(session_store_module, "_insert_message", fail_before_observation_message)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        first_recorder.callback(TraceEvent.TOOL_OBSERVATION, first_payload)
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT count(*) FROM conversation_observations").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM conversation_messages WHERE role != 'user'"
+        ).fetchone()[0] == 0
+
+    monkeypatch.setattr(session_store_module, "_insert_message", original_insert_message)
+    first_recorder.callback(TraceEvent.TOOL_OBSERVATION, first_payload)
+    first_recorder.callback(TraceEvent.TOOL_OBSERVATION, first_payload)
+    second_store = SQLiteSessionStore(path)
+    second_recorder = SessionRecorder(
+        second_store,
+        "conversation-1",
+        provider="test",
+        model="mock",
+    )
+    turn.observations.append(
+        ObservationRecord(tool_name="lookup", content="Second lookup completed.")
+    )
+    second_recorder.callback(
+        TraceEvent.TOOL_OBSERVATION,
+        {
+            "turn_id": turn.turn_id,
+            "tool_name": "lookup",
+            "tool_action_context": "Executed lookup with query two.",
+            "observation": "Second lookup completed.",
+            "output_metadata": {},
+            "turn": turn.to_dict(),
+        },
+    )
+    second_recorder.callback(TraceEvent.TOOL_OBSERVATION, first_payload)
+
+    with sqlite3.connect(path) as conn:
+        observation_keys = [
+            row[0]
+            for row in conn.execute(
+                "SELECT observation_key FROM conversation_observations ORDER BY observation_key"
+            )
+        ]
+        message_keys = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT message_key
+                FROM conversation_messages
+                WHERE role != 'user'
+                ORDER BY ordinal
+                """
+            )
+        ]
+
+    assert observation_keys == ["turn-1:observation:1", "turn-1:observation:2"]
+    assert message_keys == [
+        "turn-1:tool_action:1",
+        "turn-1:observation:1",
+        "turn-1:tool_action:2",
+        "turn-1:observation:2",
+    ]
+    restored_turn = SQLiteSessionStore(path).load_turns("conversation-1")[0]
+    assert [record.content for record in restored_turn.observations] == [
+        "First lookup completed.",
+        "Second lookup completed.",
+    ]
+
+
+def test_session_recorder_checkpoints_approved_and_plan_step_progress(tmp_path):
+    path = tmp_path / "store.sqlite"
+    first_store = SQLiteSessionStore(path)
+    first_recorder = SessionRecorder(
+        first_store,
+        "conversation-1",
+        provider="test",
+        model="mock",
+    )
+    plan = Plan(
+        summary="Execute two durable steps.",
+        steps=[
+            PlanStep(id="1", title="Complete work", description="Finish the first step."),
+            PlanStep(
+                id="2",
+                title="Blocked work",
+                description="Record a blocked second step.",
+                depends_on=["1"],
+            ),
+        ],
+    )
+    turn = TurnState(user_message="Run the durable plan.", turn_id="turn-1")
+    turn.wait_for_plan_approval(plan)
+    first_recorder.callback(
+        TraceEvent.PLAN_CREATED,
+        {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()},
+    )
+    turn.approve_plan()
+    first_recorder.callback(
+        TraceEvent.PLAN_APPROVED,
+        {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()},
+    )
+
+    approved_turn = SQLiteSessionStore(path).load_turns("conversation-1")[0]
+    assert approved_turn.plan_approved is True
+    assert approved_turn.active_plan is not None
+    assert approved_turn.active_plan.status() == "approved"
+
+    second_store = SQLiteSessionStore(path)
+    second_recorder = SessionRecorder(
+        second_store,
+        "conversation-1",
+        provider="test",
+        model="mock",
+    )
+    first_step, second_step = plan.steps
+    first_step.mark("in_progress")
+    second_recorder.callback(
+        TraceEvent.PLAN_STEP_STARTED,
+        {
+            "turn_id": turn.turn_id,
+            "step": first_step.to_dict(),
+            "plan": plan.to_dict(),
+            "turn": turn.to_dict(),
+        },
+    )
+    started_turn = SQLiteSessionStore(path).load_turns("conversation-1")[0]
+    assert started_turn.active_plan is not None
+    assert started_turn.active_plan.steps[0].status == "in_progress"
+
+    first_step.add_evidence("The first step completed.", tool_name="plan_step_update")
+    first_step.mark("completed")
+    completed_payload = {
+        "turn_id": turn.turn_id,
+        "step": first_step.to_dict(),
+        "plan": plan.to_dict(),
+        "turn": turn.to_dict(),
+    }
+    second_recorder.callback(TraceEvent.PLAN_STEP_COMPLETED, completed_payload)
+    second_recorder.callback(TraceEvent.PLAN_STEP_COMPLETED, completed_payload)
+    completed_turn = SQLiteSessionStore(path).load_turns("conversation-1")[0]
+    assert completed_turn.active_plan is not None
+    assert completed_turn.active_plan.steps[0].status == "completed"
+    assert completed_turn.active_plan.steps[0].evidence[-1].content == "The first step completed."
+
+    second_step.mark("in_progress")
+    second_recorder.callback(
+        TraceEvent.PLAN_STEP_STARTED,
+        {
+            "turn_id": turn.turn_id,
+            "step": second_step.to_dict(),
+            "plan": plan.to_dict(),
+            "turn": turn.to_dict(),
+        },
+    )
+    second_step.block("A durable blocker was recorded.")
+    second_recorder.callback(
+        TraceEvent.PLAN_STEP_BLOCKED,
+        {
+            "turn_id": turn.turn_id,
+            "step": second_step.to_dict(),
+            "plan": plan.to_dict(),
+            "turn": turn.to_dict(),
+        },
+    )
+
+    blocked_turn = SQLiteSessionStore(path).load_turns("conversation-1")[0]
+    assert blocked_turn.active_plan is not None
+    assert [step.status for step in blocked_turn.active_plan.steps] == ["completed", "blocked"]
+    assert blocked_turn.active_plan.steps[1].blocked_reason == "A durable blocker was recorded."
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT count(*) FROM conversation_turns").fetchone()[0] == 1
 
 
 def test_session_store_round_trips_turn_context_metadata(tmp_path):
@@ -154,6 +410,121 @@ def test_session_store_restores_pending_plan_turn(tmp_path):
     assert restored_turn.active_plan.summary == "Change the code."
     assert restored_turn.active_plan.steps[0].title == "Edit runtime"
     assert restored_turn.active_plan.steps[0].acceptance_criteria == ["Runtime is updated."]
+
+
+def test_pending_plan_restores_skills_memories_and_current_dependencies(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review workflow.\n---\n"
+        "# Review\n\nCheck the result carefully.\n",
+        encoding="utf-8",
+    )
+    skill_registry = SkillRegistry(skills_dir)
+    skill_registry.load_metadata()
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    profile_id = memory_store.save_memory(
+        "Prefer exact verification.",
+        tags=["preference"],
+    )
+    relevant_id = memory_store.save_memory(
+        "The pending change targets the runtime.",
+        tags=["project"],
+    )
+    plan = Plan(
+        summary="Use the restored execution context.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Run the context tool",
+                description="Use the current host dependency.",
+            )
+        ],
+    )
+    turn = TurnState(
+        user_message="plan this",
+        turn_id="turn-pending",
+        loaded_skill_names=["review"],
+        loaded_memory_ids=[profile_id, relevant_id],
+        tool_context_metadata={"org_id": "persisted-org"},
+    )
+    turn.wait_for_plan_approval(plan)
+    state = AgentState(
+        turns=[turn],
+        active_plan=plan,
+        pending_plan_turn_id=turn.turn_id,
+    )
+    memory = ConversationMemory()
+    memory.add_user_message("plan this")
+    captured_contexts = []
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="use_dependency",
+            description="Use a host dependency.",
+            args_schema={"type": "object", "properties": {}},
+            callable=lambda _arguments, context: captured_contexts.append(context)
+            or ToolResult("use_dependency", True, "dependency used"),
+            accepts_context=True,
+        )
+    )
+    llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "use_dependency",
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The dependency was used.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "done"}),
+        ]
+    )
+    agent = CoreAgent(
+        llm,
+        state=state,
+        memory=memory,
+        memory_store=memory_store,
+        skill_registry=skill_registry,
+        tool_registry=registry,
+        default_tool_context=ToolExecutionContext(
+            metadata={"runtime": "current"},
+            deps={"token": "live"},
+        ),
+    )
+
+    assert agent.approve_plan() == "done"
+
+    system_prompt = llm.requests[0][0]["content"]
+    assert "Review workflow." in system_prompt
+    assert "Check the result carefully." in system_prompt
+    assert "Prefer exact verification." in system_prompt
+    assert "pending change targets the runtime" in system_prompt
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].metadata["org_id"] == "persisted-org"
+    assert captured_contexts[0].metadata["runtime"] == "current"
+    assert captured_contexts[0].deps == {"token": "live"}
 
 
 def test_session_store_preserves_blocked_plan_status(tmp_path):
@@ -304,7 +675,13 @@ def test_create_agent_uses_hosted_mcp_without_bridge_for_openai_only(monkeypatch
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", lambda servers: calls.append(servers) or [])
     config = load_config()
 
-    agent = create_agent(config, lambda _config: FakeLLMClient(), tool_specs=[])
+    class HostedOpenAIFakeLLM(FakeLLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
+    agent = create_agent(config, lambda _config: HostedOpenAIFakeLLM(), tool_specs=[])
 
     assert calls == []
     assert [server.label for server in agent.mcp_servers] == ["docs"]
@@ -390,6 +767,12 @@ def test_create_agent_resumes_pending_plan_and_approves(monkeypatch, tmp_path):
 
     first_agent.run_planned_turn("plan a change")
 
+    stored_plan_messages = SQLiteSessionStore(config.store_path).load_recent_messages(
+        first_agent.state.conversation_id,
+        limit=10,
+    )
+    assert stored_plan_messages == [{"role": "user", "content": "plan a change"}]
+
     resumed_llm = FakeLLMClient(
         [
             json.dumps(
@@ -417,9 +800,101 @@ def test_create_agent_resumes_pending_plan_and_approves(monkeypatch, tmp_path):
 
     assert resumed_agent.has_pending_plan() is False
     assert response == "approved work complete"
-    approved_prompt = resumed_llm.requests[0][0]["content"]
+    approved_messages = resumed_llm.requests[0]
+    approved_prompt = approved_messages[0]["content"]
     assert "Planning: approved for this turn." in approved_prompt
     assert "Make a small change." in approved_prompt
+    assert not any("Use /approve to execute this plan" in message["content"] for message in approved_messages)
+    assert not any("User approved the plan" in message["content"] for message in approved_messages)
+
+
+def test_resumed_low_history_limit_keeps_turn_anchor_and_tool_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "1")
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-low-history"
+    turn_id = "turn-low-history"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    turn = TurnState(user_message="Inspect the current state.", turn_id=turn_id)
+    turn.wait_for_plan_approval(
+        Plan(
+            summary="Finish the inspected work.",
+            steps=[
+                PlanStep(
+                    id="1",
+                    title="Finish work",
+                    description="Complete the work using the inspection result.",
+                )
+            ],
+        )
+    )
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+    action_context = (
+        '<executed_tool_action>\n{"tool_name":"lookup","arguments_json":"{}"}'
+        "\n</executed_tool_action>"
+    )
+    store.save_message(
+        conversation_id,
+        role="user",
+        content=turn.user_message,
+        turn_id=turn_id,
+        message_key=f"{turn_id}:user",
+    )
+    store.save_message(
+        conversation_id,
+        role="assistant",
+        content=action_context,
+        turn_id=turn_id,
+        message_key=f"{turn_id}:tool_action:1",
+    )
+    store.save_message(
+        conversation_id,
+        role="observation",
+        content="Lookup completed.",
+        turn_id=turn_id,
+        message_key=f"{turn_id}:observation:1",
+    )
+    resumed_llm = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "The inspected work was completed.",
+                            "reason": None,
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Work complete."}),
+        ]
+    )
+
+    resumed_agent = create_agent(
+        config,
+        lambda _config: resumed_llm,
+        conversation_id=conversation_id,
+    )
+
+    assert resumed_agent.approve_plan() == "Work complete."
+    resumed_history = resumed_llm.requests[0][1:]
+    assert resumed_history == [
+        {"role": "user", "content": turn.user_message},
+        {"role": "assistant", "content": action_context},
+        {"role": "observation", "content": "Lookup completed."},
+    ]
 
 
 def test_cli_lists_resumes_and_shows_history(monkeypatch, tmp_path, capsys):

@@ -26,8 +26,6 @@ class PlanExecution:
         self.state.active_plan = plan
         self.state.pending_plan_turn_id = turn.turn_id
         response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
-        self.memory.add_assistant_message(response)
-        self.state.messages = self.memory.recent()
         self.trace(
             TraceEvent.PLAN_CREATED,
             {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()},
@@ -45,10 +43,10 @@ class PlanExecution:
         if feedback is None:
             feedback = (
                 "Planning feedback: the proposed plan is still mostly reconnaissance. "
-                "Do not present read/list/search/explore/inspect steps as the approval plan. "
-                "If more context is needed, call read_file or search_files now. "
-                "Otherwise return a concrete implementation plan naming the modules/files to change, "
-                "the behavior to add, and the tests to update."
+                "Do not present discovery or research as the approval plan. "
+                "If more context is needed, use an available read-only reconnaissance action now. "
+                "Otherwise return a concrete implementation plan naming the relevant components or "
+                "resources, the behavior to change, and how the result will be verified."
             )
         metadata: dict[str, object] = {"revision_count": turn.planning_feedback_count}
         if plan is not None:
@@ -88,7 +86,12 @@ class PlanExecution:
         step.mark("in_progress")
         self.trace(
             TraceEvent.PLAN_STEP_STARTED,
-            {"turn_id": turn.turn_id, "step": step.to_dict(), "plan": plan.to_dict()},
+            {
+                "turn_id": turn.turn_id,
+                "step": step.to_dict(),
+                "plan": plan.to_dict(),
+                "turn": turn.to_dict(),
+            },
         )
 
     def apply_step_result(
@@ -121,15 +124,17 @@ class PlanExecution:
         result: ToolResult,
         observation: str,
         output_metadata: dict,
+        evidence_recorded: bool = False,
     ) -> str | None:
         retry_metadata = effect.retry_metadata
-        self._record_tool_evidence(
-            step,
-            record,
-            observation,
-            output_metadata,
-            retry_metadata=retry_metadata,
-        )
+        if not evidence_recorded:
+            self._record_tool_evidence(
+                step,
+                record,
+                observation,
+                output_metadata,
+                retry_metadata=retry_metadata,
+            )
         if effect.disposition in {"none", "evidence"}:
             return None
         if effect.disposition == "retry_scheduled":
@@ -166,6 +171,24 @@ class PlanExecution:
         )
         return _blocked_message(step)
 
+    def record_tool_evidence(
+        self,
+        step: PlanStep,
+        record: ToolCallRecord,
+        observation: str,
+        output_metadata: dict,
+        *,
+        retry_metadata: dict[str, object] | None,
+    ) -> None:
+        """Attach tool evidence before the observation checkpoint is emitted."""
+        self._record_tool_evidence(
+            step,
+            record,
+            observation,
+            output_metadata,
+            retry_metadata=retry_metadata,
+        )
+
     def add_observation(
         self,
         turn: TurnState,
@@ -194,9 +217,11 @@ class PlanExecution:
             TraceEvent.TOOL_OBSERVATION,
             {
                 "turn_id": turn.turn_id,
+                "observation_index": len(turn.observations),
                 "tool_name": tool_name,
                 "observation": content,
                 "output_metadata": metadata,
+                "turn": turn.to_dict(),
             },
         )
 
@@ -246,6 +271,7 @@ class PlanExecution:
                 "plan": turn.active_plan.to_dict() if turn.active_plan else None,
                 "tool_name": tool_name,
                 "error": error,
+                "turn": turn.to_dict(),
             },
         )
 

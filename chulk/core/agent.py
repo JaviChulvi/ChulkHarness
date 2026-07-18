@@ -483,11 +483,14 @@ class Agent:
             turn.approve_plan()
             self.state.pending_plan_turn_id = None
             self.state.active_plan = turn.active_plan
-            self.memory.add_user_message("User approved the plan. Continue executing the approved plan.")
             self.state.messages = self.memory.recent()
             self._trace(
                 TraceEvent.PLAN_APPROVED,
-                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+                {
+                    "turn_id": turn.turn_id,
+                    "plan": turn.active_plan.to_dict(),
+                    "turn": turn.to_dict(),
+                },
             )
         except BaseException:
             self._release_tool_context(turn)

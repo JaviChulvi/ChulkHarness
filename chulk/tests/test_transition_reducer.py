@@ -181,7 +181,7 @@ def _step_update(
         (
             _snapshot(
                 require_plan=True,
-                planning_tool_call_count=5,
+                tool_call_count=5,
                 max_tool_calls_per_turn=5,
             ),
             _tool_call(),
@@ -191,7 +191,7 @@ def _step_update(
         (
             _snapshot(
                 require_plan=True,
-                planning_tool_call_count=5,
+                tool_call_count=5,
                 max_tool_calls_per_turn=5,
                 planning_tool_limit_feedback_sent=True,
             ),
@@ -200,7 +200,7 @@ def _step_update(
             TransitionOutcome.STOP,
         ),
         (
-            _snapshot(execution_tool_call_count=5, max_tool_calls_per_turn=5),
+            _snapshot(tool_call_count=5, max_tool_calls_per_turn=5),
             _tool_call("shell"),
             FailTurnEffect,
             TransitionOutcome.STOP,
@@ -301,14 +301,14 @@ def test_reduce_action_returns_transport_details_without_mutating_inputs() -> No
         effect=ExecuteToolEffect(action=action, phase="planning"),
         outcome=TransitionOutcome.AWAIT_RESULT,
     )
-    assert snapshot.planning_tool_call_count == 0
+    assert snapshot.tool_call_count == 0
     assert action.arguments == {"path": "README.md"}
 
 
 def test_planning_tool_limit_effect_explicitly_requests_one_way_flag_update() -> None:
     snapshot = _snapshot(
         require_plan=True,
-        planning_tool_call_count=5,
+        tool_call_count=5,
         max_tool_calls_per_turn=5,
     )
 
@@ -317,6 +317,21 @@ def test_planning_tool_limit_effect_explicitly_requests_one_way_flag_update() ->
     assert isinstance(transition.effect, RequestPlanRevisionEffect)
     assert transition.effect.mark_tool_limit_feedback_sent is True
     assert "reconnaissance tool budget is exhausted" in (transition.effect.feedback or "")
+
+
+def test_tool_call_limit_is_shared_by_planning_and_execution() -> None:
+    planning_transition = reduce_action(
+        _snapshot(require_plan=True, tool_call_count=4, max_tool_calls_per_turn=5),
+        ModelActionSignal(action=_tool_call()),
+    )
+    execution_transition = reduce_action(
+        _snapshot(tool_call_count=5, max_tool_calls_per_turn=5),
+        ModelActionSignal(action=_tool_call("shell")),
+    )
+
+    assert isinstance(planning_transition.effect, ExecuteToolEffect)
+    assert isinstance(execution_transition.effect, FailTurnEffect)
+    assert "tool call limit" in execution_transition.effect.message.lower()
 
 
 @pytest.mark.parametrize(
@@ -458,7 +473,7 @@ def test_reduce_reflection_result(
             _snapshot(
                 active_plan_step_id="implementation",
                 active_plan_step_retry_limit=1,
-                execution_tool_call_count=5,
+                tool_call_count=5,
                 max_tool_calls_per_turn=5,
             ),
             ToolResultSignal(

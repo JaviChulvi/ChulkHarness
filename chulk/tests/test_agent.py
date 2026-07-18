@@ -293,6 +293,41 @@ def test_conversation_memory_trims_to_limit():
     ]
 
 
+def test_low_history_limit_keeps_current_user_and_complete_tool_result():
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "calculator",
+                    "arguments_json": json.dumps({"expression": "2 + 2"}),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "The result is 4."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(
+        llm,
+        memory=ConversationMemory(max_messages=1),
+        tool_registry=registry,
+    )
+
+    assert agent.run_turn("Calculate 2 + 2.") == "The result is 4."
+
+    follow_up_history = llm.requests[1][1:]
+    assert [message["role"] for message in follow_up_history] == [
+        "user",
+        "assistant",
+        "observation",
+    ]
+    assert follow_up_history[0]["content"] == "Calculate 2 + 2."
+    assert follow_up_history[1]["content"].startswith("<executed_tool_action>")
+    assert "Tool calculator finished with success." in follow_up_history[2]["content"]
+
+
 def test_agent_calls_calculator_tool_then_returns_final_answer():
     llm = RecordingLLMClient(
         [

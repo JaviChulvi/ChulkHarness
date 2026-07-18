@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from chulk.core.context import TurnContextSection
 from chulk.core.state import ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
+from chulk.memory.store import select_recent_conversation_messages
 from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
@@ -142,26 +143,15 @@ class SQLiteSessionStore:
         key = message_key or f"{conversation_id}:{uuid4()}"
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            next_ordinal = _next_message_ordinal(conn, conversation_id)
-            conn.execute(
-                """
-                INSERT INTO conversation_messages (
-                    id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(message_key) DO NOTHING
-                """,
-                (
-                    str(uuid4()),
-                    conversation_id,
-                    turn_id,
-                    role,
-                    clean_content,
-                    next_ordinal,
-                    key,
-                    now,
-                    json.dumps(metadata or {}, sort_keys=True),
-                ),
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role=role,
+                content=clean_content,
+                message_key=key,
+                metadata=metadata,
+                created_at=now,
             )
             _touch_conversation(conn, conversation_id, now)
 
@@ -197,10 +187,27 @@ class SQLiteSessionStore:
         after_ordinal: int = 0,
     ) -> list[dict[str, str]]:
         """Return recent messages in the format expected by ConversationMemory."""
-        return [
-            {"role": message.role, "content": message.content}
-            for message in self.list_messages(conversation_id, limit=limit, after_ordinal=after_ordinal)
+        clean_limit = max(1, min(limit, 500))
+        clean_after_ordinal = max(0, after_ordinal)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                  AND ordinal > ?
+                ORDER BY ordinal
+                """,
+                (conversation_id, clean_after_ordinal),
+            ).fetchall()
+        messages = [
+            {"role": str(row["role"]), "content": str(row["content"])}
+            for row in rows
         ]
+        return select_recent_conversation_messages(
+            messages,
+            max_messages=clean_limit,
+        )
 
     def save_conversation_summary(
         self,
@@ -258,49 +265,8 @@ class SQLiteSessionStore:
             return
 
         now = _utc_now()
-        active_plan = turn.get("active_plan")
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO conversation_turns (
-                    turn_id, conversation_id, user_message, status, started_at, ended_at, final_answer,
-                    model_request_count, tool_call_count, loaded_memory_ids, loaded_skill_names,
-                    errors, active_plan, turn_json, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(turn_id) DO UPDATE SET
-                    user_message = excluded.user_message,
-                    status = excluded.status,
-                    ended_at = excluded.ended_at,
-                    final_answer = excluded.final_answer,
-                    model_request_count = excluded.model_request_count,
-                    tool_call_count = excluded.tool_call_count,
-                    loaded_memory_ids = excluded.loaded_memory_ids,
-                    loaded_skill_names = excluded.loaded_skill_names,
-                    errors = excluded.errors,
-                    active_plan = excluded.active_plan,
-                    turn_json = excluded.turn_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    turn_id,
-                    conversation_id,
-                    user_message,
-                    str(turn.get("status", "unknown")),
-                    str(turn.get("started_at") or now),
-                    turn.get("ended_at"),
-                    turn.get("final_answer"),
-                    int(turn.get("model_request_count") or 0),
-                    int(turn.get("tool_call_count") or 0),
-                    json.dumps(turn.get("loaded_memory_ids") or [], sort_keys=True),
-                    json.dumps(turn.get("loaded_skill_names") or [], sort_keys=True),
-                    json.dumps(turn.get("errors") or [], sort_keys=True),
-                    json.dumps(active_plan, sort_keys=True) if active_plan else None,
-                    json.dumps(turn, sort_keys=True),
-                    now,
-                ),
-            )
-            _set_conversation_status(conn, conversation_id, _conversation_status_from_turn(turn), now)
+            _save_turn_snapshot(conn, conversation_id, turn, now)
 
     def load_turns(self, conversation_id: str) -> list[TurnState]:
         """Load persisted turn snapshots as runtime TurnState objects."""
@@ -471,6 +437,108 @@ class SQLiteSessionStore:
                     now,
                 ),
             )
+
+    def save_tool_observation_bundle(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        observation_index: int,
+        tool_name: str,
+        content: str,
+        output_metadata: dict[str, Any] | None = None,
+        action_context: str | None = None,
+        turn: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist one tool action, observation, and turn checkpoint."""
+        if (
+            isinstance(observation_index, bool)
+            or not isinstance(observation_index, int)
+            or observation_index < 1
+        ):
+            raise ValueError("observation_index must be a positive integer")
+        clean_content = content.strip()
+        if not clean_content:
+            return
+
+        now = _utc_now()
+        observation_key = f"{turn_id}:observation:{observation_index}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if isinstance(action_context, str) and action_context.strip():
+                _insert_message(
+                    conn,
+                    conversation_id,
+                    turn_id=turn_id,
+                    role="assistant",
+                    content=action_context.strip(),
+                    message_key=f"{turn_id}:tool_action:{observation_index}",
+                    metadata={
+                        "tool_name": tool_name,
+                        "internal": True,
+                        "event": "tool_observation",
+                        "observation_index": observation_index,
+                    },
+                    created_at=now,
+                )
+            observation_insert = conn.execute(
+                """
+                INSERT OR IGNORE INTO conversation_observations (
+                    id, conversation_id, turn_id, tool_name, content, output_metadata,
+                    observation_key, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    conversation_id,
+                    turn_id,
+                    tool_name,
+                    clean_content,
+                    json.dumps(output_metadata or {}, sort_keys=True),
+                    observation_key,
+                    now,
+                ),
+            )
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role="observation",
+                content=clean_content,
+                message_key=observation_key,
+                metadata={
+                    "tool_name": tool_name,
+                    "observation_index": observation_index,
+                },
+                created_at=now,
+            )
+            if (
+                observation_insert.rowcount == 1
+                and isinstance(turn, dict)
+                and _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+            ):
+                _save_turn_snapshot(conn, conversation_id, turn, now)
+            else:
+                _touch_conversation(conn, conversation_id, now)
+
+    def max_observation_index(self, conversation_id: str, turn_id: str) -> int:
+        """Return the largest recorder sequence already stored for one turn."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT observation_key
+                FROM conversation_observations
+                WHERE conversation_id = ? AND turn_id = ?
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+        indexes = []
+        for row in rows:
+            suffix = str(row["observation_key"] or "").rsplit(":", 1)[-1]
+            if suffix.isdigit():
+                indexes.append(int(suffix))
+        return max(indexes, default=0)
 
     def update_conversation_status(self, conversation_id: str, status: str) -> None:
         """Update only the conversation status and timestamp."""
@@ -656,6 +724,108 @@ def _observation_from_dict(payload: dict[str, Any]) -> ObservationRecord:
         content=str(payload.get("content") or ""),
         output_metadata=_safe_json_object(payload.get("output_metadata")),
         created_at=str(payload.get("created_at") or _utc_now()),
+    )
+
+
+def _insert_message(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    turn_id: str | None,
+    role: str,
+    content: str,
+    message_key: str,
+    metadata: dict[str, Any] | None,
+    created_at: str,
+) -> None:
+    """Insert one idempotent message using the caller's transaction."""
+    next_ordinal = _next_message_ordinal(conn, conversation_id)
+    conn.execute(
+        """
+        INSERT INTO conversation_messages (
+            id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_key) DO NOTHING
+        """,
+        (
+            str(uuid4()),
+            conversation_id,
+            turn_id,
+            role,
+            content,
+            next_ordinal,
+            message_key,
+            created_at,
+            json.dumps(metadata or {}, sort_keys=True),
+        ),
+    )
+
+
+def _valid_turn_snapshot(turn: dict[str, Any], *, expected_turn_id: str) -> bool:
+    return (
+        str(turn.get("turn_id", "")).strip() == expected_turn_id
+        and bool(str(turn.get("user_message", "")).strip())
+    )
+
+
+def _save_turn_snapshot(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    turn: dict[str, Any],
+    updated_at: str,
+) -> None:
+    """Upsert one turn snapshot using the caller's transaction."""
+    turn_id = str(turn.get("turn_id", "")).strip()
+    user_message = str(turn.get("user_message", "")).strip()
+    if not turn_id or not user_message:
+        return
+    active_plan = turn.get("active_plan")
+    conn.execute(
+        """
+        INSERT INTO conversation_turns (
+            turn_id, conversation_id, user_message, status, started_at, ended_at, final_answer,
+            model_request_count, tool_call_count, loaded_memory_ids, loaded_skill_names,
+            errors, active_plan, turn_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+            user_message = excluded.user_message,
+            status = excluded.status,
+            ended_at = excluded.ended_at,
+            final_answer = excluded.final_answer,
+            model_request_count = excluded.model_request_count,
+            tool_call_count = excluded.tool_call_count,
+            loaded_memory_ids = excluded.loaded_memory_ids,
+            loaded_skill_names = excluded.loaded_skill_names,
+            errors = excluded.errors,
+            active_plan = excluded.active_plan,
+            turn_json = excluded.turn_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            turn_id,
+            conversation_id,
+            user_message,
+            str(turn.get("status", "unknown")),
+            str(turn.get("started_at") or updated_at),
+            turn.get("ended_at"),
+            turn.get("final_answer"),
+            int(turn.get("model_request_count") or 0),
+            int(turn.get("tool_call_count") or 0),
+            json.dumps(turn.get("loaded_memory_ids") or [], sort_keys=True),
+            json.dumps(turn.get("loaded_skill_names") or [], sort_keys=True),
+            json.dumps(turn.get("errors") or [], sort_keys=True),
+            json.dumps(active_plan, sort_keys=True) if active_plan else None,
+            json.dumps(turn, sort_keys=True),
+            updated_at,
+        ),
+    )
+    _set_conversation_status(
+        conn,
+        conversation_id,
+        _conversation_status_from_turn(turn),
+        updated_at,
     )
 
 
