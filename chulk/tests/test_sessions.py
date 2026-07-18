@@ -338,6 +338,118 @@ def test_session_recorder_checkpoints_approved_and_plan_step_progress(tmp_path):
         assert conn.execute("SELECT count(*) FROM conversation_turns").fetchone()[0] == 1
 
 
+def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path):
+    final_turn = TurnState(user_message="finish", turn_id="turn-final")
+    final_turn.complete("finished")
+
+    rejected_plan = Plan(
+        summary="Reject this plan.",
+        steps=[PlanStep(id="1", title="Work", description="Do work.")],
+    )
+    rejected_turn = TurnState(user_message="reject", turn_id="turn-rejected")
+    rejected_turn.wait_for_plan_approval(rejected_plan)
+    rejected_turn.reject_plan("Plan rejected. No tools were run.")
+
+    failed_turn = TurnState(user_message="fail", turn_id="turn-failed")
+    failed_turn.fail("failed safely")
+    blocked_turn = TurnState(user_message="block", turn_id="turn-blocked")
+    blocked_turn.block("blocked safely")
+
+    cases = [
+        (
+            TraceEvent.FINAL_ANSWER,
+            final_turn,
+            {"content": "finished"},
+            "completed",
+            "final",
+        ),
+        (
+            TraceEvent.PLAN_REJECTED,
+            rejected_turn,
+            {},
+            "plan_rejected",
+            "plan_rejected",
+        ),
+        (
+            TraceEvent.TURN_FAILED,
+            failed_turn,
+            {"message": "failed safely", "status": "failed"},
+            "failed",
+            "failed",
+        ),
+        (
+            TraceEvent.TURN_FAILED,
+            blocked_turn,
+            {"message": "blocked safely", "status": "blocked"},
+            "blocked",
+            "failed",
+        ),
+    ]
+
+    for index, (event_type, turn, payload, status, message_kind) in enumerate(cases):
+        store = SQLiteSessionStore(tmp_path / f"terminal-{index}.sqlite")
+        recorder = SessionRecorder(
+            store,
+            f"conversation-{index}",
+            provider="test",
+            model="mock",
+        )
+        recorder.callback(
+            event_type,
+            {"turn_id": turn.turn_id, "turn": turn.to_dict(), **payload},
+        )
+
+        restored_turn = store.load_turns(f"conversation-{index}")[0]
+        terminal_message = store.load_terminal_turn_message(
+            f"conversation-{index}",
+            turn.turn_id,
+        )
+        assert restored_turn.status == status
+        assert store.get_conversation(f"conversation-{index}").status == status
+        assert terminal_message is not None
+        assert terminal_message["kind"] == message_kind
+
+
+def test_final_answer_checkpoint_survives_crash_before_turn_finished(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(
+            [json.dumps({"type": "final_answer", "content": "durable final"})]
+        ),
+    )
+    recorder_callback = agent.session_recorder.callback
+
+    def crash_before_turn_finished(event_type, payload):
+        if event_type == TraceEvent.TURN_FINISHED:
+            raise RuntimeError("simulated crash before turn snapshot")
+        recorder_callback(event_type, payload)
+
+    agent.event_callback = crash_before_turn_finished
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        agent.run_turn("finish once")
+
+    store = SQLiteSessionStore(config.store_path)
+    restored_turn = store.load_turns(agent.state.conversation_id)[-1]
+    assert restored_turn.status == "completed"
+    assert restored_turn.final_answer == "durable final"
+
+    resumed_llm = FakeLLMClient()
+    resumed_agent = create_agent(
+        config,
+        lambda _config: resumed_llm,
+        conversation_id=agent.state.conversation_id,
+    )
+    assert resumed_agent.has_resumable_plan() is False
+    assert resumed_agent.approve_plan() == "No plan is waiting for approval."
+    assert resumed_llm.requests == []
+
+
 def test_session_store_round_trips_turn_context_metadata(tmp_path):
     store = SQLiteSessionStore(tmp_path / "store.sqlite")
     store.create_conversation("conversation-1", provider="test", model="mock")
@@ -702,6 +814,87 @@ def test_create_agent_does_not_resume_older_approved_plan(monkeypatch, tmp_path)
     assert agent.state.active_plan is None
 
 
+def test_create_agent_reconciles_legacy_terminal_messages_without_replay(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    cases = [
+        ("final", "completed", "legacy final answer", "active"),
+        (
+            "plan_rejected",
+            "plan_rejected",
+            "Plan rejected. No tools were run.",
+            "plan_rejected",
+        ),
+        ("failed", "failed", "legacy turn failed", "failed"),
+    ]
+
+    for index, (message_kind, expected_status, content, conversation_status) in enumerate(cases):
+        conversation_id = f"conversation-legacy-{message_kind}"
+        turn_id = f"turn-legacy-{message_kind}"
+        store.create_conversation(
+            conversation_id,
+            provider=config.llm_provider,
+            model=config.model,
+        )
+        plan = Plan(
+            summary=f"Legacy {message_kind} plan.",
+            steps=[
+                PlanStep(
+                    id="1",
+                    title="Legacy work",
+                    description="Complete legacy work once.",
+                )
+            ],
+        )
+        turn = TurnState(
+            user_message=f"legacy request {index}",
+            turn_id=turn_id,
+        )
+        turn.wait_for_plan_approval(plan)
+        if message_kind != "plan_rejected":
+            turn.approve_plan()
+            plan.steps[0].mark(
+                "completed" if message_kind == "final" else "in_progress"
+            )
+        store.save_message(
+            conversation_id,
+            turn_id=turn_id,
+            role="user",
+            content=turn.user_message,
+            message_key=f"{turn_id}:user",
+        )
+        store.save_turn_snapshot(conversation_id, turn.to_dict())
+        store.save_message(
+            conversation_id,
+            turn_id=turn_id,
+            role="assistant",
+            content=content,
+            message_key=f"{turn_id}:assistant:{message_kind}",
+        )
+        if conversation_status != "active":
+            store.update_conversation_status(conversation_id, conversation_status)
+        llm = FakeLLMClient()
+
+        agent = create_agent(
+            config,
+            lambda _config, client=llm: client,
+            conversation_id=conversation_id,
+        )
+
+        restored_turn = agent.state.turns[-1]
+        assert restored_turn.status == expected_status
+        assert restored_turn.final_answer == content
+        assert agent.has_pending_plan() is False
+        assert agent.has_resumable_plan() is False
+        assert agent.approve_plan() == "No plan is waiting for approval."
+        assert llm.requests == []
+        assert store.get_conversation(conversation_id).status == expected_status
+
+
 def test_tool_intent_is_durable_before_callable_runs(monkeypatch, tmp_path):
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     config = load_config()
@@ -755,6 +948,10 @@ def test_tool_intent_is_durable_before_callable_runs(monkeypatch, tmp_path):
 
     assert agent.run_turn("inspect the intent checkpoint") == "done"
     assert observed_intents == [(None, None, None, None)]
+    assert SQLiteSessionStore(config.store_path).load_tool_calls_without_observations(
+        agent.state.conversation_id,
+        agent.state.turns[-1].turn_id,
+    ) == []
 
 
 def test_restart_blocks_unresolved_non_plan_tool_intent(monkeypatch, tmp_path):
@@ -798,7 +995,7 @@ def test_restart_blocks_unresolved_non_plan_tool_intent(monkeypatch, tmp_path):
     assert SQLiteSessionStore(config.store_path).get_conversation(conversation_id).status == "blocked"
 
 
-def test_restart_finds_later_unresolved_intent_missing_from_legacy_turn_snapshot(
+def test_restart_blocks_completed_call_without_observation_missing_from_legacy_snapshot(
     monkeypatch,
     tmp_path,
 ):
@@ -826,10 +1023,15 @@ def test_restart_finds_later_unresolved_intent_missing_from_legacy_turn_snapshot
         arguments={},
         iteration=2,
     )
+    second_call.finish(ToolResult("second_mutation", True, "mutation completed"))
     store.save_tool_call(
         conversation_id,
         {**second_call.to_dict(), "turn_id": turn.turn_id},
     )
+    with sqlite3.connect(config.store_path) as conn:
+        assert conn.execute(
+            "SELECT success FROM conversation_tool_calls WHERE iteration = 2"
+        ).fetchone()[0] == 1
 
     agent = create_agent(
         config,

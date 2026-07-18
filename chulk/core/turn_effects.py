@@ -193,7 +193,14 @@ class TurnEffects:
         self.state.messages = self.memory.recent()
         turn.complete(content)
         self.plan.clear(turn)
-        self.trace(TraceEvent.FINAL_ANSWER, {"turn_id": turn.turn_id, "content": content})
+        self.trace(
+            TraceEvent.FINAL_ANSWER,
+            {
+                "turn_id": turn.turn_id,
+                "content": content,
+                "turn": turn.to_dict(),
+            },
+        )
         self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return content
 
@@ -207,7 +214,12 @@ class TurnEffects:
             self.plan.clear(turn)
         self.trace(
             TraceEvent.TURN_FAILED,
-            {"turn_id": turn.turn_id if turn else None, "message": message},
+            {
+                "turn_id": turn.turn_id if turn else None,
+                "message": message,
+                "status": turn.status if turn else "failed",
+                "turn": turn.to_dict() if turn else None,
+            },
         )
         if turn is not None:
             self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
@@ -222,7 +234,12 @@ class TurnEffects:
         self.plan.clear(turn)
         self.trace(
             TraceEvent.TURN_FAILED,
-            {"turn_id": turn.turn_id, "message": message, "status": "blocked"},
+            {
+                "turn_id": turn.turn_id,
+                "message": message,
+                "status": "blocked",
+                "turn": turn.to_dict(),
+            },
         )
         self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return message
@@ -354,6 +371,10 @@ class TurnEffects:
             pending,
         )
         metadata["tool_action_context"] = action_context_metadata
+        metadata["tool_call_identity"] = {
+            "iteration": record.iteration,
+            "phase": record.phase,
+        }
         self.state.observations.append(
             {
                 "tool_name": action.tool_name,

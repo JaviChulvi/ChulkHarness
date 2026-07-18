@@ -532,7 +532,11 @@ class Agent:
             self.state.messages = self.memory.recent()
             self._trace(
                 TraceEvent.PLAN_REJECTED,
-                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+                {
+                    "turn_id": turn.turn_id,
+                    "plan": turn.active_plan.to_dict(),
+                    "turn": turn.to_dict(),
+                },
             )
             self._trace(TraceEvent.TURN_FINISHED, self._turn_effects.state_snapshot(turn))
             return message
@@ -811,6 +815,7 @@ class Agent:
             "message": message,
             "status": turn.status,
             "exception_type": type(exc).__name__,
+            "turn": turn.to_dict(),
         }
         for event_type, payload in (
             (TraceEvent.TURN_FAILED, failure_payload),

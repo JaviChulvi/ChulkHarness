@@ -274,23 +274,29 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         return state
 
     latest_turn = state.turns[-1]
+    _reconcile_terminal_turn_message(
+        session_store,
+        conversation.id,
+        conversation.status,
+        latest_turn,
+    )
     if latest_turn.status == "in_progress":
-        unresolved_calls = [
+        unreconciled_calls = [
             record.to_dict()
             for record in latest_turn.tool_calls
             if record.success is None or record.ended_at is None
         ]
-        if not unresolved_calls:
-            unresolved_calls = session_store.load_unresolved_tool_calls(
+        if not unreconciled_calls:
+            unreconciled_calls = session_store.load_tool_calls_without_observations(
                 conversation.id,
                 latest_turn.turn_id,
             )
-        if unresolved_calls:
+        if unreconciled_calls:
             _block_unresolved_tool_intent(
                 session_store,
                 conversation.id,
                 latest_turn,
-                unresolved_calls,
+                unreconciled_calls,
             )
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
@@ -315,6 +321,40 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
     return state
 
 
+def _reconcile_terminal_turn_message(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    conversation_status: str,
+    turn: TurnState,
+) -> None:
+    """Terminalize a legacy turn whose terminal message preceded its snapshot."""
+    if turn.status not in {"in_progress", "waiting_for_approval"}:
+        return
+    terminal_message = session_store.load_terminal_turn_message(
+        conversation_id,
+        turn.turn_id,
+    )
+    if terminal_message is None:
+        return
+    content = terminal_message["content"]
+    kind = terminal_message["kind"]
+    if kind == "final":
+        turn.complete(content)
+    elif kind == "plan_rejected":
+        turn.reject_plan(content)
+    elif kind == "failed":
+        plan_status = turn.active_plan.status() if turn.active_plan is not None else None
+        if conversation_status == "cancelled":
+            turn.cancel(content)
+        elif conversation_status == "blocked" or plan_status == "blocked":
+            turn.block(content)
+        else:
+            turn.fail(content)
+    else:  # pragma: no cover - constrained by SQLiteSessionStore
+        return
+    session_store.save_turn_snapshot(conversation_id, turn.to_dict())
+
+
 def _block_unresolved_tool_intent(
     session_store: SQLiteSessionStore,
     conversation_id: str,
@@ -332,7 +372,7 @@ def _block_unresolved_tool_intent(
     )
     reason = (
         "Turn execution stopped after restart because "
-        f"tool call {tool_name} (iteration {iteration}) started without a recorded result. "
+        f"tool call {tool_name} (iteration {iteration}) has no matching persisted observation. "
         "Chulk will not replay it automatically; inspect external state before retrying."
     )
     plan = turn.active_plan

@@ -179,6 +179,72 @@ class SQLiteSessionStore:
             ).fetchall()
         return [_row_to_message(row) for row in reversed(rows)]
 
+    def save_terminal_turn_bundle(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        content: str,
+        message_key: str,
+        turn: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Atomically persist a terminal assistant message and its turn snapshot."""
+        clean_content = content.strip()
+        if (
+            not clean_content
+            or not message_key.strip()
+            or not _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+        ):
+            return False
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role="assistant",
+                content=clean_content,
+                message_key=message_key,
+                metadata=metadata,
+                created_at=now,
+            )
+            _save_turn_snapshot(conn, conversation_id, turn, now)
+        return True
+
+    def load_terminal_turn_message(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> dict[str, str] | None:
+        """Return a terminal assistant message that may predate its turn snapshot."""
+        message_keys = {
+            f"{turn_id}:assistant:final": "final",
+            f"{turn_id}:assistant:failed": "failed",
+            f"{turn_id}:assistant:plan_rejected": "plan_rejected",
+        }
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT content, message_key
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND message_key IN (?, ?, ?)
+                ORDER BY ordinal DESC
+                LIMIT 1
+                """,
+                (conversation_id, turn_id, *message_keys),
+            ).fetchone()
+        if row is None:
+            return None
+        message_key = str(row["message_key"])
+        kind = message_keys.get(message_key)
+        if kind is None:
+            return None
+        return {"kind": kind, "content": str(row["content"])}
+
     def load_recent_messages(
         self,
         conversation_id: str,
@@ -419,34 +485,90 @@ class SQLiteSessionStore:
             ):
                 _save_turn_snapshot(conn, conversation_id, turn, now)
 
-    def load_unresolved_tool_calls(
+    def load_tool_calls_without_observations(
         self,
         conversation_id: str,
         turn_id: str,
     ) -> list[dict[str, object]]:
-        """Return persisted tool intents that never recorded a result."""
+        """Return persisted tool calls without a matching durable observation."""
         with self._connect() as conn:
-            rows = conn.execute(
+            call_rows = conn.execute(
                 """
-                SELECT tool_name, arguments, iteration, phase, started_at
+                SELECT tool_name, arguments, iteration, phase, started_at,
+                       ended_at, success
                 FROM conversation_tool_calls
                 WHERE conversation_id = ?
                   AND turn_id = ?
-                  AND success IS NULL
                 ORDER BY iteration
                 """,
                 (conversation_id, turn_id),
             ).fetchall()
-        return [
+            observation_rows = conn.execute(
+                """
+                SELECT tool_name, output_metadata
+                FROM conversation_observations
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                ORDER BY observation_key
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+
+        calls = [
             {
                 "tool_name": str(row["tool_name"]),
                 "arguments": _safe_json_dict(row["arguments"]),
                 "iteration": int(row["iteration"]),
                 "phase": str(row["phase"]),
                 "started_at": str(row["started_at"]),
+                "ended_at": row["ended_at"],
+                "success": (
+                    None if row["success"] is None else bool(row["success"])
+                ),
             }
-            for row in rows
+            for row in call_rows
         ]
+        observed_identities: set[tuple[str, int]] = set()
+        legacy_observation_tools: list[str] = []
+        for row in observation_rows:
+            metadata = _safe_json_dict(row["output_metadata"])
+            if metadata.get("synthetic") is True:
+                continue
+            identity = metadata.get("tool_call_identity")
+            if not isinstance(identity, dict):
+                legacy_observation_tools.append(str(row["tool_name"]))
+                continue
+            phase = identity.get("phase")
+            iteration = identity.get("iteration")
+            if (
+                isinstance(phase, str)
+                and phase
+                and isinstance(iteration, int)
+                and not isinstance(iteration, bool)
+                and iteration > 0
+            ):
+                observed_identities.add((phase, iteration))
+            else:
+                legacy_observation_tools.append(str(row["tool_name"]))
+
+        unmatched = [
+            call
+            for call in calls
+            if (str(call["phase"]), int(call["iteration"]))
+            not in observed_identities
+        ]
+        for observed_tool_name in legacy_observation_tools:
+            matching_index = next(
+                (
+                    index
+                    for index, call in enumerate(unmatched)
+                    if call["tool_name"] == observed_tool_name
+                ),
+                None,
+            )
+            if matching_index is not None:
+                unmatched.pop(matching_index)
+        return unmatched
 
     def save_observation(
         self,

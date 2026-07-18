@@ -170,11 +170,20 @@ class SessionRecorder:
 
         if event_type == TraceEvent.PLAN_REJECTED:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
+            message = "Plan rejected. No tools were run."
+            if self._save_terminal_turn(
+                turn_id=turn_id,
+                content=message,
+                message_key_suffix="plan_rejected",
+                turn=payload.get("turn"),
+                metadata={"event": event_type},
+            ):
+                return
             self.store.save_message(
                 self.conversation_id,
                 turn_id=turn_id,
                 role="assistant",
-                content="Plan rejected. No tools were run.",
+                content=message,
                 message_key=f"{turn_id}:assistant:plan_rejected" if turn_id else None,
                 metadata={"event": event_type},
             )
@@ -183,23 +192,46 @@ class SessionRecorder:
 
         if event_type == TraceEvent.FINAL_ANSWER:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
+            content = str(payload.get("content") or "")
+            if self._save_terminal_turn(
+                turn_id=turn_id,
+                content=content,
+                message_key_suffix="final",
+                turn=payload.get("turn"),
+                metadata={"event": event_type},
+            ):
+                return
             self.store.save_message(
                 self.conversation_id,
                 turn_id=turn_id,
                 role="assistant",
-                content=str(payload.get("content") or ""),
+                content=content,
                 message_key=f"{turn_id}:assistant:final" if turn_id else None,
             )
             return
 
         if event_type == TraceEvent.TURN_FAILED:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
-            status = "cancelled" if payload.get("status") == "cancelled" else "failed"
+            content = str(payload.get("message") or "")
+            if self._save_terminal_turn(
+                turn_id=turn_id,
+                content=content,
+                message_key_suffix="failed",
+                turn=payload.get("turn"),
+                metadata={"event": event_type},
+            ):
+                return
+            raw_status = payload.get("status")
+            status = (
+                raw_status
+                if raw_status in {"blocked", "cancelled", "failed"}
+                else "failed"
+            )
             self.store.save_message(
                 self.conversation_id,
                 turn_id=turn_id,
                 role="assistant",
-                content=str(payload.get("message") or ""),
+                content=content,
                 message_key=f"{turn_id}:assistant:failed" if turn_id else None,
                 metadata={"event": event_type},
             )
@@ -210,6 +242,26 @@ class SessionRecorder:
             turn = payload.get("turn")
             if isinstance(turn, dict):
                 self.store.save_turn_snapshot(self.conversation_id, turn)
+
+    def _save_terminal_turn(
+        self,
+        *,
+        turn_id: str | None,
+        content: str,
+        message_key_suffix: str,
+        turn: object,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if turn_id is None or not isinstance(turn, dict):
+            return False
+        return self.store.save_terminal_turn_bundle(
+            self.conversation_id,
+            turn_id=turn_id,
+            content=content,
+            message_key=f"{turn_id}:assistant:{message_key_suffix}",
+            turn=turn,
+            metadata=metadata,
+        )
 
     def _ensure_conversation(self) -> None:
         if self.persisted:
