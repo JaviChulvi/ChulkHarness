@@ -293,6 +293,41 @@ def test_conversation_memory_trims_to_limit():
     ]
 
 
+def test_low_history_limit_keeps_current_user_and_complete_tool_result():
+    llm = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "content": None,
+                    "tool_name": "calculator",
+                    "arguments_json": json.dumps({"expression": "2 + 2"}),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "The result is 4."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(
+        llm,
+        memory=ConversationMemory(max_messages=1),
+        tool_registry=registry,
+    )
+
+    assert agent.run_turn("Calculate 2 + 2.") == "The result is 4."
+
+    follow_up_history = llm.requests[1][1:]
+    assert [message["role"] for message in follow_up_history] == [
+        "user",
+        "assistant",
+        "observation",
+    ]
+    assert follow_up_history[0]["content"] == "Calculate 2 + 2."
+    assert follow_up_history[1]["content"].startswith("<executed_tool_action>")
+    assert "Tool calculator finished with success." in follow_up_history[2]["content"]
+
+
 def test_agent_calls_calculator_tool_then_returns_final_answer():
     llm = RecordingLLMClient(
         [
@@ -489,7 +524,7 @@ def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported(tm
 
     system_prompt = llm.requests[0][0]["content"]
     assert response == "native ok"
-    assert "provider-native tool-calling interface" in system_prompt
+    assert "provider-native tool interface" in system_prompt
     assert "You must respond with exactly one JSON object" not in system_prompt
     assert "<name>calculator</name>" not in system_prompt
     assert "<arguments_schema_json>" not in system_prompt
@@ -543,6 +578,14 @@ def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(t
     trace_text = trace_logger.path.read_text(encoding="utf-8")
     assert '"name": "mcp:docs"' in trace_text
     assert "secret-token" not in trace_text
+    events = [json.loads(line) for line in trace_text.splitlines()]
+    request_payload = next(
+        event["payload"]
+        for event in events
+        if event["type"] == TraceEvent.MODEL_REQUEST_STARTED
+    )
+    assert request_payload["hosted_mcp_enabled"] is True
+    assert request_payload["hosted_mcp_server_labels"] == ["docs"]
 
 
 def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
@@ -616,10 +659,16 @@ def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
         transport="streamable_http",
         server_url="https://mcp.example.com",
     )
+    bridge_tool = create_mcp_bridge_tools(
+        [server],
+        client_factory=lambda _server: RecordingMCPClient(),
+    )[0]
+    registry.register(bridge_tool)
     agent = Agent(
         FallbackChain([primary, secondary]),
         tool_registry=registry,
         mcp_servers=(server,),
+        mcp_bridge_tool_names=[bridge_tool.name],
     )
 
     response = agent.run_planned_turn("hello")
@@ -711,9 +760,17 @@ def test_agent_async_keeps_native_options_off_for_a_mixed_fallback_chain():
         transport="streamable_http",
         server_url="https://mcp.example.com",
     )
+    registry = ToolRegistry()
+    bridge_tool = create_mcp_bridge_tools(
+        [server],
+        client_factory=lambda _server: RecordingMCPClient(),
+    )[0]
+    registry.register(bridge_tool)
     agent = Agent(
         FallbackChain([primary, secondary]),
+        tool_registry=registry,
         mcp_servers=(server,),
+        mcp_bridge_tool_names=[bridge_tool.name],
     )
 
     response = asyncio.run(agent.run_planned_turn_async("hello"))
@@ -759,9 +816,18 @@ def test_native_planning_tools_follow_the_plan_lifecycle():
                 FinalAnswerAction(type="final_answer", content="done"),
             ]
             self.planning_policies = []
+            self.action_schemas = []
 
-        def complete_action(self, messages, *, planning_tools=None, **kwargs):
+        def complete_action(
+            self,
+            messages,
+            *,
+            planning_tools=None,
+            action_schema=None,
+            **kwargs,
+        ):
             self.planning_policies.append(planning_tools)
+            self.action_schemas.append(action_schema)
             return LLMActionResult(
                 action=self.actions.pop(0),
                 raw_response='{"type":"recorded"}',
@@ -780,6 +846,10 @@ def test_native_planning_tools_follow_the_plan_lifecycle():
         (policy.propose_plan, policy.update_plan_step)
         for policy in llm.planning_policies
     ] == [(True, False), (False, True), (False, False)]
+    assert [
+        schema["properties"]["type"]["enum"]
+        for schema in llm.action_schemas
+    ] == [["plan"], ["plan_step_update"], ["final_answer"]]
 
 
 def test_agent_records_context_report_in_state_and_trace(tmp_path):
@@ -994,13 +1064,14 @@ def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path)
 
     assert response == "I can run that command."
     assert agent.state.loaded_skill_names == ["shell"]
-    assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
-    assert "- shell: Use this skill when the user request requires terminal inspection" in system_prompt
-    assert "- memory: Use this skill when the user request involves saving or retrieving" in system_prompt
-    assert "Loaded skills are procedural instructions" in system_prompt
-    assert "Skill: shell" in system_prompt
+    assert "Unloaded skill metadata for this agent" not in system_prompt
+    assert system_prompt.count(
+        "Use this skill when the user request requires terminal inspection"
+    ) == 1
+    assert "Use this skill when the user request involves saving or retrieving" not in system_prompt
+    assert "Procedural instructions selected for this turn" in system_prompt
+    assert "<name>shell</name>" in system_prompt
     assert "# Shell Skill" in system_prompt
-    assert "Skill: memory" not in system_prompt
     assert "# Memory Skill" not in system_prompt
     assert skill_registry.get_skill("shell").loaded_content is not None
     assert skill_registry.get_skill("memory").loaded_content is None
@@ -1079,11 +1150,11 @@ def test_agent_selects_memory_and_file_skills_for_matching_requests(tmp_path):
     file_prompt = llm.requests[1][0]["content"]
 
     assert memory_response == "Memory skill selected."
-    assert "Skill: memory" in memory_prompt
+    assert "<name>memory</name>" in memory_prompt
     assert agent.state.loaded_skill_names == ["files"]
     assert file_response == "Files skill selected."
-    assert "Skill: files" in file_prompt
-    assert "Skill: shell" not in file_prompt
+    assert "<name>files</name>" in file_prompt
+    assert "# Shell Skill" not in file_prompt
 
 
 def test_agent_can_run_safe_shell_tool(tmp_path):
@@ -1370,7 +1441,7 @@ def test_agent_planned_turn_creates_pending_plan_without_running_tools(tmp_path)
     assert agent.state.turns[0].active_plan is not None
     assert agent.state.turns[0].active_plan.summary == "Calculate the answer safely."
     assert "Planning: requested for this turn." in llm.requests[0][0]["content"]
-    assert "return a plan action" in llm.requests[0][0]["content"]
+    assert "available plan action" in llm.requests[0][0]["content"]
     assert "plan_created" in event_types
     assert "tool_call_started" not in event_types
 
@@ -1423,7 +1494,7 @@ def test_agent_planned_turn_allows_read_only_reconnaissance_before_plan(tmp_path
     assert turn.tool_calls[0].tool_name == "read_file"
     assert turn.tool_calls[0].phase == "planning"
     assert "class Agent" in agent.state.observations[0]["observation"]
-    assert "read-only reconnaissance tools" in llm.requests[0][0]["content"]
+    assert "read-only tools" in llm.requests[0][0]["content"]
     assert any(message["role"] == "observation" for message in llm.requests[1])
 
 

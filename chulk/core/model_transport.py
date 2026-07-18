@@ -7,10 +7,11 @@ from dataclasses import dataclass
 import json
 import re
 
-from chulk.core.actions import AgentAction
+from chulk.core.actions import AgentAction, action_json_schema_for
 from chulk.core.context import AgentPrompt, ContextBudget
 from chulk.core.events import TraceEvent
 from chulk.core.prompt_builder import build_agent_prompt
+from chulk.core.planning import read_only_planning_tool_names
 from chulk.core.reflection import (
     ReflectionParseError,
     ReflectionResult,
@@ -21,11 +22,15 @@ from chulk.core.state import AgentState, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
 from chulk.llm import LLMActionError, LLMActionResult, LLMClient, LLMError
 from chulk.llm.base import call_async_with_supported_kwargs, call_with_supported_kwargs
+from chulk.llm.capabilities import (
+    client_supports_hosted_mcp_tools,
+    client_supports_native_tool_calling,
+)
 from chulk.llm.tools import PlanningToolAvailability, provider_action_tools
 from chulk.mcp import MCPServerConfig
 from chulk.memory import ConversationMemory, MemoryRecord
 from chulk.skills import SkillRegistry, SkillSelection
-from chulk.tools import ToolRegistry
+from chulk.tools import Tool, ToolRegistry
 
 
 MAX_SUMMARY_SOURCE_CHARS = 12000
@@ -72,13 +77,17 @@ class ModelTransport:
     def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
         """Build the model input and context report."""
         native_action_protocol = self._native_tool_calling_enabled()
-        registered_tools = list(self.tool_registry.list_tools())
+        action_tools = self._action_tools(require_plan=require_plan)
         planning_tools = self._planning_tool_availability(turn, require_plan=require_plan)
         native_tool_declarations = provider_action_tools(
-            registered_tools,
+            action_tools,
             planning_tools=planning_tools,
         )
-        if native_action_protocol and self._hosted_mcp_enabled():
+        if (
+            native_action_protocol
+            and not require_plan
+            and self._hosted_mcp_enabled()
+        ):
             native_tool_declarations.extend(
                 _safe_hosted_mcp_declaration(server) for server in self.mcp_servers
             )
@@ -91,11 +100,6 @@ class ModelTransport:
             tool_registry=self.tool_registry,
             max_skill_content_chars=self.max_skill_content_chars,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
-            available_skills=(
-                self.skill_registry.list_skills()
-                if self.skill_registry is not None
-                else []
-            ),
             context_sections=turn.context_sections,
             prompt_profile=turn.prompt_profile,
             locale=turn.locale,
@@ -174,23 +178,40 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
-        messages = self._record_model_request(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
+        hosted_mcp_enabled = (
+            native_action_protocol
+            and not require_plan
+            and self._hosted_mcp_enabled()
+        )
+        messages = self._record_model_request(
+            turn,
+            prompt,
+            hosted_mcp_enabled=hosted_mcp_enabled,
+        )
         try:
             result = call_with_supported_kwargs(
                 self.llm_client.complete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
-                tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
+                action_schema=self._action_schema(
+                    turn,
+                    require_plan=require_plan,
+                ),
+                tools=(
+                    self._action_tools(require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
                 planning_tools=(
                     self._planning_tool_availability(turn, require_plan=require_plan)
                     if native_action_protocol
                     else None
                 ),
-                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                hosted_mcp_servers=(self.mcp_servers if hosted_mcp_enabled else None),
                 mcp_approval_callback=(
                     (lambda request: self.resolve_mcp_approval(request, turn))
-                    if native_action_protocol
+                    if hosted_mcp_enabled
                     else None
                 ),
             )
@@ -206,23 +227,40 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
-        messages = self._record_model_request(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
+        hosted_mcp_enabled = (
+            native_action_protocol
+            and not require_plan
+            and self._hosted_mcp_enabled()
+        )
+        messages = self._record_model_request(
+            turn,
+            prompt,
+            hosted_mcp_enabled=hosted_mcp_enabled,
+        )
         try:
             result = await call_async_with_supported_kwargs(
                 self.llm_client.acomplete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
-                tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
+                action_schema=self._action_schema(
+                    turn,
+                    require_plan=require_plan,
+                ),
+                tools=(
+                    self._action_tools(require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
                 planning_tools=(
                     self._planning_tool_availability(turn, require_plan=require_plan)
                     if native_action_protocol
                     else None
                 ),
-                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                hosted_mcp_servers=(self.mcp_servers if hosted_mcp_enabled else None),
                 mcp_approval_callback=(
                     (lambda request: self.resolve_mcp_approval(request, turn))
-                    if native_action_protocol
+                    if hosted_mcp_enabled
                     else None
                 ),
             )
@@ -420,7 +458,13 @@ class ModelTransport:
             return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
         return clean_summary, False, None
 
-    def _record_model_request(self, turn: TurnState, prompt: AgentPrompt) -> list[dict[str, str]]:
+    def _record_model_request(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+        *,
+        hosted_mcp_enabled: bool,
+    ) -> list[dict[str, str]]:
         messages = prompt.messages
         context_report = prompt.context_report.to_dict()
         turn.context_reports.append(context_report)
@@ -437,6 +481,12 @@ class ModelTransport:
             context_report=context_report,
         )
         payload["action_transport"] = prompt.action_transport
+        payload["hosted_mcp_enabled"] = hosted_mcp_enabled
+        payload["hosted_mcp_server_labels"] = (
+            [server.label for server in self.mcp_servers]
+            if hosted_mcp_enabled
+            else []
+        )
         payload["native_tool_names"] = [
             str(declaration.get("name", ""))
             for declaration in prompt.native_tool_declarations
@@ -658,18 +708,39 @@ class ModelTransport:
         return reflection
 
     def _native_tool_calling_enabled(self) -> bool:
-        providers = getattr(self.llm_client, "providers", None)
-        if isinstance(providers, list):
-            return bool(providers) and all(
-                _client_supports_native_tool_calling(item) for item in providers
-            )
-        return _client_supports_native_tool_calling(self.llm_client)
+        return client_supports_native_tool_calling(self.llm_client)
 
     def _hosted_mcp_enabled(self) -> bool:
-        providers = getattr(self.llm_client, "providers", None)
-        if isinstance(providers, list):
-            return any(_client_supports_hosted_mcp(item) for item in providers)
-        return _client_supports_hosted_mcp(self.llm_client)
+        return client_supports_hosted_mcp_tools(self.llm_client)
+
+    def _action_tools(self, *, require_plan: bool) -> list[Tool]:
+        """Return only tools legal in the current action phase."""
+        tools = list(self.tool_registry.list_tools())
+        if not require_plan:
+            return tools
+        read_only_names = read_only_planning_tool_names(tools)
+        return [tool for tool in tools if tool.name in read_only_names]
+
+    def _action_schema(
+        self,
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> dict:
+        action_types: list[str] = []
+        if self._action_tools(require_plan=require_plan):
+            action_types.append("tool_call")
+        planning = self._planning_tool_availability(
+            turn,
+            require_plan=require_plan,
+        )
+        if planning.propose_plan:
+            action_types.append("plan")
+        elif planning.update_plan_step:
+            action_types.append("plan_step_update")
+        else:
+            action_types.insert(0, "final_answer")
+        return action_json_schema_for(action_types)
 
     @staticmethod
     def _planning_tool_availability(
@@ -686,16 +757,6 @@ class ModelTransport:
                 and active_plan.active_step() is not None
             ),
         )
-
-
-def _client_supports_native_tool_calling(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_native_tool_calling", False))
-
-
-def _client_supports_hosted_mcp(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
 
 
 def _safe_hosted_mcp_declaration(server: MCPServerConfig) -> dict:

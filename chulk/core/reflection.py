@@ -8,10 +8,13 @@ import re
 from typing import Any
 
 from chulk.core.prompts import REFLECTION_PROMPT
-from chulk.core.state import TurnState
+from chulk.core.state import Plan, TurnState
 
 
 MAX_REFLECTION_FIELD_CHARS = 6000
+MAX_REFLECTION_STEP_DESCRIPTION_CHARS = 600
+MAX_REFLECTION_CRITERION_CHARS = 400
+MAX_REFLECTION_CRITERIA_PER_STEP = 8
 
 
 class ReflectionParseError(ValueError):
@@ -74,7 +77,7 @@ def parse_reflection_response(raw_response: str | dict[str, Any]) -> ReflectionR
 def _format_turn_evidence(turn: TurnState) -> str:
     lines: list[str] = []
     if turn.active_plan is not None:
-        lines.extend(["Active plan:", turn.active_plan.to_prompt()])
+        lines.extend(["Active plan:", _format_plan_reference(turn.active_plan)])
     else:
         lines.append("Active plan: none")
 
@@ -101,6 +104,52 @@ def _format_turn_evidence(turn: TurnState) -> str:
         lines.append("Errors: none")
 
     return _truncate("\n".join(lines))
+
+
+def _format_plan_reference(plan: Plan) -> str:
+    """Summarize plan state without copying observation evidence into reflection."""
+    lines = [
+        f"- status: {plan.status()}",
+        f"- summary: {_truncate(plan.summary, max_chars=600)}",
+        "- steps:",
+    ]
+    for step in plan.steps:
+        evidence_sources = sorted(
+            {record.tool_name or "plan_step_update" for record in step.evidence}
+        )
+        evidence_reference = f"; evidence_records={len(step.evidence)}"
+        if evidence_sources:
+            evidence_reference += "; evidence_sources=" + ",".join(evidence_sources)
+        lines.append(
+            f"  - [{step.status}] {_truncate(step.id, max_chars=160)}: "
+            f"{_truncate(step.title, max_chars=400)}{evidence_reference}"
+        )
+        lines.append(
+            "    description: "
+            + _truncate(
+                step.description,
+                max_chars=MAX_REFLECTION_STEP_DESCRIPTION_CHARS,
+            )
+        )
+        criteria = step.acceptance_criteria[:MAX_REFLECTION_CRITERIA_PER_STEP]
+        if criteria:
+            lines.append("    acceptance_criteria:")
+            lines.extend(
+                "      - "
+                + _truncate(
+                    criterion,
+                    max_chars=MAX_REFLECTION_CRITERION_CHARS,
+                )
+                for criterion in criteria
+            )
+            omitted_count = len(step.acceptance_criteria) - len(criteria)
+            if omitted_count:
+                lines.append(f"      - ... [{omitted_count} more criteria omitted]")
+        else:
+            lines.append("    acceptance_criteria: none")
+    active_step = plan.active_step()
+    lines.append(f"- current_step: {active_step.id if active_step else 'none'}")
+    return "\n".join(lines)
 
 
 def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from chulk.core.actions import (
     STRICT_AGENT_ACTION_JSON_SCHEMA,
     ActionParseError,
@@ -37,6 +39,81 @@ def test_parse_final_answer_rejects_embedded_tool_call_fields():
         raise AssertionError("Expected final_answer with tool fields to fail")
 
 
+def test_parse_final_answer_rejects_embedded_plan_fields():
+    raw_response = json.dumps(
+        {
+            "type": "final_answer",
+            "content": "Done.",
+            "tool_name": None,
+            "arguments_json": "{}",
+            "plan_json": json.dumps({"summary": "Ignored plan", "steps": []}),
+            "step_update_json": "{}",
+        }
+    )
+
+    try:
+        parse_model_response(raw_response)
+    except ActionParseError as exc:
+        assert "plan fields" in str(exc)
+    else:
+        raise AssertionError("Expected final_answer with plan fields to fail")
+
+
+@pytest.mark.parametrize(
+    "invalid_placeholder",
+    ["[]", "null", "false", "0", '""'],
+)
+@pytest.mark.parametrize(
+    "field_name",
+    ["arguments_json", "plan_json", "step_update_json"],
+)
+def test_parse_action_rejects_non_object_json_transports(
+    field_name,
+    invalid_placeholder,
+):
+    payload = {
+        "type": "final_answer",
+        "content": "Done.",
+        "tool_name": None,
+        "arguments_json": "{}",
+        "plan_json": "{}",
+        "step_update_json": "{}",
+        field_name: invalid_placeholder,
+    }
+
+    with pytest.raises(ActionParseError, match="must contain a JSON object"):
+        parse_model_response(payload)
+
+
+@pytest.mark.parametrize("invalid_tool_name", [0, False, [], {}])
+def test_parse_final_answer_rejects_invalid_falsey_tool_name(invalid_tool_name):
+    with pytest.raises(ActionParseError, match="tool_name must be a string or null"):
+        parse_model_response(
+            {
+                "type": "final_answer",
+                "content": "Done.",
+                "tool_name": invalid_tool_name,
+            }
+        )
+
+
+def test_parse_action_rejects_unknown_and_conflicting_transport_fields():
+    with pytest.raises(ActionParseError, match="unsupported fields: extra"):
+        parse_model_response(
+            {"type": "final_answer", "content": "Done.", "extra": True}
+        )
+
+    with pytest.raises(ActionParseError, match="must not combine arguments"):
+        parse_model_response(
+            {
+                "type": "tool_call",
+                "tool_name": "calculator",
+                "arguments": {"expression": "1 + 1"},
+                "arguments_json": '{"expression":"2 + 2"}',
+            }
+        )
+
+
 def test_parse_tool_call():
     action = parse_model_response(
         json.dumps({"type": "tool_call", "tool_name": "calculator", "arguments": {"expression": "1 + 1"}})
@@ -58,6 +135,25 @@ def test_parse_tool_call_with_arguments_json_transport():
     )
 
     assert action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
+
+
+def test_parse_tool_call_rejects_content_and_plan_fields():
+    for extra in (
+        {"content": "ignored"},
+        {"content": None, "plan_json": json.dumps({"summary": "ignored"})},
+    ):
+        payload = {
+            "type": "tool_call",
+            "tool_name": "calculator",
+            "arguments_json": "{}",
+            **extra,
+        }
+        try:
+            parse_model_response(payload)
+        except ActionParseError:
+            pass
+        else:
+            raise AssertionError("Expected tool_call with contradictory fields to fail")
 
 
 def test_parse_plan_action_with_plan_json_transport():
@@ -299,3 +395,32 @@ def test_parse_plan_action_rejects_invalid_step_status():
         assert "plan step status" in str(exc)
     else:
         raise AssertionError("Expected invalid plan status to fail")
+
+
+@pytest.mark.parametrize("status", ["in_progress", "completed", "blocked"])
+def test_parse_plan_action_rejects_pre_advanced_step_status(status):
+    plan_json = json.dumps(
+        {
+            "summary": "Invalid pre-advanced plan.",
+            "steps": [
+                {
+                    "id": "1",
+                    "title": "Skipped work",
+                    "description": "This work has not run yet.",
+                    "status": status,
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ActionParseError, match="status must be pending"):
+        parse_model_response(
+            {
+                "type": "plan",
+                "content": None,
+                "tool_name": None,
+                "arguments_json": "{}",
+                "plan_json": plan_json,
+                "step_update_json": "{}",
+            }
+        )

@@ -23,6 +23,16 @@ from chulk.tools.schema import (
 )
 
 
+PLAN_TOOL_NAME = "chulk_propose_plan"
+PLAN_STEP_UPDATE_TOOL_NAME = "chulk_plan_step_update"
+RESERVED_TOOL_NAMES = frozenset(
+    {
+        PLAN_TOOL_NAME,
+        PLAN_STEP_UPDATE_TOOL_NAME,
+    }
+)
+
+
 class ToolFailureKind:
     """Stable tool failure categories for adapters and traces."""
 
@@ -141,6 +151,8 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         if not tool.name or not tool.name.replace("_", "").isalnum():
             raise ValueError("Tool names must be non-empty and contain only letters, numbers, and underscores")
+        if tool.name in RESERVED_TOOL_NAMES:
+            raise ValueError(f"Tool name is reserved for an internal Chulk action: {tool.name}")
         if tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
         tool.normalized_permission_level()

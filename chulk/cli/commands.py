@@ -162,7 +162,7 @@ CLI_COMMANDS: tuple[CLICommand, ...] = (
     ),
     CLICommand("/plan", "/plan [request]", "show or propose an approval plan", "Run", _plan),
     CLICommand("/approve", "/approve", "approve the pending plan", "Run", _approve),
-    CLICommand("/reject", "/reject", "reject the pending plan", "Run", _reject),
+    CLICommand("/reject", "/reject", "cancel the active plan", "Run", _reject),
     CLICommand("/status", "/status", "show runtime status", "Inspect", _status),
     CLICommand("/context", "/context", "show the latest prompt context", "Inspect", _context),
     CLICommand("/tools", "/tools", "list registered tools", "Inspect", _tools),

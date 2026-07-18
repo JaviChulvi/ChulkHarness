@@ -18,8 +18,10 @@ from chulk.core.state import AgentState, TurnState
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
+from chulk.llm.capabilities import client_requires_mcp_bridge
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.mcp import MCPServerConfig
+from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory import (
     ConversationMemory,
     MemoryPolicy,
@@ -131,6 +133,7 @@ class Agent:
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
+        self._restore_plan_turn_context()
         self.state.conversation_summary = self.memory.conversation_summary
         self._tool_executor = ToolExecutor(
             registry=self.tool_registry,
@@ -377,6 +380,11 @@ class Agent:
         """Create and trace a user turn before model/tool execution."""
         if self.has_pending_plan():
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
+        if self.has_resumable_plan():
+            return (
+                "An approved plan is waiting to continue. Use /approve to resume it or "
+                "/reject to cancel it before starting a new turn."
+            )
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
         execution_context = _coerce_tool_execution_context(tool_context) or self.default_tool_context
@@ -432,13 +440,17 @@ class Agent:
         turn = self._pending_plan_turn()
         return bool(turn and turn.active_plan and not turn.plan_approved)
 
+    def has_resumable_plan(self) -> bool:
+        """Return True when an approved durable plan can continue after restart."""
+        return self._resumable_plan_turn() is not None
+
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn = self._pending_plan_turn()
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
-            turn_or_response = self._approve_pending_plan()
+            turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
@@ -455,9 +467,9 @@ class Agent:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
         self._refresh_action_runtime()
-        turn = self._pending_plan_turn()
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
-            turn_or_response = self._approve_pending_plan()
+            turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
@@ -470,21 +482,32 @@ class Agent:
             if turn is not None:
                 self._release_tool_context(turn)
 
-    def _approve_pending_plan(self) -> TurnState | str:
-        """Mark the pending plan approved and return its paused turn."""
+    def _prepare_plan_execution(self) -> TurnState | str:
+        """Approve a pending plan or continue an already-approved durable plan."""
         turn = self._pending_plan_turn()
-        if turn is None or turn.active_plan is None:
+        if turn is None:
+            resumed_turn = self._resumable_plan_turn()
+            if resumed_turn is None or resumed_turn.active_plan is None:
+                return "No plan is waiting for approval."
+            self.state.current_turn_id = resumed_turn.turn_id
+            self.state.active_plan = resumed_turn.active_plan
+            self.state.messages = self.memory.recent()
+            return resumed_turn
+        if turn.active_plan is None:
             return "No plan is waiting for approval."
 
         try:
             turn.approve_plan()
             self.state.pending_plan_turn_id = None
             self.state.active_plan = turn.active_plan
-            self.memory.add_user_message("User approved the plan. Continue executing the approved plan.")
             self.state.messages = self.memory.recent()
             self._trace(
                 TraceEvent.PLAN_APPROVED,
-                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+                {
+                    "turn_id": turn.turn_id,
+                    "plan": turn.active_plan.to_dict(),
+                    "turn": turn.to_dict(),
+                },
             )
         except BaseException:
             self._release_tool_context(turn)
@@ -492,24 +515,42 @@ class Agent:
         return turn
 
     def reject_plan(self) -> str:
-        """Reject the pending plan without executing tools."""
+        """Reject a pending plan or cancel a restored approved plan."""
         self._ensure_open()
         self._refresh_action_runtime()
         turn = self._pending_plan_turn()
+        resumed = False
+        if turn is None:
+            turn = self._resumable_plan_turn()
+            resumed = turn is not None
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
 
         try:
-            message = "Plan rejected. No tools were run."
-            turn.reject_plan(message)
-            self.state.pending_plan_turn_id = None
-            self.state.active_plan = None
+            if resumed:
+                message = (
+                    "Approved plan cancelled. No further steps will run; any work already "
+                    "completed was not rolled back."
+                )
+                turn.cancel(message)
+                event_type = TraceEvent.TURN_FAILED
+            else:
+                message = "Plan rejected. No tools were run."
+                turn.reject_plan(message)
+                event_type = TraceEvent.PLAN_REJECTED
+            self._plan_execution.clear(turn)
             self.state.final_answer = message
             self.memory.add_assistant_message(message)
             self.state.messages = self.memory.recent()
             self._trace(
-                TraceEvent.PLAN_REJECTED,
-                {"turn_id": turn.turn_id, "plan": turn.active_plan.to_dict()},
+                event_type,
+                {
+                    "turn_id": turn.turn_id,
+                    "plan": turn.active_plan.to_dict(),
+                    "message": message,
+                    "status": turn.status,
+                    "turn": turn.to_dict(),
+                },
             )
             self._trace(TraceEvent.TURN_FINISHED, self._turn_effects.state_snapshot(turn))
             return message
@@ -545,6 +586,7 @@ class Agent:
 
     def _refresh_action_runtime(self) -> None:
         """Reflect mutable public runtime configuration in focused services."""
+        self._validate_mcp_route()
         model = self._model_transport
         model.llm_client = self.llm_client
         model.state = self.state
@@ -578,6 +620,59 @@ class Agent:
         effects.max_tool_stdout_chars = self.max_tool_stdout_chars
         effects.max_tool_stderr_chars = self.max_tool_stderr_chars
 
+    def _restore_plan_turn_context(self) -> None:
+        """Restore context that shaped a pending or resumable approved plan."""
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is None:
+            return
+
+        if self.skill_registry is not None:
+            for name in turn.loaded_skill_names:
+                skill = self.skill_registry.get_skill(name)
+                if skill is None:
+                    continue
+                self.skill_registry.load_content(skill.name)
+                self._selected_skills.append(
+                    SkillSelection(
+                        skill=skill,
+                        score=10_000,
+                        matched_keywords=["restored_pending_plan"],
+                    )
+                )
+
+        if (
+            self.memory_store is not None
+            and self.memory_policy is not None
+            and self.memory_policy.retrieval_enabled
+        ):
+            for memory_id in turn.loaded_memory_ids:
+                memory = self.memory_store.get_memory(
+                    memory_id,
+                    include_archived=True,
+                )
+                if memory is None:
+                    continue
+                if set(memory.tags) & PROFILE_MEMORY_TAGS:
+                    self._profile_memories.append(memory)
+                else:
+                    self._relevant_memories.append(memory)
+        elif self.memory_policy is not None and not self.memory_policy.retrieval_enabled:
+            self.state.loaded_memory_ids = []
+            turn.loaded_memory_ids = []
+
+    def _validate_mcp_route(self) -> None:
+        """Fail closed when mutable runtime state lacks a required MCP bridge."""
+        if not self.mcp_servers or not client_requires_mcp_bridge(self.llm_client):
+            return
+        registered_names = {tool.name for tool in self.tool_registry.list_tools()}
+        bridge_names = set(self.mcp_bridge_tool_names)
+        if bridge_names and bridge_names.issubset(registered_names):
+            return
+        raise RuntimeError(
+            "The current LLM client requires MCP bridge tools, but this agent was "
+            "not assembled with them. Rebuild the agent for the replacement client."
+        )
+
     def _pending_plan_turn(self) -> TurnState | None:
         pending_turn_id = self.state.pending_plan_turn_id
         if pending_turn_id is None:
@@ -585,6 +680,17 @@ class Agent:
         for turn in self.state.turns:
             if turn.turn_id == pending_turn_id:
                 return turn
+        return None
+
+    def _resumable_plan_turn(self) -> TurnState | None:
+        if self.state.active_plan is None or not self.state.turns:
+            return None
+        turn = self.state.turns[-1]
+        if (
+            turn.active_plan is self.state.active_plan
+            and turn.can_continue_approved_plan()
+        ):
+            return turn
         return None
 
     def _extract_long_term_memories(self, user_message: str) -> None:
@@ -730,6 +836,7 @@ class Agent:
             "message": message,
             "status": turn.status,
             "exception_type": type(exc).__name__,
+            "turn": turn.to_dict(),
         }
         for event_type, payload in (
             (TraceEvent.TURN_FAILED, failure_payload),
@@ -836,9 +943,18 @@ class Agent:
     def _tool_context_for_turn(self, turn: TurnState) -> ToolExecutionContext | None:
         if turn.turn_id in self._tool_contexts:
             return self._tool_contexts[turn.turn_id]
-        if turn.tool_context_metadata:
-            return ToolExecutionContext(metadata=turn.tool_context_metadata)
-        return None
+        default_context = self.default_tool_context
+        if not turn.tool_context_metadata and default_context is None:
+            return None
+        return ToolExecutionContext(
+            metadata={
+                **(default_context.metadata if default_context is not None else {}),
+                **turn.tool_context_metadata,
+                "conversation_id": self.state.conversation_id,
+                "turn_id": turn.turn_id,
+            },
+            deps=default_context.deps if default_context is not None else None,
+        )
 
     def _release_tool_context(self, turn: TurnState) -> None:
         """Release request-scoped host dependencies after terminal work."""

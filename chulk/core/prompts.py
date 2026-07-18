@@ -7,7 +7,7 @@ from typing import Literal
 
 from chulk.core.context import TurnContextSection
 from chulk.memory import MemoryRecord
-from chulk.skills import Skill, SkillSelection
+from chulk.skills import SkillSelection
 from chulk.core.planning import format_read_only_planning_tools
 from chulk.core.state import Plan
 
@@ -21,87 +21,136 @@ Answer the user's message directly and clearly. Use the recent conversation hist
 When tools are available, call a tool only when it materially helps answer the user.
 """
 
-JSON_ACTION_PROMPT = """<response_protocol>
-<transport>json_object</transport>
-<primary_rule>You must respond with exactly one JSON object and no extra prose.</primary_rule>
-<formats>
-<format>
-<label>Direct answer format:</label>
-<json_example>
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}
-</json_example>
-</format>
-<format>
-<label>Plan format:</label>
-<json_example>
-{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\",\\\"depends_on\\\":[],\\\"acceptance_criteria\\\":[\\\"...\\\"],\\\"retry_limit\\\":0}]}", "step_update_json": "{}"}
-</json_example>
-</format>
-<format>
-<label>Tool call format:</label>
-<json_example>
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}", "step_update_json": "{}"}
-</json_example>
-</format>
-<format>
-<label>Plan step update format:</label>
-<json_example>
-{"type": "plan_step_update", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{\\\"step_id\\\":\\\"1\\\",\\\"status\\\":\\\"completed\\\",\\\"evidence\\\":\\\"...\\\",\\\"reason\\\":null}"}
-</json_example>
-</format>
-</formats>
-<rules>
-<rule>Use a final_answer when you can answer without a tool. Use a tool_call when you need a listed tool.</rule>
-<rule>If you intend to use a tool, the type must be tool_call; never put tool_name or arguments_json on a final_answer.</rule>
-<rule>If you intend to answer the user, the type must be final_answer, tool_name must be null, and arguments_json must be "{}".</rule>
-<rule>For tool calls, arguments_json must be a JSON-encoded object string containing the tool arguments.</rule>
-<rule>For tool calls, use only argument fields from the listed tool schema.</rule>
-<rule>Use a plan only when the Planning section explicitly tells you to propose a plan.</rule>
-<rule>For plans, plan_json must be a JSON-encoded object string with summary and executable steps.</rule>
-<rule>Each plan step should include depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>
-<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts model recovery attempts after a failed tool call.</rule>
-<rule>When an approved plan is active, work only on the current executable step.</rule>
-<rule>After tool evidence satisfies that step's acceptance criteria, return plan_step_update instead of final_answer.</rule>
-<rule>Use final_answer only after the approved plan is completed.</rule>
-<rule>After an observation is provided, use it to produce the next tool_call, plan_step_update, or final_answer.</rule>
-<rule>Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.</rule>
-<rule>If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final_answer.</rule>
-</rules>
-</response_protocol>
-"""
 
-NATIVE_ACTION_PROMPT = """<response_protocol>
-<transport>provider_native_tool_calling</transport>
-<primary_rule>Use the provider-native tool-calling interface for actions.</primary_rule>
-<rules>
-<rule>Use normal assistant text only for a direct final answer to the user.</rule>
-<rule>When you need a listed Chulk tool, call that tool through the native tool interface.</rule>
-<rule>For tool calls, use only argument fields from the listed tool schema.</rule>
-<rule>When the Planning section tells you to propose a plan, use the available native plan-proposal action.</rule>
-<rule>For plans, provide a summary and executable steps with depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>
-<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts model recovery attempts after a failed tool call.</rule>
-<rule>When an approved plan is active, work only on the current executable step.</rule>
-<rule>After tool evidence satisfies that step's acceptance criteria, use the available native plan-step-update action instead of answering directly.</rule>
-<rule>Use a final answer only after the approved plan is completed.</rule>
-<rule>After an observation is provided, use it to produce the next native tool call, plan step update, or final answer.</rule>
-<rule>Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.</rule>
-<rule>If the omitted middle may contain information needed to answer correctly, inspect the artifact or run a narrower follow-up tool call before giving a final answer.</rule>
-</rules>
-</response_protocol>
-"""
+def format_action_protocol_for_prompt(
+    *,
+    native: bool,
+    allow_final_answer: bool,
+    allow_tool_call: bool,
+    allow_plan: bool,
+    allow_plan_step_update: bool,
+) -> str:
+    """Format only the action transports that are legal for this request."""
+    allowed_actions = [
+        name
+        for name, enabled in (
+            ("final_answer", allow_final_answer),
+            ("tool_call", allow_tool_call),
+            ("plan", allow_plan),
+            ("plan_step_update", allow_plan_step_update),
+        )
+        if enabled
+    ]
+    if not allowed_actions:
+        raise ValueError("at least one action must be available")
 
-JSON_REPAIR_PROMPT = """Your previous response could not be parsed as ChulkHarness action JSON.
-Return exactly one valid JSON object using one of these shapes:
-{"type": "final_answer", "content": "...", "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}
-{"type": "plan", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{\\\"summary\\\":\\\"...\\\",\\\"steps\\\":[{\\\"id\\\":\\\"1\\\",\\\"title\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\",\\\"status\\\":\\\"pending\\\",\\\"depends_on\\\":[],\\\"acceptance_criteria\\\":[\\\"...\\\"],\\\"retry_limit\\\":0}]}", "step_update_json": "{}"}
-{"type": "tool_call", "content": null, "tool_name": "tool_name", "arguments_json": "{\\\"arg\\\":\\\"value\\\"}", "plan_json": "{}", "step_update_json": "{}"}
-{"type": "plan_step_update", "content": null, "tool_name": null, "arguments_json": "{}", "plan_json": "{}", "step_update_json": "{\\\"step_id\\\":\\\"1\\\",\\\"status\\\":\\\"completed\\\",\\\"evidence\\\":\\\"...\\\",\\\"reason\\\":null}"}
-Do not include Markdown fences, comments, or prose outside the JSON object.
-If your previous response included tool_name or tool arguments, return a tool_call action.
-If your previous response was a direct answer, return a final_answer action with tool_name null and arguments_json "{}".
-If an observation reported invalid_arguments, remove unsupported fields and use only the listed schema fields.
-If plan execution feedback says a plan is incomplete, continue the current step or return a plan_step_update.
-"""
+    transport = "provider_native_tool_calling" if native else "json_object"
+    if native and allow_final_answer and len(allowed_actions) > 1:
+        primary_rule = (
+            "Use normal assistant text for final answers and the provider-native "
+            "tool interface for other allowed actions."
+        )
+    elif native and allow_final_answer:
+        primary_rule = "Use normal assistant text for the final answer."
+    elif native:
+        primary_rule = "Use the provider-native tool interface for the allowed action."
+    else:
+        primary_rule = "Respond with exactly one JSON object and no extra prose."
+    lines = [
+        "<response_protocol>",
+        f"<transport>{transport}</transport>",
+        f"<primary_rule>{primary_rule}</primary_rule>",
+        "<allowed_actions>",
+        *(f"<action>{action}</action>" for action in allowed_actions),
+        "</allowed_actions>",
+    ]
+
+    if not native:
+        lines.append("<formats>")
+        if allow_final_answer:
+            lines.extend(
+                _json_action_format(
+                    "final_answer",
+                    '{"type": "final_answer", "content": "...", "tool_name": null, '
+                    '"arguments_json": "{}", "plan_json": "{}", "step_update_json": "{}"}',
+                )
+            )
+        if allow_tool_call:
+            lines.extend(
+                _json_action_format(
+                    "tool_call",
+                    '{"type": "tool_call", "content": null, "tool_name": "tool_name", '
+                    '"arguments_json": "{\\"arg\\":\\"value\\"}", "plan_json": "{}", '
+                    '"step_update_json": "{}"}',
+                )
+            )
+        if allow_plan:
+            lines.extend(
+                _json_action_format(
+                    "plan",
+                    '{"type": "plan", "content": null, "tool_name": null, '
+                    '"arguments_json": "{}", "plan_json": "{\\"summary\\":\\"...\\",'
+                    '\\"steps\\":[{\\"id\\":\\"1\\",\\"title\\":\\"...\\",'
+                    '\\"description\\":\\"...\\",\\"status\\":\\"pending\\",'
+                    '\\"depends_on\\":[],\\"acceptance_criteria\\":[\\"...\\"],'
+                    '\\"retry_limit\\":0}]}", "step_update_json": "{}"}',
+                )
+            )
+        if allow_plan_step_update:
+            lines.extend(
+                _json_action_format(
+                    "plan_step_update",
+                    '{"type": "plan_step_update", "content": null, "tool_name": null, '
+                    '"arguments_json": "{}", "plan_json": "{}", '
+                    '"step_update_json": "{\\"step_id\\":\\"1\\",\\"status\\":'
+                    '\\"completed\\",\\"evidence\\":\\"...\\",\\"reason\\":null}"}',
+                )
+            )
+        lines.append("</formats>")
+
+    lines.append("<rules>")
+    if allow_final_answer:
+        lines.append(
+            "<rule>Use a final answer only when no further action is required for this turn.</rule>"
+        )
+    if allow_tool_call:
+        if native:
+            lines.append(
+                "<rule>Call listed tools through the provider-native interface and use only fields from their schemas.</rule>"
+            )
+        else:
+            lines.extend(
+                [
+                    "<rule>For a tool call, arguments_json must encode one JSON object using only fields from the listed schema.</rule>",
+                    "<rule>Never place tool fields on a different action type.</rule>",
+                ]
+            )
+    if allow_plan:
+        lines.append(
+            "<rule>Propose the approval plan using the available plan action; do not answer directly or begin execution.</rule>"
+        )
+    if allow_plan_step_update:
+        lines.append(
+            "<rule>When the current approved step is satisfied or blocked, use the plan-step-update action.</rule>"
+        )
+    if allow_tool_call or allow_plan_step_update:
+        lines.extend(
+            [
+                "<rule>Use each observation to choose the next allowed action.</rule>",
+                "<rule>When an observation is truncated, inspect its artifact or make a narrower call if omitted content is required.</rule>",
+            ]
+        )
+    lines.extend(["</rules>", "</response_protocol>"])
+    return "\n".join(lines)
+
+
+def _json_action_format(label: str, example: str) -> list[str]:
+    return [
+        "<format>",
+        f"<label>{label}</label>",
+        f"<json_example>{example}</json_example>",
+        "</format>",
+    ]
 
 REFLECTION_PROMPT = """You are ChulkHarness's final-answer reviewer.
 Review a proposed final answer before it is shown to the user.
@@ -226,32 +275,6 @@ def _format_native_tool_status(tool_count: int) -> str:
     )
 
 
-def format_available_skills_for_prompt(available_skills: list[Skill]) -> str:
-    """Format registered skill metadata for prompt injection."""
-    if not available_skills:
-        return "\n".join(["<available_skills>", "<status>Available skills: none.</status>", "</available_skills>"])
-
-    lines = [
-        "<available_skills>",
-        "<summary>Available skills are prompt-loadable procedural playbooks.</summary>",
-        "<boundary>This catalog is metadata only; detailed instructions are available only under Loaded skills.</boundary>",
-        "<rule>Do not claim to follow a skill's detailed procedure unless that skill is loaded for this turn.</rule>",
-    ]
-    for skill in available_skills:
-        description = skill.description.strip() or "No description provided."
-        lines.extend(
-            [
-                "<skill>",
-                f"<name>{_xml_text(skill.name)}</name>",
-                f"<description>{_xml_text(description)}</description>",
-                f"<catalog_line>- {_xml_text(skill.name)}: {_xml_text(description)}</catalog_line>",
-                "</skill>",
-            ]
-        )
-    lines.append("</available_skills>")
-    return "\n".join(lines)
-
-
 def format_conversation_summary_for_prompt(summary: str | None) -> str:
     """Format the task-local compact summary for prompt injection."""
     if not summary:
@@ -336,29 +359,34 @@ def format_planning_for_prompt(
 
     if require_plan and active_plan is None:
         read_only_tools = format_read_only_planning_tools(read_only_tool_names)
-        return "\n".join(
+        lines = [
+            "<planning>",
+            "<status>Planning: requested for this turn.</status>",
+            f"<read_only_reconnaissance_tools>{_xml_text(read_only_tools)}</read_only_reconnaissance_tools>",
+            f"<max_reconnaissance_tool_calls>{max_reconnaissance_tool_calls}</max_reconnaissance_tool_calls>",
+        ]
+        if read_only_tools == "none":
+            lines.append(
+                "<rule>No reconnaissance tools are available. Build the plan only from the request and supplied context.</rule>"
+            )
+        else:
+            lines.extend(
+                [
+                    f"<rule>Before proposing the plan, you may call only these read-only tools: {_xml_text(read_only_tools)}.</rule>",
+                    "<rule>Use reconnaissance only when missing facts would materially change the plan, and stop as soon as the evidence is sufficient.</rule>",
+                    f"<rule>Do not exceed {max_reconnaissance_tool_calls} reconnaissance tool calls.</rule>",
+                ]
+            )
+        lines.extend(
             [
-                "<planning>",
-                "<status>Planning: requested for this turn.</status>",
-                f"<read_only_reconnaissance_tools>{_xml_text(read_only_tools)}</read_only_reconnaissance_tools>",
-                f"<max_reconnaissance_tool_calls>{max_reconnaissance_tool_calls}</max_reconnaissance_tool_calls>",
-                f"<rule>Before proposing the plan, you may call only these read-only reconnaissance tools: {_xml_text(read_only_tools)}.</rule>",
-                "<rule>Use reconnaissance when codebase details matter; inspect the smallest useful set of files before planning.</rule>",
-                "<rule>Use search_files to locate symbols or factory functions instead of guessing which file owns them.</rule>",
-                "<rule>Only name files/modules in the plan when they are supported by listed, searched, or read observations.</rule>",
-                f"<rule>You have at most {max_reconnaissance_tool_calls} reconnaissance tool calls. Do not spend them all unless necessary.</rule>",
-                "<rule>After two or three useful file reads/searches, stop reconnaissance and return the approval plan.</rule>",
-                "<rule>Do not call shell, write, memory-mutation, import/export, or other mutating tools before approval.</rule>",
-                "<rule>After reconnaissance, return a plan action. Do not execute implementation steps until the user approves the plan.</rule>",
-                "<rule>Keep the plan concrete, short, and executable, with specific files/modules when they are known.</rule>",
-                "<rule>For each plan step, include depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>",
-                "<rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts recovery attempts after a failed tool call.</rule>",
+                "<rule>Return a short executable approval plan; do not perform its execution steps before approval.</rule>",
+                "<rule>Reconnaissance is preparation, not an executable plan step.</rule>",
+                "<rule>For each step include depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>",
                 "<rule>Use dependencies only when a step truly cannot start until an earlier step is completed.</rule>",
-                "<rule>The approval plan must be an implementation plan. Do not make read/list/search/explore/inspect steps the plan.</rule>",
-                "<rule>Because the user explicitly requested /plan, do not answer directly. Return a plan action after any needed reconnaissance.</rule>",
                 "</planning>",
             ]
         )
+        return "\n".join(lines)
 
     if active_plan is not None and plan_approved:
         return "\n".join(
@@ -441,21 +469,19 @@ def format_skills_for_prompt(
 
     sections = [
         "<loaded_skills>",
-        "<summary>Loaded skills are procedural instructions for this turn.</summary>",
-        "<boundary>They are not tools and they are not long-term memory.</boundary>",
-        "<rule>Use them only when relevant to the user's request.</rule>",
+        "<summary>Procedural instructions selected for this turn.</summary>",
     ]
     for selection in selected_skills:
         skill = selection.skill
-        content = skill.loaded_content or ""
+        content = _skill_body_without_duplicate_description(
+            skill.loaded_content or "",
+            skill.description,
+        )
         sections.extend(
             [
                 "<skill>",
-                f"<label>Skill: {_xml_text(skill.name)}</label>",
                 f"<name>{_xml_text(skill.name)}</name>",
-                f"<source>{_xml_text(skill.path)}</source>",
                 f"<description>{_xml_text(skill.description)}</description>",
-                f"<matched_keywords>{_xml_text(', '.join(selection.matched_keywords) or 'none')}</matched_keywords>",
                 "<instructions>",
                 _xml_text(_truncate_skill_content(content, max_chars_per_skill)),
                 "</instructions>",
@@ -464,6 +490,17 @@ def format_skills_for_prompt(
         )
     sections.append("</loaded_skills>")
     return "\n".join(sections)
+
+
+def _skill_body_without_duplicate_description(content: str, description: str) -> str:
+    clean_description = description.strip()
+    if not clean_description:
+        return content
+    return "\n".join(
+        line
+        for line in content.splitlines()
+        if line.strip() != clean_description
+    ).strip()
 
 
 def _format_memory_record(memory: MemoryRecord) -> str:

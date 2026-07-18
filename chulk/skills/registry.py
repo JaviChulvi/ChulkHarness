@@ -240,10 +240,12 @@ class SkillRegistry:
         return selections
 
     def load_content(self, name: str) -> str:
-        """Load full skill instructions for one registered skill."""
+        """Load skill instructions without repeating parsed front matter."""
         skill = self._skills[_normalize_skill_name(name)]
         if skill.loaded_content is None:
-            skill.loaded_content = skill.path.read_text(encoding="utf-8")
+            text = skill.path.read_text(encoding="utf-8")
+            _front_matter, body = _split_front_matter(text)
+            skill.loaded_content = body.strip()
         return skill.loaded_content
 
     def _selection_limit(self, limit: int | None) -> int:

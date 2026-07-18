@@ -25,12 +25,16 @@ class PlanExecution:
         turn.wait_for_plan_approval(plan)
         self.state.active_plan = plan
         self.state.pending_plan_turn_id = turn.turn_id
-        response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
-        self.memory.add_assistant_message(response)
         self.state.messages = self.memory.recent()
+        response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
         self.trace(
             TraceEvent.PLAN_CREATED,
-            {"turn_id": turn.turn_id, "plan": plan.to_dict(), "turn": turn.to_dict()},
+            {
+                "turn_id": turn.turn_id,
+                "plan": plan.to_dict(),
+                "display_message": response,
+                "turn": turn.to_dict(),
+            },
         )
         return response
 
@@ -45,10 +49,10 @@ class PlanExecution:
         if feedback is None:
             feedback = (
                 "Planning feedback: the proposed plan is still mostly reconnaissance. "
-                "Do not present read/list/search/explore/inspect steps as the approval plan. "
-                "If more context is needed, call read_file or search_files now. "
-                "Otherwise return a concrete implementation plan naming the modules/files to change, "
-                "the behavior to add, and the tests to update."
+                "Do not present discovery or research as the approval plan. "
+                "If more context is needed, use an available read-only reconnaissance action now. "
+                "Otherwise return a concrete implementation plan naming the relevant components or "
+                "resources, the behavior to change, and how the result will be verified."
             )
         metadata: dict[str, object] = {"revision_count": turn.planning_feedback_count}
         if plan is not None:
@@ -88,7 +92,12 @@ class PlanExecution:
         step.mark("in_progress")
         self.trace(
             TraceEvent.PLAN_STEP_STARTED,
-            {"turn_id": turn.turn_id, "step": step.to_dict(), "plan": plan.to_dict()},
+            {
+                "turn_id": turn.turn_id,
+                "step": step.to_dict(),
+                "plan": plan.to_dict(),
+                "turn": turn.to_dict(),
+            },
         )
 
     def apply_step_result(
@@ -108,8 +117,23 @@ class PlanExecution:
             self._trace_step(turn, step, TraceEvent.PLAN_STEP_COMPLETED)
             return None
         step.block(action.reason or action.evidence)
+        message = _blocked_message(step)
+        turn.block(message)
         self._trace_step(turn, step, TraceEvent.PLAN_STEP_BLOCKED)
-        return _blocked_message(step)
+        return message
+
+    def prepare_tool_result_checkpoint(
+        self,
+        effect: FinishToolEffect,
+        *,
+        step: PlanStep,
+    ) -> None:
+        """Apply terminal tool disposition before the observation checkpoint."""
+        if effect.disposition != "block":
+            return
+        if effect.blocked_reason is None:
+            raise RuntimeError("Blocked plan tool result requires a reason")
+        step.block(effect.blocked_reason)
 
     def apply_tool_result(
         self,
@@ -121,15 +145,17 @@ class PlanExecution:
         result: ToolResult,
         observation: str,
         output_metadata: dict,
+        evidence_recorded: bool = False,
     ) -> str | None:
         retry_metadata = effect.retry_metadata
-        self._record_tool_evidence(
-            step,
-            record,
-            observation,
-            output_metadata,
-            retry_metadata=retry_metadata,
-        )
+        if not evidence_recorded:
+            self._record_tool_evidence(
+                step,
+                record,
+                observation,
+                output_metadata,
+                retry_metadata=retry_metadata,
+            )
         if effect.disposition in {"none", "evidence"}:
             return None
         if effect.disposition == "retry_scheduled":
@@ -156,7 +182,11 @@ class PlanExecution:
             return None
         if effect.blocked_reason is None:
             raise RuntimeError("Blocked plan tool result requires a reason")
-        step.block(effect.blocked_reason)
+        if step.status != "blocked" or step.blocked_reason != effect.blocked_reason:
+            step.block(effect.blocked_reason)
+        message = _blocked_message(step)
+        if turn.status != "blocked" or turn.final_answer != message:
+            turn.block(message)
         self._trace_step(
             turn,
             step,
@@ -164,7 +194,25 @@ class PlanExecution:
             tool_name=result.tool_name,
             error=result.error,
         )
-        return _blocked_message(step)
+        return message
+
+    def record_tool_evidence(
+        self,
+        step: PlanStep,
+        record: ToolCallRecord,
+        observation: str,
+        output_metadata: dict,
+        *,
+        retry_metadata: dict[str, object] | None,
+    ) -> None:
+        """Attach tool evidence before the observation checkpoint is emitted."""
+        self._record_tool_evidence(
+            step,
+            record,
+            observation,
+            output_metadata,
+            retry_metadata=retry_metadata,
+        )
 
     def add_observation(
         self,
@@ -194,9 +242,11 @@ class PlanExecution:
             TraceEvent.TOOL_OBSERVATION,
             {
                 "turn_id": turn.turn_id,
+                "observation_index": len(turn.observations),
                 "tool_name": tool_name,
                 "observation": content,
                 "output_metadata": metadata,
+                "turn": turn.to_dict(),
             },
         )
 
@@ -246,6 +296,7 @@ class PlanExecution:
                 "plan": turn.active_plan.to_dict() if turn.active_plan else None,
                 "tool_name": tool_name,
                 "error": error,
+                "turn": turn.to_dict(),
             },
         )
 

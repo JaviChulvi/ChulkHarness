@@ -138,6 +138,44 @@ def test_compatible_providers_follow_native_single_tool_contract(
     assert result.metadata["action_transport"] == "provider_native"
 
 
+@pytest.mark.parametrize("client_factory", [_hosted, _openrouter])
+@pytest.mark.parametrize(
+    ("unsupported_kwargs", "field"),
+    [
+        ({"hosted_mcp_servers": [object()]}, "hosted_mcp_servers"),
+        ({"mcp_approval_callback": lambda _request: True}, "mcp_approval_callback"),
+    ],
+)
+def test_compatible_providers_reject_unsupported_hosted_mcp_arguments(
+    client_factory,
+    unsupported_kwargs: dict,
+    field: str,
+) -> None:
+    completions = FakeChatCompletions()
+    client = client_factory(completions)
+
+    with pytest.raises(LLMError, match=field) as raised:
+        client.complete_action(MESSAGES, **unsupported_kwargs)
+
+    assert raised.value.code == "unsupported_feature"
+    assert completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_factory", [_hosted, _openrouter])
+async def test_compatible_providers_async_reject_unsupported_hosted_mcp_arguments(
+    client_factory,
+) -> None:
+    completions = FakeChatCompletions()
+    client = client_factory(completions)
+
+    with pytest.raises(LLMError, match="hosted_mcp_servers") as raised:
+        await client.acomplete_action(MESSAGES, hosted_mcp_servers=[object()])
+
+    assert raised.value.code == "unsupported_feature"
+    assert completions.calls == []
+
+
 @pytest.mark.parametrize(
     ("factory", "provider"),
     [(_hosted, "openai-compatible"), (_openrouter, "openrouter")],

@@ -10,7 +10,7 @@ from typing import Protocol, cast
 
 from chulk.capabilities import Capabilities
 from chulk.config import Config
-from chulk.core import Agent, AgentState
+from chulk.core import Agent, AgentState, TurnState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
@@ -21,10 +21,15 @@ from chulk.llm import (
     provider_capabilities,
     provider_connection_from_config,
 )
-from chulk.llm.capabilities import resolve_runtime_model_capabilities
+from chulk.llm.capabilities import (
+    client_requires_mcp_bridge,
+    client_supports_hosted_mcp_tools,
+    client_supports_native_tool_calling,
+    resolve_runtime_model_capabilities,
+)
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
-from chulk.sessions import SQLiteSessionStore, SessionRecorder
+from chulk.sessions import ConversationSummaryRecord, SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
 from chulk.tools import ShellExecutionPolicy, Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
 from chulk.tools.permissions import (
@@ -63,6 +68,14 @@ class SkillSpecResolution:
 
     pinned_skill_names: list[str]
     warnings: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class MCPRoute:
+    """Effective MCP transport across the clients that may handle a request."""
+
+    provider_path: str
+    bridge_required: bool
 
 
 def create_agent(
@@ -123,7 +136,7 @@ def create_agent(
         recent_messages = session_store.load_recent_messages(
             state.conversation_id,
             config.history_limit,
-            after_ordinal=latest_summary.source_message_count if latest_summary is not None else 0,
+            after_ordinal=_summary_source_ordinal(latest_summary),
         )
         conversation_memory.replace(
             recent_messages,
@@ -235,6 +248,20 @@ def create_agent(
     return agent
 
 
+def _summary_source_ordinal(summary: ConversationSummaryRecord | None) -> int:
+    """Return the durable ordinal covered by a logical conversation summary."""
+    if summary is None:
+        return 0
+    source_ordinal = summary.metadata.get("source_message_ordinal")
+    if (
+        isinstance(source_ordinal, int)
+        and not isinstance(source_ordinal, bool)
+        and source_ordinal >= 0
+    ):
+        return source_ordinal
+    return summary.source_message_count
+
+
 def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str | None) -> AgentState:
     """Create fresh state or rebuild state for an existing conversation."""
     if conversation_id is None:
@@ -247,6 +274,48 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         return state
 
     latest_turn = state.turns[-1]
+    _reconcile_terminal_turn_message(
+        session_store,
+        conversation.id,
+        conversation.status,
+        latest_turn,
+    )
+    _reconcile_blocked_plan_turn(
+        session_store,
+        conversation.id,
+        latest_turn,
+    )
+    if latest_turn.status == "in_progress":
+        hosted_requests = session_store.load_uncheckpointed_hosted_mcp_requests(
+            conversation.id,
+            latest_turn.turn_id,
+            checkpointed_request_count=latest_turn.model_request_count,
+        )
+        if hosted_requests:
+            _block_uncertain_hosted_mcp_request(
+                session_store,
+                conversation.id,
+                latest_turn,
+                hosted_requests,
+            )
+        else:
+            unreconciled_calls = [
+                record.to_dict()
+                for record in latest_turn.tool_calls
+                if record.success is None or record.ended_at is None
+            ]
+            if not unreconciled_calls:
+                unreconciled_calls = session_store.load_tool_calls_without_observations(
+                    conversation.id,
+                    latest_turn.turn_id,
+                )
+            if unreconciled_calls:
+                _block_unresolved_tool_intent(
+                    session_store,
+                    conversation.id,
+                    latest_turn,
+                    unreconciled_calls,
+                )
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
     state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
@@ -258,12 +327,172 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         state.last_context_report = latest_turn.context_reports[-1]
     if latest_turn.model_usage_totals:
         state.last_usage_report = latest_turn.model_usage_totals
-    for turn in reversed(state.turns):
-        if turn.status == "waiting_for_approval" and turn.active_plan is not None and not turn.plan_approved:
-            state.active_plan = turn.active_plan
-            state.pending_plan_turn_id = turn.turn_id
-            break
+    if (
+        latest_turn.status == "waiting_for_approval"
+        and latest_turn.active_plan is not None
+        and not latest_turn.plan_approved
+    ):
+        state.active_plan = latest_turn.active_plan
+        state.pending_plan_turn_id = latest_turn.turn_id
+    elif latest_turn.can_continue_approved_plan():
+        state.active_plan = latest_turn.active_plan
     return state
+
+
+def _reconcile_terminal_turn_message(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    conversation_status: str,
+    turn: TurnState,
+) -> None:
+    """Terminalize a legacy turn whose terminal message preceded its snapshot."""
+    if turn.status not in {"in_progress", "waiting_for_approval"}:
+        return
+    terminal_message = session_store.load_terminal_turn_message(
+        conversation_id,
+        turn.turn_id,
+    )
+    if terminal_message is None:
+        return
+    content = terminal_message["content"]
+    kind = terminal_message["kind"]
+    if kind == "final":
+        turn.complete(content)
+    elif kind == "plan_rejected":
+        turn.reject_plan(content)
+    elif kind == "failed":
+        plan_status = turn.active_plan.status() if turn.active_plan is not None else None
+        if conversation_status == "cancelled":
+            turn.cancel(content)
+        elif conversation_status == "blocked" or plan_status == "blocked":
+            turn.block(content)
+        else:
+            turn.fail(content)
+    else:  # pragma: no cover - constrained by SQLiteSessionStore
+        return
+    session_store.save_turn_snapshot(conversation_id, turn.to_dict())
+
+
+def _reconcile_blocked_plan_turn(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+) -> None:
+    """Terminalize a checkpoint that already contains a blocked plan step."""
+    plan = turn.active_plan
+    if turn.status != "in_progress" or plan is None or plan.status() != "blocked":
+        return
+    blocked_step = next(
+        (step for step in plan.steps if step.status == "blocked"),
+        None,
+    )
+    if blocked_step is None:  # pragma: no cover - Plan.status enforces this
+        return
+    reason = blocked_step.blocked_reason or "Step blocked."
+    message = f"Plan step blocked: {blocked_step.title}. {reason}"
+    turn.block(message)
+    _save_recovery_terminal(
+        session_store,
+        conversation_id,
+        turn,
+        message,
+        message_key_suffix="blocked_plan_checkpoint",
+        metadata={"recovery": "blocked_plan_checkpoint"},
+    )
+
+
+def _block_uncertain_hosted_mcp_request(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    hosted_requests: list[dict[str, object]],
+) -> None:
+    """Fail closed when a hosted provider request lacks a durable checkpoint."""
+    latest = hosted_requests[-1]
+    raw_request_index = latest.get("request_index")
+    request_index = (
+        raw_request_index
+        if isinstance(raw_request_index, int) and not isinstance(raw_request_index, bool)
+        else 0
+    )
+    reason = (
+        "Turn execution stopped after restart because hosted MCP request "
+        f"{request_index} may have executed a remote operation without a durable "
+        "checkpoint. Chulk will not replay it automatically; inspect remote state "
+        "before retrying."
+    )
+    plan = turn.active_plan
+    active_step = plan.active_step() if plan is not None else None
+    if active_step is not None:
+        active_step.block(reason)
+    turn.block(reason)
+    _save_recovery_terminal(
+        session_store,
+        conversation_id,
+        turn,
+        reason,
+        message_key_suffix="uncertain_hosted_mcp",
+        metadata={
+            "recovery": "uncertain_hosted_mcp",
+            "request_index": request_index,
+        },
+    )
+
+
+def _block_unresolved_tool_intent(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    unresolved_calls: list[dict[str, object]],
+) -> None:
+    """Fail closed when execution stopped after intent but before a result."""
+    latest = unresolved_calls[-1]
+    tool_name = str(latest.get("tool_name") or "tool")
+    raw_iteration = latest.get("iteration")
+    iteration = (
+        raw_iteration
+        if isinstance(raw_iteration, int) and not isinstance(raw_iteration, bool)
+        else 0
+    )
+    reason = (
+        "Turn execution stopped after restart because "
+        f"tool call {tool_name} (iteration {iteration}) has no matching persisted observation. "
+        "Chulk will not replay it automatically; inspect external state before retrying."
+    )
+    plan = turn.active_plan
+    active_step = plan.active_step() if plan is not None else None
+    if active_step is not None:
+        active_step.block(reason)
+    turn.block(reason)
+    _save_recovery_terminal(
+        session_store,
+        conversation_id,
+        turn,
+        reason,
+        message_key_suffix="unresolved_tool_intent",
+        metadata={"recovery": "unresolved_tool_intent"},
+    )
+
+
+def _save_recovery_terminal(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    content: str,
+    *,
+    message_key_suffix: str,
+    metadata: dict[str, object],
+) -> None:
+    saved = session_store.save_terminal_turn_bundle(
+        conversation_id,
+        turn_id=turn.turn_id,
+        content=content,
+        message_key=f"{turn.turn_id}:assistant:{message_key_suffix}",
+        turn=turn.to_dict(),
+        metadata=metadata,
+    )
+    if not saved:  # pragma: no cover - TurnState guarantees a valid payload
+        raise RuntimeError("Failed to persist terminal recovery state")
 
 
 def _default_llm_client_factory(config: Config) -> LLMClient:
@@ -370,21 +599,11 @@ def _mcp_bridge_required(
     *,
     llm_client: LLMClient | None = None,
 ) -> bool:
-    if not tuple(mcp_servers):
-        return False
-    client_path = _fallback_client_path(llm_client)
-    if client_path is not None:
-        return any(
-            not _client_supports_native_tool_calling(client)
-            or not _client_supports_hosted_mcp(client)
-            for client in client_path
-        )
-    provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(
-        not _supports_native_tool_calling(provider)
-        or not _supports_hosted_mcp(provider)
-        for provider in provider_path
-    )
+    return resolve_mcp_route(
+        config,
+        mcp_servers,
+        llm_client=llm_client,
+    ).bridge_required
 
 
 def _mcp_provider_path(
@@ -393,40 +612,46 @@ def _mcp_provider_path(
     *,
     llm_client: LLMClient | None = None,
 ) -> str:
+    return resolve_mcp_route(
+        config,
+        mcp_servers,
+        llm_client=llm_client,
+    ).provider_path
+
+
+def resolve_mcp_route(
+    config: Config,
+    mcp_servers: Iterable[object],
+    *,
+    llm_client: LLMClient | None = None,
+) -> MCPRoute:
+    """Resolve one MCP route from the effective bound client path when available."""
     if not tuple(mcp_servers):
-        return "none"
-    client_path = _fallback_client_path(llm_client)
-    if client_path is None:
-        provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-        native_support = [_supports_native_tool_calling(provider) for provider in provider_path]
-        support = [_supports_hosted_mcp(provider) for provider in provider_path]
+        return MCPRoute(provider_path="none", bridge_required=False)
+
+    if llm_client is not None:
+        native_protocol = client_supports_native_tool_calling(llm_client)
+        has_hosted = client_supports_hosted_mcp_tools(llm_client)
+        has_bridge = client_requires_mcp_bridge(llm_client)
     else:
-        native_support = [_client_supports_native_tool_calling(client) for client in client_path]
-        support = [_client_supports_hosted_mcp(client) for client in client_path]
-    if not all(native_support):
-        return "bridge"
-    has_hosted = any(support)
-    has_bridge = any(not item for item in support)
+        provider_names = [
+            config.llm_provider,
+            *(provider.provider for provider in config.llm_fallback_providers),
+        ]
+        native_support = [_supports_native_tool_calling(provider) for provider in provider_names]
+        hosted_support = [_supports_hosted_mcp(provider) for provider in provider_names]
+        native_protocol = all(native_support)
+        has_hosted = any(hosted_support)
+        has_bridge = any(not item for item in hosted_support)
+
+    if not native_protocol:
+        return MCPRoute(provider_path="bridge", bridge_required=True)
+
     if has_hosted and has_bridge:
-        return "hosted+bridge"
-    return "hosted" if has_hosted else "bridge"
-
-
-def _fallback_client_path(llm_client: LLMClient | None) -> list[object] | None:
-    providers = getattr(llm_client, "providers", None)
-    if isinstance(providers, list) and providers:
-        return list(providers)
-    return None
-
-
-def _client_supports_hosted_mcp(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
-
-
-def _client_supports_native_tool_calling(client: object) -> bool:
-    capabilities = getattr(client, "capabilities", None)
-    return bool(getattr(capabilities, "supports_native_tool_calling", False))
+        route_path = "hosted+bridge"
+    else:
+        route_path = "hosted" if has_hosted else "bridge"
+    return MCPRoute(provider_path=route_path, bridge_required=has_bridge)
 
 
 def _supports_hosted_mcp(provider: str) -> bool:

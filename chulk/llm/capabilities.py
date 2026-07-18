@@ -156,6 +156,63 @@ class LLMModelCapabilities:
         }
 
 
+def effective_client_path(client: object) -> tuple[object, ...]:
+    """Return the concrete clients that can receive one fallback request."""
+    providers = getattr(client, "providers", None)
+    if isinstance(providers, (list, tuple)) and providers:
+        return tuple(providers)
+    return (client,)
+
+
+def client_supports_native_tool_calling(client: object) -> bool:
+    """Return whether every client on the request path supports native tools."""
+    return all(
+        bool(
+            getattr(
+                getattr(item, "capabilities", None),
+                "supports_native_tool_calling",
+                False,
+            )
+        )
+        for item in effective_client_path(client)
+    )
+
+
+def client_supports_hosted_mcp_tools(client: object) -> bool:
+    """Return whether any compatible client on the request path can host MCP."""
+    return any(
+        bool(
+            getattr(
+                getattr(item, "capabilities", None),
+                "supports_hosted_mcp_tools",
+                False,
+            )
+        )
+        for item in effective_client_path(client)
+    )
+
+
+def client_requires_mcp_bridge(client: object) -> bool:
+    """Return whether any client on the request path needs bridge tools for MCP."""
+    return any(
+        not bool(
+            getattr(
+                getattr(item, "capabilities", None),
+                "supports_native_tool_calling",
+                False,
+            )
+        )
+        or not bool(
+            getattr(
+                getattr(item, "capabilities", None),
+                "supports_hosted_mcp_tools",
+                False,
+            )
+        )
+        for item in effective_client_path(client)
+    )
+
+
 MODEL_CAPABILITIES: dict[tuple[str, str], LLMModelCapabilities] = {}
 
 

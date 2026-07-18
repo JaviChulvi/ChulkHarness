@@ -13,8 +13,7 @@ from chulk.llm.tools import (
     provider_action_tools,
 )
 from chulk.memory import ConversationMemory
-from chulk.skills import Skill
-from chulk.tools import Tool, ToolRegistry, calculator_tool
+from chulk.tools import Tool, ToolPermissionLevel, ToolRegistry, ToolResult, calculator_tool
 
 
 def test_estimate_tokens_is_deterministic():
@@ -57,16 +56,17 @@ def test_build_agent_prompt_reports_named_sections():
     assert report["included_message_count"] == 1
     assert report["omitted_message_count"] == 0
     assert "system_prompt" in section_names
-    assert "memories" in section_names
-    assert "available_skills" in section_names
-    assert "skills" in section_names
+    assert "memories" not in section_names
+    assert "available_skills" not in section_names
+    assert "skills" not in section_names
+    assert "planning" not in section_names
     assert "tools" in section_names
     assert "history" in section_names
     assert "observations" in section_names
     assert prompt.messages[0]["content"].startswith("<chulk_prompt>\n<system_prompt>\n<system_instructions>")
     assert "<instruction_text>\nBase prompt.\n</instruction_text>" in prompt.messages[0]["content"]
     assert prompt.messages[0]["content"].endswith("</chulk_prompt>")
-    assert "Available skills: none." in prompt.messages[0]["content"]
+    assert "Available skills: none." not in prompt.messages[0]["content"]
     xml_root = ET.fromstring(prompt.messages[0]["content"])
     assert xml_root.tag == "chulk_prompt"
     assert xml_root.find("tools/available_tools/tool/name").text == "calculator"
@@ -195,6 +195,7 @@ def test_native_planning_only_declaration_is_available_without_prompt_schema():
     assert PLAN_TOOL_NAME not in system_prompt
     assert PLAN_STEP_UPDATE_TOOL_NAME not in system_prompt
     assert "arguments_schema_json" not in system_prompt
+    assert "normal assistant text" not in system_prompt
     assert tools_section["item_count"] == 1
     assert tools_section["metadata"]["tool_names"] == [PLAN_TOOL_NAME]
     assert native_tools_section["item_count"] == 1
@@ -202,16 +203,67 @@ def test_native_planning_only_declaration_is_available_without_prompt_schema():
     assert native_tools_section["estimated_tokens"] > 0
 
 
-def test_build_agent_prompt_lists_available_skill_metadata_without_loading_content(tmp_path):
+def test_plan_prompt_exposes_only_registered_read_only_tools():
+    memory = ConversationMemory()
+    memory.add_user_message("plan this")
+    registry = ToolRegistry()
+    read_tool = Tool(
+        name="inspect_state",
+        description="Inspect state.",
+        args_schema={"type": "object", "properties": {}},
+        callable=lambda _arguments: ToolResult("inspect_state", True, "ok"),
+        permission_level=ToolPermissionLevel.READ,
+    )
+    write_tool = Tool(
+        name="change_state",
+        description="Change state.",
+        args_schema={"type": "object", "properties": {}},
+        callable=lambda _arguments: ToolResult("change_state", True, "ok"),
+        permission_level=ToolPermissionLevel.WRITE,
+    )
+    registry.register(read_tool)
+    registry.register(write_tool)
+
+    json_prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        planning_enabled=True,
+        require_plan=True,
+    )
+    native_prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        planning_enabled=True,
+        require_plan=True,
+        native_action_protocol=True,
+        native_tool_declarations=provider_action_tools(
+            [read_tool, write_tool],
+            planning_tools=PlanningToolAvailability(propose_plan=True),
+        ),
+    )
+
+    assert "<name>inspect_state</name>" in json_prompt.messages[0]["content"]
+    assert "change_state" not in json_prompt.messages[0]["content"]
+    assert [
+        declaration["name"] for declaration in native_prompt.native_tool_declarations
+    ] == ["inspect_state", PLAN_TOOL_NAME]
+
+
+def test_build_agent_prompt_omits_unselected_skill_sections():
     memory = ConversationMemory()
     memory.add_user_message("review this")
-    skill_path = tmp_path / "review" / "SKILL.md"
-    available_skill = Skill(
-        name="review",
-        description="Use this skill when reviewing code.",
-        path=skill_path,
-        loaded_content="# Review Skill\n\nDetailed review procedure.",
-    )
 
     prompt = build_agent_prompt(
         system_prompt="Base prompt.",
@@ -219,25 +271,83 @@ def test_build_agent_prompt_lists_available_skill_metadata_without_loading_conte
         profile_memories=[],
         relevant_memories=[],
         selected_skills=[],
-        available_skills=[available_skill],
         tool_registry=ToolRegistry(),
         max_skill_content_chars=1000,
         max_tool_calls_per_turn=3,
     )
     system_prompt = prompt.messages[0]["content"]
     report = prompt.context_report.to_dict()
-    available_section = next(section for section in report["sections"] if section["name"] == "available_skills")
 
-    assert "Available skills are prompt-loadable procedural playbooks" in system_prompt
-    assert "<available_skills>" in system_prompt
-    assert "</available_skills>" in system_prompt
-    assert "<skills>" in system_prompt
-    assert "</skills>" in system_prompt
-    assert "- review: Use this skill when reviewing code." in system_prompt
-    assert "Loaded skills: none selected for this turn." in system_prompt
+    assert "Unloaded skill metadata for this agent" not in system_prompt
+    assert "<available_skills>" not in system_prompt
+    assert "<skills>" not in system_prompt
+    assert "<name>review</name>" not in system_prompt
+    assert "Use this skill when reviewing code." not in system_prompt
+    assert "catalog_line" not in system_prompt
+    assert "Loaded skills: none selected for this turn." not in system_prompt
     assert "# Review Skill" not in system_prompt
-    assert available_section["metadata"]["skill_names"] == ["review"]
-    assert available_section["item_count"] == 1
+    assert not any(
+        section["name"] == "available_skills"
+        for section in report["sections"]
+    )
+
+
+def test_minimal_prompt_omits_unavailable_sections_and_actions():
+    memory = ConversationMemory()
+    memory.add_user_message("hello")
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    section_names = [
+        section["name"] for section in prompt.context_report.to_dict()["sections"]
+    ]
+
+    assert len(system_prompt) < 1000
+    assert "<action>final_answer</action>" in system_prompt
+    assert "<action>tool_call</action>" not in system_prompt
+    assert "<action>plan</action>" not in system_prompt
+    assert "<action>plan_step_update</action>" not in system_prompt
+    assert section_names == ["system_prompt", "action_protocol", "history", "observations"]
+    assert "<available_skills><available_skills>" not in system_prompt
+    assert "<conversation_summary><conversation_summary>" not in system_prompt
+    assert "<planning><planning>" not in system_prompt
+
+
+def test_plan_prompt_without_tools_is_domain_neutral_and_plan_only():
+    memory = ConversationMemory()
+    memory.add_user_message("plan this change")
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=1,
+        planning_enabled=True,
+        require_plan=True,
+    )
+    system_prompt = prompt.messages[0]["content"]
+
+    assert "No reconnaissance tools are available" in system_prompt
+    assert "<max_reconnaissance_tool_calls>1</max_reconnaissance_tool_calls>" in system_prompt
+    assert "search_files" not in system_prompt
+    assert "two or three" not in system_prompt
+    assert "codebase" not in system_prompt
+    assert "<action>plan</action>" in system_prompt
+    assert "<action>tool_call</action>" not in system_prompt
+    assert "<action>final_answer</action>" not in system_prompt
 
 
 def test_build_agent_prompt_injects_external_context_and_prompt_metadata():

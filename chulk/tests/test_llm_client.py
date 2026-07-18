@@ -4,7 +4,13 @@ from decimal import Decimal
 import json
 from types import SimpleNamespace
 
-from chulk.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
+from chulk.core.actions import (
+    FinalAnswerAction,
+    PlanAction,
+    ToolCallAction,
+    action_json_schema_for,
+)
+from chulk.core.state import Plan, PlanStep
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
     FallbackChain,
@@ -429,12 +435,71 @@ def test_openai_responses_client_uses_native_tool_calls_when_tools_are_provided(
 
     assert result.action == ToolCallAction(type="tool_call", tool_name="calculator", arguments={"expression": "1 + 1"})
     assert fake_client.responses.kwargs["tool_choice"] == "auto"
+    assert fake_client.responses.kwargs["parallel_tool_calls"] is False
     assert "tools" in fake_client.responses.kwargs
     assert "text" not in fake_client.responses.kwargs
     tool_names = {tool["name"] for tool in fake_client.responses.kwargs["tools"]}
     assert tool_names == {"calculator"}
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["call_id"] == "call_1"
+
+
+def test_openai_rejects_multiple_function_calls_and_uses_json_fallback():
+    fallback_payload = json.dumps(
+        {
+            "type": "final_answer",
+            "content": "safe fallback",
+            "tool_name": None,
+            "arguments_json": "{}",
+            "plan_json": "{}",
+            "step_update_json": "{}",
+        }
+    )
+    fake_client = FakeOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_parallel",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="calculator",
+                        arguments=json.dumps({"expression": "1 + 1"}),
+                        call_id="call_1",
+                    ),
+                    SimpleNamespace(
+                        type="function_call",
+                        name="calculator",
+                        arguments=json.dumps({"expression": "2 + 2"}),
+                        call_id="call_2",
+                    ),
+                ],
+            ),
+            SimpleNamespace(
+                id="resp_fallback",
+                output_text=fallback_payload,
+                usage=None,
+                output=[],
+            ),
+        ]
+    )
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "calculate both"}],
+        tools=[fake_calculator_tool()],
+    )
+
+    assert result.action == FinalAnswerAction(
+        type="final_answer",
+        content="safe fallback",
+    )
+    assert result.metadata["action_transport"] == "chulk_json_fallback"
+    assert "multiple function calls" in result.metadata["native_tool_call_error"]
+    assert len(fake_client.responses.calls) == 2
+    assert fake_client.responses.calls[0]["parallel_tool_calls"] is False
+    assert "tools" not in fake_client.responses.calls[1]
 
 
 def test_openai_native_text_with_no_effective_tools_omits_tool_fields():
@@ -539,6 +604,67 @@ def test_openai_responses_client_continues_after_mcp_approval_request():
             "approved": True,
         }
     ]
+
+
+def test_openai_mcp_approval_continuation_keeps_planning_contract_and_fails_closed_on_text():
+    fake_client = FakeOpenAIClient(
+        responses=[
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id="approval_1",
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                id="resp_2",
+                output_text="phase-illegal final text",
+                usage=None,
+                output=[],
+            ),
+        ]
+    )
+    primary = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "must not run"})]
+    )
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    try:
+        fallback.complete_action(
+            [
+                {"role": "system", "content": "Finish with a plan step update."},
+                {"role": "user", "content": "Search the docs and update the step."},
+            ],
+            planning_tools=PlanningToolAvailability(update_plan_step=True),
+            hosted_mcp_servers=[server],
+            mcp_approval_callback=lambda _approval: True,
+        )
+    except LLMError as exc:
+        assert exc.code == "action_shape_error"
+        assert exc.retryable is False
+        assert exc.fallback_eligible is False
+        assert "planning action was required" in str(exc)
+    else:
+        raise AssertionError("Expected post-MCP text to fail closed during plan execution")
+
+    continuation = fake_client.responses.calls[1]
+    assert continuation["tool_choice"] == "required"
+    assert continuation["instructions"] == "Finish with a plan step update."
+    assert len(fallback.last_attempts) == 1
+    assert secondary.requests == []
 
 
 def test_openai_hosted_mcp_approval_requires_callback():
@@ -880,6 +1006,7 @@ def test_openai_responses_native_plan_tool_becomes_plan_action():
     assert [tool["name"] for tool in fake_client.responses.kwargs["tools"]] == [
         PLAN_TOOL_NAME
     ]
+    assert fake_client.responses.kwargs["tool_choice"] == "required"
 
 
 def test_unknown_model_reports_usage_without_cost():
@@ -984,6 +1111,43 @@ def test_fallback_chain_honors_a_custom_public_complete_action():
     assert result.raw_response == '{"type":"custom"}'
 
 
+def test_fallback_chain_serializes_custom_plan_action_as_a_strict_proposal():
+    plan = Plan(
+        summary="Inspect and update the file.",
+        steps=[
+            PlanStep(
+                id="inspect",
+                title="Inspect",
+                description="Read the current implementation.",
+                acceptance_criteria=["The implementation is understood."],
+            ),
+            PlanStep(
+                id="update",
+                title="Update",
+                description="Apply the requested change.",
+                depends_on=["inspect"],
+                acceptance_criteria=["The requested behavior is implemented."],
+                retry_limit=1,
+            ),
+        ],
+    )
+
+    class PublicPlanActionClient(LLMClient):
+        def complete_action(self, messages, **kwargs):
+            return LLMActionResult(
+                action=PlanAction(type="plan", plan=plan),
+                raw_response='{"type":"custom-plan"}',
+            )
+
+    result = FallbackChain([PublicPlanActionClient()]).complete_action(
+        [{"role": "user", "content": "Plan this"}],
+        action_schema=action_json_schema_for(["plan"]),
+    )
+
+    assert result.action == PlanAction(type="plan", plan=plan)
+    assert result.raw_response == '{"type":"custom-plan"}'
+
+
 def test_custom_public_action_provider_does_not_collapse_other_provider_repairs():
     class PublicActionClient(LLMClient):
         def complete_action(self, messages, **kwargs):
@@ -1044,6 +1208,42 @@ def test_openai_responses_client_uses_strict_action_schema():
     assert "plan_json" in schema["properties"]
     assert "step_update_json" in schema["properties"]
     assert "arguments" not in schema["properties"]
+
+
+def test_openai_responses_client_uses_phase_narrowed_action_schema():
+    plan_payload = {
+        "summary": "Make the change.",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Make the change",
+                "description": "Complete the requested work.",
+                "status": "pending",
+            }
+        ],
+    }
+    fake_client = FakeOpenAIClient(
+        json.dumps(
+            {
+                "type": "plan",
+                "content": None,
+                "tool_name": None,
+                "arguments_json": "{}",
+                "plan_json": json.dumps(plan_payload),
+                "step_update_json": "{}",
+            }
+        )
+    )
+    client = OpenAIResponsesClient(model="test-model", client=fake_client)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "Plan this"}],
+        action_schema=action_json_schema_for(["plan"]),
+    )
+
+    schema = fake_client.responses.kwargs["text"]["format"]["schema"]
+    assert isinstance(result.action, PlanAction)
+    assert schema["properties"]["type"]["enum"] == ["plan"]
 
 
 def test_openai_responses_client_applies_output_limits():
@@ -1431,7 +1631,7 @@ def test_local_client_falls_back_to_json_when_native_tools_are_rejected():
     assert len(fake_client.chat.completions.calls) == 2
     assert "tools" in fake_client.chat.completions.calls[0]
     assert "tools" not in fake_client.chat.completions.calls[1]
-    assert "You must respond with exactly one JSON object" in fake_client.chat.completions.calls[1]["messages"][0]["content"]
+    assert "Respond with exactly one JSON object" in fake_client.chat.completions.calls[1]["messages"][0]["content"]
 
 
 def test_llm_client_repairs_invalid_action_json():
@@ -1448,6 +1648,73 @@ def test_llm_client_repairs_invalid_action_json():
     assert result.repair_attempts == 1
     assert "not valid JSON" in result.errors[0]
     assert "could not be parsed" in client.requests[1][-1]["content"]
+    assert "Return exactly one valid JSON object" in client.requests[1][-1]["content"]
+
+
+def test_llm_client_repairs_pre_advanced_plan_steps():
+    def plan_response(status: str) -> str:
+        return json.dumps(
+            {
+                "type": "plan",
+                "content": None,
+                "tool_name": None,
+                "arguments_json": "{}",
+                "plan_json": json.dumps(
+                    {
+                        "summary": "Make the change.",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "title": "Make the change",
+                                "description": "Complete the requested work.",
+                                "status": status,
+                            }
+                        ],
+                    }
+                ),
+                "step_update_json": "{}",
+            }
+        )
+
+    client = ScriptedLLMClient(
+        [plan_response("completed"), plan_response("pending")]
+    )
+
+    result = client.complete_action(
+        [{"role": "user", "content": "Plan this"}],
+        max_repair_attempts=1,
+    )
+
+    assert isinstance(result.action, PlanAction)
+    assert result.action.plan.steps[0].status == "pending"
+    assert result.repair_attempts == 1
+    assert "status must be pending" in result.errors[0]
+
+
+def test_llm_client_replaces_prior_repair_instead_of_accumulating_it():
+    client = ScriptedLLMClient(
+        [
+            "FIRST_INVALID_RESPONSE",
+            "SECOND_INVALID_RESPONSE",
+            json.dumps({"type": "final_answer", "content": "repaired"}),
+        ]
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "<response_protocol>Existing action contract.</response_protocol>",
+        },
+        {"role": "user", "content": "Hello"},
+    ]
+
+    result = client.complete_action(messages, max_repair_attempts=2)
+
+    assert result.action.content == "repaired"
+    assert [len(request) for request in client.requests] == [2, 3, 3]
+    assert "FIRST_INVALID_RESPONSE" in client.requests[1][-1]["content"]
+    assert "FIRST_INVALID_RESPONSE" not in client.requests[2][-1]["content"]
+    assert "SECOND_INVALID_RESPONSE" in client.requests[2][-1]["content"]
+    assert "Return exactly one valid JSON object" not in client.requests[2][-1]["content"]
 
 
 def test_create_llm_client_selects_deepseek_provider():

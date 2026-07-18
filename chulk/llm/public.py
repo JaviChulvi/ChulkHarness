@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import json
 import time
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 from chulk.core.actions import (
     FinalAnswerAction,
@@ -349,6 +349,7 @@ class FallbackChain(LLMClient):
         *,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -360,6 +361,7 @@ class FallbackChain(LLMClient):
                 messages,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -377,6 +379,7 @@ class FallbackChain(LLMClient):
         *,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -388,6 +391,7 @@ class FallbackChain(LLMClient):
                 messages,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -415,6 +419,7 @@ class FallbackChain(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -425,6 +430,7 @@ class FallbackChain(LLMClient):
                 provider,
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
@@ -437,6 +443,7 @@ class FallbackChain(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -447,6 +454,7 @@ class FallbackChain(LLMClient):
                 provider,
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
@@ -687,6 +695,7 @@ def _complete_action(
     *,
     max_repair_attempts: int,
     max_output_tokens: int | None,
+    action_schema: dict[str, Any] | None,
     tools: list[object] | None,
     planning_tools: PlanningToolAvailability | None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None,
@@ -694,6 +703,7 @@ def _complete_action(
 ) -> LLMActionResult:
     kwargs: dict[str, object] = {
         "max_repair_attempts": max_repair_attempts,
+        "action_schema": action_schema,
         "tools": tools,
         "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
@@ -710,6 +720,7 @@ async def _acomplete_action(
     *,
     max_repair_attempts: int,
     max_output_tokens: int | None,
+    action_schema: dict[str, Any] | None,
     tools: list[object] | None,
     planning_tools: PlanningToolAvailability | None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None,
@@ -717,6 +728,7 @@ async def _acomplete_action(
 ) -> LLMActionResult:
     kwargs: dict[str, object] = {
         "max_repair_attempts": max_repair_attempts,
+        "action_schema": action_schema,
         "tools": tools,
         "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
@@ -736,6 +748,7 @@ def _complete_action_response_once(
     messages: list[dict[str, str]],
     *,
     max_output_tokens: int | None,
+    action_schema: dict[str, Any] | None,
     tools: list[object] | None,
     planning_tools: PlanningToolAvailability | None = None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -747,6 +760,7 @@ def _complete_action_response_once(
             messages,
             max_repair_attempts=0,
             max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
             tools=tools,
             planning_tools=planning_tools,
             hosted_mcp_servers=hosted_mcp_servers,
@@ -754,6 +768,7 @@ def _complete_action_response_once(
         )
         return _response_from_custom_action(result, provider=provider)
     kwargs: dict[str, object] = {
+        "action_schema": action_schema,
         "tools": tools,
         "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
@@ -769,6 +784,7 @@ async def _acomplete_action_response_once(
     messages: list[dict[str, str]],
     *,
     max_output_tokens: int | None,
+    action_schema: dict[str, Any] | None,
     tools: list[object] | None,
     planning_tools: PlanningToolAvailability | None = None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -780,6 +796,7 @@ async def _acomplete_action_response_once(
             messages,
             max_repair_attempts=0,
             max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
             tools=tools,
             planning_tools=planning_tools,
             hosted_mcp_servers=hosted_mcp_servers,
@@ -787,6 +804,7 @@ async def _acomplete_action_response_once(
         )
         return _response_from_custom_action(result, provider=provider)
     kwargs: dict[str, object] = {
+        "action_schema": action_schema,
         "tools": tools,
         "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
@@ -847,7 +865,23 @@ def _action_payload(result: LLMActionResult) -> dict[str, object]:
             "arguments": action.arguments,
         }
     if isinstance(action, PlanAction):
-        return {"type": action.type, "plan": action.plan.to_dict()}
+        return {
+            "type": action.type,
+            "plan": {
+                "summary": action.plan.summary,
+                "steps": [
+                    {
+                        "id": step.id,
+                        "title": step.title,
+                        "description": step.description,
+                        "depends_on": list(step.depends_on),
+                        "acceptance_criteria": list(step.acceptance_criteria),
+                        "retry_limit": step.retry_limit,
+                    }
+                    for step in action.plan.steps
+                ],
+            },
+        }
     if isinstance(action, PlanStepUpdateAction):
         return {
             "type": action.type,

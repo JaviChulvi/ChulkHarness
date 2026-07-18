@@ -226,6 +226,7 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -250,8 +251,13 @@ class GeminiGenerateContentClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
+                    action_schema=action_schema,
                 )
                 fallback.metadata.update(
                     {
@@ -263,6 +269,7 @@ class GeminiGenerateContentClient(LLMClient):
         return self._complete_json_action_response_once(
             messages,
             max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
         )
 
     async def _acomplete_action_response_once(
@@ -270,6 +277,7 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
         planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
@@ -279,6 +287,7 @@ class GeminiGenerateContentClient(LLMClient):
             return await super()._acomplete_action_response_once(
                 messages,
                 max_output_tokens=max_output_tokens,
+                action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
@@ -303,8 +312,13 @@ class GeminiGenerateContentClient(LLMClient):
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages, tools=tools),
+                    with_json_action_prompt(
+                        messages,
+                        tools=tools,
+                        planning_tools=planning_tools,
+                    ),
                     max_output_tokens=max_output_tokens,
+                    action_schema=action_schema,
                 )
                 fallback.metadata.update(
                     {
@@ -316,6 +330,7 @@ class GeminiGenerateContentClient(LLMClient):
         return await self._acomplete_json_action_response_once(
             messages,
             max_output_tokens=max_output_tokens,
+            action_schema=action_schema,
         )
 
     def _complete_json_action_response_once(
@@ -323,12 +338,13 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
         request["config"].update(
             {
                 "response_mime_type": "application/json",
-                "response_json_schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                "response_json_schema": action_schema or STRICT_AGENT_ACTION_JSON_SCHEMA,
             }
         )
         response = self._generate(request, operation="structured action request")
@@ -339,6 +355,7 @@ class GeminiGenerateContentClient(LLMClient):
                 provider=self.provider,
                 model=self.model,
                 code="action_shape_error",
+                fallback_eligible=True,
             )
         result = self._response_from_provider(
             messages,
@@ -353,12 +370,13 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        action_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
         request["config"].update(
             {
                 "response_mime_type": "application/json",
-                "response_json_schema": STRICT_AGENT_ACTION_JSON_SCHEMA,
+                "response_json_schema": action_schema or STRICT_AGENT_ACTION_JSON_SCHEMA,
             }
         )
         response = await self._agenerate(request, operation="structured action request")
@@ -369,6 +387,7 @@ class GeminiGenerateContentClient(LLMClient):
                 provider=self.provider,
                 model=self.model,
                 code="action_shape_error",
+                fallback_eligible=True,
             )
         result = self._response_from_provider(
             messages,
@@ -624,9 +643,14 @@ def _native_tool_config(
     ]
     if not declarations:
         return {}
+    planning_required = planning_tools is not None and planning_tools.enabled
     return {
         "tools": [{"function_declarations": declarations}],
-        "tool_config": {"function_calling_config": {"mode": "AUTO"}},
+        "tool_config": {
+            "function_calling_config": {
+                "mode": "ANY" if planning_required else "AUTO"
+            }
+        },
         "automatic_function_calling": {"disable": True},
     }
 

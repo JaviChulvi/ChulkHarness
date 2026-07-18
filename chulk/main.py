@@ -304,6 +304,13 @@ def run_chat_loop(
         if command_context.agent.has_pending_plan():
             output_func(terminal.warning("A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."))
             continue
+        if command_context.agent.has_resumable_plan():
+            output_func(
+                terminal.warning(
+                    "An approved plan is waiting to continue. Use /approve to resume it."
+                )
+            )
+            continue
 
         try:
             assistant_response = command_context.agent.run_turn(user_message)

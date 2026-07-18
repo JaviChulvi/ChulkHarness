@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from chulk.core.context import TurnContextSection
 from chulk.core.state import ObservationRecord, Plan, PlanStep, PlanStepEvidence, ToolCallRecord, TurnState
+from chulk.memory.store import select_recent_conversation_messages
 from chulk.sessions.models import ConversationRecord, ConversationSummaryRecord, MessageRecord
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
@@ -142,26 +143,15 @@ class SQLiteSessionStore:
         key = message_key or f"{conversation_id}:{uuid4()}"
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            next_ordinal = _next_message_ordinal(conn, conversation_id)
-            conn.execute(
-                """
-                INSERT INTO conversation_messages (
-                    id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(message_key) DO NOTHING
-                """,
-                (
-                    str(uuid4()),
-                    conversation_id,
-                    turn_id,
-                    role,
-                    clean_content,
-                    next_ordinal,
-                    key,
-                    now,
-                    json.dumps(metadata or {}, sort_keys=True),
-                ),
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role=role,
+                content=clean_content,
+                message_key=key,
+                metadata=metadata,
+                created_at=now,
             )
             _touch_conversation(conn, conversation_id, now)
 
@@ -189,6 +179,72 @@ class SQLiteSessionStore:
             ).fetchall()
         return [_row_to_message(row) for row in reversed(rows)]
 
+    def save_terminal_turn_bundle(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        content: str,
+        message_key: str,
+        turn: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Atomically persist a terminal assistant message and its turn snapshot."""
+        clean_content = content.strip()
+        if (
+            not clean_content
+            or not message_key.strip()
+            or not _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+        ):
+            return False
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role="assistant",
+                content=clean_content,
+                message_key=message_key,
+                metadata=metadata,
+                created_at=now,
+            )
+            _save_turn_snapshot(conn, conversation_id, turn, now)
+        return True
+
+    def load_terminal_turn_message(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> dict[str, str] | None:
+        """Return a terminal assistant message that may predate its turn snapshot."""
+        message_keys = {
+            f"{turn_id}:assistant:final": "final",
+            f"{turn_id}:assistant:failed": "failed",
+            f"{turn_id}:assistant:plan_rejected": "plan_rejected",
+        }
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT content, message_key
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND message_key IN (?, ?, ?)
+                ORDER BY ordinal DESC
+                LIMIT 1
+                """,
+                (conversation_id, turn_id, *message_keys),
+            ).fetchone()
+        if row is None:
+            return None
+        message_key = str(row["message_key"])
+        kind = message_keys.get(message_key)
+        if kind is None:
+            return None
+        return {"kind": kind, "content": str(row["content"])}
+
     def load_recent_messages(
         self,
         conversation_id: str,
@@ -197,10 +253,28 @@ class SQLiteSessionStore:
         after_ordinal: int = 0,
     ) -> list[dict[str, str]]:
         """Return recent messages in the format expected by ConversationMemory."""
-        return [
-            {"role": message.role, "content": message.content}
-            for message in self.list_messages(conversation_id, limit=limit, after_ordinal=after_ordinal)
+        clean_limit = max(1, min(limit, 500))
+        clean_after_ordinal = max(0, after_ordinal)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content, metadata
+                FROM conversation_messages
+                WHERE conversation_id = ?
+                  AND ordinal > ?
+                ORDER BY ordinal
+                """,
+                (conversation_id, clean_after_ordinal),
+            ).fetchall()
+        messages = [
+            {"role": str(row["role"]), "content": str(row["content"])}
+            for row in rows
+            if not _message_is_prompt_excluded(row["metadata"])
         ]
+        return select_recent_conversation_messages(
+            messages,
+            max_messages=clean_limit,
+        )
 
     def save_conversation_summary(
         self,
@@ -216,6 +290,14 @@ class SQLiteSessionStore:
             return
         now = _utc_now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            clean_source_message_count = max(0, source_message_count)
+            clean_metadata = dict(metadata or {})
+            clean_metadata["source_message_ordinal"] = _prompt_source_ordinal(
+                conn,
+                conversation_id,
+                clean_source_message_count,
+            )
             conn.execute(
                 """
                 INSERT INTO conversation_summaries (
@@ -227,10 +309,10 @@ class SQLiteSessionStore:
                     str(uuid4()),
                     conversation_id,
                     clean_content,
-                    max(0, source_message_count),
+                    clean_source_message_count,
                     now,
                     now,
-                    json.dumps(metadata or {}, sort_keys=True),
+                    json.dumps(clean_metadata, sort_keys=True),
                 ),
             )
             _touch_conversation(conn, conversation_id, now)
@@ -258,49 +340,8 @@ class SQLiteSessionStore:
             return
 
         now = _utc_now()
-        active_plan = turn.get("active_plan")
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO conversation_turns (
-                    turn_id, conversation_id, user_message, status, started_at, ended_at, final_answer,
-                    model_request_count, tool_call_count, loaded_memory_ids, loaded_skill_names,
-                    errors, active_plan, turn_json, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(turn_id) DO UPDATE SET
-                    user_message = excluded.user_message,
-                    status = excluded.status,
-                    ended_at = excluded.ended_at,
-                    final_answer = excluded.final_answer,
-                    model_request_count = excluded.model_request_count,
-                    tool_call_count = excluded.tool_call_count,
-                    loaded_memory_ids = excluded.loaded_memory_ids,
-                    loaded_skill_names = excluded.loaded_skill_names,
-                    errors = excluded.errors,
-                    active_plan = excluded.active_plan,
-                    turn_json = excluded.turn_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    turn_id,
-                    conversation_id,
-                    user_message,
-                    str(turn.get("status", "unknown")),
-                    str(turn.get("started_at") or now),
-                    turn.get("ended_at"),
-                    turn.get("final_answer"),
-                    int(turn.get("model_request_count") or 0),
-                    int(turn.get("tool_call_count") or 0),
-                    json.dumps(turn.get("loaded_memory_ids") or [], sort_keys=True),
-                    json.dumps(turn.get("loaded_skill_names") or [], sort_keys=True),
-                    json.dumps(turn.get("errors") or [], sort_keys=True),
-                    json.dumps(active_plan, sort_keys=True) if active_plan else None,
-                    json.dumps(turn, sort_keys=True),
-                    now,
-                ),
-            )
-            _set_conversation_status(conn, conversation_id, _conversation_status_from_turn(turn), now)
+            _save_turn_snapshot(conn, conversation_id, turn, now)
 
     def load_turns(self, conversation_id: str) -> list[TurnState]:
         """Load persisted turn snapshots as runtime TurnState objects."""
@@ -391,15 +432,54 @@ class SQLiteSessionStore:
                 ),
             )
 
+    def load_uncheckpointed_hosted_mcp_requests(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        *,
+        checkpointed_request_count: int,
+    ) -> list[dict[str, object]]:
+        """Return hosted MCP requests newer than the durable turn checkpoint."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT request_index, request_json, created_at, response_created_at
+                FROM conversation_model_requests
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND request_index > ?
+                ORDER BY request_index
+                """,
+                (conversation_id, turn_id, max(0, checkpointed_request_count)),
+            ).fetchall()
+
+        requests: list[dict[str, object]] = []
+        for row in rows:
+            payload = _safe_json_dict(row["request_json"])
+            if payload.get("hosted_mcp_enabled") is not True:
+                continue
+            requests.append(
+                {
+                    "request_index": int(row["request_index"]),
+                    "server_labels": payload.get("hosted_mcp_server_labels") or [],
+                    "created_at": str(row["created_at"]),
+                    "response_recorded": row["response_created_at"] is not None,
+                }
+            )
+        return requests
+
     def save_tool_call(self, conversation_id: str, payload: dict[str, Any]) -> None:
-        """Upsert a tool-call lifecycle record."""
+        """Upsert a tool-call lifecycle record and any matching intent checkpoint."""
         turn_id = str(payload.get("turn_id", "")).strip()
         iteration = int(payload.get("iteration") or 0)
         phase = str(payload.get("phase") or "execution")
         tool_name = str(payload.get("tool_name") or payload.get("resolved_tool_name") or "").strip()
         if not turn_id or not iteration or not tool_name:
             return
+        turn = payload.get("turn")
+        now = _utc_now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO conversation_tool_calls (
@@ -427,7 +507,7 @@ class SQLiteSessionStore:
                     json.dumps(payload.get("arguments") or {}, sort_keys=True),
                     iteration,
                     phase,
-                    str(payload.get("started_at") or _utc_now()),
+                    str(payload.get("started_at") or now),
                     payload.get("ended_at"),
                     _optional_bool_to_int(payload.get("success")),
                     payload.get("error"),
@@ -435,6 +515,96 @@ class SQLiteSessionStore:
                     json.dumps(payload, sort_keys=True),
                 ),
             )
+            if (
+                isinstance(turn, dict)
+                and _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+            ):
+                _save_turn_snapshot(conn, conversation_id, turn, now)
+
+    def load_tool_calls_without_observations(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> list[dict[str, object]]:
+        """Return persisted tool calls without a matching durable observation."""
+        with self._connect() as conn:
+            call_rows = conn.execute(
+                """
+                SELECT tool_name, arguments, iteration, phase, started_at,
+                       ended_at, success
+                FROM conversation_tool_calls
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                ORDER BY iteration
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+            observation_rows = conn.execute(
+                """
+                SELECT tool_name, output_metadata
+                FROM conversation_observations
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                ORDER BY observation_key
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+
+        calls = [
+            {
+                "tool_name": str(row["tool_name"]),
+                "arguments": _safe_json_dict(row["arguments"]),
+                "iteration": int(row["iteration"]),
+                "phase": str(row["phase"]),
+                "started_at": str(row["started_at"]),
+                "ended_at": row["ended_at"],
+                "success": (
+                    None if row["success"] is None else bool(row["success"])
+                ),
+            }
+            for row in call_rows
+        ]
+        observed_identities: set[tuple[str, int]] = set()
+        legacy_observation_tools: list[str] = []
+        for row in observation_rows:
+            metadata = _safe_json_dict(row["output_metadata"])
+            if metadata.get("synthetic") is True:
+                continue
+            identity = metadata.get("tool_call_identity")
+            if not isinstance(identity, dict):
+                legacy_observation_tools.append(str(row["tool_name"]))
+                continue
+            phase = identity.get("phase")
+            iteration = identity.get("iteration")
+            if (
+                isinstance(phase, str)
+                and phase
+                and isinstance(iteration, int)
+                and not isinstance(iteration, bool)
+                and iteration > 0
+            ):
+                observed_identities.add((phase, iteration))
+            else:
+                legacy_observation_tools.append(str(row["tool_name"]))
+
+        unmatched = [
+            call
+            for call in calls
+            if (str(call["phase"]), int(call["iteration"]))
+            not in observed_identities
+        ]
+        for observed_tool_name in legacy_observation_tools:
+            matching_index = next(
+                (
+                    index
+                    for index, call in enumerate(unmatched)
+                    if call["tool_name"] == observed_tool_name
+                ),
+                None,
+            )
+            if matching_index is not None:
+                unmatched.pop(matching_index)
+        return unmatched
 
     def save_observation(
         self,
@@ -471,6 +641,108 @@ class SQLiteSessionStore:
                     now,
                 ),
             )
+
+    def save_tool_observation_bundle(
+        self,
+        conversation_id: str,
+        *,
+        turn_id: str,
+        observation_index: int,
+        tool_name: str,
+        content: str,
+        output_metadata: dict[str, Any] | None = None,
+        action_context: str | None = None,
+        turn: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist one tool action, observation, and turn checkpoint."""
+        if (
+            isinstance(observation_index, bool)
+            or not isinstance(observation_index, int)
+            or observation_index < 1
+        ):
+            raise ValueError("observation_index must be a positive integer")
+        clean_content = content.strip()
+        if not clean_content:
+            return
+
+        now = _utc_now()
+        observation_key = f"{turn_id}:observation:{observation_index}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if isinstance(action_context, str) and action_context.strip():
+                _insert_message(
+                    conn,
+                    conversation_id,
+                    turn_id=turn_id,
+                    role="assistant",
+                    content=action_context.strip(),
+                    message_key=f"{turn_id}:tool_action:{observation_index}",
+                    metadata={
+                        "tool_name": tool_name,
+                        "internal": True,
+                        "event": "tool_observation",
+                        "observation_index": observation_index,
+                    },
+                    created_at=now,
+                )
+            observation_insert = conn.execute(
+                """
+                INSERT OR IGNORE INTO conversation_observations (
+                    id, conversation_id, turn_id, tool_name, content, output_metadata,
+                    observation_key, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    conversation_id,
+                    turn_id,
+                    tool_name,
+                    clean_content,
+                    json.dumps(output_metadata or {}, sort_keys=True),
+                    observation_key,
+                    now,
+                ),
+            )
+            _insert_message(
+                conn,
+                conversation_id,
+                turn_id=turn_id,
+                role="observation",
+                content=clean_content,
+                message_key=observation_key,
+                metadata={
+                    "tool_name": tool_name,
+                    "observation_index": observation_index,
+                },
+                created_at=now,
+            )
+            if (
+                observation_insert.rowcount == 1
+                and isinstance(turn, dict)
+                and _valid_turn_snapshot(turn, expected_turn_id=turn_id)
+            ):
+                _save_turn_snapshot(conn, conversation_id, turn, now)
+            else:
+                _touch_conversation(conn, conversation_id, now)
+
+    def max_observation_index(self, conversation_id: str, turn_id: str) -> int:
+        """Return the largest recorder sequence already stored for one turn."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT observation_key
+                FROM conversation_observations
+                WHERE conversation_id = ? AND turn_id = ?
+                """,
+                (conversation_id, turn_id),
+            ).fetchall()
+        indexes = []
+        for row in rows:
+            suffix = str(row["observation_key"] or "").rsplit(":", 1)[-1]
+            if suffix.isdigit():
+                indexes.append(int(suffix))
+        return max(indexes, default=0)
 
     def update_conversation_status(self, conversation_id: str, status: str) -> None:
         """Update only the conversation status and timestamp."""
@@ -659,12 +931,146 @@ def _observation_from_dict(payload: dict[str, Any]) -> ObservationRecord:
     )
 
 
+def _insert_message(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    turn_id: str | None,
+    role: str,
+    content: str,
+    message_key: str,
+    metadata: dict[str, Any] | None,
+    created_at: str,
+) -> None:
+    """Insert one idempotent message using the caller's transaction."""
+    next_ordinal = _next_message_ordinal(conn, conversation_id)
+    conn.execute(
+        """
+        INSERT INTO conversation_messages (
+            id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_key) DO NOTHING
+        """,
+        (
+            str(uuid4()),
+            conversation_id,
+            turn_id,
+            role,
+            content,
+            next_ordinal,
+            message_key,
+            created_at,
+            json.dumps(metadata or {}, sort_keys=True),
+        ),
+    )
+
+
+def _valid_turn_snapshot(turn: dict[str, Any], *, expected_turn_id: str) -> bool:
+    return (
+        str(turn.get("turn_id", "")).strip() == expected_turn_id
+        and bool(str(turn.get("user_message", "")).strip())
+    )
+
+
+def _save_turn_snapshot(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    turn: dict[str, Any],
+    updated_at: str,
+) -> None:
+    """Upsert one turn snapshot using the caller's transaction."""
+    turn_id = str(turn.get("turn_id", "")).strip()
+    user_message = str(turn.get("user_message", "")).strip()
+    if not turn_id or not user_message:
+        return
+    active_plan = turn.get("active_plan")
+    conn.execute(
+        """
+        INSERT INTO conversation_turns (
+            turn_id, conversation_id, user_message, status, started_at, ended_at, final_answer,
+            model_request_count, tool_call_count, loaded_memory_ids, loaded_skill_names,
+            errors, active_plan, turn_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+            user_message = excluded.user_message,
+            status = excluded.status,
+            ended_at = excluded.ended_at,
+            final_answer = excluded.final_answer,
+            model_request_count = excluded.model_request_count,
+            tool_call_count = excluded.tool_call_count,
+            loaded_memory_ids = excluded.loaded_memory_ids,
+            loaded_skill_names = excluded.loaded_skill_names,
+            errors = excluded.errors,
+            active_plan = excluded.active_plan,
+            turn_json = excluded.turn_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            turn_id,
+            conversation_id,
+            user_message,
+            str(turn.get("status", "unknown")),
+            str(turn.get("started_at") or updated_at),
+            turn.get("ended_at"),
+            turn.get("final_answer"),
+            int(turn.get("model_request_count") or 0),
+            int(turn.get("tool_call_count") or 0),
+            json.dumps(turn.get("loaded_memory_ids") or [], sort_keys=True),
+            json.dumps(turn.get("loaded_skill_names") or [], sort_keys=True),
+            json.dumps(turn.get("errors") or [], sort_keys=True),
+            json.dumps(active_plan, sort_keys=True) if active_plan else None,
+            json.dumps(turn, sort_keys=True),
+            updated_at,
+        ),
+    )
+    _set_conversation_status(
+        conn,
+        conversation_id,
+        _conversation_status_from_turn(turn),
+        updated_at,
+    )
+
+
 def _next_message_ordinal(conn: sqlite3.Connection, conversation_id: str) -> int:
     row = conn.execute(
         "SELECT COALESCE(MAX(ordinal), 0) + 1 AS next_ordinal FROM conversation_messages WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchone()
     return int(row["next_ordinal"])
+
+
+def _prompt_source_ordinal(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    source_message_count: int,
+) -> int:
+    """Map a logical prompt-history count to its durable message ordinal."""
+    if source_message_count <= 0:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT ordinal, metadata
+        FROM conversation_messages
+        WHERE conversation_id = ?
+        ORDER BY ordinal
+        """,
+        (conversation_id,),
+    ).fetchall()
+    prompt_ordinals = [
+        int(row["ordinal"])
+        for row in rows
+        if not _message_is_prompt_excluded(row["metadata"])
+    ]
+    if not prompt_ordinals:
+        return 0
+    index = min(source_message_count, len(prompt_ordinals)) - 1
+    return prompt_ordinals[index]
+
+
+def _message_is_prompt_excluded(metadata: Any) -> bool:
+    return _safe_json_dict(metadata).get("prompt_excluded") is True
 
 
 def _touch_conversation(conn: sqlite3.Connection, conversation_id: str, updated_at: str) -> None:

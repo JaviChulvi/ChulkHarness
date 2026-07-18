@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import re
 from typing import Any, Literal
 
-from chulk.core.state import PLAN_STEP_STATUSES, Plan, PlanStep
+from chulk.core.state import Plan, PlanStep
+
+
+ACTION_PAYLOAD_FIELDS = frozenset(
+    {
+        "type",
+        "content",
+        "tool_name",
+        "arguments",
+        "arguments_json",
+        "plan",
+        "plan_json",
+        "step_update",
+        "step_update_json",
+    }
+)
 
 
 class ActionParseError(ValueError):
@@ -95,20 +112,48 @@ STRICT_AGENT_ACTION_JSON_SCHEMA: dict[str, Any] = {
 }
 
 
+def action_json_schema_for(
+    allowed_actions: Iterable[str],
+) -> dict[str, Any]:
+    """Return the strict shared schema narrowed to the legal action types."""
+    legal_actions = tuple(
+        dict.fromkeys(str(action).strip() for action in allowed_actions)
+    )
+    supported = tuple(STRICT_AGENT_ACTION_JSON_SCHEMA["properties"]["type"]["enum"])
+    if not legal_actions or any(action not in supported for action in legal_actions):
+        raise ValueError("allowed_actions must contain supported action types")
+    schema = deepcopy(STRICT_AGENT_ACTION_JSON_SCHEMA)
+    schema["properties"]["type"]["enum"] = list(legal_actions)
+    return schema
+
+
 def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
     """Parse a model response into a final answer or tool call."""
     payload = _coerce_json_object(raw_response)
+    _validate_action_transports(payload)
     action_type = payload.get("type")
 
     if action_type == "final_answer":
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
             raise ActionParseError("final_answer.content must be a non-empty string")
-        if _has_tool_call_fields(payload) or _has_step_update_fields(payload):
-            raise ActionParseError("final_answer must not include tool call fields or plan step update fields")
+        _reject_irrelevant_fields(
+            payload,
+            action_type="final_answer",
+            reject_tool=True,
+            reject_plan=True,
+            reject_step_update=True,
+        )
         return FinalAnswerAction(type="final_answer", content=content)
 
     if action_type == "tool_call":
+        _reject_nonempty_content(payload, action_type="tool_call")
+        _reject_irrelevant_fields(
+            payload,
+            action_type="tool_call",
+            reject_plan=True,
+            reject_step_update=True,
+        )
         tool_name = payload.get("tool_name")
         arguments = _coerce_tool_arguments(payload)
         if not isinstance(tool_name, str) or not tool_name.strip():
@@ -116,9 +161,23 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
         return ToolCallAction(type="tool_call", tool_name=tool_name, arguments=arguments)
 
     if action_type == "plan":
+        _reject_nonempty_content(payload, action_type="plan")
+        _reject_irrelevant_fields(
+            payload,
+            action_type="plan",
+            reject_tool=True,
+            reject_step_update=True,
+        )
         return PlanAction(type="plan", plan=_coerce_plan(payload))
 
     if action_type == "plan_step_update":
+        _reject_nonempty_content(payload, action_type="plan_step_update")
+        _reject_irrelevant_fields(
+            payload,
+            action_type="plan_step_update",
+            reject_tool=True,
+            reject_plan=True,
+        )
         return _coerce_plan_step_update(payload)
 
     raise ActionParseError("model response type must be final_answer, tool_call, plan, or plan_step_update")
@@ -126,7 +185,7 @@ def parse_model_response(raw_response: str | dict[str, Any]) -> AgentAction:
 
 def _has_tool_call_fields(payload: dict[str, Any]) -> bool:
     tool_name = payload.get("tool_name")
-    if isinstance(tool_name, str) and tool_name.strip():
+    if tool_name is not None:
         return True
 
     arguments = payload.get("arguments")
@@ -134,30 +193,58 @@ def _has_tool_call_fields(payload: dict[str, Any]) -> bool:
         return True
 
     raw_arguments_json = payload.get("arguments_json")
-    if raw_arguments_json in (None, "", "{}"):
+    if raw_arguments_json is None:
         return False
-    if not isinstance(raw_arguments_json, str):
-        return True
-
-    try:
-        arguments = json.loads(raw_arguments_json)
-    except json.JSONDecodeError:
-        return True
-    return bool(arguments)
+    return bool(_decode_json_object_field(payload, "arguments_json"))
 
 
 def _has_step_update_fields(payload: dict[str, Any]) -> bool:
-    raw_step_update_json = payload.get("step_update_json")
-    if raw_step_update_json in (None, "", "{}"):
-        return False
-    if not isinstance(raw_step_update_json, str):
+    step_update = payload.get("step_update")
+    if step_update not in (None, {}):
         return True
 
-    try:
-        step_update = json.loads(raw_step_update_json)
-    except json.JSONDecodeError:
+    raw_step_update_json = payload.get("step_update_json")
+    if raw_step_update_json is None:
+        return False
+    return bool(_decode_json_object_field(payload, "step_update_json"))
+
+
+def _has_plan_fields(payload: dict[str, Any]) -> bool:
+    plan = payload.get("plan")
+    if plan not in (None, {}):
         return True
-    return bool(step_update)
+
+    raw_plan_json = payload.get("plan_json")
+    if raw_plan_json is None:
+        return False
+    return bool(_decode_json_object_field(payload, "plan_json"))
+
+
+def _reject_nonempty_content(payload: dict[str, Any], *, action_type: str) -> None:
+    content = payload.get("content")
+    if content not in (None, ""):
+        raise ActionParseError(f"{action_type} must not include content")
+
+
+def _reject_irrelevant_fields(
+    payload: dict[str, Any],
+    *,
+    action_type: str,
+    reject_tool: bool = False,
+    reject_plan: bool = False,
+    reject_step_update: bool = False,
+) -> None:
+    field_groups = []
+    if reject_tool and _has_tool_call_fields(payload):
+        field_groups.append("tool call")
+    if reject_plan and _has_plan_fields(payload):
+        field_groups.append("plan")
+    if reject_step_update and _has_step_update_fields(payload):
+        field_groups.append("plan step update")
+    if field_groups:
+        raise ActionParseError(
+            f"{action_type} must not include {' or '.join(field_groups)} fields"
+        )
 
 
 def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +268,56 @@ def _coerce_json_object(raw_response: str | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _validate_action_transports(payload: dict[str, Any]) -> None:
+    unknown_fields = sorted(set(payload) - ACTION_PAYLOAD_FIELDS)
+    if unknown_fields:
+        raise ActionParseError(
+            "model response contains unsupported fields: "
+            + ", ".join(unknown_fields)
+        )
+
+    content = payload.get("content")
+    if content is not None and not isinstance(content, str):
+        raise ActionParseError("content must be a string or null")
+    tool_name = payload.get("tool_name")
+    if tool_name is not None and not isinstance(tool_name, str):
+        raise ActionParseError("tool_name must be a string or null")
+
+    for alias, json_field in (
+        ("arguments", "arguments_json"),
+        ("plan", "plan_json"),
+        ("step_update", "step_update_json"),
+    ):
+        alias_present = alias in payload
+        if alias_present and not isinstance(payload[alias], dict):
+            raise ActionParseError(f"{alias} must be an object")
+        if json_field not in payload:
+            continue
+        decoded = _decode_json_object_field(payload, json_field)
+        if alias_present and decoded:
+            raise ActionParseError(
+                f"model response must not combine {alias} with non-empty {json_field}"
+            )
+
+
+def _decode_json_object_field(
+    payload: dict[str, Any],
+    field_name: str,
+) -> dict[str, Any]:
+    raw_value = payload.get(field_name)
+    if not isinstance(raw_value, str):
+        raise ActionParseError(f"{field_name} must be a JSON object string")
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ActionParseError(
+            f"{field_name} must contain a JSON object"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise ActionParseError(f"{field_name} must contain a JSON object")
+    return decoded
+
+
 def _coerce_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize provider-specific argument transports into a dict."""
     if "arguments" in payload:
@@ -189,18 +326,9 @@ def _coerce_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
             raise ActionParseError("tool_call.arguments must be an object")
         return arguments
 
-    raw_arguments_json = payload.get("arguments_json", "{}")
-    if not isinstance(raw_arguments_json, str):
-        raise ActionParseError("tool_call.arguments_json must be a string")
-
-    try:
-        arguments = json.loads(raw_arguments_json or "{}")
-    except json.JSONDecodeError as exc:
-        raise ActionParseError("tool_call.arguments_json must contain a JSON object") from exc
-
-    if not isinstance(arguments, dict):
-        raise ActionParseError("tool_call.arguments_json must contain a JSON object")
-    return arguments
+    if "arguments_json" not in payload:
+        return {}
+    return _decode_json_object_field(payload, "arguments_json")
 
 
 def _coerce_plan_step_update(payload: dict[str, Any]) -> PlanStepUpdateAction:
@@ -208,16 +336,22 @@ def _coerce_plan_step_update(payload: dict[str, Any]) -> PlanStepUpdateAction:
     if "step_update" in payload:
         update_payload = payload.get("step_update")
     else:
-        raw_step_update_json = payload.get("step_update_json", "{}")
-        if not isinstance(raw_step_update_json, str):
-            raise ActionParseError("plan_step_update.step_update_json must be a string")
-        try:
-            update_payload = json.loads(raw_step_update_json or "{}")
-        except json.JSONDecodeError as exc:
-            raise ActionParseError("plan_step_update.step_update_json must contain a JSON object") from exc
+        update_payload = (
+            _decode_json_object_field(payload, "step_update_json")
+            if "step_update_json" in payload
+            else {}
+        )
 
     if not isinstance(update_payload, dict):
         raise ActionParseError("plan_step_update payload must be an object")
+    unknown_fields = sorted(
+        set(update_payload) - {"step_id", "status", "evidence", "reason"}
+    )
+    if unknown_fields:
+        raise ActionParseError(
+            "plan_step_update contains unsupported fields: "
+            + ", ".join(unknown_fields)
+        )
 
     step_id = update_payload.get("step_id")
     status = update_payload.get("status")
@@ -249,16 +383,19 @@ def _coerce_plan(payload: dict[str, Any]) -> Plan:
     if "plan" in payload:
         plan_payload = payload.get("plan")
     else:
-        raw_plan_json = payload.get("plan_json", "{}")
-        if not isinstance(raw_plan_json, str):
-            raise ActionParseError("plan.plan_json must be a string")
-        try:
-            plan_payload = json.loads(raw_plan_json or "{}")
-        except json.JSONDecodeError as exc:
-            raise ActionParseError("plan.plan_json must contain a JSON object") from exc
+        plan_payload = (
+            _decode_json_object_field(payload, "plan_json")
+            if "plan_json" in payload
+            else {}
+        )
 
     if not isinstance(plan_payload, dict):
         raise ActionParseError("plan payload must be an object")
+    unknown_plan_fields = sorted(set(plan_payload) - {"summary", "steps"})
+    if unknown_plan_fields:
+        raise ActionParseError(
+            "plan contains unsupported fields: " + ", ".join(unknown_plan_fields)
+        )
 
     summary = plan_payload.get("summary")
     if not isinstance(summary, str) or not summary.strip():
@@ -272,6 +409,24 @@ def _coerce_plan(payload: dict[str, Any]) -> Plan:
     for index, raw_step in enumerate(raw_steps, start=1):
         if not isinstance(raw_step, dict):
             raise ActionParseError("each plan step must be an object")
+
+        unknown_step_fields = sorted(
+            set(raw_step)
+            - {
+                "id",
+                "title",
+                "description",
+                "status",
+                "depends_on",
+                "acceptance_criteria",
+                "retry_limit",
+            }
+        )
+        if unknown_step_fields:
+            raise ActionParseError(
+                "plan step contains unsupported fields: "
+                + ", ".join(unknown_step_fields)
+            )
 
         step_id = raw_step.get("id")
         title = raw_step.get("title")
@@ -290,9 +445,8 @@ def _coerce_plan(payload: dict[str, Any]) -> Plan:
             raise ActionParseError("plan step title must be a non-empty string")
         if not isinstance(description, str) or not description.strip():
             raise ActionParseError("plan step description must be a non-empty string")
-        if not isinstance(status, str) or status not in PLAN_STEP_STATUSES:
-            allowed = ", ".join(sorted(PLAN_STEP_STATUSES))
-            raise ActionParseError(f"plan step status must be one of: {allowed}")
+        if status != "pending":
+            raise ActionParseError("proposed plan step status must be pending")
 
         steps.append(
             PlanStep(

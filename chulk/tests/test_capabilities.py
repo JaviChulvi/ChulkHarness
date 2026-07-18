@@ -7,7 +7,7 @@ import json
 import pytest
 
 from chulk import Agent, AgentConfig, Capabilities, MCP, Tool
-from chulk.llm import LLMClient
+from chulk.llm import LLMCapabilities, LLMClient
 
 
 class FakeLLM(LLMClient):
@@ -120,6 +120,12 @@ def test_explicit_custom_tools_remain_authoritative(tmp_path):
 
 
 def test_external_services_capability_controls_mcp_visibility(tmp_path):
+    class HostedMCPFakeLLM(FakeLLM):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
     server = MCP.streamable_http(label="docs", server_url="https://mcp.example.com")
     disabled = Agent(
         config=AgentConfig(project_root=tmp_path / "disabled"),
@@ -132,7 +138,7 @@ def test_external_services_capability_controls_mcp_visibility(tmp_path):
     enabled = Agent(
         config=AgentConfig(project_root=tmp_path / "enabled"),
         capabilities=Capabilities(files="off", memory="off", external_services=True),
-        llm=FakeLLM(),
+        llm=HostedMCPFakeLLM(),
         tools=[],
         skills=[],
         mcp=[server],

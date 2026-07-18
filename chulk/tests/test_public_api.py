@@ -201,7 +201,7 @@ def test_public_chat_agent_disables_default_tools_and_skills(tmp_path):
     assert result.content == "chat only"
     assert handle.runtime.tool_registry.list_tools() == []
     assert handle.runtime.skill_registry.list_skills() == []
-    assert "Available tools: none." in system_prompt
+    assert "<available_tools>" not in system_prompt
     assert "<tool>" not in system_prompt
     assert "Available tools are callable actions for this turn." not in system_prompt
 
@@ -245,6 +245,34 @@ def test_software_engineer_preset_loads_default_agent_playbook():
     assert "Use `search_files` to find symbols" in SOFTWARE_ENGINEER_SYSTEM_PROMPT
     assert "If a tool returns `invalid_arguments`" in SOFTWARE_ENGINEER_SYSTEM_PROMPT
     assert preset.system_prompt == SOFTWARE_ENGINEER_SYSTEM_PROMPT
+    assert preset.skills is None
+
+
+def test_software_engineer_preset_auto_selects_relevant_project_skill(tmp_path):
+    write_skill(
+        tmp_path,
+        "architecture-review",
+        "# Architecture Review Skill\n\nUse this procedure for architecture review work.\n",
+    )
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    llm = FakeLLMClient(
+        [json.dumps({"type": "final_answer", "content": "architecture reviewed"})]
+    )
+    handle = Agent(
+        config=config,
+        preset=SoftwareEngineer(),
+        llm=llm,
+        tools=[],
+    )
+
+    assert handle.run("perform an architecture review") == "architecture reviewed"
+    assert handle.state.loaded_skill_names == ["architecture-review"]
+    system_prompt = llm.requests[0][0]["content"]
+    assert "# Architecture Review Skill" in system_prompt
+    assert system_prompt.count("<name>architecture-review</name>") == 1
+    assert "# Files Skill" not in system_prompt
+    assert "# Shell Skill" not in system_prompt
+    assert "# Memory Skill" not in system_prompt
 
 
 def test_public_agent_with_preset_injects_default_agent_playbook(tmp_path):
@@ -750,7 +778,7 @@ def test_public_agent_can_pin_skill(tmp_path):
     class SkillAwareLLM(LLMClient):
         def complete(self, messages: list[dict[str, str]]) -> str:
             system_prompt = messages[0]["content"]
-            assert "Skill: files" in system_prompt
+            assert "<name>files</name>" in system_prompt
             assert "# Files Skill" in system_prompt
             return json.dumps({"type": "final_answer", "content": "files pinned"})
 
@@ -778,19 +806,20 @@ def test_public_agent_can_allowlist_skills_by_catalog_name(tmp_path):
     assert handle.run("other work") == "other ignored"
     assert handle.state.loaded_skill_names == []
     first_system_prompt = llm.requests[0][0]["content"]
-    assert "Available skills are prompt-loadable procedural playbooks" in first_system_prompt
-    assert "- review: Use this skill when reviewing code." in first_system_prompt
-    assert "- sql: Use this skill when analyzing database queries." in first_system_prompt
-    assert "- other:" not in first_system_prompt
-    assert "Skill: other" not in llm.requests[0][0]["content"]
+    assert "Unloaded skill metadata for this agent" not in first_system_prompt
+    assert "Use this skill when reviewing code." not in first_system_prompt
+    assert "Use this skill when analyzing database queries." not in first_system_prompt
+    assert "<name>other</name>" not in first_system_prompt
 
     assert handle.run("review this code") == "review loaded"
     assert handle.state.loaded_skill_names == ["review"]
     second_system_prompt = llm.requests[1][0]["content"]
-    assert "- review: Use this skill when reviewing code." in second_system_prompt
-    assert "Skill: review" in second_system_prompt
+    assert second_system_prompt.count(
+        "<description>Use this skill when reviewing code.</description>"
+    ) == 1
+    assert "<name>review</name>" in second_system_prompt
     assert "# Review Skill" in second_system_prompt
-    assert "Skill: other" not in second_system_prompt
+    assert "<name>other</name>" not in second_system_prompt
 
 
 def test_public_agent_pin_is_additive_to_allowlist(tmp_path):
@@ -805,9 +834,11 @@ def test_public_agent_pin_is_additive_to_allowlist(tmp_path):
     assert handle.run("hello") == "review pinned"
     assert handle.state.loaded_skill_names == ["review"]
     system_prompt = llm.requests[0][0]["content"]
-    assert "- review: Use this skill when review work is needed." in system_prompt
-    assert "- sql: Use this skill when SQL work is needed." in system_prompt
-    assert "Skill: review" in system_prompt
+    assert "<name>review</name>" in system_prompt
+    assert "Use this skill when SQL work is needed." not in system_prompt
+    assert system_prompt.count(
+        "<description>Use this skill when review work is needed.</description>"
+    ) == 1
     assert "# Review Skill" in system_prompt
 
 
@@ -855,8 +886,8 @@ def test_public_agent_empty_skills_disables_catalog_skills(tmp_path):
     assert handle.skill_registry.list_skills() == []
     assert handle.run("review this code") == "no skills"
     assert handle.state.loaded_skill_names == []
-    assert "Available skills: none." in llm.requests[0][0]["content"]
-    assert "Skill: review" not in llm.requests[0][0]["content"]
+    assert "<available_skills>" not in llm.requests[0][0]["content"]
+    assert "<name>review</name>" not in llm.requests[0][0]["content"]
 
 
 def test_public_agent_keeps_path_and_directory_skill_refs(tmp_path):
@@ -887,7 +918,7 @@ def test_public_agent_keeps_path_and_directory_skill_refs(tmp_path):
     assert pinned_handle.run("hello") == "path pinned"
     assert pinned_handle.state.loaded_skill_names == ["path-review"]
     pinned_system_prompt = llm.requests[0][0]["content"]
-    assert "- path-review: Use this skill when path review work is needed." in pinned_system_prompt
+    assert "<name>path-review</name>" in pinned_system_prompt
     assert "# Path Review Skill" in pinned_system_prompt
 
     directory_handle = Agent(config=config, llm=llm, tools=[], skills=[Skills.from_dir(extra_root)])
@@ -902,7 +933,7 @@ def test_public_agent_keeps_path_and_directory_skill_refs(tmp_path):
     assert directory_handle.run("custom work") == "directory selected"
     assert directory_handle.state.loaded_skill_names == ["custom"]
     directory_system_prompt = llm.requests[1][0]["content"]
-    assert "- custom: Use this skill when custom work is needed." in directory_system_prompt
+    assert "<name>custom</name>" in directory_system_prompt
     assert "# Custom Skill" in directory_system_prompt
 
 

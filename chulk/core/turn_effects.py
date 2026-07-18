@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from chulk.core.events import TraceEvent
-from chulk.core.observations import format_tool_observation
+from chulk.core.observations import (
+    MAX_TOOL_ACTION_CONTEXT_CHARS,
+    format_tool_action_context,
+    format_tool_observation,
+)
 from chulk.core.plan_execution import PlanExecution
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
 from chulk.core.transitions import (
@@ -30,6 +34,7 @@ from chulk.core.transitions import (
 )
 from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory
+from chulk.tools.output import preview_text
 from chulk.tools.registry import ToolResult
 
 
@@ -95,8 +100,7 @@ class TurnEffects:
             ),
             active_plan_step_id=active_step.id if active_step else None,
             planning_tool_names=self.planning_tool_names(),
-            planning_tool_call_count=_tool_call_count(turn, "planning"),
-            execution_tool_call_count=_tool_call_count(turn, "execution"),
+            tool_call_count=turn.tool_call_count,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
             reflection_count=turn.reflection_count,
             max_reflection_attempts=self.max_reflection_attempts,
@@ -189,7 +193,14 @@ class TurnEffects:
         self.state.messages = self.memory.recent()
         turn.complete(content)
         self.plan.clear(turn)
-        self.trace(TraceEvent.FINAL_ANSWER, {"turn_id": turn.turn_id, "content": content})
+        self.trace(
+            TraceEvent.FINAL_ANSWER,
+            {
+                "turn_id": turn.turn_id,
+                "content": content,
+                "turn": turn.to_dict(),
+            },
+        )
         self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return content
 
@@ -203,7 +214,12 @@ class TurnEffects:
             self.plan.clear(turn)
         self.trace(
             TraceEvent.TURN_FAILED,
-            {"turn_id": turn.turn_id if turn else None, "message": message},
+            {
+                "turn_id": turn.turn_id if turn else None,
+                "message": message,
+                "status": turn.status if turn else "failed",
+                "turn": turn.to_dict() if turn else None,
+            },
         )
         if turn is not None:
             self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
@@ -214,11 +230,17 @@ class TurnEffects:
         self.state.final_answer = message
         self.memory.add_assistant_message(message)
         self.state.messages = self.memory.recent()
-        turn.block(message)
+        if turn.status != "blocked" or turn.final_answer != message:
+            turn.block(message)
         self.plan.clear(turn)
         self.trace(
             TraceEvent.TURN_FAILED,
-            {"turn_id": turn.turn_id, "message": message, "status": "blocked"},
+            {
+                "turn_id": turn.turn_id,
+                "message": message,
+                "status": "blocked",
+                "turn": turn.to_dict(),
+            },
         )
         self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return message
@@ -300,6 +322,7 @@ class TurnEffects:
                 **record.to_dict(),
                 "turn_id": turn.turn_id,
                 "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                "turn": turn.to_dict(),
             },
         )
         return PendingToolExecution(effect=effect, record=record, plan_step=step)
@@ -345,6 +368,14 @@ class TurnEffects:
             },
         )
         observation, metadata = self._format_observation(action.tool_name, result)
+        tool_action_context, action_context_metadata = self._format_tool_action_context(
+            pending,
+        )
+        metadata["tool_action_context"] = action_context_metadata
+        metadata["tool_call_identity"] = {
+            "iteration": record.iteration,
+            "phase": record.phase,
+        }
         self.state.observations.append(
             {
                 "tool_name": action.tool_name,
@@ -359,14 +390,30 @@ class TurnEffects:
                 output_metadata=metadata,
             )
         )
+        if pending.plan_step is not None:
+            self.plan.record_tool_evidence(
+                pending.plan_step,
+                record,
+                observation,
+                metadata,
+                retry_metadata=effect.retry_metadata,
+            )
+            self.plan.prepare_tool_result_checkpoint(
+                effect,
+                step=pending.plan_step,
+            )
+        self.memory.add_assistant_message(tool_action_context)
         self.memory.add_observation(observation)
         self.trace(
             TraceEvent.TOOL_OBSERVATION,
             {
                 "turn_id": turn.turn_id,
+                "observation_index": len(turn.observations),
                 "tool_name": action.tool_name,
+                "tool_action_context": tool_action_context,
                 "observation": observation,
                 "output_metadata": metadata,
+                "turn": turn.to_dict(),
             },
         )
         if pending.plan_step is None:
@@ -381,6 +428,7 @@ class TurnEffects:
             result=result,
             observation=observation,
             output_metadata=metadata,
+            evidence_recorded=True,
         )
 
     def _format_observation(
@@ -407,6 +455,39 @@ class TurnEffects:
         if redaction.get("redacted") or redaction.get("redaction_error"):
             metadata["redaction"] = redaction
         return observation, metadata
+
+    def _format_tool_action_context(
+        self,
+        pending: PendingToolExecution,
+    ) -> tuple[str, dict]:
+        record = pending.record
+        max_chars = min(
+            MAX_TOOL_ACTION_CONTEXT_CHARS,
+            self.max_observation_chars,
+        )
+        context, metadata = format_tool_action_context(
+            tool_name=record.tool_name,
+            arguments=record.arguments,
+            phase=record.phase,
+            iteration=record.iteration,
+            plan_step_id=record.plan_step_id,
+            max_chars=max_chars,
+        )
+        context, redaction = self.redact_text(
+            TraceEvent.TOOL_OBSERVATION,
+            context,
+            {
+                "requested_tool_name": record.tool_name,
+                "field": "tool_action_context",
+                "iteration": record.iteration,
+                "plan_step_id": record.plan_step_id,
+            },
+        )
+        final_preview = preview_text(context, max_chars)
+        metadata["final_context"] = final_preview.to_metadata()
+        if redaction.get("redacted") or redaction.get("redaction_error"):
+            metadata["redaction"] = redaction
+        return final_preview.text, metadata
 
     def _emit_final_stream(self, content: str, turn: TurnState) -> None:
         if not content or not self._streaming_enabled():
@@ -476,10 +557,6 @@ def _validate_application(
     else:  # pragma: no cover - enum exhaustiveness
         raise RuntimeError(f"Unsupported transition outcome: {outcome}")
     return TransitionApplication(outcome=outcome, response=response, pending=pending)
-
-
-def _tool_call_count(turn: TurnState, phase: str) -> int:
-    return sum(1 for call in turn.tool_calls if call.phase == phase)
 
 
 def _stream_chunks(text: str, *, max_chars: int = 80):

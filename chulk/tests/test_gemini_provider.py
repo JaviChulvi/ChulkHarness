@@ -74,6 +74,18 @@ class FakeModels:
         return iter(self.stream_chunks)
 
 
+class FakeAsyncModels:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = list(responses)
+        self.generate_calls: list[dict] = []
+
+    async def generate_content(self, **kwargs):
+        self.generate_calls.append(kwargs)
+        if not self.responses:
+            raise AssertionError("No fake async Gemini response configured")
+        return self.responses.pop(0)
+
+
 def _client(
     models: FakeModels,
     *,
@@ -288,6 +300,35 @@ def test_gemini_json_action_mode_uses_schema_without_native_tools() -> None:
     assert "tools" not in config
 
 
+def test_gemini_empty_json_action_response_is_fallback_eligible() -> None:
+    models = FakeModels(responses=[_response(text=None)])
+
+    with pytest.raises(LLMError, match="did not include JSON text") as raised:
+        _client(models).complete_action(MESSAGES, max_repair_attempts=0)
+
+    assert raised.value.code == "action_shape_error"
+    assert raised.value.fallback_eligible is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_async_empty_json_action_response_is_fallback_eligible() -> None:
+    sync_models = FakeModels()
+    async_models = FakeAsyncModels([_response(text=None)])
+    client = GeminiGenerateContentClient(
+        model="gemini-test",
+        client=SimpleNamespace(models=sync_models),
+        async_client=SimpleNamespace(models=async_models),
+    )
+
+    with pytest.raises(LLMError, match="did not include JSON text") as raised:
+        await client.acomplete_action(MESSAGES, max_repair_attempts=0)
+
+    assert raised.value.code == "action_shape_error"
+    assert raised.value.fallback_eligible is True
+    assert len(async_models.generate_calls) == 1
+    assert sync_models.generate_calls == []
+
+
 def test_gemini_native_single_function_call_is_normalized_to_one_action() -> None:
     models = FakeModels(
         responses=[
@@ -359,6 +400,9 @@ def test_gemini_planning_policy_enables_native_transport_without_regular_tools()
         "function_declarations"
     ]
     assert [item["name"] for item in declarations] == [PLAN_TOOL_NAME]
+    assert models.generate_calls[0]["config"]["tool_config"] == {
+        "function_calling_config": {"mode": "ANY"}
+    }
     assert result.metadata["action_transport"] == "provider_native"
 
 
