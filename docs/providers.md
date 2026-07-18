@@ -251,6 +251,38 @@ inject an application-owned `LLMClient` through `Agent(llm=client)`. The shared
 runtime asks providers for validated actions through `complete_action(...)` and
 normalizes provider-specific tool calls before orchestration.
 
+## Action request shaping
+
+Each action request uses one tool-schema channel. If every provider in a
+fallback chain supports native tool calling, the system prompt contains only a
+compact native-transport status and the schemas travel in the provider's tool
+field. Otherwise, Chulk puts the full catalog in the JSON-action prompt and
+sends no native tool declarations. A provider that rejects an attempted native
+request receives a structurally replaced JSON protocol and catalog on the
+fallback attempt; the native and JSON protocols are never appended together.
+
+The provider wire mappings are:
+
+| Transport family | System and conversation data | Native declarations |
+| --- | --- | --- |
+| OpenAI Responses | `instructions` plus `input` | top-level `tools` and `tool_choice`; hosted MCP entries also use `tools` |
+| DeepSeek, local, OpenAI-compatible, OpenRouter, Bedrock | Chat Completions `messages`; local endpoints fold system instructions into the latest user message | top-level `tools` and `tool_choice` |
+| Anthropic Messages | top-level `system` plus `messages` | top-level `tools` using `input_schema`, with parallel tool use disabled |
+| Gemini GenerateContent | `config.system_instruction` plus `contents` | `config.tools` using `parameters_json_schema`, with automatic execution disabled |
+
+Plan proposal and plan-step-update declarations are included only while that
+action is legal for the current turn. Ordinary turns receive neither; approved
+active steps receive only the step-update declaration; completed plans receive
+neither. When the effective declaration set is empty, provider requests omit
+the tool and tool-choice fields instead of sending an empty array.
+Low-level `complete_action(...)` callers that intentionally drive planning can
+pass `PlanningToolAvailability`; its default exposes no planning pseudo-tools.
+
+Provider-native calls are normalized into Chulk action dataclasses before the
+agent loop. Tool results currently return on the next request as bounded textual
+observations; Chulk does not persist each provider's native tool-call transcript
+or call id as continuation state.
+
 `AsyncAgent` uses each SDK's native async transport: OpenAI's async Responses
 or Chat Completions clients, Anthropic's async Messages client, and Gemini's
 async GenerateContent client. Cancellation propagates through native requests

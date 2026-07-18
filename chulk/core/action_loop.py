@@ -49,7 +49,11 @@ def run_action_loop(
             turn,
             require_plan=require_plan,
         )
-        model_result = runtime.model.request_action(turn, prompt)
+        model_result = runtime.model.request_action(
+            turn,
+            prompt,
+            require_plan=require_plan,
+        )
         application = _apply_signal(
             runtime,
             turn,
@@ -119,7 +123,11 @@ async def run_action_loop_async(
             turn,
             require_plan=require_plan,
         )
-        model_result = await runtime.model.request_action_async(turn, prompt)
+        model_result = await runtime.model.request_action_async(
+            turn,
+            prompt,
+            require_plan=require_plan,
+        )
         application = _apply_signal(
             runtime,
             turn,

@@ -17,6 +17,7 @@ from chulk.llm.base import (
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
+    PlanningToolAvailability,
     action_payload_json,
     chat_completion_tools,
     native_final_answer_payload,
@@ -228,21 +229,23 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return self._complete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -260,6 +263,7 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -268,21 +272,23 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return await self._acomplete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -332,15 +338,16 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request.update(
-            {
-                "tools": chat_completion_tools(tools),
-                "tool_choice": "auto",
-            }
+        native_tools = chat_completion_tools(
+            tools,
+            planning_tools=planning_tools,
         )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         response = self._create(request, operation="native tool action request", action_transport=True)
         message = _response_message(
             response,
@@ -368,15 +375,16 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request.update(
-            {
-                "tools": chat_completion_tools(tools),
-                "tool_choice": "auto",
-            }
+        native_tools = chat_completion_tools(
+            tools,
+            planning_tools=planning_tools,
         )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         response = await self._acreate(
             request,
             operation="native tool action request",

@@ -18,6 +18,7 @@ from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
+    PlanningToolAvailability,
     action_payload_json,
     native_final_answer_payload,
     native_tool_action_payload,
@@ -242,26 +243,34 @@ class OpenAIResponsesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Return one raw action response plus OpenAI usage metadata."""
-        if tools is not None:
+        if (
+            tools is not None
+            or bool(planning_tools and planning_tools.enabled)
+            or bool(hosted_mcp_servers)
+        ):
             try:
                 return self._complete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                     hosted_mcp_servers=hosted_mcp_servers,
                     mcp_approval_callback=mcp_approval_callback,
                 )
             except LLMError as exc:
                 if hosted_mcp_servers:
+                    if _hosted_mcp_can_advance_fallback(exc):
+                        raise _hosted_mcp_fallback_error(exc) from exc
                     raise
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -279,6 +288,7 @@ class OpenAIResponsesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -287,25 +297,33 @@ class OpenAIResponsesClient(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
-        if tools is not None:
+        if (
+            tools is not None
+            or bool(planning_tools and planning_tools.enabled)
+            or bool(hosted_mcp_servers)
+        ):
             try:
                 return await self._acomplete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                     hosted_mcp_servers=hosted_mcp_servers,
                     mcp_approval_callback=mcp_approval_callback,
                 )
             except LLMError as exc:
                 if hosted_mcp_servers:
+                    if _hosted_mcp_can_advance_fallback(exc):
+                        raise _hosted_mcp_fallback_error(exc) from exc
                     raise
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -414,6 +432,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
@@ -423,13 +442,18 @@ class OpenAIResponsesClient(LLMClient):
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,
-            "tools": openai_response_tools(tools, hosted_mcp_servers=hosted_mcp_servers),
-            "tool_choice": "auto",
         }
+        native_tools = openai_response_tools(
+            tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            planning_tools=planning_tools,
+        )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
-        response, approval_metadata = self._create_native_action_response(
+        response, approval_metadata, mcp_execution_possible = self._create_native_action_response(
             request,
             mcp_approval_callback=mcp_approval_callback,
         )
@@ -438,6 +462,7 @@ class OpenAIResponsesClient(LLMClient):
             response,
             provider=self.provider,
             model=self.model,
+            mcp_execution_possible=mcp_execution_possible,
         )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
@@ -446,6 +471,7 @@ class OpenAIResponsesClient(LLMClient):
                 "provider_tool_call": metadata.get("provider_tool_call"),
                 "provider_mcp_output": metadata.get("provider_mcp_output", []),
                 "provider_mcp_approval": approval_metadata,
+                "hosted_mcp_execution_possible": mcp_execution_possible,
             }
         )
         return result
@@ -455,6 +481,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
@@ -464,13 +491,18 @@ class OpenAIResponsesClient(LLMClient):
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,
-            "tools": openai_response_tools(tools, hosted_mcp_servers=hosted_mcp_servers),
-            "tool_choice": "auto",
         }
+        native_tools = openai_response_tools(
+            tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            planning_tools=planning_tools,
+        )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
-        response, approval_metadata = await self._acreate_native_action_response(
+        response, approval_metadata, mcp_execution_possible = await self._acreate_native_action_response(
             request,
             mcp_approval_callback=mcp_approval_callback,
         )
@@ -479,6 +511,7 @@ class OpenAIResponsesClient(LLMClient):
             response,
             provider=self.provider,
             model=self.model,
+            mcp_execution_possible=mcp_execution_possible,
         )
         result = self._response_from_provider(messages, content, getattr(response, "usage", None))
         result.metadata.update(
@@ -487,6 +520,7 @@ class OpenAIResponsesClient(LLMClient):
                 "provider_tool_call": metadata.get("provider_tool_call"),
                 "provider_mcp_output": metadata.get("provider_mcp_output", []),
                 "provider_mcp_approval": approval_metadata,
+                "hosted_mcp_execution_possible": mcp_execution_possible,
             }
         )
         return result
@@ -496,12 +530,18 @@ class OpenAIResponsesClient(LLMClient):
         request: dict[str, Any],
         *,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None,
-    ) -> tuple[object, list[dict[str, Any]]]:
+    ) -> tuple[object, list[dict[str, Any]], bool]:
         approval_metadata: list[dict[str, Any]] = []
         current_request = dict(request)
+        mcp_execution_possible = False
+        current_request_can_execute_mcp = _request_can_execute_mcp_without_approval(request)
         for _ in range(4):
+            responses = _responses_resource_for_action_request(
+                self._client,
+                disable_retries=(mcp_execution_possible or current_request_can_execute_mcp),
+            )
             try:
-                response = self._client.responses.create(**current_request)
+                response = responses.create(**current_request)
             except Exception as exc:
                 error = provider_error_from_exception(
                     exc,
@@ -510,13 +550,23 @@ class OpenAIResponsesClient(LLMClient):
                     model=self.model,
                     action_transport=True,
                 )
+                error = _apply_hosted_mcp_execution_policy(
+                    error,
+                    mcp_execution_possible=mcp_execution_possible,
+                    current_request_can_execute_mcp=current_request_can_execute_mcp,
+                )
                 if error is exc:
                     raise
                 raise error from exc
 
+            mcp_execution_possible = (
+                mcp_execution_possible
+                or current_request_can_execute_mcp
+                or _response_has_mcp_call(response)
+            )
             approval_request = _find_mcp_approval_request(response)
             if approval_request is None:
-                return response, approval_metadata
+                return response, approval_metadata, mcp_execution_possible
             if mcp_approval_callback is None:
                 raise LLMError(
                     "OpenAI MCP approval request could not be handled without a permission callback",
@@ -533,6 +583,7 @@ class OpenAIResponsesClient(LLMClient):
                     provider=self.provider,
                     model=self.model,
                     code="invalid_response",
+                    fallback_eligible=not mcp_execution_possible,
                 )
             approved = bool(mcp_approval_callback(approval_payload))
             approval_metadata.append(
@@ -543,13 +594,15 @@ class OpenAIResponsesClient(LLMClient):
                     "approved": approved,
                 }
             )
+            previous_response_id = _response_id(
+                response,
+                provider=self.provider,
+                model=self.model,
+                fallback_eligible=not mcp_execution_possible,
+            )
             current_request = {
                 "model": self.model,
-                "previous_response_id": _response_id(
-                    response,
-                    provider=self.provider,
-                    model=self.model,
-                ),
+                "previous_response_id": previous_response_id,
                 "input": [
                     {
                         "type": "mcp_approval_response",
@@ -560,6 +613,9 @@ class OpenAIResponsesClient(LLMClient):
                 "tools": request["tools"],
                 "tool_choice": "auto",
             }
+            current_request_can_execute_mcp = (
+                approved or _request_can_execute_mcp_without_approval(current_request)
+            )
             if request.get("max_output_tokens") is not None:
                 current_request["max_output_tokens"] = request["max_output_tokens"]
 
@@ -568,6 +624,7 @@ class OpenAIResponsesClient(LLMClient):
             provider=self.provider,
             model=self.model,
             code="invalid_response",
+            fallback_eligible=not mcp_execution_possible,
         )
 
     async def _acreate_native_action_response(
@@ -575,15 +632,21 @@ class OpenAIResponsesClient(LLMClient):
         request: dict[str, Any],
         *,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None,
-    ) -> tuple[object, list[dict[str, Any]]]:
+    ) -> tuple[object, list[dict[str, Any]], bool]:
         async_client = self._async_client
         if async_client is None:
             raise RuntimeError("Async OpenAI client is not configured")
         approval_metadata: list[dict[str, Any]] = []
         current_request = dict(request)
+        mcp_execution_possible = False
+        current_request_can_execute_mcp = _request_can_execute_mcp_without_approval(request)
         for _ in range(4):
+            responses = _responses_resource_for_action_request(
+                async_client,
+                disable_retries=(mcp_execution_possible or current_request_can_execute_mcp),
+            )
             try:
-                response = await async_client.responses.create(**current_request)
+                response = await responses.create(**current_request)
             except Exception as exc:
                 error = provider_error_from_exception(
                     exc,
@@ -592,13 +655,23 @@ class OpenAIResponsesClient(LLMClient):
                     model=self.model,
                     action_transport=True,
                 )
+                error = _apply_hosted_mcp_execution_policy(
+                    error,
+                    mcp_execution_possible=mcp_execution_possible,
+                    current_request_can_execute_mcp=current_request_can_execute_mcp,
+                )
                 if error is exc:
                     raise
                 raise error from exc
 
+            mcp_execution_possible = (
+                mcp_execution_possible
+                or current_request_can_execute_mcp
+                or _response_has_mcp_call(response)
+            )
             approval_request = _find_mcp_approval_request(response)
             if approval_request is None:
-                return response, approval_metadata
+                return response, approval_metadata, mcp_execution_possible
             if mcp_approval_callback is None:
                 raise LLMError(
                     "OpenAI MCP approval request could not be handled without a permission callback",
@@ -615,6 +688,7 @@ class OpenAIResponsesClient(LLMClient):
                     provider=self.provider,
                     model=self.model,
                     code="invalid_response",
+                    fallback_eligible=not mcp_execution_possible,
                 )
             approved = bool(mcp_approval_callback(approval_payload))
             approval_metadata.append(
@@ -625,13 +699,15 @@ class OpenAIResponsesClient(LLMClient):
                     "approved": approved,
                 }
             )
+            previous_response_id = _response_id(
+                response,
+                provider=self.provider,
+                model=self.model,
+                fallback_eligible=not mcp_execution_possible,
+            )
             current_request = {
                 "model": self.model,
-                "previous_response_id": _response_id(
-                    response,
-                    provider=self.provider,
-                    model=self.model,
-                ),
+                "previous_response_id": previous_response_id,
                 "input": [
                     {
                         "type": "mcp_approval_response",
@@ -642,6 +718,9 @@ class OpenAIResponsesClient(LLMClient):
                 "tools": request["tools"],
                 "tool_choice": "auto",
             }
+            current_request_can_execute_mcp = (
+                approved or _request_can_execute_mcp_without_approval(current_request)
+            )
             if request.get("max_output_tokens") is not None:
                 current_request["max_output_tokens"] = request["max_output_tokens"]
 
@@ -650,6 +729,7 @@ class OpenAIResponsesClient(LLMClient):
             provider=self.provider,
             model=self.model,
             code="invalid_response",
+            fallback_eligible=not mcp_execution_possible,
         )
 
     def _text_request(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> dict[str, Any]:
@@ -695,6 +775,72 @@ def _validate_max_output_tokens(value: int | None) -> int | None:
     return value
 
 
+def _hosted_mcp_fallback_error(exc: LLMError) -> LLMError:
+    """Allow a fallback provider to recover when JSON retry would drop hosted MCP."""
+    return LLMError(
+        str(exc),
+        provider=exc.provider,
+        model=exc.model,
+        code=exc.code,
+        retryable=exc.retryable,
+        fallback_eligible=True,
+    )
+
+
+def _hosted_mcp_can_advance_fallback(exc: LLMError) -> bool:
+    return exc.fallback_eligible
+
+
+def _apply_hosted_mcp_execution_policy(
+    exc: LLMError,
+    *,
+    mcp_execution_possible: bool,
+    current_request_can_execute_mcp: bool,
+) -> LLMError:
+    if (
+        not mcp_execution_possible
+        and (
+            not current_request_can_execute_mcp
+            or exc.code in {"rate_limit", "unsupported_feature"}
+        )
+    ):
+        return exc
+    if not exc.fallback_eligible and not exc.retryable:
+        return exc
+    return LLMError(
+        f"{exc} (fallback disabled because a hosted MCP call may have executed)",
+        provider=exc.provider,
+        model=exc.model,
+        code=exc.code,
+        retryable=False,
+        fallback_eligible=False,
+    )
+
+
+def _responses_resource_for_action_request(
+    client: object,
+    *,
+    disable_retries: bool,
+) -> Any:
+    if disable_retries:
+        with_options = getattr(client, "with_options", None)
+        if callable(with_options):
+            client = with_options(max_retries=0)
+    return getattr(client, "responses")
+
+
+def _request_can_execute_mcp_without_approval(request: dict[str, Any]) -> bool:
+    tools = request.get("tools")
+    if not isinstance(tools, list):
+        return False
+    return any(
+        isinstance(tool, dict)
+        and tool.get("type") == "mcp"
+        and tool.get("require_approval") != "always"
+        for tool in tools
+    )
+
+
 def _request_max_output_tokens(model_limit: int | None, request_limit: int | None) -> int | None:
     if model_limit is None:
         return _validate_max_output_tokens(request_limit)
@@ -726,6 +872,7 @@ def _normalize_openai_native_action_response(
     *,
     provider: str,
     model: str,
+    mcp_execution_possible: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     metadata: dict[str, Any] = {"provider_tool_call": None, "provider_mcp_output": []}
     output = _event_value(response, "output")
@@ -744,6 +891,7 @@ def _normalize_openai_native_action_response(
                     provider=provider,
                     model=model,
                     code="action_shape_error",
+                    fallback_eligible=not mcp_execution_possible,
                 )
             try:
                 arguments = parse_native_arguments(_event_value(item, "arguments"))
@@ -753,6 +901,7 @@ def _normalize_openai_native_action_response(
                     provider=provider,
                     model=model,
                     code="action_shape_error",
+                    fallback_eligible=not mcp_execution_possible,
                 ) from exc
             payload = native_tool_action_payload(name, arguments)
             metadata["provider_tool_call"] = public_value(item)
@@ -766,7 +915,13 @@ def _normalize_openai_native_action_response(
         provider=provider,
         model=model,
         code="action_shape_error",
+        fallback_eligible=not mcp_execution_possible,
     )
+
+
+def _response_has_mcp_call(response: object) -> bool:
+    output = _event_value(response, "output")
+    return isinstance(output, list) and any(_event_value(item, "type") == "mcp_call" for item in output)
 
 
 def _find_mcp_approval_request(response: object) -> object | None:
@@ -787,7 +942,13 @@ def _mcp_approval_request_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _response_id(response: object, *, provider: str, model: str) -> str:
+def _response_id(
+    response: object,
+    *,
+    provider: str,
+    model: str,
+    fallback_eligible: bool = False,
+) -> str:
     response_id = _event_value(response, "id")
     if isinstance(response_id, str) and response_id:
         return response_id
@@ -796,4 +957,5 @@ def _response_id(response: object, *, provider: str, model: str) -> str:
         provider=provider,
         model=model,
         code="invalid_response",
+        fallback_eligible=fallback_eligible,
     )

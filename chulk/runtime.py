@@ -157,6 +157,7 @@ def create_agent(
         memory_store,
         tool_specs,
         active_mcp_servers,
+        llm_client=client,
         capabilities=selected_capabilities,
         memory_policy=memory_policy,
         deps=deps,
@@ -172,14 +173,22 @@ def create_agent(
                     server.to_dict() if hasattr(server, "to_dict") else {"server": str(server)}
                     for server in active_mcp_servers
                 ],
-                "provider_path": _mcp_provider_path(config, active_mcp_servers),
+                "provider_path": _mcp_provider_path(
+                    config,
+                    active_mcp_servers,
+                    llm_client=client,
+                ),
             },
         )
         trace_logger.log(
             "mcp_tool_discovery_completed",
             {
                 "bridge_tool_names": mcp_bridge_tool_names,
-                "bridge_required": _mcp_bridge_required(config, active_mcp_servers),
+                "bridge_required": _mcp_bridge_required(
+                    config,
+                    active_mcp_servers,
+                    llm_client=client,
+                ),
             },
         )
     owned_resources = [client] if client_is_owned else []
@@ -285,6 +294,7 @@ def _create_tool_registry(
     tool_specs: Iterable[object] | None,
     mcp_servers: Iterable[MCPServerConfig],
     *,
+    llm_client: LLMClient | None = None,
     capabilities: Capabilities,
     memory_policy: MemoryPolicy,
     deps: object | None,
@@ -303,7 +313,12 @@ def _create_tool_registry(
             shell_execution_policy=shell_execution_policy,
             require_shell_containment=require_shell_containment,
         )
-        return _register_mcp_bridge_tools(config, registry, mcp_servers)
+        return _register_mcp_bridge_tools(
+            config,
+            registry,
+            mcp_servers,
+            llm_client=llm_client,
+        )
 
     context = RuntimeToolContext(
         project_root=config.project_root,
@@ -319,16 +334,27 @@ def _create_tool_registry(
     for spec in tool_specs:
         tool = _resolve_tool_spec(spec, context)
         registry.register(tool)
-    return _register_mcp_bridge_tools(config, registry, mcp_servers)
+    return _register_mcp_bridge_tools(
+        config,
+        registry,
+        mcp_servers,
+        llm_client=llm_client,
+    )
 
 
 def _register_mcp_bridge_tools(
     config: Config,
     registry: ToolRegistry,
     mcp_servers: Iterable[MCPServerConfig],
+    *,
+    llm_client: LLMClient | None = None,
 ) -> tuple[ToolRegistry, list[str]]:
     servers = tuple(mcp_servers)
-    if not servers or not _mcp_bridge_required(config, servers):
+    if not servers or not _mcp_bridge_required(
+        config,
+        servers,
+        llm_client=llm_client,
+    ):
         return registry, []
     bridge_tools = create_mcp_bridge_tools(servers)
     bridge_tool_names: list[str] = []
@@ -338,26 +364,77 @@ def _register_mcp_bridge_tools(
     return registry, bridge_tool_names
 
 
-def _mcp_bridge_required(config: Config, mcp_servers: Iterable[object]) -> bool:
+def _mcp_bridge_required(
+    config: Config,
+    mcp_servers: Iterable[object],
+    *,
+    llm_client: LLMClient | None = None,
+) -> bool:
     if not tuple(mcp_servers):
         return False
+    client_path = _fallback_client_path(llm_client)
+    if client_path is not None:
+        return any(
+            not _client_supports_native_tool_calling(client)
+            or not _client_supports_hosted_mcp(client)
+            for client in client_path
+        )
     provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    return any(not _supports_hosted_mcp(provider) for provider in provider_path)
+    return any(
+        not _supports_native_tool_calling(provider)
+        or not _supports_hosted_mcp(provider)
+        for provider in provider_path
+    )
 
 
-def _mcp_provider_path(config: Config, mcp_servers: Iterable[object]) -> str:
+def _mcp_provider_path(
+    config: Config,
+    mcp_servers: Iterable[object],
+    *,
+    llm_client: LLMClient | None = None,
+) -> str:
     if not tuple(mcp_servers):
         return "none"
-    provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
-    has_hosted = any(_supports_hosted_mcp(provider) for provider in provider_path)
-    has_bridge = any(not _supports_hosted_mcp(provider) for provider in provider_path)
+    client_path = _fallback_client_path(llm_client)
+    if client_path is None:
+        provider_path = [config.llm_provider, *(provider.provider for provider in config.llm_fallback_providers)]
+        native_support = [_supports_native_tool_calling(provider) for provider in provider_path]
+        support = [_supports_hosted_mcp(provider) for provider in provider_path]
+    else:
+        native_support = [_client_supports_native_tool_calling(client) for client in client_path]
+        support = [_client_supports_hosted_mcp(client) for client in client_path]
+    if not all(native_support):
+        return "bridge"
+    has_hosted = any(support)
+    has_bridge = any(not item for item in support)
     if has_hosted and has_bridge:
         return "hosted+bridge"
     return "hosted" if has_hosted else "bridge"
 
 
+def _fallback_client_path(llm_client: LLMClient | None) -> list[object] | None:
+    providers = getattr(llm_client, "providers", None)
+    if isinstance(providers, list) and providers:
+        return list(providers)
+    return None
+
+
+def _client_supports_hosted_mcp(client: object) -> bool:
+    capabilities = getattr(client, "capabilities", None)
+    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
+
+
+def _client_supports_native_tool_calling(client: object) -> bool:
+    capabilities = getattr(client, "capabilities", None)
+    return bool(getattr(capabilities, "supports_native_tool_calling", False))
+
+
 def _supports_hosted_mcp(provider: str) -> bool:
     return provider_capabilities(provider).supports_hosted_mcp_tools
+
+
+def _supports_native_tool_calling(provider: str) -> bool:
+    return provider_capabilities(provider).supports_native_tool_calling
 
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:

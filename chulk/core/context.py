@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Any
+from typing import Any, Literal
 
 
 ESTIMATED_CHARS_PER_TOKEN = 4
@@ -146,6 +146,8 @@ class ContextReport:
     sections: list[ContextSection]
     budget: ContextBudget = field(default_factory=ContextBudget)
     message_estimated_tokens: int | None = None
+    request_overhead_estimated_tokens: int = 0
+    fallback_message_estimated_tokens: int | None = None
     included_message_count: int = 0
     omitted_message_count: int = 0
     omitted_observation_count: int = 0
@@ -156,9 +158,18 @@ class ContextReport:
 
     @property
     def estimated_tokens(self) -> int:
-        if self.message_estimated_tokens is not None:
-            return self.message_estimated_tokens
-        return self.section_estimated_tokens
+        if self.message_estimated_tokens is None:
+            return self.section_estimated_tokens
+        return (
+            self.message_estimated_tokens
+            + self.request_overhead_estimated_tokens
+        )
+
+    @property
+    def budget_estimated_tokens(self) -> int:
+        """Return the larger actual-request or JSON-fallback estimate."""
+        fallback_tokens = self.fallback_message_estimated_tokens or 0
+        return max(self.estimated_tokens, fallback_tokens)
 
     @property
     def section_estimated_tokens(self) -> int:
@@ -169,7 +180,7 @@ class ContextReport:
         input_budget = self.budget.input_token_budget
         if input_budget is None:
             return 0
-        return max(0, self.estimated_tokens - input_budget)
+        return max(0, self.budget_estimated_tokens - input_budget)
 
     @property
     def trimmed(self) -> bool:
@@ -179,6 +190,10 @@ class ContextReport:
         return {
             "total_char_count": self.total_char_count,
             "estimated_tokens": self.estimated_tokens,
+            "message_estimated_tokens": self.message_estimated_tokens,
+            "request_overhead_estimated_tokens": self.request_overhead_estimated_tokens,
+            "fallback_message_estimated_tokens": self.fallback_message_estimated_tokens,
+            "budget_estimated_tokens": self.budget_estimated_tokens,
             "section_estimated_tokens": self.section_estimated_tokens,
             "budget": self.budget.to_dict(),
             "over_budget_tokens": self.over_budget_tokens,
@@ -197,6 +212,8 @@ class AgentPrompt:
     messages: list[dict[str, str]]
     context_report: ContextReport
     omitted_messages: list[dict[str, str]] = field(default_factory=list)
+    action_transport: Literal["provider_native", "chulk_json"] = "chulk_json"
+    native_tool_declarations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:
@@ -220,8 +237,12 @@ def select_messages_for_budget(
     system_message: dict[str, str],
     history_messages: list[dict[str, str]],
     budget: ContextBudget,
+    request_overhead_tokens: int = 0,
+    alternate_system_message: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Return history messages that fit the prompt budget plus omitted messages."""
+    if request_overhead_tokens < 0:
+        raise ValueError("request_overhead_tokens cannot be negative")
     if not budget.enabled:
         return list(history_messages), []
 
@@ -230,7 +251,12 @@ def select_messages_for_budget(
         return list(history_messages), []
 
     selected = list(history_messages)
-    while _messages_token_count([system_message, *selected]) > input_budget:
+    while _request_token_count(
+        system_message=system_message,
+        history_messages=selected,
+        request_overhead_tokens=request_overhead_tokens,
+        alternate_system_message=alternate_system_message,
+    ) > input_budget:
         drop_range = _oldest_droppable_history_block(selected)
         if drop_range is None:
             break
@@ -248,6 +274,8 @@ def build_context_report(
     omitted_messages: list[dict[str, str]],
     budget: ContextBudget,
     sent_messages: list[dict[str, str]],
+    request_overhead_estimated_tokens: int = 0,
+    fallback_sent_messages: list[dict[str, str]] | None = None,
 ) -> ContextReport:
     """Build a per-section context report for prompt visibility."""
     non_observation_messages = [
@@ -276,6 +304,12 @@ def build_context_report(
         sections=sections,
         budget=budget,
         message_estimated_tokens=_messages_token_count(sent_messages),
+        request_overhead_estimated_tokens=request_overhead_estimated_tokens,
+        fallback_message_estimated_tokens=(
+            _messages_token_count(fallback_sent_messages)
+            if fallback_sent_messages is not None
+            else None
+        ),
         included_message_count=len(history_messages),
         omitted_message_count=len(omitted_messages),
         omitted_observation_count=omitted_observations,
@@ -284,6 +318,25 @@ def build_context_report(
 
 def _messages_token_count(messages: list[dict[str, str]]) -> int:
     return sum(estimate_message_tokens(message) for message in messages)
+
+
+def _request_token_count(
+    *,
+    system_message: dict[str, str],
+    history_messages: list[dict[str, str]],
+    request_overhead_tokens: int,
+    alternate_system_message: dict[str, str] | None,
+) -> int:
+    actual_tokens = (
+        _messages_token_count([system_message, *history_messages])
+        + request_overhead_tokens
+    )
+    if alternate_system_message is None:
+        return actual_tokens
+    alternate_tokens = _messages_token_count(
+        [alternate_system_message, *history_messages]
+    )
+    return max(actual_tokens, alternate_tokens)
 
 
 def _oldest_droppable_history_block(messages: list[dict[str, str]]) -> slice | None:

@@ -18,6 +18,7 @@ from chulk.llm.base import (
 from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
+    PlanningToolAvailability,
     action_payload_json,
     native_final_answer_payload,
     native_tool_action_payload,
@@ -226,6 +227,7 @@ class GeminiGenerateContentClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -236,18 +238,19 @@ class GeminiGenerateContentClient(LLMClient):
                 model=self.model,
                 code="unsupported_feature",
             )
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return self._complete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -268,6 +271,7 @@ class GeminiGenerateContentClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -276,6 +280,7 @@ class GeminiGenerateContentClient(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
@@ -286,18 +291,19 @@ class GeminiGenerateContentClient(LLMClient):
                 model=self.model,
                 code="unsupported_feature",
             )
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return await self._acomplete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -377,10 +383,13 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request["config"].update(_native_tool_config(tools))
+        request["config"].update(
+            _native_tool_config(tools, planning_tools=planning_tools)
+        )
         response = self._generate(
             request,
             operation="native tool action request",
@@ -409,10 +418,13 @@ class GeminiGenerateContentClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request["config"].update(_native_tool_config(tools))
+        request["config"].update(
+            _native_tool_config(tools, planning_tools=planning_tools)
+        )
         response = await self._agenerate(
             request,
             operation="native tool action request",
@@ -594,15 +606,24 @@ def _append_content(contents: list[dict[str, Any]], role: str, text: str) -> Non
     contents.append({"role": role, "parts": [{"text": text}]})
 
 
-def _native_tool_config(tools: list[object]) -> dict[str, Any]:
+def _native_tool_config(
+    tools: list[object],
+    *,
+    planning_tools: PlanningToolAvailability | None = None,
+) -> dict[str, Any]:
     declarations = [
         {
             "name": declaration["name"],
             "description": declaration["description"],
             "parameters_json_schema": declaration["parameters"],
         }
-        for declaration in provider_action_tools(tools)
+        for declaration in provider_action_tools(
+            tools,
+            planning_tools=planning_tools,
+        )
     ]
+    if not declarations:
+        return {}
     return {
         "tools": [{"function_declarations": declarations}],
         "tool_config": {"function_calling_config": {"mode": "AUTO"}},

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 import re
 
 from chulk.core.actions import AgentAction
@@ -19,6 +20,8 @@ from chulk.core.reflection import (
 from chulk.core.state import AgentState, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
 from chulk.llm import LLMActionError, LLMActionResult, LLMClient, LLMError
+from chulk.llm.base import call_async_with_supported_kwargs, call_with_supported_kwargs
+from chulk.llm.tools import PlanningToolAvailability, provider_action_tools
 from chulk.mcp import MCPServerConfig
 from chulk.memory import ConversationMemory, MemoryRecord
 from chulk.skills import SkillRegistry, SkillSelection
@@ -68,6 +71,17 @@ class ModelTransport:
 
     def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
         """Build the model input and context report."""
+        native_action_protocol = self._native_tool_calling_enabled()
+        registered_tools = list(self.tool_registry.list_tools())
+        planning_tools = self._planning_tool_availability(turn, require_plan=require_plan)
+        native_tool_declarations = provider_action_tools(
+            registered_tools,
+            planning_tools=planning_tools,
+        )
+        if native_action_protocol and self._hosted_mcp_enabled():
+            native_tool_declarations.extend(
+                _safe_hosted_mcp_declaration(server) for server in self.mcp_servers
+            )
         return build_agent_prompt(
             system_prompt=self.system_prompt,
             memory=self.memory,
@@ -89,7 +103,12 @@ class ModelTransport:
             active_plan=turn.active_plan,
             plan_approved=turn.plan_approved,
             require_plan=require_plan,
-            native_action_protocol=self._native_tool_calling_enabled(),
+            native_action_protocol=native_action_protocol,
+            native_tool_declarations=(
+                native_tool_declarations
+                if native_action_protocol
+                else []
+            ),
             context_budget=self.context_budget,
         )
 
@@ -147,16 +166,33 @@ class ModelTransport:
             )
         return current_prompt
 
-    def request_action(self, turn: TurnState, prompt: AgentPrompt) -> AgentAction | ProtocolFailure:
+    def request_action(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+        *,
+        require_plan: bool,
+    ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
         messages = self._record_model_request(turn, prompt)
+        native_action_protocol = prompt.action_transport == "provider_native"
         try:
-            result = self.llm_client.complete_action(
+            result = call_with_supported_kwargs(
+                self.llm_client.complete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
-                tools=list(self.tool_registry.list_tools()),
-                hosted_mcp_servers=self.mcp_servers,
-                mcp_approval_callback=lambda request: self.resolve_mcp_approval(request, turn),
+                tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
+                planning_tools=(
+                    self._planning_tool_availability(turn, require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
+                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                mcp_approval_callback=(
+                    (lambda request: self.resolve_mcp_approval(request, turn))
+                    if native_action_protocol
+                    else None
+                ),
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
@@ -166,16 +202,29 @@ class ModelTransport:
         self,
         turn: TurnState,
         prompt: AgentPrompt,
+        *,
+        require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
         messages = self._record_model_request(turn, prompt)
+        native_action_protocol = prompt.action_transport == "provider_native"
         try:
-            result = await self.llm_client.acomplete_action(
+            result = await call_async_with_supported_kwargs(
+                self.llm_client.acomplete_action,
                 messages,
                 max_repair_attempts=self.max_json_repair_attempts,
-                tools=list(self.tool_registry.list_tools()),
-                hosted_mcp_servers=self.mcp_servers,
-                mcp_approval_callback=lambda request: self.resolve_mcp_approval(request, turn),
+                tools=(list(self.tool_registry.list_tools()) if native_action_protocol else None),
+                planning_tools=(
+                    self._planning_tool_availability(turn, require_plan=require_plan)
+                    if native_action_protocol
+                    else None
+                ),
+                hosted_mcp_servers=(self.mcp_servers if native_action_protocol else None),
+                mcp_approval_callback=(
+                    (lambda request: self.resolve_mcp_approval(request, turn))
+                    if native_action_protocol
+                    else None
+                ),
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
@@ -377,19 +426,26 @@ class ModelTransport:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         turn.model_request_count += 1
-        self.trace(
-            TraceEvent.MODEL_REQUEST_STARTED,
-            format_model_request_trace(
-                messages,
-                max_prompt_chars=self.trace_max_prompt_chars,
-                request_index=turn.model_request_count,
-                turn_id=turn.turn_id,
-                loaded_memory_ids=self.state.loaded_memory_ids,
-                loaded_skill_names=self.state.loaded_skill_names,
-                available_tool_names=turn.available_tool_names,
-                context_report=context_report,
-            ),
+        payload = format_model_request_trace(
+            messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=turn.model_request_count,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report=context_report,
         )
+        payload["action_transport"] = prompt.action_transport
+        payload["native_tool_names"] = [
+            str(declaration.get("name", ""))
+            for declaration in prompt.native_tool_declarations
+        ]
+        payload["native_tool_declarations"] = _bounded_native_tool_declarations(
+            prompt.native_tool_declarations,
+            max_chars=self.trace_max_prompt_chars,
+        )
+        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return messages
 
     def _record_protocol_failure(
@@ -604,13 +660,82 @@ class ModelTransport:
     def _native_tool_calling_enabled(self) -> bool:
         providers = getattr(self.llm_client, "providers", None)
         if isinstance(providers, list):
-            return any(_client_supports_native_tool_calling(item) for item in providers)
+            return bool(providers) and all(
+                _client_supports_native_tool_calling(item) for item in providers
+            )
         return _client_supports_native_tool_calling(self.llm_client)
+
+    def _hosted_mcp_enabled(self) -> bool:
+        providers = getattr(self.llm_client, "providers", None)
+        if isinstance(providers, list):
+            return any(_client_supports_hosted_mcp(item) for item in providers)
+        return _client_supports_hosted_mcp(self.llm_client)
+
+    @staticmethod
+    def _planning_tool_availability(
+        turn: TurnState,
+        *,
+        require_plan: bool,
+    ) -> PlanningToolAvailability:
+        active_plan = turn.active_plan
+        return PlanningToolAvailability(
+            propose_plan=require_plan and active_plan is None,
+            update_plan_step=bool(
+                turn.plan_approved
+                and active_plan is not None
+                and active_plan.active_step() is not None
+            ),
+        )
 
 
 def _client_supports_native_tool_calling(client: object) -> bool:
     capabilities = getattr(client, "capabilities", None)
     return bool(getattr(capabilities, "supports_native_tool_calling", False))
+
+
+def _client_supports_hosted_mcp(client: object) -> bool:
+    capabilities = getattr(client, "capabilities", None)
+    return bool(getattr(capabilities, "supports_hosted_mcp_tools", False))
+
+
+def _safe_hosted_mcp_declaration(server: MCPServerConfig) -> dict:
+    declaration = {
+        "type": "mcp",
+        "name": f"mcp:{server.label}",
+        "server_label": server.label,
+        "server_url": server.server_url,
+        "require_approval": server.approval,
+        "authorization_configured": bool(server.authorization),
+    }
+    if server.server_description:
+        declaration["server_description"] = server.server_description
+    if server.allowed_tools:
+        declaration["allowed_tools"] = list(server.allowed_tools)
+    if server.defer_loading:
+        declaration["defer_loading"] = True
+    return declaration
+
+
+def _bounded_native_tool_declarations(
+    declarations: list[dict],
+    *,
+    max_chars: int,
+) -> dict:
+    serialized = json.dumps(
+        declarations,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    limit = max(0, max_chars)
+    truncated = len(serialized) > limit
+    return {
+        "items": None if truncated else declarations,
+        "json_preview": serialized[:limit] if truncated else None,
+        "char_count": len(serialized),
+        "returned_char_count": min(len(serialized), limit),
+        "truncated": truncated,
+    }
 
 
 def _dedupe_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:

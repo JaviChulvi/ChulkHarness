@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
 from chulk.core.prompts import JSON_REPAIR_PROMPT
 from chulk.llm.pricing import estimate_cost
+from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggregate_usage, estimate_usage
 
 if TYPE_CHECKING:
@@ -239,6 +240,7 @@ class LLMClient:
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
@@ -255,6 +257,7 @@ class LLMClient:
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -275,9 +278,13 @@ class LLMClient:
                 )
             except ActionParseError as exc:
                 errors.append(str(exc))
-                if attempt >= max_repair_attempts:
+                repair_blocked = _action_repair_blocked(response)
+                if repair_blocked or attempt >= max_repair_attempts:
+                    message = f"Model response was not valid action JSON: {exc}"
+                    if repair_blocked:
+                        message += " (repair disabled because a hosted MCP call may have executed)"
                     raise LLMActionError(
-                        f"Model response was not valid action JSON: {exc}",
+                        message,
                         repair_attempts=attempt,
                         errors=errors,
                         raw_response=response.content,
@@ -307,6 +314,7 @@ class LLMClient:
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
@@ -318,6 +326,7 @@ class LLMClient:
             compatibility_kwargs: dict[str, Any] = {
                 "max_repair_attempts": max_repair_attempts,
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -341,6 +350,7 @@ class LLMClient:
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -361,9 +371,13 @@ class LLMClient:
                 )
             except ActionParseError as exc:
                 errors.append(str(exc))
-                if attempt >= max_repair_attempts:
+                repair_blocked = _action_repair_blocked(response)
+                if repair_blocked or attempt >= max_repair_attempts:
+                    message = f"Model response was not valid action JSON: {exc}"
+                    if repair_blocked:
+                        message += " (repair disabled because a hosted MCP call may have executed)"
                     raise LLMActionError(
-                        f"Model response was not valid action JSON: {exc}",
+                        message,
                         repair_attempts=attempt,
                         errors=errors,
                         raw_response=response.content,
@@ -396,6 +410,7 @@ class LLMClient:
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -410,12 +425,14 @@ class LLMClient:
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Compatibility hook for sync-only custom clients."""
         kwargs: dict[str, Any] = {
             "tools": tools,
+            "planning_tools": planning_tools,
             "hosted_mcp_servers": hosted_mcp_servers,
             "mcp_approval_callback": mcp_approval_callback,
         }
@@ -439,6 +456,10 @@ class LLMClient:
             provider=provider,
             model=model,
         )
+
+
+def _action_repair_blocked(response: LLMResponse) -> bool:
+    return response.metadata.get("hosted_mcp_execution_possible") is True
 
 
 def _parse_json_object(raw_response: str, *, client: LLMClient) -> dict[str, Any]:

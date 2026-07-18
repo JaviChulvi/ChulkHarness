@@ -2,22 +2,46 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 from typing import Any
 
-from chulk.core.prompts import JSON_ACTION_PROMPT
+from chulk.core.prompts import JSON_ACTION_PROMPT, format_tools_for_prompt
+from chulk.tools.registry import tool_descriptions_for_prompt
 
 
 PLAN_TOOL_NAME = "chulk_propose_plan"
 PLAN_STEP_UPDATE_TOOL_NAME = "chulk_plan_step_update"
+JSON_FALLBACK_WRAPPER = "chulk_action_fallback"
 
 
-def provider_action_tools(tools: list[object] | None) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class PlanningToolAvailability:
+    """Planning actions exposed through a provider's native tool transport."""
+
+    propose_plan: bool = False
+    update_plan_step: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether at least one planning declaration is requested."""
+        return self.propose_plan or self.update_plan_step
+
+
+def provider_action_tools(
+    tools: Iterable[object] | None,
+    *,
+    planning_tools: PlanningToolAvailability | None = None,
+) -> list[dict[str, Any]]:
     """Return provider-neutral native tool declarations for Chulk actions."""
     declarations = [_tool_declaration(tool) for tool in tools or []]
-    declarations.append(_plan_tool_declaration())
-    declarations.append(_plan_step_update_tool_declaration())
+    availability = planning_tools or PlanningToolAvailability()
+    if availability.propose_plan:
+        declarations.append(_plan_tool_declaration())
+    if availability.update_plan_step:
+        declarations.append(_plan_step_update_tool_declaration())
     return declarations
 
 
@@ -25,6 +49,7 @@ def openai_response_tools(
     tools: list[object] | None,
     *,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
+    planning_tools: PlanningToolAvailability | None = None,
 ) -> list[dict[str, Any]]:
     """Return Responses API tool declarations."""
     hosted_mcp_servers = hosted_mcp_servers or []
@@ -36,13 +61,20 @@ def openai_response_tools(
             "description": declaration["description"],
             "parameters": declaration["parameters"],
         }
-        for declaration in provider_action_tools(chulk_tools)
+        for declaration in provider_action_tools(
+            chulk_tools,
+            planning_tools=planning_tools,
+        )
     ]
     declarations.extend(_hosted_mcp_tool(server) for server in hosted_mcp_servers)
     return declarations
 
 
-def chat_completion_tools(tools: list[object] | None) -> list[dict[str, Any]]:
+def chat_completion_tools(
+    tools: list[object] | None,
+    *,
+    planning_tools: PlanningToolAvailability | None = None,
+) -> list[dict[str, Any]]:
     """Return OpenAI-compatible chat-completion tool declarations."""
     return [
         {
@@ -53,7 +85,10 @@ def chat_completion_tools(tools: list[object] | None) -> list[dict[str, Any]]:
                 "parameters": declaration["parameters"],
             },
         }
-        for declaration in provider_action_tools(tools)
+        for declaration in provider_action_tools(
+            tools,
+            planning_tools=planning_tools,
+        )
     ]
 
 
@@ -121,20 +156,95 @@ def action_payload_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
-def with_json_action_prompt(messages: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Return messages with the JSON action protocol appended for fallback calls."""
+def with_json_action_prompt(
+    messages: list[dict[str, str]],
+    *,
+    tools: list[object] | None = None,
+) -> list[dict[str, str]]:
+    """Return fallback messages with one JSON protocol and a full safe tool catalog."""
+    tool_catalog = format_tools_for_prompt(tool_descriptions_for_prompt(tools or []))
     if not messages:
-        return [{"role": "system", "content": JSON_ACTION_PROMPT}]
+        return [{"role": "system", "content": _json_fallback_prompt("", tool_catalog)}]
     first = messages[0]
     if first.get("role") == "system":
         return [
             {
                 **first,
-                "content": "\n\n".join([first.get("content", ""), JSON_ACTION_PROMPT]).strip(),
+                "content": _json_fallback_prompt(first.get("content", ""), tool_catalog),
             },
             *messages[1:],
         ]
-    return [{"role": "system", "content": JSON_ACTION_PROMPT}, *messages]
+    return [
+        {"role": "system", "content": _json_fallback_prompt("", tool_catalog)},
+        *messages,
+    ]
+
+
+def _json_fallback_prompt(content: str, tool_catalog: str) -> str:
+    if _is_chulk_prompt(content):
+        updated, tools_replaced = _replace_xml_section(content, "tools", tool_catalog)
+        updated, protocol_replaced = _replace_xml_section(
+            updated,
+            "action_protocol",
+            JSON_ACTION_PROMPT,
+        )
+        if tools_replaced and protocol_replaced:
+            return updated.strip()
+
+    updated_wrapper = _replace_json_fallback_wrapper(content, tool_catalog)
+    if updated_wrapper is not None:
+        return updated_wrapper.strip()
+
+    wrapper_content = "\n".join(
+        [
+            _xml_section("tools", tool_catalog),
+            _xml_section("action_protocol", JSON_ACTION_PROMPT),
+        ]
+    )
+    wrapper = _xml_section(JSON_FALLBACK_WRAPPER, wrapper_content)
+    return "\n\n".join(part for part in [content.strip(), wrapper] if part).strip()
+
+
+def _is_chulk_prompt(content: str) -> bool:
+    stripped = content.strip()
+    return stripped.startswith("<chulk_prompt>") and stripped.endswith("</chulk_prompt>")
+
+
+def _replace_json_fallback_wrapper(content: str, tool_catalog: str) -> str | None:
+    start_tag = f"<{JSON_FALLBACK_WRAPPER}>"
+    end_tag = f"</{JSON_FALLBACK_WRAPPER}>"
+    before, separator, remainder = content.partition(start_tag)
+    if not separator:
+        return None
+    body, end_separator, after = remainder.partition(end_tag)
+    if not end_separator:
+        return None
+    updated, tools_replaced = _replace_xml_section(body, "tools", tool_catalog)
+    updated, protocol_replaced = _replace_xml_section(
+        updated,
+        "action_protocol",
+        JSON_ACTION_PROMPT,
+    )
+    if not tools_replaced or not protocol_replaced:
+        return None
+    return f"{before}{start_tag}{updated}{end_tag}{after}"
+
+
+def _replace_xml_section(content: str, name: str, replacement: str) -> tuple[str, bool]:
+    start_tag = f"<{name}>"
+    end_tag = f"</{name}>"
+    before, separator, remainder = content.partition(start_tag)
+    if not separator:
+        return content, False
+    _current, end_separator, after = remainder.partition(end_tag)
+    if not end_separator:
+        return content, False
+    section = _xml_section(name, replacement)
+    return f"{before}{section}{after}", True
+
+
+def _xml_section(name: str, content: str) -> str:
+    return f"<{name}>\n{content.strip()}\n</{name}>"
 
 
 def public_value(value: object) -> Any:

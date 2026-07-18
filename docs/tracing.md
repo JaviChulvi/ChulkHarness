@@ -11,6 +11,15 @@ output, or credentials are absent. Restrict access, set retention, and scrub
 before sharing. Truncated tool-output artifacts beside a trace require the same
 handling.
 
+Action-request trace payloads identify `action_transport`, the effective native
+tool names, and a bounded provider-neutral declaration snapshot. The context
+report separates message tokens from out-of-band native declaration overhead.
+For native requests it also records the larger JSON-fallback message estimate,
+which is the value used when reserving and trimming context. This makes the
+actual request and its safe fallback budget inspectable without duplicating
+schemas in the system prompt; provider SDK wrappers may still use different
+field names around the same neutral declarations.
+
 ## Envelope schema
 
 New events use schema version `1`:
