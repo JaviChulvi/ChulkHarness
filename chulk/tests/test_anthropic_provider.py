@@ -17,6 +17,7 @@ from chulk.config import ConfigValueError, load_config
 from chulk.core.actions import FinalAnswerAction, ToolCallAction
 from chulk.llm import AnthropicMessagesClient as ExportedAnthropicMessagesClient
 from chulk.llm import AnthropicProvider as ExportedAnthropicProvider
+from chulk.llm import PlanningToolAvailability
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.llm.capabilities import resolve_model_capabilities
 from chulk.llm.factory import (
@@ -32,6 +33,7 @@ from chulk.llm.providers.anthropic import (
     normalize_anthropic_usage,
 )
 from chulk.llm.public import AnthropicProvider
+from chulk.llm.tools import PLAN_TOOL_NAME
 from chulk.main import create_cli_llm, format_config
 
 
@@ -165,7 +167,7 @@ def test_anthropic_uses_one_native_tool_call_and_disables_parallel_use() -> None
     request_tools = request["tools"]
     assert isinstance(request_tools, list)
     tool_names = {str(tool["name"]) for tool in request_tools if isinstance(tool, dict)}
-    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert tool_names == {"calculator"}
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["id"] == "toolu_1"
 
@@ -183,6 +185,38 @@ def test_anthropic_native_text_becomes_final_answer() -> None:
     assert result.action.content == "native final"
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"] is None
+
+
+def test_anthropic_native_text_with_no_effective_tools_omits_tool_fields() -> None:
+    fake = FakeAnthropicClient([_response(_text("native final"))])
+    client = AnthropicMessagesClient(model="claude-test", client=fake)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "hello"}],
+        tools=[],
+        planning_tools=PlanningToolAvailability(),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    assert "tools" not in fake.messages.calls[0]
+    assert "tool_choice" not in fake.messages.calls[0]
+    assert result.metadata["action_transport"] == "provider_native"
+
+
+def test_anthropic_planning_policy_enables_native_transport_without_regular_tools() -> None:
+    fake = FakeAnthropicClient([_response(_text("native final"))])
+    client = AnthropicMessagesClient(model="claude-test", client=fake)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "plan this"}],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    assert [item["name"] for item in fake.messages.calls[0]["tools"]] == [
+        PLAN_TOOL_NAME
+    ]
+    assert result.metadata["action_transport"] == "provider_native"
 
 
 def test_anthropic_rejects_multiple_tool_calls_and_uses_json_fallback() -> None:

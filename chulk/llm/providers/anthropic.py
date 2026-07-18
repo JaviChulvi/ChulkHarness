@@ -17,6 +17,7 @@ from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
+    PlanningToolAvailability,
     action_payload_json,
     native_final_answer_payload,
     native_tool_action_payload,
@@ -244,6 +245,7 @@ class AnthropicMessagesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -255,18 +257,19 @@ class AnthropicMessagesClient(LLMClient):
                 model=self.model,
                 code="unsupported_feature",
             )
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return self._complete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -284,6 +287,7 @@ class AnthropicMessagesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -293,6 +297,7 @@ class AnthropicMessagesClient(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
             )
         if hosted_mcp_servers:
@@ -302,18 +307,19 @@ class AnthropicMessagesClient(LLMClient):
                 model=self.model,
                 code="unsupported_feature",
             )
-        if tools is not None:
+        if tools is not None or bool(planning_tools and planning_tools.enabled):
             try:
                 return await self._acomplete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                 )
             except LLMError as exc:
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -373,15 +379,21 @@ class AnthropicMessagesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request.update(
-            {
-                "tools": _anthropic_tools(tools),
-                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
-            }
+        native_tools = _anthropic_tools(
+            tools,
+            planning_tools=planning_tools,
         )
+        if native_tools:
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                }
+            )
         response = self._create(
             request,
             operation="native tool action request",
@@ -406,15 +418,21 @@ class AnthropicMessagesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         request = self._request(messages, max_output_tokens=max_output_tokens)
-        request.update(
-            {
-                "tools": _anthropic_tools(tools),
-                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
-            }
+        native_tools = _anthropic_tools(
+            tools,
+            planning_tools=planning_tools,
         )
+        if native_tools:
+            request.update(
+                {
+                    "tools": native_tools,
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+                }
+            )
         response = await self._acreate(
             request,
             operation="native tool action request",
@@ -552,14 +570,21 @@ def normalize_anthropic_usage(usage: object) -> LLMUsage | None:
     )
 
 
-def _anthropic_tools(tools: list[object]) -> list[dict[str, Any]]:
+def _anthropic_tools(
+    tools: list[object],
+    *,
+    planning_tools: PlanningToolAvailability | None = None,
+) -> list[dict[str, Any]]:
     return [
         {
             "name": declaration["name"],
             "description": declaration["description"],
             "input_schema": declaration["parameters"],
         }
-        for declaration in provider_action_tools(tools)
+        for declaration in provider_action_tools(
+            tools,
+            planning_tools=planning_tools,
+        )
     ]
 
 

@@ -1310,7 +1310,11 @@ def test_main_e2e_uses_openai_native_tool_calling(monkeypatch, tmp_path, capsys)
     assert first_call["tool_choice"] == "auto"
     assert "tools" in first_call
     assert "text" not in first_call
-    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert "calculator" in tool_names
+    assert "chulk_propose_plan" not in tool_names
+    assert "chulk_plan_step_update" not in tool_names
+    assert "<arguments_schema_json>" not in str(first_call["instructions"])
+    assert "<name>calculator</name>" not in str(first_call["instructions"])
 
 
 def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_path, capsys):

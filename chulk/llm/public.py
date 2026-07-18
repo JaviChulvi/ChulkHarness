@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
+import json
 import time
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
 
+from chulk.core.actions import (
+    FinalAnswerAction,
+    PlanAction,
+    PlanStepUpdateAction,
+    ToolCallAction,
+)
 from chulk.llm.base import (
     LLMActionResult,
     LLMClient,
@@ -17,6 +24,7 @@ from chulk.llm.base import (
 )
 from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
 from chulk.llm.factory import create_llm_client, provider_connection_from_config
+from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 if TYPE_CHECKING:
@@ -24,6 +32,8 @@ if TYPE_CHECKING:
 
 
 FallbackStrategy = Literal["first_success", "round_robin", "lowest_latency"]
+ResultT = TypeVar("ResultT")
+_CUSTOM_ACTION_RESULT_METADATA_KEY = "_chulk_custom_action_result"
 
 
 class BindableLLM(Protocol):
@@ -340,19 +350,22 @@ class FallbackChain(LLMClient):
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMActionResult:
         self._action_attempts = []
         try:
-            return super().complete_action(
+            result = super().complete_action(
                 messages,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
+            return _restore_custom_action_result(result)
         finally:
             if self._action_attempts is not None:
                 self.last_attempts = self._action_attempts
@@ -365,19 +378,22 @@ class FallbackChain(LLMClient):
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMActionResult:
         self._action_attempts = []
         try:
-            return await super().acomplete_action(
+            result = await super().acomplete_action(
                 messages,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
+            return _restore_custom_action_result(result)
         finally:
             if self._action_attempts is not None:
                 self.last_attempts = self._action_attempts
@@ -400,6 +416,7 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMResponse:
@@ -409,6 +426,7 @@ class FallbackChain(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
                 mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
             )
@@ -420,6 +438,7 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict], bool] | None = None,
     ) -> LLMResponse:
@@ -429,12 +448,16 @@ class FallbackChain(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
                 mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
             )
         )
 
-    def _try_provider_responses(self, call) -> LLMResponse:
+    def _try_provider_responses(
+        self,
+        call: Callable[[LLMClient], ResultT],
+    ) -> ResultT:
         self.last_attempts = []
         self.last_success_provider = None
         errors: list[str] = []
@@ -444,7 +467,7 @@ class FallbackChain(LLMClient):
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
             try:
-                response: LLMResponse = call(provider)
+                response = call(provider)
             except Exception as exc:
                 latency = time.monotonic() - started_at
                 error = str(exc)
@@ -470,7 +493,14 @@ class FallbackChain(LLMClient):
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
-            attempt = ProviderAttempt(provider_name, model, True, latency, usage=response.usage, cost=response.cost)
+            attempt = ProviderAttempt(
+                provider_name,
+                model,
+                True,
+                latency,
+                usage=getattr(response, "usage", None),
+                cost=getattr(response, "cost", None),
+            )
             self.last_attempts.append(attempt)
             self.attempts.append(attempt)
             if self._action_attempts is not None:
@@ -486,8 +516,8 @@ class FallbackChain(LLMClient):
 
     async def _atry_provider_responses(
         self,
-        call: Callable[[LLMClient], Awaitable[LLMResponse]],
-    ) -> LLMResponse:
+        call: Callable[[LLMClient], Awaitable[ResultT]],
+    ) -> ResultT:
         self.last_attempts = []
         self.last_success_provider = None
         errors: list[str] = []
@@ -523,7 +553,14 @@ class FallbackChain(LLMClient):
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
-            attempt = ProviderAttempt(provider_name, model, True, latency, usage=response.usage, cost=response.cost)
+            attempt = ProviderAttempt(
+                provider_name,
+                model,
+                True,
+                latency,
+                usage=getattr(response, "usage", None),
+                cost=getattr(response, "cost", None),
+            )
             self.last_attempts.append(attempt)
             self.attempts.append(attempt)
             if self._action_attempts is not None:
@@ -633,17 +670,92 @@ def _stream_complete(
     yield from call_with_supported_kwargs(provider.stream_complete, messages, **kwargs)
 
 
+def _uses_custom_sync_action(provider: LLMClient) -> bool:
+    return type(provider).complete_action is not LLMClient.complete_action
+
+
+def _uses_custom_async_action(provider: LLMClient) -> bool:
+    return (
+        type(provider).acomplete_action is not LLMClient.acomplete_action
+        or _uses_custom_sync_action(provider)
+    )
+
+
+def _complete_action(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_repair_attempts: int,
+    max_output_tokens: int | None,
+    tools: list[object] | None,
+    planning_tools: PlanningToolAvailability | None,
+    hosted_mcp_servers: list[object] | tuple[object, ...] | None,
+    mcp_approval_callback: Callable[[dict], bool] | None,
+) -> LLMActionResult:
+    kwargs: dict[str, object] = {
+        "max_repair_attempts": max_repair_attempts,
+        "tools": tools,
+        "planning_tools": planning_tools,
+        "hosted_mcp_servers": hosted_mcp_servers,
+        "mcp_approval_callback": mcp_approval_callback,
+    }
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    return call_with_supported_kwargs(provider.complete_action, messages, **kwargs)
+
+
+async def _acomplete_action(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_repair_attempts: int,
+    max_output_tokens: int | None,
+    tools: list[object] | None,
+    planning_tools: PlanningToolAvailability | None,
+    hosted_mcp_servers: list[object] | tuple[object, ...] | None,
+    mcp_approval_callback: Callable[[dict], bool] | None,
+) -> LLMActionResult:
+    kwargs: dict[str, object] = {
+        "max_repair_attempts": max_repair_attempts,
+        "tools": tools,
+        "planning_tools": planning_tools,
+        "hosted_mcp_servers": hosted_mcp_servers,
+        "mcp_approval_callback": mcp_approval_callback,
+    }
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    return await call_async_with_supported_kwargs(
+        provider.acomplete_action,
+        messages,
+        **kwargs,
+    )
+
+
 def _complete_action_response_once(
     provider: LLMClient,
     messages: list[dict[str, str]],
     *,
     max_output_tokens: int | None,
     tools: list[object] | None,
+    planning_tools: PlanningToolAvailability | None = None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
     mcp_approval_callback: Callable[[dict], bool] | None = None,
 ) -> LLMResponse:
+    if _uses_custom_sync_action(provider):
+        result = _complete_action(
+            provider,
+            messages,
+            max_repair_attempts=0,
+            max_output_tokens=max_output_tokens,
+            tools=tools,
+            planning_tools=planning_tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            mcp_approval_callback=mcp_approval_callback,
+        )
+        return _response_from_custom_action(result, provider=provider)
     kwargs: dict[str, object] = {
         "tools": tools,
+        "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
         "mcp_approval_callback": mcp_approval_callback,
     }
@@ -658,11 +770,25 @@ async def _acomplete_action_response_once(
     *,
     max_output_tokens: int | None,
     tools: list[object] | None,
+    planning_tools: PlanningToolAvailability | None = None,
     hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
     mcp_approval_callback: Callable[[dict], bool] | None = None,
 ) -> LLMResponse:
+    if _uses_custom_async_action(provider):
+        result = await _acomplete_action(
+            provider,
+            messages,
+            max_repair_attempts=0,
+            max_output_tokens=max_output_tokens,
+            tools=tools,
+            planning_tools=planning_tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            mcp_approval_callback=mcp_approval_callback,
+        )
+        return _response_from_custom_action(result, provider=provider)
     kwargs: dict[str, object] = {
         "tools": tools,
+        "planning_tools": planning_tools,
         "hosted_mcp_servers": hosted_mcp_servers,
         "mcp_approval_callback": mcp_approval_callback,
     }
@@ -673,6 +799,66 @@ async def _acomplete_action_response_once(
         messages,
         **kwargs,
     )
+
+
+def _response_from_custom_action(
+    result: LLMActionResult,
+    *,
+    provider: LLMClient,
+) -> LLMResponse:
+    metadata = dict(result.metadata)
+    metadata[_CUSTOM_ACTION_RESULT_METADATA_KEY] = result
+    provider_name, model = _provider_identity(provider)
+    return LLMResponse(
+        content=json.dumps(_action_payload(result), sort_keys=True),
+        usage=result.usage,
+        cost=result.cost,
+        provider=provider_name,
+        model=model,
+        metadata=metadata,
+    )
+
+
+def _restore_custom_action_result(result: LLMActionResult) -> LLMActionResult:
+    custom_result = result.metadata.get(_CUSTOM_ACTION_RESULT_METADATA_KEY)
+    if not isinstance(custom_result, LLMActionResult):
+        return result
+    metadata = dict(result.metadata)
+    metadata.pop(_CUSTOM_ACTION_RESULT_METADATA_KEY, None)
+    return LLMActionResult(
+        action=custom_result.action,
+        raw_response=custom_result.raw_response,
+        repair_attempts=result.repair_attempts + custom_result.repair_attempts,
+        errors=[*result.errors, *custom_result.errors],
+        usage=result.usage,
+        cost=result.cost,
+        metadata=metadata,
+    )
+
+
+def _action_payload(result: LLMActionResult) -> dict[str, object]:
+    action = result.action
+    if isinstance(action, FinalAnswerAction):
+        return {"type": action.type, "content": action.content}
+    if isinstance(action, ToolCallAction):
+        return {
+            "type": action.type,
+            "tool_name": action.tool_name,
+            "arguments": action.arguments,
+        }
+    if isinstance(action, PlanAction):
+        return {"type": action.type, "plan": action.plan.to_dict()}
+    if isinstance(action, PlanStepUpdateAction):
+        return {
+            "type": action.type,
+            "step_update": {
+                "step_id": action.step_id,
+                "status": action.status,
+                "evidence": action.evidence,
+                "reason": action.reason,
+            },
+        }
+    raise TypeError(f"Unsupported custom action result: {type(action).__name__}")
 
 
 def _supports_hosted_mcp(provider: object) -> bool:

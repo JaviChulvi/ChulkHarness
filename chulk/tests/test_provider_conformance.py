@@ -9,8 +9,10 @@ import pytest
 
 from chulk import runtime as runtime_module
 from chulk.cli import terminal as terminal_module
-from chulk.core.actions import ToolCallAction
+from chulk.core.actions import FinalAnswerAction, ToolCallAction
 from chulk.llm import (
+    FallbackChain,
+    LLMClient,
     LLMClientSettings,
     LLMProviderConnection,
     LLMProviderProfile,
@@ -19,10 +21,12 @@ from chulk.llm import (
     LLMCapabilities,
     DeepSeekChatCompletionsClient,
     LocalOpenAICompatibleClient,
+    PlanningToolAvailability,
     create_llm_client,
     provider_connection_from_config,
 )
 from chulk.llm.capabilities import LLMModelCapabilities, MODEL_CAPABILITIES
+from chulk.llm.tools import PLAN_TOOL_NAME
 from chulk.testing import ScriptedLLMClient
 
 
@@ -140,6 +144,43 @@ def test_provider_native_single_tool_contract_omits_optional_parallel_parameter(
     assert completions.calls[0]["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in completions.calls[0]
     assert result.metadata["provider_tool_call"]["id"] == "call_1"
+
+
+@pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
+def test_provider_native_text_with_no_effective_tools_omits_tool_fields(
+    client_type, model, provider
+):
+    completions = FakeChatCompletions(responses=[_response(content="native final")])
+    client = _client(client_type, model, completions)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "hello"}],
+        tools=[],
+        planning_tools=PlanningToolAvailability(),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    assert "tools" not in completions.calls[0]
+    assert "tool_choice" not in completions.calls[0]
+    assert result.metadata["action_transport"] == "provider_native"
+
+
+@pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
+def test_provider_planning_policy_enables_native_transport_without_regular_tools(
+    client_type, model, provider
+):
+    completions = FakeChatCompletions(responses=[_response(content="native final")])
+    client = _client(client_type, model, completions)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "plan this"}],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    declarations = completions.calls[0]["tools"]
+    assert [item["function"]["name"] for item in declarations] == [PLAN_TOOL_NAME]
+    assert result.metadata["action_transport"] == "provider_native"
 
 
 @pytest.mark.asyncio
@@ -430,3 +471,29 @@ def test_mcp_routing_uses_provider_capability_instead_of_provider_name(monkeypat
     assert runtime_module._mcp_bridge_required(config, config.mcp_servers) is False
     assert runtime_module._mcp_provider_path(config, config.mcp_servers) == "hosted"
     assert terminal_module._mcp_provider_path(config) == "hosted"
+
+
+def test_mcp_routing_registers_a_bridge_for_an_injected_mixed_fallback_chain():
+    class HostedClient(LLMClient):
+        capabilities = LLMCapabilities(supports_hosted_mcp_tools=True)
+
+    class BridgeClient(LLMClient):
+        capabilities = LLMCapabilities(supports_hosted_mcp_tools=False)
+
+    config = SimpleNamespace(
+        llm_provider="openai",
+        llm_fallback_providers=(),
+    )
+    chain = FallbackChain([HostedClient(), BridgeClient()])
+    servers = (object(),)
+
+    assert runtime_module._mcp_bridge_required(
+        config,
+        servers,
+        llm_client=chain,
+    ) is True
+    assert runtime_module._mcp_provider_path(
+        config,
+        servers,
+        llm_client=chain,
+    ) == "hosted+bridge"

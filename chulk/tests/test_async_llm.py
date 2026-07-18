@@ -18,6 +18,7 @@ from chulk.llm.providers.openai import OpenAIResponsesClient
 from chulk.llm.public import FallbackChain
 from chulk.llm import public as public_llm
 from chulk.llm.usage import LLMResponse, LLMUsage
+from chulk.mcp import MCPServerConfig
 
 
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -184,6 +185,82 @@ async def test_custom_sync_complete_action_remains_async_compatible() -> None:
 
     assert result.action == FinalAnswerAction(type="final_answer", content="sync compatibility")
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chain_honors_custom_public_action_in_async_mode() -> None:
+    client = _SyncActionOnly()
+
+    result = await FallbackChain([client]).acomplete_action(MESSAGES, tools=[])
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="sync compatibility")
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_custom_public_action_provider_does_not_collapse_async_repairs() -> None:
+    scripted = _AsyncActionScript(["not json", _final_answer("repaired")])
+    custom_fallback = _SyncActionOnly()
+    fallback = FallbackChain([scripted, custom_fallback])
+
+    result = await fallback.acomplete_action(MESSAGES, max_repair_attempts=1)
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="repaired")
+    assert result.repair_attempts == 1
+    assert len(fallback.last_attempts) == 2
+    assert [attempt.success for attempt in fallback.last_attempts] == [True, True]
+    assert result.usage is not None
+    assert fallback.last_attempts[-1].usage is not None
+    assert result.usage.total_tokens > fallback.last_attempts[-1].usage.total_tokens
+    assert custom_fallback.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_malformed_hosted_mcp_approval_advances_async_fallback() -> None:
+    sync = _FailingSyncEndpoint()
+    async_endpoint = _AsyncEndpoint(
+        [
+            SimpleNamespace(
+                id="resp_1",
+                output_text="",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="mcp_approval_request",
+                        id=None,
+                        server_label="docs",
+                        name="search_docs",
+                        arguments=json.dumps({"query": "MCP"}),
+                    )
+                ],
+            )
+        ]
+    )
+    primary = OpenAIResponsesClient(
+        model="openai-test",
+        client=SimpleNamespace(responses=sync),
+        async_client=SimpleNamespace(responses=async_endpoint),
+    )
+    secondary = _AsyncActionScript([_final_answer("fallback ok")])
+    fallback = FallbackChain([primary, secondary])
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    result = await fallback.acomplete_action(
+        MESSAGES,
+        tools=[],
+        hosted_mcp_servers=[server],
+        mcp_approval_callback=lambda _approval: True,
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
+    assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
+    assert fallback.last_attempts[0].error_code == "invalid_response"
+    assert len(secondary.async_messages) == 1
+    assert sync.calls == 0
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from chulk.llm.capabilities import LLMCapabilities
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
+    PlanningToolAvailability,
     action_payload_json,
     native_final_answer_payload,
     native_tool_action_payload,
@@ -242,26 +243,34 @@ class OpenAIResponsesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Return one raw action response plus OpenAI usage metadata."""
-        if tools is not None:
+        if (
+            tools is not None
+            or bool(planning_tools and planning_tools.enabled)
+            or bool(hosted_mcp_servers)
+        ):
             try:
                 return self._complete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                     hosted_mcp_servers=hosted_mcp_servers,
                     mcp_approval_callback=mcp_approval_callback,
                 )
             except LLMError as exc:
                 if hosted_mcp_servers:
+                    if _hosted_mcp_can_advance_fallback(exc):
+                        raise _hosted_mcp_fallback_error(exc) from exc
                     raise
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = self._complete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -279,6 +288,7 @@ class OpenAIResponsesClient(LLMClient):
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -287,25 +297,33 @@ class OpenAIResponsesClient(LLMClient):
                 messages,
                 max_output_tokens=max_output_tokens,
                 tools=tools,
+                planning_tools=planning_tools,
                 hosted_mcp_servers=hosted_mcp_servers,
                 mcp_approval_callback=mcp_approval_callback,
             )
-        if tools is not None:
+        if (
+            tools is not None
+            or bool(planning_tools and planning_tools.enabled)
+            or bool(hosted_mcp_servers)
+        ):
             try:
                 return await self._acomplete_native_action_response_once(
                     messages,
-                    tools=tools,
+                    tools=tools or [],
+                    planning_tools=planning_tools,
                     max_output_tokens=max_output_tokens,
                     hosted_mcp_servers=hosted_mcp_servers,
                     mcp_approval_callback=mcp_approval_callback,
                 )
             except LLMError as exc:
                 if hosted_mcp_servers:
+                    if _hosted_mcp_can_advance_fallback(exc):
+                        raise _hosted_mcp_fallback_error(exc) from exc
                     raise
                 if not is_action_transport_fallback_error(exc):
                     raise
                 fallback = await self._acomplete_json_action_response_once(
-                    with_json_action_prompt(messages),
+                    with_json_action_prompt(messages, tools=tools),
                     max_output_tokens=max_output_tokens,
                 )
                 fallback.metadata.update(
@@ -414,6 +432,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
@@ -423,9 +442,14 @@ class OpenAIResponsesClient(LLMClient):
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,
-            "tools": openai_response_tools(tools, hosted_mcp_servers=hosted_mcp_servers),
-            "tool_choice": "auto",
         }
+        native_tools = openai_response_tools(
+            tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            planning_tools=planning_tools,
+        )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
@@ -455,6 +479,7 @@ class OpenAIResponsesClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         tools: list[object],
+        planning_tools: PlanningToolAvailability | None = None,
         max_output_tokens: int | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
@@ -464,9 +489,14 @@ class OpenAIResponsesClient(LLMClient):
             "model": self.model,
             "instructions": instructions or None,
             "input": response_input,
-            "tools": openai_response_tools(tools, hosted_mcp_servers=hosted_mcp_servers),
-            "tool_choice": "auto",
         }
+        native_tools = openai_response_tools(
+            tools,
+            hosted_mcp_servers=hosted_mcp_servers,
+            planning_tools=planning_tools,
+        )
+        if native_tools:
+            request.update({"tools": native_tools, "tool_choice": "auto"})
         output_limit = _request_max_output_tokens(self.max_output_tokens, max_output_tokens)
         if output_limit is not None:
             request["max_output_tokens"] = output_limit
@@ -693,6 +723,26 @@ def _validate_max_output_tokens(value: int | None) -> int | None:
     if value < 1:
         raise ValueError("max_output_tokens must be greater than zero")
     return value
+
+
+def _hosted_mcp_fallback_error(exc: LLMError) -> LLMError:
+    """Allow a fallback provider to recover when JSON retry would drop hosted MCP."""
+    return LLMError(
+        str(exc),
+        provider=exc.provider,
+        model=exc.model,
+        code=exc.code,
+        retryable=exc.retryable,
+        fallback_eligible=True,
+    )
+
+
+def _hosted_mcp_can_advance_fallback(exc: LLMError) -> bool:
+    return (
+        exc.fallback_eligible
+        or exc.code == "invalid_response"
+        or is_action_transport_fallback_error(exc)
+    )
 
 
 def _request_max_output_tokens(model_limit: int | None, request_limit: int | None) -> int | None:

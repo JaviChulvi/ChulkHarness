@@ -16,6 +16,7 @@ from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggr
 
 if TYPE_CHECKING:
     from chulk.llm.capabilities import LLMModelCapabilities
+    from chulk.llm.tools import PlanningToolAvailability
 
 
 LLMErrorCode = Literal[
@@ -239,6 +240,7 @@ class LLMClient:
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
@@ -255,6 +257,7 @@ class LLMClient:
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -307,6 +310,7 @@ class LLMClient:
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
@@ -318,6 +322,7 @@ class LLMClient:
             compatibility_kwargs: dict[str, Any] = {
                 "max_repair_attempts": max_repair_attempts,
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -341,6 +346,7 @@ class LLMClient:
         for attempt in range(max_repair_attempts + 1):
             response_kwargs: dict[str, Any] = {
                 "tools": tools,
+                "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
             }
@@ -396,6 +402,7 @@ class LLMClient:
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
@@ -410,12 +417,14 @@ class LLMClient:
         *,
         max_output_tokens: int | None = None,
         tools: list[object] | None = None,
+        planning_tools: PlanningToolAvailability | None = None,
         hosted_mcp_servers: list[object] | tuple[object, ...] | None = None,
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Compatibility hook for sync-only custom clients."""
         kwargs: dict[str, Any] = {
             "tools": tools,
+            "planning_tools": planning_tools,
             "hosted_mcp_servers": hosted_mcp_servers,
             "mcp_approval_callback": mcp_approval_callback,
         }

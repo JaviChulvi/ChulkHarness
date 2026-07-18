@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Generic, TypeVar, cast
@@ -114,6 +114,23 @@ class Tool:
         return normalize_permission_level(self.permission_level)
 
 
+def tool_descriptions_for_prompt(tools: Iterable[object]) -> str:
+    """Serialize the safe, prompt-visible fields for Tool-like objects."""
+    descriptions = [
+        {
+            "name": str(getattr(tool, "name")),
+            "description": str(getattr(tool, "description", "")),
+            "arguments": getattr(tool, "args_schema", {}) or {},
+            "requires_confirmation": bool(getattr(tool, "requires_confirmation", False)),
+            "permission_level": normalize_permission_level(
+                getattr(tool, "permission_level", ToolPermissionLevel.READ)
+            ).value,
+        }
+        for tool in tools
+    ]
+    return json.dumps(descriptions, indent=2, sort_keys=True)
+
+
 class ToolRegistry:
     """Registry for available tools."""
 
@@ -145,17 +162,7 @@ class ToolRegistry:
 
     def tool_descriptions_for_prompt(self) -> str:
         """Return JSON tool descriptions suitable for prompt injection."""
-        tools = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "arguments": tool.args_schema,
-                "requires_confirmation": tool.requires_confirmation,
-                "permission_level": tool.normalized_permission_level().value,
-            }
-            for tool in self.list_tools()
-        ]
-        return json.dumps(tools, indent=2, sort_keys=True)
+        return tool_descriptions_for_prompt(self.list_tools())
 
     def run(
         self,

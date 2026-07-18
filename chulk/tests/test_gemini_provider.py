@@ -15,6 +15,7 @@ from chulk.config import ConfigValueError, load_config
 from chulk.core.actions import FinalAnswerAction, ToolCallAction
 from chulk.llm import GeminiGenerateContentClient as ExportedGeminiGenerateContentClient
 from chulk.llm import GeminiProvider as ExportedGeminiProvider
+from chulk.llm import PlanningToolAvailability
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.llm.capabilities import (
     GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -33,6 +34,7 @@ from chulk.llm.providers.gemini import (
     GeminiGenerateContentClient,
 )
 from chulk.llm.public import GeminiProvider
+from chulk.llm.tools import PLAN_TOOL_NAME
 from chulk.llm.usage import LLMUsage
 from chulk.main import create_cli_llm, format_config
 
@@ -313,8 +315,7 @@ def test_gemini_native_single_function_call_is_normalized_to_one_action() -> Non
     assert config["automatic_function_calling"] == {"disable": True}
     assert config["tool_config"] == {"function_calling_config": {"mode": "AUTO"}}
     declarations = config["tools"][0]["function_declarations"]
-    assert any(item["name"] == "calculator" for item in declarations)
-    assert any(item["name"] == "chulk_propose_plan" for item in declarations)
+    assert [item["name"] for item in declarations] == ["calculator"]
 
 
 def test_gemini_native_text_is_a_direct_final_answer() -> None:
@@ -326,6 +327,39 @@ def test_gemini_native_text_is_a_direct_final_answer() -> None:
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"] is None
     assert len(models.generate_calls) == 1
+
+
+def test_gemini_native_text_with_no_effective_tools_omits_tool_config() -> None:
+    models = FakeModels(responses=[_response(text="A direct answer")])
+
+    result = _client(models).complete_action(
+        MESSAGES,
+        tools=[],
+        planning_tools=PlanningToolAvailability(),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="A direct answer")
+    config = models.generate_calls[0]["config"]
+    assert "tools" not in config
+    assert "tool_config" not in config
+    assert "automatic_function_calling" not in config
+    assert result.metadata["action_transport"] == "provider_native"
+
+
+def test_gemini_planning_policy_enables_native_transport_without_regular_tools() -> None:
+    models = FakeModels(responses=[_response(text="native final")])
+
+    result = _client(models).complete_action(
+        MESSAGES,
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    declarations = models.generate_calls[0]["config"]["tools"][0][
+        "function_declarations"
+    ]
+    assert [item["name"] for item in declarations] == [PLAN_TOOL_NAME]
+    assert result.metadata["action_transport"] == "provider_native"
 
 
 def test_gemini_rejects_multiple_function_calls_and_uses_json_fallback() -> None:

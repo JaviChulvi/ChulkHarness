@@ -32,6 +32,7 @@ from chulk.llm.providers.compatible import (
 )
 from chulk.llm.providers.local import LocalOpenAICompatibleClient
 from chulk.llm.providers.openai import OpenAIResponsesClient
+from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
 __all__ = [
@@ -61,6 +62,7 @@ __all__ = [
     "LocalOpenAICompatibleClient",
     "OpenAIResponsesClient",
     "OpenRouterChatCompletionsClient",
+    "PlanningToolAvailability",
     "create_llm_client",
     "provider_capabilities",
     "provider_connection_from_config",

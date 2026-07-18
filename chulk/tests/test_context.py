@@ -6,9 +6,15 @@ import xml.etree.ElementTree as ET
 from chulk.core.context import ContextBudget, TurnContextSection, estimate_tokens
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.prompts import format_tools_for_prompt
+from chulk.llm.tools import (
+    PLAN_STEP_UPDATE_TOOL_NAME,
+    PLAN_TOOL_NAME,
+    PlanningToolAvailability,
+    provider_action_tools,
+)
 from chulk.memory import ConversationMemory
 from chulk.skills import Skill
-from chulk.tools import ToolRegistry, calculator_tool
+from chulk.tools import Tool, ToolRegistry, calculator_tool
 
 
 def test_estimate_tokens_is_deterministic():
@@ -64,6 +70,136 @@ def test_build_agent_prompt_reports_named_sections():
     xml_root = ET.fromstring(prompt.messages[0]["content"])
     assert xml_root.tag == "chulk_prompt"
     assert xml_root.find("tools/available_tools/tool/name").text == "calculator"
+
+
+def test_native_agent_prompt_omits_tool_catalog_and_accounts_for_declarations():
+    memory = ConversationMemory()
+    memory.add_user_message("hello")
+    registry = ToolRegistry()
+    calculator = calculator_tool()
+    registry.register(calculator)
+    native_declarations = provider_action_tools(
+        [calculator],
+        planning_tools=PlanningToolAvailability(),
+    )
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=True,
+        native_tool_declarations=native_declarations,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    tools_section = next(section for section in report["sections"] if section["name"] == "tools")
+    native_tools_section = next(
+        section for section in report["sections"] if section["name"] == "native_tools"
+    )
+
+    assert "calculator" not in system_prompt
+    assert calculator.description not in system_prompt
+    assert "arguments_schema_json" not in system_prompt
+    assert "Arithmetic expression to evaluate" not in system_prompt
+    assert tools_section["metadata"] == {
+        "tool_names": ["calculator"],
+        "delivery": "provider_native",
+        "schemas_embedded": False,
+    }
+    assert native_tools_section["item_count"] == 1
+    assert native_tools_section["metadata"] == {
+        "tool_names": ["calculator"],
+        "delivery": "provider_native",
+        "schemas_embedded": False,
+    }
+    assert native_tools_section["estimated_tokens"] > 0
+    assert report["request_overhead_estimated_tokens"] == native_tools_section["estimated_tokens"]
+    assert (
+        report["message_estimated_tokens"] + report["request_overhead_estimated_tokens"]
+        == report["estimated_tokens"]
+    )
+
+
+def test_json_agent_prompt_embeds_full_tool_catalog_without_native_overhead():
+    memory = ConversationMemory()
+    memory.add_user_message("hello")
+    registry = ToolRegistry()
+    calculator = calculator_tool()
+    registry.register(calculator)
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=False,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    tools_section = next(section for section in report["sections"] if section["name"] == "tools")
+
+    assert "<name>calculator</name>" in system_prompt
+    assert calculator.description in system_prompt
+    assert "<arguments_schema_json>" in system_prompt
+    assert "Arithmetic expression to evaluate" in system_prompt
+    assert tools_section["metadata"] == {
+        "tool_names": ["calculator"],
+        "delivery": "prompt",
+        "schemas_embedded": True,
+    }
+    assert not any(section["name"] == "native_tools" for section in report["sections"])
+    assert report["request_overhead_estimated_tokens"] == 0
+    assert report["fallback_message_estimated_tokens"] is None
+    assert report["estimated_tokens"] == report["message_estimated_tokens"]
+
+
+def test_native_planning_only_declaration_is_available_without_prompt_schema():
+    memory = ConversationMemory()
+    memory.add_user_message("plan this")
+    native_declarations = provider_action_tools(
+        [],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        planning_enabled=True,
+        require_plan=True,
+        native_action_protocol=True,
+        native_tool_declarations=native_declarations,
+    )
+    system_prompt = prompt.messages[0]["content"]
+    report = prompt.context_report.to_dict()
+    tools_section = next(section for section in report["sections"] if section["name"] == "tools")
+    native_tools_section = next(
+        section for section in report["sections"] if section["name"] == "native_tools"
+    )
+
+    assert "Available tools are delivered through the provider-native tool interface." in system_prompt
+    assert PLAN_TOOL_NAME not in system_prompt
+    assert PLAN_STEP_UPDATE_TOOL_NAME not in system_prompt
+    assert "arguments_schema_json" not in system_prompt
+    assert tools_section["item_count"] == 1
+    assert tools_section["metadata"]["tool_names"] == [PLAN_TOOL_NAME]
+    assert native_tools_section["item_count"] == 1
+    assert native_tools_section["metadata"]["tool_names"] == [PLAN_TOOL_NAME]
+    assert native_tools_section["estimated_tokens"] > 0
 
 
 def test_build_agent_prompt_lists_available_skill_metadata_without_loading_content(tmp_path):
@@ -225,3 +361,107 @@ def test_context_budget_trims_complete_old_history_blocks():
     assert "older answer" not in payload
     assert report["omitted_message_count"] >= 2
     assert report["section_estimated_tokens"] > 0
+
+
+def test_large_native_declaration_and_fallback_reserve_trim_more_history():
+    memory = ConversationMemory(max_messages=10)
+    memory.add_user_message("older question " + ("a" * 1000))
+    memory.add_assistant_message("older answer " + ("b" * 1000))
+    memory.add_user_message("newer question " + ("c" * 1000))
+    memory.add_assistant_message("newer answer " + ("d" * 1000))
+    memory.add_user_message("latest question")
+
+    empty_registry = ToolRegistry()
+    small_unbounded = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=empty_registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=True,
+        native_tool_declarations=[],
+    )
+
+    large_tool = Tool(
+        name="large_context_tool",
+        description="Large native declaration " + ("d" * 4000),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "string",
+                    "description": "x" * 8000,
+                }
+            },
+            "required": ["payload"],
+            "additionalProperties": False,
+        },
+        callable=lambda _arguments: None,
+    )
+    large_registry = ToolRegistry()
+    large_registry.register(large_tool)
+    large_declarations = provider_action_tools(
+        [large_tool],
+        planning_tools=PlanningToolAvailability(),
+    )
+    large_unbounded = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=large_registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=True,
+        native_tool_declarations=large_declarations,
+    )
+    small_report = small_unbounded.context_report.to_dict()
+    large_report = large_unbounded.context_report.to_dict()
+
+    assert large_report["request_overhead_estimated_tokens"] > 0
+    assert large_report["fallback_message_estimated_tokens"] is not None
+    assert large_report["fallback_message_estimated_tokens"] > large_report["estimated_tokens"]
+    assert large_report["budget_estimated_tokens"] == large_report["fallback_message_estimated_tokens"]
+    assert large_report["budget_estimated_tokens"] > small_report["budget_estimated_tokens"]
+
+    tight_budget = ContextBudget(
+        max_prompt_tokens=small_report["budget_estimated_tokens"],
+        response_reserve_tokens=0,
+    )
+    small_bounded = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=empty_registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=True,
+        native_tool_declarations=[],
+        context_budget=tight_budget,
+    )
+    large_bounded = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=large_registry,
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+        native_action_protocol=True,
+        native_tool_declarations=large_declarations,
+        context_budget=tight_budget,
+    )
+
+    assert small_bounded.context_report.omitted_message_count == 0
+    assert (
+        large_bounded.context_report.omitted_message_count
+        > small_bounded.context_report.omitted_message_count
+    )
+    assert large_bounded.messages[-1] == {"role": "user", "content": "latest question"}

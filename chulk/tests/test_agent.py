@@ -5,8 +5,8 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
-from chulk.core import Agent, ObservationRecord, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
-from chulk.core.actions import FinalAnswerAction
+from chulk.core import Agent, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
+from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
 from chulk.llm import (
     FallbackChain,
@@ -15,6 +15,7 @@ from chulk.llm import (
     LLMCapabilities,
     LLMClient,
     LLMCost,
+    LLMError,
     LLMResponse,
     LLMUsage,
 )
@@ -477,11 +478,12 @@ def test_agent_prompt_shows_available_tools():
     assert "at most 4 tool calls" in system_prompt
 
 
-def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported():
+def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported(tmp_path):
     llm = NativeActionRecordingLLMClient()
     registry = ToolRegistry()
     registry.register(calculator_tool())
-    agent = Agent(llm, tool_registry=registry)
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "native-context")
+    agent = Agent(llm, tool_registry=registry, trace_logger=trace_logger)
 
     response = agent.run_turn("what is 1 + 1?")
 
@@ -489,8 +491,150 @@ def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported():
     assert response == "native ok"
     assert "provider-native tool-calling interface" in system_prompt
     assert "You must respond with exactly one JSON object" not in system_prompt
+    assert "<name>calculator</name>" not in system_prompt
+    assert "<arguments_schema_json>" not in system_prompt
     assert llm.tool_batches[0] is not None
     assert [tool.name for tool in llm.tool_batches[0]] == ["calculator"]
+    events = [
+        json.loads(line)
+        for line in trace_logger.path.read_text(encoding="utf-8").splitlines()
+    ]
+    request_payload = next(
+        event["payload"]
+        for event in events
+        if event["type"] == TraceEvent.MODEL_REQUEST_STARTED
+    )
+    assert request_payload["action_transport"] == "provider_native"
+    assert request_payload["native_tool_names"] == ["calculator"]
+    declarations = request_payload["native_tool_declarations"]
+    assert declarations["truncated"] is False
+    assert declarations["items"][0]["parameters"]["type"] == "object"
+
+
+def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(tmp_path):
+    class HostedNativeClient(NativeActionRecordingLLMClient):
+        capabilities = LLMCapabilities(
+            supports_native_tool_calling=True,
+            supports_hosted_mcp_tools=True,
+        )
+
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+        authorization="secret-token",
+    )
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "hosted-mcp-context")
+    agent = Agent(
+        HostedNativeClient(),
+        mcp_servers=(server,),
+        trace_logger=trace_logger,
+    )
+
+    assert agent.run_turn("search docs") == "native ok"
+
+    report = agent.state.last_context_report
+    native_section = next(
+        section for section in report["sections"] if section["name"] == "native_tools"
+    )
+    assert native_section["metadata"]["tool_names"] == ["mcp:docs"]
+    assert native_section["item_count"] == 1
+    assert report["request_overhead_estimated_tokens"] > 0
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+    assert '"name": "mcp:docs"' in trace_text
+    assert "secret-token" not in trace_text
+
+
+def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
+    class NativeFailingClient(LLMClient):
+        capabilities = LLMCapabilities(supports_native_tool_calling=True)
+        provider = "native-primary"
+        model = "native-model"
+
+        def __init__(self) -> None:
+            self.requests: list[list[dict[str, str]]] = []
+            self.tool_batches: list[list[object] | None] = []
+
+        def _complete_action_response_once(self, messages, *, tools=None, **kwargs):
+            self.requests.append(messages)
+            self.tool_batches.append(tools)
+            raise LLMError(
+                "primary unavailable",
+                code="server_error",
+                retryable=True,
+                fallback_eligible=True,
+            )
+
+    primary = NativeFailingClient()
+    secondary = RecordingLLMClient(
+        [json.dumps({"type": "final_answer", "content": "fallback ok"})]
+    )
+    registry = ToolRegistry()
+    registry.register(calculator_tool())
+    agent = Agent(FallbackChain([primary, secondary]), tool_registry=registry)
+
+    response = agent.run_turn("hello")
+
+    assert response == "fallback ok"
+    assert primary.tool_batches == [None]
+    for request in [primary.requests[0], secondary.requests[0]]:
+        system_prompt = request[0]["content"]
+        assert "<transport>json_object</transport>" in system_prompt
+        assert "provider_native_tool_calling" not in system_prompt
+        assert system_prompt.count("<name>calculator</name>") == 1
+        assert system_prompt.count("<arguments_schema_json>") == 1
+    assert agent.state.last_context_report["request_overhead_estimated_tokens"] == 0
+
+
+def test_native_planning_tools_follow_the_plan_lifecycle():
+    class PlanningPolicyRecordingClient(LLMClient):
+        capabilities = LLMCapabilities(supports_native_tool_calling=True)
+
+        def __init__(self) -> None:
+            self.actions = [
+                PlanAction(
+                    type="plan",
+                    plan=Plan(
+                        summary="Make one change.",
+                        steps=[
+                            PlanStep(
+                                id="1",
+                                title="Make the change",
+                                description="Complete the requested change.",
+                            )
+                        ],
+                    ),
+                ),
+                PlanStepUpdateAction(
+                    type="plan_step_update",
+                    step_id="1",
+                    status="completed",
+                    evidence="The change is complete.",
+                ),
+                FinalAnswerAction(type="final_answer", content="done"),
+            ]
+            self.planning_policies = []
+
+        def complete_action(self, messages, *, planning_tools=None, **kwargs):
+            self.planning_policies.append(planning_tools)
+            return LLMActionResult(
+                action=self.actions.pop(0),
+                raw_response='{"type":"recorded"}',
+                metadata={"action_transport": "provider_native"},
+            )
+
+    llm = PlanningPolicyRecordingClient()
+    agent = Agent(llm)
+
+    plan_text = agent.run_planned_turn("make a change")
+    response = agent.approve_plan()
+
+    assert "Use /approve" in plan_text
+    assert response == "done"
+    assert [
+        (policy.propose_plan, policy.update_plan_step)
+        for policy in llm.planning_policies
+    ] == [(True, False), (False, True), (False, False)]
 
 
 def test_agent_records_context_report_in_state_and_trace(tmp_path):

@@ -4,11 +4,12 @@ from decimal import Decimal
 import json
 from types import SimpleNamespace
 
-from chulk.core.actions import PlanAction, ToolCallAction
+from chulk.core.actions import FinalAnswerAction, PlanAction, ToolCallAction
 from chulk.llm import (
     DeepSeekChatCompletionsClient,
     FallbackChain,
     LLMActionError,
+    LLMActionResult,
     LLM_PROVIDER_REGISTRY,
     LLMCapabilities,
     LLMClient,
@@ -20,6 +21,7 @@ from chulk.llm import (
     LLMUsage,
     LocalOpenAICompatibleClient,
     OpenAIResponsesClient,
+    PlanningToolAvailability,
     create_llm_client,
     conservative_model_capabilities,
     resolve_model_capabilities,
@@ -417,9 +419,25 @@ def test_openai_responses_client_uses_native_tool_calls_when_tools_are_provided(
     assert "tools" in fake_client.responses.kwargs
     assert "text" not in fake_client.responses.kwargs
     tool_names = {tool["name"] for tool in fake_client.responses.kwargs["tools"]}
-    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert tool_names == {"calculator"}
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["call_id"] == "call_1"
+
+
+def test_openai_native_text_with_no_effective_tools_omits_tool_fields():
+    fake_client = FakeOpenAIClient(output_text="native final")
+    client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
+
+    result = client.complete_action(
+        [{"role": "user", "content": "hello"}],
+        tools=[],
+        planning_tools=PlanningToolAvailability(),
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="native final")
+    assert "tools" not in fake_client.responses.kwargs
+    assert "tool_choice" not in fake_client.responses.kwargs
+    assert result.metadata["action_transport"] == "provider_native"
 
 
 def test_openai_responses_client_sends_hosted_mcp_tools_and_filters_bridge_tools():
@@ -481,7 +499,6 @@ def test_openai_responses_client_continues_after_mcp_approval_request():
 
     result = client.complete_action(
         [{"role": "user", "content": "search docs"}],
-        tools=[],
         hosted_mcp_servers=[
             MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")
         ],
@@ -546,6 +563,76 @@ def test_openai_hosted_mcp_approval_requires_callback():
         raise AssertionError("Expected hosted MCP approval without callback to fail")
 
 
+def test_openai_hosted_mcp_shape_error_advances_fallback_chain():
+    primary = OpenAIResponsesClient(
+        model="gpt-4.1-mini",
+        client=FakeOpenAIClient(output_text="", output=[]),
+    )
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "fallback ok"})]
+    )
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+
+    result = FallbackChain([primary, secondary]).complete_action(
+        [{"role": "user", "content": "search docs"}],
+        tools=[],
+        planning_tools=PlanningToolAvailability(),
+        hosted_mcp_servers=[server],
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
+    assert len(secondary.requests) == 1
+
+
+def test_openai_malformed_hosted_mcp_approval_advances_fallback_chain():
+    primary = OpenAIResponsesClient(
+        model="gpt-4.1-mini",
+        client=FakeOpenAIClient(
+            responses=[
+                SimpleNamespace(
+                    id="resp_1",
+                    output_text="",
+                    usage=None,
+                    output=[
+                        SimpleNamespace(
+                            type="mcp_approval_request",
+                            id=None,
+                            server_label="docs",
+                            name="search_docs",
+                            arguments=json.dumps({"query": "MCP"}),
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+    secondary = ScriptedLLMClient(
+        [json.dumps({"type": "final_answer", "content": "fallback ok"})]
+    )
+    server = MCPServerConfig(
+        label="docs",
+        transport="streamable_http",
+        server_url="https://mcp.example.com",
+    )
+    fallback = FallbackChain([primary, secondary])
+
+    result = fallback.complete_action(
+        [{"role": "user", "content": "search docs"}],
+        tools=[],
+        hosted_mcp_servers=[server],
+        mcp_approval_callback=lambda _approval: True,
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="fallback ok")
+    assert [attempt.success for attempt in fallback.last_attempts] == [False, True]
+    assert fallback.last_attempts[0].error_code == "invalid_response"
+    assert len(secondary.requests) == 1
+
+
 def test_openai_responses_native_final_text_becomes_final_answer():
     fake_client = FakeOpenAIClient(output_text="native final")
     client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
@@ -584,11 +671,17 @@ def test_openai_responses_native_plan_tool_becomes_plan_action():
     )
     client = OpenAIResponsesClient(model="gpt-4.1-mini", client=fake_client)
 
-    result = client.complete_action([{"role": "user", "content": "plan this"}], tools=[])
+    result = client.complete_action(
+        [{"role": "user", "content": "plan this"}],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
 
     assert isinstance(result.action, PlanAction)
     assert result.action.plan.summary == "Make a change."
     assert result.action.plan.steps[0].title == "Edit file"
+    assert [tool["name"] for tool in fake_client.responses.kwargs["tools"]] == [
+        PLAN_TOOL_NAME
+    ]
 
 
 def test_unknown_model_reports_usage_without_cost():
@@ -660,6 +753,63 @@ def test_fallback_chain_keeps_action_attempts_across_json_repair():
     assert len(fallback.last_attempts) == 2
     assert [attempt.success for attempt in fallback.last_attempts] == [True, True]
     assert result.usage is not None
+    assert result.usage.total_tokens > fallback.last_attempts[-1].usage.total_tokens
+
+
+def test_fallback_chain_honors_a_custom_public_complete_action():
+    class PublicActionClient(LLMClient):
+        provider = "custom-action"
+
+        def __init__(self) -> None:
+            self.planning_tools = None
+
+        def complete(self, messages, *, max_output_tokens=None):
+            raise AssertionError("complete() must not replace complete_action()")
+
+        def complete_action(self, messages, *, planning_tools=None, **kwargs):
+            self.planning_tools = planning_tools
+            return LLMActionResult(
+                action=FinalAnswerAction(type="final_answer", content="custom action"),
+                raw_response='{"type":"custom"}',
+            )
+
+    provider = PublicActionClient()
+    policy = PlanningToolAvailability(propose_plan=True)
+
+    result = FallbackChain([provider]).complete_action(
+        [{"role": "user", "content": "hello"}],
+        planning_tools=policy,
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="custom action")
+    assert provider.planning_tools == policy
+    assert result.raw_response == '{"type":"custom"}'
+
+
+def test_custom_public_action_provider_does_not_collapse_other_provider_repairs():
+    class PublicActionClient(LLMClient):
+        def complete_action(self, messages, **kwargs):
+            raise AssertionError("fallback provider should not be reached")
+
+    scripted = ScriptedLLMClient(
+        [
+            "plain prose",
+            json.dumps({"type": "final_answer", "content": "repaired"}),
+        ]
+    )
+    fallback = FallbackChain([scripted, PublicActionClient()])
+
+    result = fallback.complete_action(
+        [{"role": "user", "content": "Hello"}],
+        max_repair_attempts=1,
+    )
+
+    assert result.action == FinalAnswerAction(type="final_answer", content="repaired")
+    assert result.repair_attempts == 1
+    assert len(fallback.last_attempts) == 2
+    assert [attempt.success for attempt in fallback.last_attempts] == [True, True]
+    assert result.usage is not None
+    assert fallback.last_attempts[-1].usage is not None
     assert result.usage.total_tokens > fallback.last_attempts[-1].usage.total_tokens
 
 
@@ -766,7 +916,7 @@ def test_deepseek_client_uses_native_tool_calls_when_tools_are_provided():
     assert "tools" in fake_client.chat.completions.kwargs
     assert "response_format" not in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
-    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert tool_names == {"calculator"}
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["id"] == "call_1"
 
@@ -1036,7 +1186,7 @@ def test_local_client_uses_native_tool_calls_when_tools_are_provided():
     assert "parallel_tool_calls" not in fake_client.chat.completions.kwargs
     assert "tools" in fake_client.chat.completions.kwargs
     tool_names = {tool["function"]["name"] for tool in fake_client.chat.completions.kwargs["tools"]}
-    assert {"calculator", "chulk_propose_plan", "chulk_plan_step_update"} <= tool_names
+    assert tool_names == {"calculator"}
     assert result.metadata["action_transport"] == "provider_native"
     assert result.metadata["provider_tool_call"]["id"] == "call_local"
 

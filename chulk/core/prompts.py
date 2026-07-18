@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from html import escape
 import json
+from typing import Literal
 
 from chulk.core.context import TurnContextSection
 from chulk.memory import MemoryRecord
@@ -76,11 +77,11 @@ NATIVE_ACTION_PROMPT = """<response_protocol>
 <rule>Use normal assistant text only for a direct final answer to the user.</rule>
 <rule>When you need a listed Chulk tool, call that tool through the native tool interface.</rule>
 <rule>For tool calls, use only argument fields from the listed tool schema.</rule>
-<rule>When the Planning section tells you to propose a plan, call chulk_propose_plan.</rule>
+<rule>When the Planning section tells you to propose a plan, use the available native plan-proposal action.</rule>
 <rule>For plans, provide a summary and executable steps with depends_on, acceptance_criteria, and a non-negative retry_limit.</rule>
 <rule>Use retry_limit 0 for fail-fast steps. Otherwise keep it small; it counts model recovery attempts after a failed tool call.</rule>
 <rule>When an approved plan is active, work only on the current executable step.</rule>
-<rule>After tool evidence satisfies that step's acceptance criteria, call chulk_plan_step_update instead of answering directly.</rule>
+<rule>After tool evidence satisfies that step's acceptance criteria, use the available native plan-step-update action instead of answering directly.</rule>
 <rule>Use a final answer only after the approved plan is completed.</rule>
 <rule>After an observation is provided, use it to produce the next native tool call, plan step update, or final answer.</rule>
 <rule>Some tool observations may contain bounded head/tail previews plus local artifact paths for full output.</rule>
@@ -149,14 +150,27 @@ def format_tool_call_rules(max_tool_calls_per_turn: int) -> str:
     )
 
 
-def format_tools_for_prompt(tool_descriptions: str) -> str:
+def format_tools_for_prompt(
+    tool_descriptions: str,
+    *,
+    delivery: Literal["prompt", "provider_native"] = "prompt",
+    native_tool_count: int | None = None,
+) -> str:
     """Format available tools for prompt injection."""
+    if delivery not in {"prompt", "provider_native"}:
+        raise ValueError("delivery must be prompt or provider_native")
+    if native_tool_count is not None and native_tool_count < 0:
+        raise ValueError("native_tool_count cannot be negative")
+    if delivery == "provider_native" and native_tool_count is not None:
+        return _format_native_tool_status(native_tool_count)
     if not tool_descriptions:
         return "\n".join(["<available_tools>", "<status>Available tools: none.</status>", "</available_tools>"])
 
     try:
         tools = json.loads(tool_descriptions)
     except json.JSONDecodeError:
+        if delivery == "provider_native":
+            return _format_native_tool_status(1)
         return "\n".join(
             [
                 "<available_tools>",
@@ -170,6 +184,9 @@ def format_tools_for_prompt(tool_descriptions: str) -> str:
     tool_entries = [tool for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
     if not tool_entries:
         return "\n".join(["<available_tools>", "<status>Available tools: none.</status>", "</available_tools>"])
+
+    if delivery == "provider_native":
+        return _format_native_tool_status(len(tool_entries))
 
     lines = [
         "<available_tools>",
@@ -192,6 +209,21 @@ def format_tools_for_prompt(tool_descriptions: str) -> str:
         )
     lines.append("</available_tools>")
     return "\n".join(lines)
+
+
+def _format_native_tool_status(tool_count: int) -> str:
+    status = (
+        "Available tools are delivered through the provider-native tool interface."
+        if tool_count
+        else "Available tools: none."
+    )
+    return "\n".join(
+        [
+            "<available_tools>",
+            f"<status>{status}</status>",
+            "</available_tools>",
+        ]
+    )
 
 
 def format_available_skills_for_prompt(available_skills: list[Skill]) -> str:
