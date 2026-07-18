@@ -12,6 +12,9 @@ from chulk.core.state import Plan, TurnState
 
 
 MAX_REFLECTION_FIELD_CHARS = 6000
+MAX_REFLECTION_STEP_DESCRIPTION_CHARS = 600
+MAX_REFLECTION_CRITERION_CHARS = 400
+MAX_REFLECTION_CRITERIA_PER_STEP = 8
 
 
 class ReflectionParseError(ValueError):
@@ -121,6 +124,29 @@ def _format_plan_reference(plan: Plan) -> str:
             f"  - [{step.status}] {_truncate(step.id, max_chars=160)}: "
             f"{_truncate(step.title, max_chars=400)}{evidence_reference}"
         )
+        lines.append(
+            "    description: "
+            + _truncate(
+                step.description,
+                max_chars=MAX_REFLECTION_STEP_DESCRIPTION_CHARS,
+            )
+        )
+        criteria = step.acceptance_criteria[:MAX_REFLECTION_CRITERIA_PER_STEP]
+        if criteria:
+            lines.append("    acceptance_criteria:")
+            lines.extend(
+                "      - "
+                + _truncate(
+                    criterion,
+                    max_chars=MAX_REFLECTION_CRITERION_CHARS,
+                )
+                for criterion in criteria
+            )
+            omitted_count = len(step.acceptance_criteria) - len(criteria)
+            if omitted_count:
+                lines.append(f"      - ... [{omitted_count} more criteria omitted]")
+        else:
+            lines.append("    acceptance_criteria: none")
     active_step = plan.active_step()
     lines.append(f"- current_step: {active_step.id if active_step else 'none'}")
     return "\n".join(lines)

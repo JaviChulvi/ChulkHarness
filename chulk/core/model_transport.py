@@ -178,12 +178,16 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
-        messages = self._record_model_request(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol
             and not require_plan
             and self._hosted_mcp_enabled()
+        )
+        messages = self._record_model_request(
+            turn,
+            prompt,
+            hosted_mcp_enabled=hosted_mcp_enabled,
         )
         try:
             result = call_with_supported_kwargs(
@@ -223,12 +227,16 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
-        messages = self._record_model_request(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol
             and not require_plan
             and self._hosted_mcp_enabled()
+        )
+        messages = self._record_model_request(
+            turn,
+            prompt,
+            hosted_mcp_enabled=hosted_mcp_enabled,
         )
         try:
             result = await call_async_with_supported_kwargs(
@@ -450,7 +458,13 @@ class ModelTransport:
             return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
         return clean_summary, False, None
 
-    def _record_model_request(self, turn: TurnState, prompt: AgentPrompt) -> list[dict[str, str]]:
+    def _record_model_request(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+        *,
+        hosted_mcp_enabled: bool,
+    ) -> list[dict[str, str]]:
         messages = prompt.messages
         context_report = prompt.context_report.to_dict()
         turn.context_reports.append(context_report)
@@ -467,6 +481,12 @@ class ModelTransport:
             context_report=context_report,
         )
         payload["action_transport"] = prompt.action_transport
+        payload["hosted_mcp_enabled"] = hosted_mcp_enabled
+        payload["hosted_mcp_server_labels"] = (
+            [server.label for server in self.mcp_servers]
+            if hosted_mcp_enabled
+            else []
+        )
         payload["native_tool_names"] = [
             str(declaration.get("name", ""))
             for declaration in prompt.native_tool_declarations

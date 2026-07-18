@@ -53,6 +53,31 @@ def test_reflection_references_plan_evidence_without_copying_its_content() -> No
     assert "Make the requested change." in reflection_request
 
 
+def test_reflection_includes_bounded_step_description_and_acceptance_criteria() -> None:
+    description = "DESCRIPTION_MARKER " + ("d" * 900)
+    criterion = "CRITERION_MARKER " + ("c" * 700)
+    step = PlanStep(
+        id="1",
+        title="Generic work",
+        description=description,
+        acceptance_criteria=[criterion],
+    )
+    plan = Plan(summary="Complete the work.", steps=[step])
+    plan.approve()
+    turn = TurnState(
+        user_message="Please complete it.",
+        active_plan=plan,
+        plan_approved=True,
+    )
+
+    reflection_request = build_reflection_messages(turn, "Done.")[-1]["content"]
+
+    assert "DESCRIPTION_MARKER" in reflection_request
+    assert "CRITERION_MARKER" in reflection_request
+    assert description not in reflection_request
+    assert criterion not in reflection_request
+
+
 def test_plan_prompt_bounds_latest_evidence_preview() -> None:
     evidence = "EVIDENCE_PREVIEW_MARKER " + ("x" * 4000)
     step = PlanStep(id="1", title="Implement change", description="Update the behavior.")

@@ -158,13 +158,30 @@ class SessionRecorder:
         if event_type in {
             TraceEvent.PLAN_STEP_STARTED,
             TraceEvent.PLAN_STEP_COMPLETED,
-            TraceEvent.PLAN_STEP_BLOCKED,
         }:
             turn_id = _payload_turn_id(payload, self.current_turn_id)
             if turn_id is not None:
                 self.current_turn_id = turn_id
             turn = payload.get("turn")
             if isinstance(turn, dict):
+                self.store.save_turn_snapshot(self.conversation_id, turn)
+            return
+
+        if event_type == TraceEvent.PLAN_STEP_BLOCKED:
+            turn_id = _payload_turn_id(payload, self.current_turn_id)
+            if turn_id is not None:
+                self.current_turn_id = turn_id
+            turn = payload.get("turn")
+            if isinstance(turn, dict):
+                content = str(turn.get("final_answer") or "")
+                if turn.get("status") == "blocked" and self._save_terminal_turn(
+                    turn_id=turn_id,
+                    content=content,
+                    message_key_suffix="failed",
+                    turn=turn,
+                    metadata={"event": event_type},
+                ):
+                    return
                 self.store.save_turn_snapshot(self.conversation_id, turn)
             return
 

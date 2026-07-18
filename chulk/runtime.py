@@ -280,24 +280,42 @@ def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str 
         conversation.status,
         latest_turn,
     )
+    _reconcile_blocked_plan_turn(
+        session_store,
+        conversation.id,
+        latest_turn,
+    )
     if latest_turn.status == "in_progress":
-        unreconciled_calls = [
-            record.to_dict()
-            for record in latest_turn.tool_calls
-            if record.success is None or record.ended_at is None
-        ]
-        if not unreconciled_calls:
-            unreconciled_calls = session_store.load_tool_calls_without_observations(
-                conversation.id,
-                latest_turn.turn_id,
-            )
-        if unreconciled_calls:
-            _block_unresolved_tool_intent(
+        hosted_requests = session_store.load_uncheckpointed_hosted_mcp_requests(
+            conversation.id,
+            latest_turn.turn_id,
+            checkpointed_request_count=latest_turn.model_request_count,
+        )
+        if hosted_requests:
+            _block_uncertain_hosted_mcp_request(
                 session_store,
                 conversation.id,
                 latest_turn,
-                unreconciled_calls,
+                hosted_requests,
             )
+        else:
+            unreconciled_calls = [
+                record.to_dict()
+                for record in latest_turn.tool_calls
+                if record.success is None or record.ended_at is None
+            ]
+            if not unreconciled_calls:
+                unreconciled_calls = session_store.load_tool_calls_without_observations(
+                    conversation.id,
+                    latest_turn.turn_id,
+                )
+            if unreconciled_calls:
+                _block_unresolved_tool_intent(
+                    session_store,
+                    conversation.id,
+                    latest_turn,
+                    unreconciled_calls,
+                )
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
     state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
@@ -355,6 +373,72 @@ def _reconcile_terminal_turn_message(
     session_store.save_turn_snapshot(conversation_id, turn.to_dict())
 
 
+def _reconcile_blocked_plan_turn(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+) -> None:
+    """Terminalize a checkpoint that already contains a blocked plan step."""
+    plan = turn.active_plan
+    if turn.status != "in_progress" or plan is None or plan.status() != "blocked":
+        return
+    blocked_step = next(
+        (step for step in plan.steps if step.status == "blocked"),
+        None,
+    )
+    if blocked_step is None:  # pragma: no cover - Plan.status enforces this
+        return
+    reason = blocked_step.blocked_reason or "Step blocked."
+    message = f"Plan step blocked: {blocked_step.title}. {reason}"
+    turn.block(message)
+    _save_recovery_terminal(
+        session_store,
+        conversation_id,
+        turn,
+        message,
+        message_key_suffix="blocked_plan_checkpoint",
+        metadata={"recovery": "blocked_plan_checkpoint"},
+    )
+
+
+def _block_uncertain_hosted_mcp_request(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    hosted_requests: list[dict[str, object]],
+) -> None:
+    """Fail closed when a hosted provider request lacks a durable checkpoint."""
+    latest = hosted_requests[-1]
+    raw_request_index = latest.get("request_index")
+    request_index = (
+        raw_request_index
+        if isinstance(raw_request_index, int) and not isinstance(raw_request_index, bool)
+        else 0
+    )
+    reason = (
+        "Turn execution stopped after restart because hosted MCP request "
+        f"{request_index} may have executed a remote operation without a durable "
+        "checkpoint. Chulk will not replay it automatically; inspect remote state "
+        "before retrying."
+    )
+    plan = turn.active_plan
+    active_step = plan.active_step() if plan is not None else None
+    if active_step is not None:
+        active_step.block(reason)
+    turn.block(reason)
+    _save_recovery_terminal(
+        session_store,
+        conversation_id,
+        turn,
+        reason,
+        message_key_suffix="uncertain_hosted_mcp",
+        metadata={
+            "recovery": "uncertain_hosted_mcp",
+            "request_index": request_index,
+        },
+    )
+
+
 def _block_unresolved_tool_intent(
     session_store: SQLiteSessionStore,
     conversation_id: str,
@@ -380,15 +464,35 @@ def _block_unresolved_tool_intent(
     if active_step is not None:
         active_step.block(reason)
     turn.block(reason)
-    session_store.save_turn_snapshot(conversation_id, turn.to_dict())
-    session_store.save_message(
+    _save_recovery_terminal(
+        session_store,
         conversation_id,
-        turn_id=turn.turn_id,
-        role="assistant",
-        content=reason,
-        message_key=f"{turn.turn_id}:assistant:unresolved_tool_intent",
+        turn,
+        reason,
+        message_key_suffix="unresolved_tool_intent",
         metadata={"recovery": "unresolved_tool_intent"},
     )
+
+
+def _save_recovery_terminal(
+    session_store: SQLiteSessionStore,
+    conversation_id: str,
+    turn: TurnState,
+    content: str,
+    *,
+    message_key_suffix: str,
+    metadata: dict[str, object],
+) -> None:
+    saved = session_store.save_terminal_turn_bundle(
+        conversation_id,
+        turn_id=turn.turn_id,
+        content=content,
+        message_key=f"{turn.turn_id}:assistant:{message_key_suffix}",
+        turn=turn.to_dict(),
+        metadata=metadata,
+    )
+    if not saved:  # pragma: no cover - TurnState guarantees a valid payload
+        raise RuntimeError("Failed to persist terminal recovery state")
 
 
 def _default_llm_client_factory(config: Config) -> LLMClient:

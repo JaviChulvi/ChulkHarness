@@ -148,7 +148,7 @@ def public_api_smoke_source() -> str:
         preset = SoftwareEngineer()
         assert preset.system_prompt
         assert preset.tools
-        assert preset.skills
+        assert preset.skills is None
 
         print("metadata, typing, public API, resources, and runtime defaults are available")
         """

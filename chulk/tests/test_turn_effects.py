@@ -187,10 +187,85 @@ def test_planned_tool_observation_checkpoint_includes_step_evidence() -> None:
     assert len(plan.steps[0].evidence) == 1
 
 
+def test_terminal_tool_outcome_blocks_step_before_observation_checkpoint() -> None:
+    state = AgentState()
+    memory = ConversationMemory()
+    events: list[tuple[str, dict | None]] = []
+
+    def trace(event_type: str, payload: dict | None) -> None:
+        events.append((event_type, payload))
+
+    effects = TurnEffects(
+        state=state,
+        memory=memory,
+        llm_client=ScriptedLLMClient([]),
+        plan=PlanExecution(state=state, memory=memory, trace=trace),
+        trace=trace,
+        redact_text=lambda _event, text, _metadata: (text, {"redacted": False}),
+        artifact_writer=lambda _name, _content: None,
+        planning_tool_names=lambda: frozenset(),
+        max_tool_calls_per_turn=5,
+        max_reflection_attempts=0,
+        max_observation_chars=1000,
+        max_tool_stdout_chars=1000,
+        max_tool_stderr_chars=1000,
+    )
+    plan = Plan(
+        summary="Use one failing tool.",
+        steps=[PlanStep(id="1", title="Lookup", description="Run lookup.")],
+    )
+    plan.approve()
+    plan.steps[0].mark("in_progress")
+    turn = TurnState(
+        user_message="Use lookup.",
+        active_plan=plan,
+        plan_approved=True,
+    )
+    pending = effects._start_tool(
+        turn,
+        ExecuteToolEffect(
+            action=ToolCallAction(type="tool_call", tool_name="lookup", arguments={}),
+            phase="execution",
+        ),
+    )
+
+    blocked_message = effects._finish_tool(
+        turn,
+        FinishToolEffect(
+            disposition="block",
+            blocked_reason="Tool retry limit exhausted.",
+        ),
+        pending=pending,
+        result=ToolResult(
+            tool_name="lookup",
+            success=False,
+            observation="lookup failed",
+            error="timeout",
+        ),
+    )
+
+    observation_payload = next(
+        payload
+        for event, payload in events
+        if event == TraceEvent.TOOL_OBSERVATION and payload is not None
+    )
+    blocked_payload = next(
+        payload
+        for event, payload in events
+        if event == TraceEvent.PLAN_STEP_BLOCKED and payload is not None
+    )
+    assert observation_payload["turn"]["active_plan"]["steps"][0]["status"] == "blocked"
+    assert blocked_payload["turn"]["status"] == "blocked"
+    assert blocked_payload["turn"]["final_answer"] == blocked_message
+    assert turn.errors == [blocked_message]
+
+
 def test_presented_plan_stays_in_canonical_state_not_model_history() -> None:
     state = AgentState()
     memory = ConversationMemory()
     memory.add_user_message("Plan this change.")
+    memory.add_assistant_message("Read-only reconnaissance action.")
+    memory.add_observation("Reconnaissance result.")
     execution = PlanExecution(state=state, memory=memory, trace=lambda _event, _payload: None)
     turn = TurnState(user_message="Plan this change.")
     plan = Plan(
@@ -201,7 +276,8 @@ def test_presented_plan_stays_in_canonical_state_not_model_history() -> None:
     response = execution.present(turn, plan)
 
     assert "Use /approve" in response
-    assert memory.messages == [{"role": "user", "content": "Plan this change."}]
+    assert state.messages == memory.messages
+    assert response not in [message["content"] for message in state.messages]
     assert state.active_plan is plan
     assert turn.active_plan is plan
 

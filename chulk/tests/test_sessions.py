@@ -23,7 +23,7 @@ from chulk.core.state import (
 )
 from chulk.llm import LLMCapabilities, LLMClient
 from chulk.main import create_agent, main
-from chulk.memory import ConversationMemory, SQLiteMemoryStore
+from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, ToolResult
@@ -384,6 +384,13 @@ def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path
             "blocked",
             "failed",
         ),
+        (
+            TraceEvent.PLAN_STEP_BLOCKED,
+            blocked_turn,
+            {},
+            "blocked",
+            "failed",
+        ),
     ]
 
     for index, (event_type, turn, payload, status, message_kind) in enumerate(cases):
@@ -665,6 +672,56 @@ def test_pending_plan_restores_skills_memories_and_current_dependencies(tmp_path
     assert captured_contexts[0].deps == {"token": "live"}
 
 
+def test_resumable_plan_does_not_restore_memories_when_retrieval_is_off(tmp_path):
+    memory_store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    memory_id = memory_store.save_memory(
+        "ARCHIVED_MEMORY_MARKER must stay out of the prompt.",
+        tags=["project"],
+    )
+    memory_store.archive_memory(memory_id)
+    plan = Plan(
+        summary="Finish restored work.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Finish",
+                description="Return the final answer.",
+            )
+        ],
+    )
+    turn = TurnState(
+        user_message="finish this",
+        turn_id="turn-memory-off",
+        loaded_memory_ids=[memory_id],
+    )
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].mark("completed")
+    state = AgentState(
+        turns=[turn],
+        active_plan=plan,
+        loaded_memory_ids=[memory_id],
+    )
+    memory = ConversationMemory()
+    memory.add_user_message(turn.user_message)
+    llm = FakeLLMClient(
+        [json.dumps({"type": "final_answer", "content": "done without memory"})]
+    )
+
+    agent = CoreAgent(
+        llm,
+        state=state,
+        memory=memory,
+        memory_store=memory_store,
+        memory_policy=MemoryPolicy(memory_store, "off"),
+    )
+
+    assert agent.approve_plan() == "done without memory"
+    assert "ARCHIVED_MEMORY_MARKER" not in llm.requests[0][0]["content"]
+    assert agent.state.loaded_memory_ids == []
+    assert agent.state.turns[-1].loaded_memory_ids == []
+
+
 def test_session_store_preserves_blocked_plan_status(tmp_path):
     store = SQLiteSessionStore(tmp_path / "store.sqlite")
     store.create_conversation("conversation-1", provider="test", model="mock")
@@ -759,8 +816,8 @@ def test_create_agent_continues_latest_approved_plan_after_restart(monkeypatch, 
     assert agent.has_resumable_plan() is True
     assert "plan      resumable" in TerminalUI(color_enabled=False).status(config, agent)
     assert agent.run_turn("start unrelated work") == (
-        "An approved plan is waiting to continue. Use /approve to resume it "
-        "before starting a new turn."
+        "An approved plan is waiting to continue. Use /approve to resume it or "
+        "/reject to cancel it before starting a new turn."
     )
     assert llm.requests == []
 
@@ -772,6 +829,62 @@ def test_create_agent_continues_latest_approved_plan_after_restart(monkeypatch, 
     assert result.plan.status == "completed"
     assert len(agent.state.turns) == 1
     assert agent.has_resumable_plan() is False
+
+
+def test_restored_approved_plan_can_be_cancelled_without_resuming(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-cancel-resumed-plan"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    plan = Plan(
+        summary="Continue approved work.",
+        steps=[
+            PlanStep(id="1", title="Completed mutation", description="Already done."),
+            PlanStep(
+                id="2",
+                title="Remaining mutation",
+                description="Continue once.",
+                depends_on=["1"],
+            ),
+        ],
+    )
+    turn = TurnState(user_message="run approved work", turn_id="turn-cancel-resume")
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].mark("completed")
+    plan.steps[1].mark("in_progress")
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+    llm = FakeLLMClient()
+    agent = create_agent(
+        config,
+        lambda _config: llm,
+        conversation_id=conversation_id,
+    )
+
+    result = AgentHandle(agent).reject_result()
+    message = result.content
+
+    assert message == (
+        "Approved plan cancelled. No further steps will run; any work already "
+        "completed was not rolled back."
+    )
+    assert llm.requests == []
+    assert result.status == "cancelled"
+    restored_plan = agent.state.turns[-1].active_plan
+    assert restored_plan is not None
+    assert [step.status for step in restored_plan.steps] == ["completed", "in_progress"]
+    assert agent.state.turns[-1].status == "cancelled"
+    assert agent.has_resumable_plan() is False
+    assert store.get_conversation(conversation_id).status == "cancelled"
+    assert agent.run_turn("start new work") == "ok"
 
 
 def test_create_agent_does_not_resume_older_approved_plan(monkeypatch, tmp_path):
@@ -812,6 +925,124 @@ def test_create_agent_does_not_resume_older_approved_plan(monkeypatch, tmp_path)
 
     assert agent.has_resumable_plan() is False
     assert agent.state.active_plan is None
+
+
+@pytest.mark.parametrize("response_recorded", [False, True])
+def test_restart_blocks_uncheckpointed_hosted_mcp_request(
+    monkeypatch,
+    tmp_path,
+    response_recorded,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = f"conversation-hosted-mcp-{response_recorded}"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    plan = Plan(
+        summary="Perform a remote mutation.",
+        steps=[
+            PlanStep(
+                id="1",
+                title="Mutate remote state",
+                description="Run the hosted operation once.",
+            )
+        ],
+    )
+    turn = TurnState(user_message="mutate remotely", turn_id="turn-hosted-mcp")
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].mark("in_progress")
+    turn.model_request_count = 1
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+    store.save_model_request(
+        conversation_id,
+        {
+            "turn_id": turn.turn_id,
+            "request_index": 2,
+            "hosted_mcp_enabled": True,
+            "hosted_mcp_server_labels": ["remote"],
+        },
+    )
+    if response_recorded:
+        store.save_model_response(
+            conversation_id,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": 2,
+                "content": "provider response arrived before checkpoint",
+            },
+        )
+    assert len(
+        store.load_uncheckpointed_hosted_mcp_requests(
+            conversation_id,
+            turn.turn_id,
+            checkpointed_request_count=1,
+        )
+    ) == 1
+    assert store.load_uncheckpointed_hosted_mcp_requests(
+        conversation_id,
+        turn.turn_id,
+        checkpointed_request_count=2,
+    ) == []
+    llm = FakeLLMClient()
+
+    agent = create_agent(
+        config,
+        lambda _config: llm,
+        conversation_id=conversation_id,
+    )
+
+    restored_turn = agent.state.turns[-1]
+    assert restored_turn.status == "blocked"
+    assert "may have executed a remote operation" in (restored_turn.final_answer or "")
+    assert agent.has_resumable_plan() is False
+    assert agent.approve_plan() == "No plan is waiting for approval."
+    assert llm.requests == []
+
+
+def test_restart_terminalizes_in_progress_turn_with_blocked_plan(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    config = load_config()
+    store = SQLiteSessionStore(config.store_path)
+    conversation_id = "conversation-blocked-plan-checkpoint"
+    store.create_conversation(
+        conversation_id,
+        provider=config.llm_provider,
+        model=config.model,
+    )
+    plan = Plan(
+        summary="Run one fallible step.",
+        steps=[PlanStep(id="1", title="Run mutation", description="Run once.")],
+    )
+    turn = TurnState(user_message="run it", turn_id="turn-blocked-checkpoint")
+    turn.wait_for_plan_approval(plan)
+    turn.approve_plan()
+    plan.steps[0].block("Retry limit exhausted.")
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+
+    agent = create_agent(
+        config,
+        lambda _config: FakeLLMClient(),
+        conversation_id=conversation_id,
+    )
+
+    restored_turn = agent.state.turns[-1]
+    assert restored_turn.status == "blocked"
+    assert restored_turn.final_answer == (
+        "Plan step blocked: Run mutation. Retry limit exhausted."
+    )
+    assert agent.has_resumable_plan() is False
+    assert any(
+        message.content == restored_turn.final_answer
+        for message in store.list_messages(conversation_id)
+    )
 
 
 def test_create_agent_reconciles_legacy_terminal_messages_without_replay(
@@ -993,6 +1224,42 @@ def test_restart_blocks_unresolved_non_plan_tool_intent(monkeypatch, tmp_path):
     assert restored_turn.active_plan is None
     assert "will not replay it automatically" in (restored_turn.final_answer or "")
     assert SQLiteSessionStore(config.store_path).get_conversation(conversation_id).status == "blocked"
+
+
+def test_unresolved_tool_recovery_persists_status_and_message_atomically(
+    monkeypatch,
+    tmp_path,
+):
+    store = SQLiteSessionStore(tmp_path / "atomic-recovery.sqlite")
+    conversation_id = "conversation-atomic-recovery"
+    store.create_conversation(conversation_id, provider="test", model="mock")
+    turn = TurnState(user_message="mutate once", turn_id="turn-atomic-recovery")
+    store.save_turn_snapshot(conversation_id, turn.to_dict())
+
+    monkeypatch.setattr(
+        store,
+        "save_turn_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("recovery must not save the snapshot separately"),
+    )
+    monkeypatch.setattr(
+        store,
+        "save_message",
+        lambda *_args, **_kwargs: pytest.fail("recovery must not save the message separately"),
+    )
+
+    runtime_module._block_unresolved_tool_intent(
+        store,
+        conversation_id,
+        turn,
+        [{"tool_name": "external_mutation", "iteration": 1}],
+    )
+
+    restored_turn = store.load_turns(conversation_id)[0]
+    assert restored_turn.status == "blocked"
+    assert any(
+        message.content == restored_turn.final_answer
+        for message in store.list_messages(conversation_id)
+    )
 
 
 def test_restart_blocks_completed_call_without_observation_missing_from_legacy_snapshot(

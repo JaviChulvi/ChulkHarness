@@ -230,7 +230,8 @@ class TurnEffects:
         self.state.final_answer = message
         self.memory.add_assistant_message(message)
         self.state.messages = self.memory.recent()
-        turn.block(message)
+        if turn.status != "blocked" or turn.final_answer != message:
+            turn.block(message)
         self.plan.clear(turn)
         self.trace(
             TraceEvent.TURN_FAILED,
@@ -396,6 +397,10 @@ class TurnEffects:
                 observation,
                 metadata,
                 retry_metadata=effect.retry_metadata,
+            )
+            self.plan.prepare_tool_result_checkpoint(
+                effect,
+                step=pending.plan_step,
             )
         self.memory.add_assistant_message(tool_action_context)
         self.memory.add_observation(observation)

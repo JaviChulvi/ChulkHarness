@@ -382,8 +382,8 @@ class Agent:
             return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
         if self.has_resumable_plan():
             return (
-                "An approved plan is waiting to continue. Use /approve to resume it "
-                "before starting a new turn."
+                "An approved plan is waiting to continue. Use /approve to resume it or "
+                "/reject to cancel it before starting a new turn."
             )
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
@@ -515,26 +515,40 @@ class Agent:
         return turn
 
     def reject_plan(self) -> str:
-        """Reject the pending plan without executing tools."""
+        """Reject a pending plan or cancel a restored approved plan."""
         self._ensure_open()
         self._refresh_action_runtime()
         turn = self._pending_plan_turn()
+        resumed = False
+        if turn is None:
+            turn = self._resumable_plan_turn()
+            resumed = turn is not None
         if turn is None or turn.active_plan is None:
             return "No plan is waiting for approval."
 
         try:
-            message = "Plan rejected. No tools were run."
-            turn.reject_plan(message)
-            self.state.pending_plan_turn_id = None
-            self.state.active_plan = None
+            if resumed:
+                message = (
+                    "Approved plan cancelled. No further steps will run; any work already "
+                    "completed was not rolled back."
+                )
+                turn.cancel(message)
+                event_type = TraceEvent.TURN_FAILED
+            else:
+                message = "Plan rejected. No tools were run."
+                turn.reject_plan(message)
+                event_type = TraceEvent.PLAN_REJECTED
+            self._plan_execution.clear(turn)
             self.state.final_answer = message
             self.memory.add_assistant_message(message)
             self.state.messages = self.memory.recent()
             self._trace(
-                TraceEvent.PLAN_REJECTED,
+                event_type,
                 {
                     "turn_id": turn.turn_id,
                     "plan": turn.active_plan.to_dict(),
+                    "message": message,
+                    "status": turn.status,
                     "turn": turn.to_dict(),
                 },
             )
@@ -626,7 +640,11 @@ class Agent:
                     )
                 )
 
-        if self.memory_store is not None:
+        if (
+            self.memory_store is not None
+            and self.memory_policy is not None
+            and self.memory_policy.retrieval_enabled
+        ):
             for memory_id in turn.loaded_memory_ids:
                 memory = self.memory_store.get_memory(
                     memory_id,
@@ -638,6 +656,9 @@ class Agent:
                     self._profile_memories.append(memory)
                 else:
                     self._relevant_memories.append(memory)
+        elif self.memory_policy is not None and not self.memory_policy.retrieval_enabled:
+            self.state.loaded_memory_ids = []
+            turn.loaded_memory_ids = []
 
     def _validate_mcp_route(self) -> None:
         """Fail closed when mutable runtime state lacks a required MCP bridge."""

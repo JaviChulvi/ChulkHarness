@@ -182,7 +182,7 @@ class AgentHandle:
         return self._run_result(content)
 
     def reject(self) -> str:
-        """Reject a pending plan."""
+        """Reject a pending plan or cancel a restored approved plan."""
         return self.reject_result().content
 
     def reject_result(
@@ -191,11 +191,13 @@ class AgentHandle:
         on_delta: DeltaCallback | None = None,
         on_event: EventCallback | None = None,
     ) -> RunResult:
-        """Reject a pending plan and return the rejection result."""
+        """Reject or cancel the active plan and return its terminal result."""
         self._ensure_open()
-        has_pending_plan = self.runtime.has_pending_plan()
+        has_plan_to_cancel = (
+            self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
+        )
         content = self._with_callbacks(lambda: self.runtime.reject_plan(), on_delta=on_delta, on_event=on_event)
-        if not has_pending_plan:
+        if not has_plan_to_cancel:
             return self._no_pending_plan_result(content)
         return self._run_result(content)
 

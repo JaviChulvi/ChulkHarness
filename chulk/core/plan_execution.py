@@ -25,6 +25,7 @@ class PlanExecution:
         turn.wait_for_plan_approval(plan)
         self.state.active_plan = plan
         self.state.pending_plan_turn_id = turn.turn_id
+        self.state.messages = self.memory.recent()
         response = plan.to_user_text() + "\n\nUse /approve to execute this plan or /reject to cancel it."
         self.trace(
             TraceEvent.PLAN_CREATED,
@@ -116,8 +117,23 @@ class PlanExecution:
             self._trace_step(turn, step, TraceEvent.PLAN_STEP_COMPLETED)
             return None
         step.block(action.reason or action.evidence)
+        message = _blocked_message(step)
+        turn.block(message)
         self._trace_step(turn, step, TraceEvent.PLAN_STEP_BLOCKED)
-        return _blocked_message(step)
+        return message
+
+    def prepare_tool_result_checkpoint(
+        self,
+        effect: FinishToolEffect,
+        *,
+        step: PlanStep,
+    ) -> None:
+        """Apply terminal tool disposition before the observation checkpoint."""
+        if effect.disposition != "block":
+            return
+        if effect.blocked_reason is None:
+            raise RuntimeError("Blocked plan tool result requires a reason")
+        step.block(effect.blocked_reason)
 
     def apply_tool_result(
         self,
@@ -166,7 +182,11 @@ class PlanExecution:
             return None
         if effect.blocked_reason is None:
             raise RuntimeError("Blocked plan tool result requires a reason")
-        step.block(effect.blocked_reason)
+        if step.status != "blocked" or step.blocked_reason != effect.blocked_reason:
+            step.block(effect.blocked_reason)
+        message = _blocked_message(step)
+        if turn.status != "blocked" or turn.final_answer != message:
+            turn.block(message)
         self._trace_step(
             turn,
             step,
@@ -174,7 +194,7 @@ class PlanExecution:
             tool_name=result.tool_name,
             error=result.error,
         )
-        return _blocked_message(step)
+        return message
 
     def record_tool_evidence(
         self,

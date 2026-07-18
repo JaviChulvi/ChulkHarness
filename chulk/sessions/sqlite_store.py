@@ -432,6 +432,42 @@ class SQLiteSessionStore:
                 ),
             )
 
+    def load_uncheckpointed_hosted_mcp_requests(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        *,
+        checkpointed_request_count: int,
+    ) -> list[dict[str, object]]:
+        """Return hosted MCP requests newer than the durable turn checkpoint."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT request_index, request_json, created_at, response_created_at
+                FROM conversation_model_requests
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND request_index > ?
+                ORDER BY request_index
+                """,
+                (conversation_id, turn_id, max(0, checkpointed_request_count)),
+            ).fetchall()
+
+        requests: list[dict[str, object]] = []
+        for row in rows:
+            payload = _safe_json_dict(row["request_json"])
+            if payload.get("hosted_mcp_enabled") is not True:
+                continue
+            requests.append(
+                {
+                    "request_index": int(row["request_index"]),
+                    "server_labels": payload.get("hosted_mcp_server_labels") or [],
+                    "created_at": str(row["created_at"]),
+                    "response_recorded": row["response_created_at"] is not None,
+                }
+            )
+        return requests
+
     def save_tool_call(self, conversation_id: str, payload: dict[str, Any]) -> None:
         """Upsert a tool-call lifecycle record and any matching intent checkpoint."""
         turn_id = str(payload.get("turn_id", "")).strip()

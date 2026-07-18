@@ -578,6 +578,14 @@ def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(t
     trace_text = trace_logger.path.read_text(encoding="utf-8")
     assert '"name": "mcp:docs"' in trace_text
     assert "secret-token" not in trace_text
+    events = [json.loads(line) for line in trace_text.splitlines()]
+    request_payload = next(
+        event["payload"]
+        for event in events
+        if event["type"] == TraceEvent.MODEL_REQUEST_STARTED
+    )
+    assert request_payload["hosted_mcp_enabled"] is True
+    assert request_payload["hosted_mcp_server_labels"] == ["docs"]
 
 
 def test_agent_uses_one_json_contract_for_a_mixed_fallback_chain():
