@@ -325,7 +325,7 @@ def _missing_provider_package(provider: str) -> str | None:
         available = False
     if available:
         return None
-    return f"{package_name}; install chulkharness[{extra_name}]"
+    return f"{package_name}; install from the source checkout with: python -m pip install -e '.[{extra_name}]'"
 
 
 def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]:

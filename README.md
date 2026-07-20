@@ -12,18 +12,19 @@ who want an inspectable runtime and a small embedding API.
 - Project direction: [roadmap](TODO.md)
 - Vulnerability reporting: [security policy](SECURITY.md)
 
-ChulkHarness supports Python 3.11, 3.12, and 3.13. The distribution name is
-`chulkharness`; Python imports and the command are `chulk`.
+ChulkHarness supports Python 3.11, 3.12, and 3.13. It is not published to
+PyPI yet, so install it from a source checkout. Python imports and the command
+are `chulk`.
 
 ```bash
-python -m pip install chulkharness
+python -m pip install -e .
 python examples/00_sdk_quickstart.py
 ```
 
 The first example is deterministic and needs no credentials. Hosted providers
 are optional. Install every provider dependency with
-`python -m pip install "chulkharness[providers]"`, or choose an individual
-extra from the [provider guide](docs/providers.md).
+`python -m pip install -e ".[providers]"`, or choose an individual extra from
+the [provider guide](docs/providers.md).
 
 ## SDK
 

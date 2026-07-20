@@ -359,7 +359,7 @@ def test_doctor_checks_sdk_package_for_every_provider_position(
     assert provider_check.status == "fail"
     assert f"{expected_label} {provider}" in provider_check.detail
     assert expected_package in provider_check.detail
-    assert f"chulkharness[{expected_extra}]" in provider_check.detail
+    assert f"python -m pip install -e '.[{expected_extra}]'" in provider_check.detail
 
 
 def test_doctor_rejects_blank_provider_credentials_and_endpoints(tmp_path):

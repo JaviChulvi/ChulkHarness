@@ -1,10 +1,11 @@
 # Credential-free SDK quickstart
 
-ChulkHarness supports Python 3.11–3.13. The distribution is `chulkharness` and
-the Python package is `chulk`.
+ChulkHarness supports Python 3.11–3.13. It is not published to PyPI yet, so
+clone the repository and install it from its root. The Python package is
+`chulk`.
 
 ```bash
-python -m pip install chulkharness
+python -m pip install -e .
 ```
 
 Save this as `quickstart.py`:
@@ -49,7 +50,7 @@ Install the provider extra, configure credentials, and explicitly select live
 mode:
 
 ```bash
-python -m pip install "chulkharness[openai]"
+python -m pip install -e ".[openai]"
 export OPENAI_API_KEY=...
 export CHULK_EXAMPLE_MODE=live
 python examples/00_sdk_quickstart.py
@@ -59,7 +60,7 @@ Live output is intentionally nondeterministic and may incur provider charges.
 The supported provider names are `openai`, `deepseek`, `local`,
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`. The
 last five require an explicit `CHULK_MODEL`; install all optional provider SDKs
-with `python -m pip install "chulkharness[providers]"`. Provider adapter tests
+with `python -m pip install -e ".[providers]"`. Provider adapter tests
 use injected fakes and make no network calls, so validating a real account,
 model entitlement, key, and endpoint remains the application's responsibility.
 For application code, inject an `LLMClient` when possible and construct the
