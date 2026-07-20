@@ -18,14 +18,15 @@ Most numbered examples call a live model and may incur provider charges. Install
 all provider SDKs or the matching individual extra first:
 
 ```bash
-python -m pip install "chulkharness[providers]"
+python -m pip install -e ".[providers]"
 ```
 
 Use `[openai]` for `openai`, `deepseek`, `local`, `openai-compatible`,
 `openrouter`, or `bedrock`; `[anthropic]` for `anthropic`; and `[gemini]` for
 `gemini`.
 
-The distribution name is `chulkharness`; examples import `chulk`, and the CLI command is also `chulk`.
+ChulkHarness is not yet published to PyPI, so run the install command from a
+source checkout. Examples import `chulk`, and the CLI command is also `chulk`.
 
 The live examples default to `openai`, so set:
 

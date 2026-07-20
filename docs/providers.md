@@ -17,11 +17,14 @@ The base installation has no hosted-provider dependency. Install one SDK extra,
 or install every provider SDK together:
 
 ```bash
-python -m pip install "chulkharness[openai]"
-python -m pip install "chulkharness[anthropic]"
-python -m pip install "chulkharness[gemini]"
-python -m pip install "chulkharness[providers]"
+python -m pip install -e ".[openai]"
+python -m pip install -e ".[anthropic]"
+python -m pip install -e ".[gemini]"
+python -m pip install -e ".[providers]"
 ```
+
+Run these commands from a ChulkHarness source checkout; the project is not yet
+published to PyPI.
 
 The `openai` extra is shared by OpenAI, DeepSeek, local, generic
 OpenAI-compatible, OpenRouter, and Bedrock because those adapters use the
