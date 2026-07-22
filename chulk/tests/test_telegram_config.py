@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from chulk.telegram.config import TelegramConfigError, load_telegram_config
@@ -26,6 +28,23 @@ def test_load_telegram_config_parses_environment_values() -> None:
     assert config.allowed_user_ids == frozenset({123, 456})
     assert config.poll_timeout_seconds == 20
     assert config.retry_delay_seconds == 0.5
+
+
+def test_load_telegram_config_reads_env_file_with_environment_precedence(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "CHULK_TELEGRAM_BOT_TOKEN=file-token\n"
+        "CHULK_TELEGRAM_ALLOWED_USER_IDS=123\n",
+        encoding="utf-8",
+    )
+
+    config = load_telegram_config(
+        {"CHULK_TELEGRAM_BOT_TOKEN": "process-token"},
+        env_file=env_file,
+    )
+
+    assert config.bot_token == "process-token"
+    assert config.allowed_user_ids == frozenset({123})
 
 
 @pytest.mark.parametrize("value", ["abc", "1,-2", "1,2.5"])

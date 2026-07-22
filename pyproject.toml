@@ -61,6 +61,7 @@ mcp = [
 
 [project.scripts]
 chulk = "chulk.main:main"
+chulk-telegram = "chulk.telegram.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}

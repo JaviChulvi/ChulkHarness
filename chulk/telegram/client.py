@@ -26,6 +26,7 @@ class TelegramUpdate:
     chat_id: int
     user_id: int
     text: str
+    chat_type: str
 
 
 class TelegramClient:
@@ -43,6 +44,7 @@ class TelegramClient:
         self._api_url = f"{TELEGRAM_API_BASE_URL}/bot{bot_token.strip()}"
         self._request_json = request_json or _request_json
         self._request_timeout_seconds = request_timeout_seconds
+        self.next_offset: int | None = None
 
     def get_updates(
         self,
@@ -66,6 +68,10 @@ class TelegramClient:
             raise TelegramError("Telegram getUpdates returned an invalid result")
         updates: list[TelegramUpdate] = []
         for item in result:
+            if isinstance(item, dict):
+                update_id = item.get("update_id")
+                if isinstance(update_id, int):
+                    self.next_offset = max(self.next_offset or 0, update_id + 1)
             update = _parse_text_update(item)
             if update is not None:
                 updates.append(update)
@@ -130,10 +136,21 @@ def _parse_text_update(value: object) -> TelegramUpdate | None:
     if not isinstance(chat, dict) or not isinstance(sender, dict) or not isinstance(text, str):
         return None
     chat_id = chat.get("id")
+    chat_type = chat.get("type")
     user_id = sender.get("id")
-    if not isinstance(chat_id, int) or not isinstance(user_id, int):
+    if (
+        not isinstance(chat_id, int)
+        or not isinstance(user_id, int)
+        or not isinstance(chat_type, str)
+    ):
         return None
-    return TelegramUpdate(update_id=update_id, chat_id=chat_id, user_id=user_id, text=text)
+    return TelegramUpdate(
+        update_id=update_id,
+        chat_id=chat_id,
+        user_id=user_id,
+        text=text,
+        chat_type=chat_type,
+    )
 
 
 def _request_json(url: str, payload: dict[str, object], timeout: float) -> object:

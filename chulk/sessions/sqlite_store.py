@@ -109,6 +109,25 @@ class SQLiteSessionStore:
             ).fetchall()
         return [_row_to_conversation(row) for row in rows]
 
+    def find_conversation_by_metadata(
+        self,
+        key: str,
+        value: str | int,
+    ) -> ConversationRecord | None:
+        """Return the latest conversation whose metadata has an exact scalar value."""
+        clean_key = key.strip()
+        if not clean_key:
+            raise ValueError("Metadata key cannot be empty")
+        with self._connect() as conn:
+            rows = conn.execute(
+                _conversation_select_sql("ORDER BY conversations.updated_at DESC")
+            ).fetchall()
+        for row in rows:
+            record = _row_to_conversation(row)
+            if record.metadata.get(clean_key) == value:
+                return record
+        return None
+
     def latest_conversation(self, *, require_turn: bool = True) -> ConversationRecord | None:
         """Return the most recently updated resumable conversation."""
         where = (

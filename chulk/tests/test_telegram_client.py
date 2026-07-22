@@ -16,7 +16,7 @@ def test_get_updates_extracts_only_text_messages() -> None:
                 {
                     "update_id": 7,
                     "message": {
-                        "chat": {"id": 11},
+                        "chat": {"id": 11, "type": "private"},
                         "from": {"id": 13},
                         "text": "hello",
                     },
@@ -28,8 +28,11 @@ def test_get_updates_extracts_only_text_messages() -> None:
     client = TelegramClient("top-secret", request_json=request)
     updates = client.get_updates(offset=7, timeout_seconds=30)
 
-    assert [(item.update_id, item.chat_id, item.user_id, item.text) for item in updates] == [
-        (7, 11, 13, "hello")
+    assert [
+        (item.update_id, item.chat_id, item.user_id, item.text, item.chat_type)
+        for item in updates
+    ] == [
+        (7, 11, 13, "hello", "private")
     ]
     assert calls[0][1] == {
         "offset": 7,
@@ -37,6 +40,7 @@ def test_get_updates_extracts_only_text_messages() -> None:
         "allowed_updates": ["message"],
     }
     assert calls[0][2] >= 35
+    assert client.next_offset == 9
 
 
 def test_send_message_splits_long_responses() -> None:

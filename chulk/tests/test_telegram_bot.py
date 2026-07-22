@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from chulk.config import load_config
+from chulk.sessions import SessionRecorder, SQLiteSessionStore
+from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
+from chulk.telegram.client import TelegramUpdate
+from chulk.telegram.config import TelegramConfig
+
+
+class FakeClient:
+    def __init__(self, updates: tuple[TelegramUpdate, ...] = ()) -> None:
+        self.updates = updates
+        self.next_offset = 100
+        self.sent: list[tuple[int, str]] = []
+
+    def get_updates(self, *, offset: int | None, timeout_seconds: int):
+        assert timeout_seconds == 1
+        return self.updates
+
+    def send_message(self, chat_id: int, text: str) -> None:
+        self.sent.append((chat_id, text))
+
+
+class FakeAgent:
+    def __init__(self, conversation_id: str) -> None:
+        self.conversation_id = conversation_id
+        self.calls: list[tuple[str, object]] = []
+        self.closed = False
+
+    async def run(self, message: str, **kwargs: object) -> str:
+        self.calls.append(("run", (message, kwargs)))
+        return f"answer: {message}"
+
+    async def plan(self, message: str) -> str:
+        self.calls.append(("plan", message))
+        return f"plan: {message}"
+
+    async def approve(self) -> str:
+        self.calls.append(("approve", None))
+        return "approved"
+
+    async def reject(self) -> str:
+        self.calls.append(("reject", None))
+        return "rejected"
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _config(tmp_path: Path):
+    return load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "gemini",
+            "CHULK_MODEL": "gemini-test",
+            "CHULK_GEMINI_API_KEY": "fake",
+        }
+    )
+
+
+def _update(text: str, *, user_id: int = 7, chat_type: str = "private") -> TelegramUpdate:
+    return TelegramUpdate(
+        update_id=1,
+        chat_id=9,
+        user_id=user_id,
+        text=text,
+        chat_type=chat_type,
+    )
+
+
+def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> TelegramAgentBot:
+    def factory(chat_id: int, conversation_id: str | None) -> FakeAgent:
+        agent = FakeAgent(conversation_id or f"new-{chat_id}-{len(agents)}")
+        agents.append(agent)
+        return agent
+
+    return TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            poll_timeout_seconds=1,
+        ),
+        client=client,  # type: ignore[arg-type]
+        agent_factory=factory,
+    )
+
+
+@pytest.mark.asyncio
+async def test_bot_ignores_unauthorized_users_and_rejects_group_chats(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    await bot.handle_update(_update("hello", user_id=99))
+    await bot.handle_update(_update("hello", chat_type="group"))
+
+    assert agents == []
+    assert client.sent == [(9, "For safety, this bot only works in private chats.")]
+
+
+@pytest.mark.asyncio
+async def test_bot_routes_messages_and_commands_to_one_chat_agent(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    await bot.handle_update(_update("hello"))
+    await bot.handle_update(_update("/plan deploy safely"))
+    await bot.handle_update(_update("/approve"))
+    await bot.handle_update(_update("/status"))
+
+    assert len(agents) == 1
+    assert agents[0].calls[0][0] == "run"
+    message, kwargs = agents[0].calls[0][1]
+    assert message == "hello"
+    assert kwargs["extension_metadata"] == {
+        "source": "telegram",
+        "telegram_chat_id": 9,
+    }
+    assert agents[0].calls[1:] == [("plan", "deploy safely"), ("approve", None)]
+    assert client.sent[-1][1] == "Provider: gemini\nModel: gemini-test\nConversation: new-9-0"
+
+
+@pytest.mark.asyncio
+async def test_new_closes_cached_agent_and_starts_new_conversation(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    await bot.handle_update(_update("hello"))
+    await bot.handle_update(_update("/new"))
+
+    assert len(agents) == 2
+    assert agents[0].closed is True
+    assert "Started a new conversation" in client.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_bot_resumes_conversation_mapped_in_sqlite(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+    bot.session_store.create_conversation(
+        "existing-conversation",
+        provider="gemini",
+        model="gemini-test",
+        metadata={TELEGRAM_CHAT_METADATA_KEY: 9},
+    )
+
+    await bot.handle_update(_update("continue"))
+
+    assert agents[0].conversation_id == "existing-conversation"
+
+
+@pytest.mark.asyncio
+async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -> None:
+    client = FakeClient((_update("hello"),))
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    await bot.poll_once()
+
+    assert bot._offset == 100
+    assert client.sent == [(9, "answer: hello")]
+
+
+def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    SessionRecorder(
+        store,
+        "telegram-conversation",
+        provider="gemini",
+        model="gemini-test",
+        metadata={TELEGRAM_CHAT_METADATA_KEY: 9},
+    )
+
+    conversation = store.find_conversation_by_metadata(TELEGRAM_CHAT_METADATA_KEY, 9)
+
+    assert conversation is not None
+    assert conversation.id == "telegram-conversation"

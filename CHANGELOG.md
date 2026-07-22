@@ -9,6 +9,9 @@ API is still pre-1.0.
 
 ### Added
 
+- Added an allowlisted, private-chat-only Telegram adapter with durable
+  per-chat conversations, plan commands, long polling, and environment-only
+  credentials.
 - Added native Anthropic and Gemini providers plus OpenAI-compatible,
   OpenRouter, and AWS Bedrock provider adapters.
 - Added an all-provider `providers` installation extra while retaining the
