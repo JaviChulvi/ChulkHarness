@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from chulk.telegram.client import TelegramClient, TelegramError, split_message
+from chulk.telegram.client import TELEGRAM_COMMANDS, TelegramClient, TelegramError, split_message
 
 
 def test_get_updates_extracts_only_text_messages() -> None:
@@ -54,6 +54,29 @@ def test_send_message_splits_long_responses() -> None:
     client.send_message(42, "abcdef")
     assert payloads == [{"chat_id": 42, "text": "abcdef"}]
     assert split_message("abcd\nefgh", limit=5) == ("abcd", "efgh")
+
+
+def test_chat_action_and_command_registration_use_bot_api_payloads() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def request(url: str, payload: dict[str, object], _timeout: float) -> object:
+        calls.append((url.rsplit("/", 1)[-1], payload))
+        return {"ok": True, "result": True}
+
+    client = TelegramClient("secret", request_json=request)
+    client.send_chat_action(42)
+    client.set_commands()
+
+    assert calls[0] == ("sendChatAction", {"chat_id": 42, "action": "typing"})
+    assert calls[1] == (
+        "setMyCommands",
+        {
+            "commands": [
+                {"command": command, "description": description}
+                for command, description in TELEGRAM_COMMANDS
+            ]
+        },
+    )
 
 
 def test_transport_failure_does_not_expose_token() -> None:

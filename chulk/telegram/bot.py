@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 import logging
 from typing import Protocol
 
@@ -19,6 +20,8 @@ from chulk.tools.web_search import tavily_search_tool
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_CHAT_METADATA_KEY = "telegram_chat_id"
+TELEGRAM_CURSOR_NAME = "telegram"
+TELEGRAM_TYPING_REFRESH_SECONDS = 4.0
 
 
 class TelegramAgent(Protocol):
@@ -59,11 +62,12 @@ class TelegramAgentBot:
         self.session_store = session_store or SQLiteSessionStore(config.store_path)
         self._agent_factory = agent_factory or self._default_agent_factory
         self._agents: dict[int, TelegramAgent] = {}
-        self._offset: int | None = None
+        self._offset = self.session_store.get_adapter_cursor(TELEGRAM_CURSOR_NAME)
 
     async def run_forever(self) -> None:
         """Poll until cancelled, retrying sanitized transport failures."""
         try:
+            await self._prepare_with_retry()
             while True:
                 try:
                     await self.poll_once()
@@ -80,9 +84,13 @@ class TelegramAgentBot:
             offset=self._offset,
             timeout_seconds=self.telegram_config.poll_timeout_seconds,
         )
-        self._offset = self.client.next_offset
         for update in updates:
+            if self._offset is not None and update.update_id < self._offset:
+                continue
             await self.handle_update(update)
+            self._save_offset(update.update_id + 1)
+        if self.client.next_offset is not None:
+            self._save_offset(self.client.next_offset)
 
     async def handle_update(self, update: TelegramUpdate) -> None:
         """Handle one authorized private text message."""
@@ -93,11 +101,18 @@ class TelegramAgentBot:
             await self._send(update.chat_id, "For safety, this bot only works in private chats.")
             return
 
+        await self._send_typing_once(update.chat_id)
+        typing_task = asyncio.create_task(self._refresh_typing(update.chat_id))
         try:
-            response = await self._dispatch(update.chat_id, update.text.strip())
-        except Exception as exc:
-            LOGGER.error("Telegram agent request failed (%s)", type(exc).__name__)
-            response = "The agent could not complete that request. Check the server logs and try again."
+            try:
+                response = await self._dispatch(update.chat_id, update.text.strip())
+            except Exception as exc:
+                LOGGER.error("Telegram agent request failed (%s)", type(exc).__name__)
+                response = "The agent could not complete that request. Check the server logs and try again."
+        finally:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task
         await self._send(update.chat_id, response)
 
     async def close(self) -> None:
@@ -191,6 +206,29 @@ class TelegramAgentBot:
 
     async def _send(self, chat_id: int, text: str) -> None:
         await asyncio.to_thread(self.client.send_message, chat_id, text)
+
+    async def _prepare_with_retry(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.client.set_commands)
+                return
+            except TelegramError as exc:
+                LOGGER.warning("Telegram command registration failed: %s", exc)
+                await asyncio.sleep(self.telegram_config.retry_delay_seconds)
+
+    async def _send_typing_once(self, chat_id: int) -> None:
+        try:
+            await asyncio.to_thread(self.client.send_chat_action, chat_id, "typing")
+        except TelegramError as exc:
+            LOGGER.warning("Telegram typing indicator failed: %s", exc)
+
+    async def _refresh_typing(self, chat_id: int) -> None:
+        while True:
+            await asyncio.sleep(TELEGRAM_TYPING_REFRESH_SECONDS)
+            await self._send_typing_once(chat_id)
+
+    def _save_offset(self, offset: int) -> None:
+        self._offset = self.session_store.save_adapter_cursor(TELEGRAM_CURSOR_NAME, offset)
 
 
 def _parse_command(text: str) -> tuple[str | None, str]:

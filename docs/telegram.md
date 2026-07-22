@@ -32,6 +32,19 @@ CHULK_MODEL=gemini-3.1-flash-lite
 CHULK_GEMINI_API_KEY=replace-with-gemini-key
 ```
 
+Optional web search uses Tavily and keeps its key in the same ignored `.env`:
+
+```dotenv
+CHULK_TAVILY_API_KEY=replace-with-tavily-key
+CHULK_WEB_SEARCH_MAX_RESULTS=5
+```
+
+When configured, the bot adds one bounded `web_search` tool. It submits concise
+queries to Tavily, returns at most 1–10 result excerpts, and tells the model to
+cite the returned source URLs. It does not enable arbitrary URL fetching or
+general network access. Search results are untrusted evidence and cannot grant
+the agent additional permissions.
+
 ## Run
 
 Install the selected provider and start the adapter from the project root:
@@ -42,7 +55,9 @@ chulk-telegram
 ```
 
 The adapter creates one durable SQLite conversation per private Telegram chat.
-It restores that conversation after a process restart. Available commands are:
+It restores that conversation after a process restart. Telegram displays the
+registered command menu automatically, and the bot refreshes a typing indicator
+while an agent request is running. Available commands are:
 
 - `/new` starts a fresh conversation for the chat.
 - `/status` reports the provider, model, and short conversation id.
@@ -54,6 +69,11 @@ It restores that conversation after a process restart. Available commands are:
 Long responses are split into Telegram-sized messages. Attachments, voice
 messages, edits, reactions, and group conversations are intentionally ignored
 in this first adapter.
+
+The next Telegram polling offset is stored in SQLite after each handled update
+and never moves backward, preventing normal service restarts from replaying old
+messages. Delivery remains at-least-once: a process failure after sending a
+reply but before saving its cursor can cause Telegram to redeliver that update.
 
 ## Run continuously with systemd
 
@@ -107,3 +127,5 @@ permission policy independently controls what those prompts may cause.
   required.
 - Stop the service before changing its token or provider configuration, then
   restart it so the new `.env` values are loaded.
+- Set `CHULK_WEB_SEARCH_MAX_RESULTS` conservatively to control context size and
+  Tavily credit usage.

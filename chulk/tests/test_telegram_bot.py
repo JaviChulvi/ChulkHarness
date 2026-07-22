@@ -16,13 +16,23 @@ class FakeClient:
         self.updates = updates
         self.next_offset = 100
         self.sent: list[tuple[int, str]] = []
+        self.actions: list[tuple[int, str]] = []
+        self.requested_offsets: list[int | None] = []
+        self.commands_registered = 0
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int):
         assert timeout_seconds == 1
+        self.requested_offsets.append(offset)
         return self.updates
 
     def send_message(self, chat_id: int, text: str) -> None:
         self.sent.append((chat_id, text))
+
+    def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        self.actions.append((chat_id, action))
+
+    def set_commands(self) -> None:
+        self.commands_registered += 1
 
 
 class FakeAgent:
@@ -101,6 +111,7 @@ async def test_bot_ignores_unauthorized_users_and_rejects_group_chats(tmp_path: 
 
     assert agents == []
     assert client.sent == [(9, "For safety, this bot only works in private chats.")]
+    assert client.actions == []
 
 
 @pytest.mark.asyncio
@@ -124,6 +135,7 @@ async def test_bot_routes_messages_and_commands_to_one_chat_agent(tmp_path: Path
     }
     assert agents[0].calls[1:] == [("plan", "deploy safely"), ("approve", None)]
     assert client.sent[-1][1] == "Provider: gemini\nModel: gemini-test\nConversation: new-9-0"
+    assert client.actions == [(9, "typing")] * 4
 
 
 @pytest.mark.asyncio
@@ -167,6 +179,22 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
 
     assert bot._offset == 100
     assert client.sent == [(9, "answer: hello")]
+    assert bot.session_store.get_adapter_cursor("telegram") == 100
+
+    restarted_client = FakeClient()
+    restarted_bot = _bot(tmp_path, restarted_client, [])
+    await restarted_bot.poll_once()
+    assert restarted_client.requested_offsets == [100]
+
+
+@pytest.mark.asyncio
+async def test_bot_registers_telegram_command_menu(tmp_path: Path) -> None:
+    client = FakeClient()
+    bot = _bot(tmp_path, client, [])
+
+    await bot._prepare_with_retry()
+
+    assert client.commands_registered == 1
 
 
 @pytest.mark.asyncio

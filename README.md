@@ -70,7 +70,8 @@ defaults; inspect `chulk --show-config` before enabling side effects.
 
 For private remote access from a phone, `chulk-telegram` runs an allowlisted
 Telegram bot over outbound long polling. It requires no public server port; see
-the [Telegram adapter guide](docs/telegram.md).
+the [Telegram adapter guide](docs/telegram.md). An optional bounded Tavily tool
+adds cited web search without exposing arbitrary network access.
 
 ## Development
 
