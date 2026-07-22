@@ -169,6 +169,39 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
     assert client.sent == [(9, "answer: hello")]
 
 
+@pytest.mark.asyncio
+async def test_default_agent_adds_only_bounded_web_network_tool(tmp_path: Path) -> None:
+    client = FakeClient()
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            tavily_api_key="search-secret",
+            web_search_max_results=3,
+        ),
+        client=client,  # type: ignore[arg-type]
+    )
+
+    agent = bot._default_agent_factory(9, None)
+    try:
+        names = {tool.name for tool in agent.tool_registry.list_tools()}  # type: ignore[attr-defined]
+        assert names == {
+            "calculator",
+            "read_file",
+            "list_files",
+            "search_files",
+            "search_memory",
+            "list_memories",
+            "summarize_memories",
+            "web_search",
+        }
+        assert agent.capabilities.network is True  # type: ignore[attr-defined]
+        assert agent.capabilities.shell is False  # type: ignore[attr-defined]
+    finally:
+        await agent.close()
+
+
 def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "store.sqlite")
     SessionRecorder(

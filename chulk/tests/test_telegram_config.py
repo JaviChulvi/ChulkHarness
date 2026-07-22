@@ -21,6 +21,8 @@ def test_load_telegram_config_parses_environment_values() -> None:
             "CHULK_TELEGRAM_ALLOWED_USER_IDS": "123, 456,123",
             "CHULK_TELEGRAM_POLL_TIMEOUT_SECONDS": "20",
             "CHULK_TELEGRAM_RETRY_DELAY_SECONDS": "0.5",
+            "CHULK_TAVILY_API_KEY": " tavily-secret ",
+            "CHULK_WEB_SEARCH_MAX_RESULTS": "3",
         }
     )
 
@@ -28,6 +30,8 @@ def test_load_telegram_config_parses_environment_values() -> None:
     assert config.allowed_user_ids == frozenset({123, 456})
     assert config.poll_timeout_seconds == 20
     assert config.retry_delay_seconds == 0.5
+    assert config.tavily_api_key == "tavily-secret"
+    assert config.web_search_max_results == 3
 
 
 def test_load_telegram_config_reads_env_file_with_environment_precedence(tmp_path: Path) -> None:
@@ -54,5 +58,16 @@ def test_load_telegram_config_rejects_invalid_user_ids(value: str) -> None:
             {
                 "CHULK_TELEGRAM_BOT_TOKEN": "secret",
                 "CHULK_TELEGRAM_ALLOWED_USER_IDS": value,
+            }
+        )
+
+
+def test_load_telegram_config_rejects_excessive_search_results() -> None:
+    with pytest.raises(TelegramConfigError, match="WEB_SEARCH_MAX_RESULTS"):
+        load_telegram_config(
+            {
+                "CHULK_TELEGRAM_BOT_TOKEN": "secret",
+                "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1",
+                "CHULK_WEB_SEARCH_MAX_RESULTS": "11",
             }
         )

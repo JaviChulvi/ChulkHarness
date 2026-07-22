@@ -7,11 +7,14 @@ from collections.abc import Callable
 import logging
 from typing import Protocol
 
-from chulk import AsyncAgent
+from chulk import AsyncAgent, Capabilities, FileAccess, MemoryMode, Tools
 from chulk.config import Config
 from chulk.sessions import SQLiteSessionStore
 from chulk.telegram.client import TelegramClient, TelegramError, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
+from chulk.tools import PermissionDecision, PermissionRequest
+from chulk.tools.permissions import PermissionDecisionRecord
+from chulk.tools.web_search import tavily_search_tool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -154,8 +157,34 @@ class TelegramAgentBot:
         return agent
 
     def _default_agent_factory(self, chat_id: int, conversation_id: str | None) -> TelegramAgent:
+        tool_specs: list[object] = [
+            Tools.calculator,
+            Tools.read_file,
+            Tools.list_files,
+            Tools.search_files,
+            Tools.search_memory,
+            Tools.list_memories,
+            Tools.summarize_memories,
+        ]
+        if self.telegram_config.tavily_api_key is not None:
+            tool_specs.append(
+                tavily_search_tool(
+                    self.telegram_config.tavily_api_key,
+                    max_results=self.telegram_config.web_search_max_results,
+                )
+            )
         return AsyncAgent(
             config=self.config,
+            tools=tool_specs,
+            capabilities=Capabilities(
+                files=FileAccess.READ,
+                shell=False,
+                memory=MemoryMode.READ_ONLY,
+                network=self.telegram_config.tavily_api_key is not None,
+                external_services=False,
+                utilities=True,
+            ),
+            permission_callback=_telegram_permission_callback,
             conversation_id=conversation_id,
             conversation_metadata={TELEGRAM_CHAT_METADATA_KEY: chat_id},
         )
@@ -182,6 +211,16 @@ def _help_text() -> str:
         "/reject — reject the pending plan\n"
         "/help — show this help"
     )
+
+
+def _telegram_permission_callback(
+    request: PermissionRequest,
+    _record: PermissionDecisionRecord,
+) -> PermissionDecision:
+    """Allow only the adapter's bounded search network action."""
+    if request.tool_name == "web_search":
+        return PermissionDecision.ALLOW
+    return PermissionDecision.DENY
 
 
 __all__ = ["TELEGRAM_CHAT_METADATA_KEY", "TelegramAgentBot"]

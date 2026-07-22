@@ -20,6 +20,8 @@ class TelegramConfig:
     allowed_user_ids: frozenset[int]
     poll_timeout_seconds: int = 30
     retry_delay_seconds: float = 2.0
+    tavily_api_key: str | None = None
+    web_search_max_results: int = 5
 
 
 def load_telegram_config(
@@ -53,6 +55,14 @@ def load_telegram_config(
             env,
             "CHULK_TELEGRAM_RETRY_DELAY_SECONDS",
             2.0,
+        ),
+        tavily_api_key=(env.get("CHULK_TAVILY_API_KEY") or "").strip() or None,
+        web_search_max_results=_bounded_int(
+            env,
+            "CHULK_WEB_SEARCH_MAX_RESULTS",
+            5,
+            minimum=1,
+            maximum=10,
         ),
     )
 
@@ -114,3 +124,17 @@ def _positive_float(env: Mapping[str, str], key: str, default: float) -> float:
     if parsed <= 0:
         raise TelegramConfigError(f"{key} must be greater than zero")
     return parsed
+
+
+def _bounded_int(
+    env: Mapping[str, str],
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = _positive_int(env, key, default)
+    if not minimum <= value <= maximum:
+        raise TelegramConfigError(f"{key} must be between {minimum} and {maximum}")
+    return value
