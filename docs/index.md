@@ -7,6 +7,8 @@ Choose the path that matches what you are doing:
   [release policy](release-policy.md).
 - **Operating the CLI:** use the [repository README](../README.md#cli) for
   commands, configuration, and local runtime paths.
+- **Talking to a remote agent:** use the private, allowlisted
+  [Telegram adapter](telegram.md).
 - **Developing ChulkHarness:** use the [contributor setup](../README.md#development),
   [roadmap](../TODO.md), and [security policy](../SECURITY.md).
 
@@ -26,6 +28,7 @@ Choose the path that matches what you are doing:
 - [Safety](safety.md): responsibilities around untrusted model input.
 - [SDK errors](sdk-errors.md): stable exception categories and diagnostics.
 - [Release policy](release-policy.md): stability labels and compatibility.
+- [Telegram](telegram.md): private phone access, credentials, and deployment.
 
 The SDK, CLI, and repository internals share one runtime builder, but their
 defaults differ. The SDK starts read-only, the CLI coding workflow may enable

@@ -83,6 +83,7 @@ def create_agent(
     llm_client_factory: Callable[[Config], LLMClient] | None = None,
     *,
     conversation_id: str | None = None,
+    conversation_metadata: dict[str, object] | None = None,
     llm_client: LLMClient | None = None,
     tool_specs: Iterable[object] | None = None,
     skill_specs: object | Iterable[object] | None = None,
@@ -151,7 +152,8 @@ def create_agent(
         provider=config.llm_provider,
         model=config.model,
         trace_path=trace_logger.path,
-        lazy=conversation_id is None,
+        lazy=conversation_id is None and not conversation_metadata,
+        metadata=conversation_metadata,
     )
     client_is_owned = llm_client is None
     client = llm_client if llm_client is not None else llm_client_factory(config)

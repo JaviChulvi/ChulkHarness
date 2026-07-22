@@ -21,6 +21,7 @@ class SessionRecorder:
         model: str,
         trace_path: Path | str | None = None,
         lazy: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.store = store
         self.conversation_id = conversation_id
@@ -29,6 +30,7 @@ class SessionRecorder:
         self.provider = provider
         self.model = model
         self.trace_path = str(trace_path) if trace_path is not None else None
+        self.metadata = dict(metadata or {})
         self.persisted = False
         if not lazy:
             self._ensure_conversation()
@@ -288,6 +290,7 @@ class SessionRecorder:
             provider=self.provider,
             model=self.model,
             trace_path=self.trace_path,
+            metadata=self.metadata,
         )
         self.persisted = True
 

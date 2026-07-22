@@ -9,6 +9,7 @@ who want an inspectable runtime and a small embedding API.
 - New SDK user: [credential-free quickstart](docs/quickstart.md)
 - Embedding an application: [documentation index](docs/index.md)
 - Runnable patterns: [SDK examples](examples/README.md)
+- Talking to a server agent from a phone: [Telegram adapter](docs/telegram.md)
 - Project direction: [roadmap](TODO.md)
 - Vulnerability reporting: [security policy](SECURITY.md)
 
@@ -66,6 +67,10 @@ Common interactive commands include `/help`, `/plan <request>`, `/approve`,
 `/reject`, `/sessions`, `/resume <id>`, `/history`, `/memory`, `/skills`, and
 `/mcp`. The CLI and SDK share the same runtime builder but use different safety
 defaults; inspect `chulk --show-config` before enabling side effects.
+
+For private remote access from a phone, `chulk-telegram` runs an allowlisted
+Telegram bot over outbound long polling. It requires no public server port; see
+the [Telegram adapter guide](docs/telegram.md).
 
 ## Development
 
