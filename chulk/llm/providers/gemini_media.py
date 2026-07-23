@@ -48,7 +48,11 @@ class GeminiMediaProcessor:
         task = (
             "Transcribe this audio accurately. Include relevant non-speech sounds."
             if attachment.kind in {"voice", "audio"}
-            else "Extract and describe the useful content of this attachment accurately."
+            else (
+                "Describe this video accurately with timestamps for important events."
+                if attachment.kind == "video"
+                else "Extract and describe the useful content of this attachment accurately."
+            )
         )
         prompt = f"{task}\nUser instruction: {instruction or 'Analyze this attachment.'}"
         try:

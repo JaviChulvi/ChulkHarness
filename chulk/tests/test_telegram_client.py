@@ -93,6 +93,38 @@ def test_get_updates_normalizes_voice_and_photo_attachments() -> None:
     assert updates[1].attachment.file_id == "large"
 
 
+def test_get_updates_normalizes_iphone_video() -> None:
+    def request(_url: str, _payload: dict[str, object], _timeout: float) -> object:
+        return {
+            "ok": True,
+            "result": [
+                {
+                    "update_id": 3,
+                    "message": {
+                        "chat": {"id": 11, "type": "private"},
+                        "from": {"id": 13},
+                        "caption": "What happened?",
+                        "video": {
+                            "file_id": "video-1",
+                            "mime_type": "video/quicktime",
+                            "file_name": "IMG_0123.MOV",
+                        },
+                    },
+                }
+            ],
+        }
+
+    update = TelegramClient("secret", request_json=request).get_updates(
+        offset=None,
+        timeout_seconds=1,
+    )[0]
+
+    assert update.attachment is not None
+    assert update.attachment.kind == "video"
+    assert update.attachment.mime_type == "video/quicktime"
+    assert update.attachment.file_name == "IMG_0123.MOV"
+
+
 def test_download_file_resolves_path_and_enforces_bound() -> None:
     calls: list[tuple[str, int]] = []
 

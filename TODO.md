@@ -183,6 +183,9 @@ These stories are ordered after the maintenance tranche above.
   the core agent message contract.
 - [x] Resolve Telegram file references and enforce a configurable byte bound
   before media reaches a provider.
+- [x] Enforce an explicit MIME/extension policy covering common iPhone and Mac
+  images, audio, videos, documents, contacts, and calendar exports, with clear
+  PDF-export guidance for Pages, Numbers, and Keynote packages.
 - [x] Keep provider-specific multimodal processing in `chulk/llm/providers/`.
 - [x] Preserve captions as user instructions and feed extracted text through
   the normal agent, memory, session, and trace path.

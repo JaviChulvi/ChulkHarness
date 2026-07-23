@@ -227,6 +227,8 @@ def _parse_attachment(message: dict[str, object]) -> TelegramAttachment | None:
     for field, kind, default_mime in (
         ("voice", "voice", "audio/ogg"),
         ("audio", "audio", "audio/mpeg"),
+        ("video", "video", "video/mp4"),
+        ("video_note", "video", "video/mp4"),
         ("document", "document", "application/octet-stream"),
     ):
         value = message.get(field)

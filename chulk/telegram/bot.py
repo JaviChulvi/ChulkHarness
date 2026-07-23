@@ -18,6 +18,7 @@ from chulk.telegram.media import (
     TelegramMediaError,
     TelegramMediaProcessor,
     attachment_context,
+    validate_attachment,
 )
 from chulk.tools import PermissionDecision, PermissionRequest
 from chulk.tools.permissions import PermissionDecisionRecord
@@ -146,6 +147,7 @@ class TelegramAgentBot:
             raise TelegramMediaError(
                 "Attachment processing is unavailable for the configured model provider."
             )
+        attachment = validate_attachment(attachment)
         try:
             data = await asyncio.to_thread(
                 self.client.download_file,

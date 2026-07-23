@@ -195,6 +195,32 @@ async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_bot_rejects_iwork_package_before_download(tmp_path: Path) -> None:
+    client = FakeClient()
+    bot = _bot(tmp_path, client, [])
+    bot._media_processor = FakeMediaProcessor()
+    update = TelegramUpdate(
+        update_id=5,
+        chat_id=9,
+        user_id=7,
+        text="Summarize",
+        chat_type="private",
+        attachment=TelegramAttachment(
+            "pages-1",
+            "document",
+            "application/octet-stream",
+            "proposal.pages",
+        ),
+    )
+
+    await bot.handle_update(update)
+
+    assert "Pages files are recognized" in client.sent[-1][1]
+    assert "Export" in client.sent[-1][1]
+    assert client.downloads == []
+
+
+@pytest.mark.asyncio
 async def test_bot_resumes_conversation_mapped_in_sqlite(tmp_path: Path) -> None:
     client = FakeClient()
     agents: list[FakeAgent] = []
