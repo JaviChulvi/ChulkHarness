@@ -22,6 +22,7 @@ class TelegramConfig:
     retry_delay_seconds: float = 2.0
     tavily_api_key: str | None = None
     web_search_max_results: int = 5
+    max_attachment_bytes: int = 10 * 1024 * 1024
 
 
 def load_telegram_config(
@@ -63,6 +64,13 @@ def load_telegram_config(
             5,
             minimum=1,
             maximum=10,
+        ),
+        max_attachment_bytes=_bounded_int(
+            env,
+            "CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES",
+            10 * 1024 * 1024,
+            minimum=1024,
+            maximum=20 * 1024 * 1024,
         ),
     )
 
