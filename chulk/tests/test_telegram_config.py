@@ -38,6 +38,7 @@ def test_load_telegram_config_parses_environment_values() -> None:
     assert config.timezone == "Europe/Madrid"
     assert config.scheduler_poll_seconds == 2.5
     assert config.scheduling_enabled is True
+    assert config.max_attachment_bytes == 10 * 1024 * 1024
 
 
 def test_load_telegram_config_reads_env_file_with_environment_precedence(tmp_path: Path) -> None:
@@ -105,5 +106,16 @@ def test_scheduling_is_disabled_by_default_and_rejects_invalid_boolean() -> None
                 "CHULK_TELEGRAM_BOT_TOKEN": "secret",
                 "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1",
                 "CHULK_TELEGRAM_SCHEDULING_ENABLED": "sometimes",
+            }
+        )
+
+
+def test_load_telegram_config_validates_attachment_bound() -> None:
+    with pytest.raises(TelegramConfigError, match="CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES"):
+        load_telegram_config(
+            {
+                "CHULK_TELEGRAM_BOT_TOKEN": "secret",
+                "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1",
+                "CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES": str(21 * 1024 * 1024),
             }
         )

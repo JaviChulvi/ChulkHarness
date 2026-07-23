@@ -26,6 +26,7 @@ class TelegramConfig:
     timezone: str = "UTC"
     scheduler_poll_seconds: float = 5.0
     scheduling_enabled: bool = False
+    max_attachment_bytes: int = 10 * 1024 * 1024
 
 
 def load_telegram_config(
@@ -78,6 +79,13 @@ def load_telegram_config(
             env,
             "CHULK_TELEGRAM_SCHEDULING_ENABLED",
             False,
+        ),
+        max_attachment_bytes=_bounded_int(
+            env,
+            "CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES",
+            10 * 1024 * 1024,
+            minimum=1024,
+            maximum=20 * 1024 * 1024,
         ),
     )
 

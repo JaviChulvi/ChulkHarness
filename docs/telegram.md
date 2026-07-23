@@ -103,8 +103,30 @@ own delivery loop. Merely importing or constructing an SDK agent does not
 enable scheduling.
 
 Long responses are split into Telegram-sized messages. Attachments, voice
-messages, edits, reactions, and group conversations are intentionally ignored
-in this first adapter.
+notes, audio, images, short videos, and documents up to 10 MiB are downloaded into bounded
+memory and analyzed by Gemini before the normal agent turn. Caption text is
+preserved as the user's instruction. Set
+`CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES` between 1 KiB and Telegram's 20 MiB bot
+download limit to change the bound. Media bytes are not written into the
+project, memory, or traces. Media processing is currently available only when
+Gemini is the selected provider. Edits, reactions, and group conversations are
+ignored.
+
+The explicit media policy includes common Apple formats:
+
+- iPhone photos: JPEG, HEIC, and HEIF
+- screenshots and web images: PNG and WebP
+- Voice Memos and audio: M4A/MP4 audio, AAC, MP3, AIFF, WAV, CAF, FLAC, and OGG
+- iPhone video and Live Photo video components: MOV/QuickTime and MP4
+- Mac/iPhone documents and exports: PDF, TXT, Markdown, RTF, CSV, JSON,
+  HTML/XML, vCard contacts, and iCalendar files
+
+Pages, Numbers, and Keynote packages are recognized explicitly but are not
+sent to Gemini as opaque ZIP/IWA containers. The bot asks the user to export
+them as PDF first, preserving layout and charts for Gemini's native PDF
+understanding. Unknown binaries, archives, and executable formats are rejected
+before download. Attachment-derived text is injected as untrusted, turn-scoped
+external context and can never grant permissions or override instructions.
 
 The next Telegram polling offset is stored in SQLite after each handled update
 and never moves backward, preventing normal service restarts from replaying old

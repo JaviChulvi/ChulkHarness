@@ -192,6 +192,22 @@ These stories are ordered after the maintenance tranche above.
 - [x] Cover migration, isolation, claiming, recurrence, tools, execution, and
   configuration without wall-clock sleeps or network calls.
 
+### Selected: Telegram Media
+
+- [x] Normalize image, document, audio, and voice-note updates without changing
+  the core agent message contract.
+- [x] Resolve Telegram file references and enforce a configurable byte bound
+  before media reaches a provider.
+- [x] Enforce an explicit MIME/extension policy covering common iPhone and Mac
+  images, audio, videos, documents, contacts, and calendar exports, with clear
+  PDF-export guidance for Pages, Numbers, and Keynote packages.
+- [x] Keep provider-specific multimodal processing in `chulk/llm/providers/`.
+- [x] Preserve captions as user instructions and feed extracted text through
+  the normal agent, memory, session, and trace path.
+- [x] Keep media bytes out of project files, durable memory, and trace payloads.
+- [x] Cover parsing, download limits, provider processing, routing, config, and
+  sanitized failures without live network calls.
+
 ### US-N1: Productize Trace Replay And Artifacts
 
 - [ ] Include all stable request, context, memory, skill, permission, tool,

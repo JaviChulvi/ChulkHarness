@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+from pathlib import PurePath
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -24,6 +25,7 @@ TELEGRAM_SCHEDULING_COMMANDS: tuple[tuple[str, str], ...] = (
     ("cancel", "Cancel a scheduled task"),
 )
 JsonRequest = Callable[[str, dict[str, object], float], object]
+BinaryRequest = Callable[[str, float, int], bytes]
 
 
 class TelegramError(RuntimeError):
@@ -31,14 +33,25 @@ class TelegramError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class TelegramAttachment:
+    """One bounded Telegram file reference attached to a message."""
+
+    file_id: str
+    kind: str
+    mime_type: str
+    file_name: str | None = None
+
+
+@dataclass(frozen=True)
 class TelegramUpdate:
-    """One supported text message extracted from a Telegram update."""
+    """One supported text or media message extracted from an update."""
 
     update_id: int
     chat_id: int
     user_id: int
     text: str
     chat_type: str
+    attachment: TelegramAttachment | None = None
 
 
 class TelegramClient:
@@ -49,12 +62,14 @@ class TelegramClient:
         bot_token: str,
         *,
         request_json: JsonRequest | None = None,
+        request_binary: BinaryRequest | None = None,
         request_timeout_seconds: float = 40.0,
     ) -> None:
         if not bot_token.strip():
             raise ValueError("bot_token is required")
         self._api_url = f"{TELEGRAM_API_BASE_URL}/bot{bot_token.strip()}"
         self._request_json = request_json or _request_json
+        self._request_binary = request_binary or _request_binary
         self._request_timeout_seconds = request_timeout_seconds
         self.next_offset: int | None = None
 
@@ -93,6 +108,28 @@ class TelegramClient:
         """Send text, splitting it at Telegram's message boundary."""
         for part in split_message(text):
             self._call("sendMessage", {"chat_id": chat_id, "text": part})
+
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        """Resolve and download one Telegram file with a hard byte limit."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero")
+        result = self._call("getFile", {"file_id": file_id})
+        if not isinstance(result, dict) or not isinstance(result.get("file_path"), str):
+            raise TelegramError("Telegram getFile returned an invalid result")
+        file_path = result["file_path"].lstrip("/")
+        try:
+            data = self._request_binary(
+                f"{self._api_url.replace('/bot', '/file/bot', 1)}/{file_path}",
+                self._request_timeout_seconds,
+                max_bytes,
+            )
+        except Exception as exc:
+            if isinstance(exc, TelegramError):
+                raise
+            raise TelegramError("Telegram file download failed") from exc
+        if len(data) > max_bytes:
+            raise TelegramError("Telegram attachment exceeds the configured size limit")
+        return data
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         """Show a short-lived activity indicator in one chat."""
@@ -160,7 +197,11 @@ def _parse_text_update(value: object) -> TelegramUpdate | None:
     chat = message.get("chat")
     sender = message.get("from")
     text = message.get("text")
-    if not isinstance(chat, dict) or not isinstance(sender, dict) or not isinstance(text, str):
+    caption = message.get("caption")
+    attachment = _parse_attachment(message)
+    if not isinstance(chat, dict) or not isinstance(sender, dict):
+        return None
+    if not isinstance(text, str) and not isinstance(caption, str) and attachment is None:
         return None
     chat_id = chat.get("id")
     chat_type = chat.get("type")
@@ -175,9 +216,45 @@ def _parse_text_update(value: object) -> TelegramUpdate | None:
         update_id=update_id,
         chat_id=chat_id,
         user_id=user_id,
-        text=text,
+        text=text if isinstance(text, str) else caption if isinstance(caption, str) else "",
         chat_type=chat_type,
+        attachment=attachment,
     )
+
+
+def _parse_attachment(message: dict[str, object]) -> TelegramAttachment | None:
+    photo = message.get("photo")
+    if isinstance(photo, list):
+        candidates = [item for item in photo if isinstance(item, dict)]
+        if candidates:
+            selected = candidates[-1]
+            file_id = selected.get("file_id")
+            if isinstance(file_id, str):
+                return TelegramAttachment(file_id, "image", "image/jpeg")
+    for field, kind, default_mime in (
+        ("voice", "voice", "audio/ogg"),
+        ("audio", "audio", "audio/mpeg"),
+        ("video", "video", "video/mp4"),
+        ("video_note", "video", "video/mp4"),
+        ("document", "document", "application/octet-stream"),
+    ):
+        value = message.get(field)
+        if not isinstance(value, dict) or not isinstance(value.get("file_id"), str):
+            continue
+        mime = value.get("mime_type")
+        raw_name = value.get("file_name")
+        file_name = (
+            PurePath(raw_name).name[:255]
+            if isinstance(raw_name, str) and PurePath(raw_name).name
+            else None
+        )
+        return TelegramAttachment(
+            value["file_id"],
+            kind,
+            mime if isinstance(mime, str) else default_mime,
+            file_name,
+        )
+    return None
 
 
 def _request_json(url: str, payload: dict[str, object], timeout: float) -> object:
@@ -193,3 +270,14 @@ def _request_json(url: str, payload: dict[str, object], timeout: float) -> objec
             return json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise TelegramError("Telegram HTTP request failed") from exc
+
+
+def _request_binary(url: str, timeout: float, max_bytes: int) -> bytes:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            data = response.read(max_bytes + 1)
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise TelegramError("Telegram file download failed") from exc
+    if len(data) > max_bytes:
+        raise TelegramError("Telegram attachment exceeds the configured size limit")
+    return data
