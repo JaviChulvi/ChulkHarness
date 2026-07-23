@@ -185,8 +185,12 @@ async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> N
     await bot.handle_update(update)
 
     message, _kwargs = agents[0].calls[0][1]
-    assert "Summarize" in message
-    assert "transcribed words" in message
+    assert message == "Summarize"
+    context_sections = _kwargs["context_sections"]
+    assert len(context_sections) == 1
+    assert context_sections[0].content == "transcribed words"
+    assert context_sections[0].source == "telegram_attachment"
+    assert context_sections[0].metadata["trusted"] is False
     assert client.downloads == [("voice-1", 10 * 1024 * 1024)]
 
 

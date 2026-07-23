@@ -10,10 +10,15 @@ from typing import Protocol
 
 from chulk import AsyncAgent, Capabilities, FileAccess, MemoryMode, Tools
 from chulk.config import Config
+from chulk.core.context import TurnContextSection
 from chulk.sessions import SQLiteSessionStore
 from chulk.telegram.client import TelegramClient, TelegramError, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
-from chulk.telegram.media import TelegramMediaProcessor
+from chulk.telegram.media import (
+    TelegramMediaError,
+    TelegramMediaProcessor,
+    attachment_context,
+)
 from chulk.tools import PermissionDecision, PermissionRequest
 from chulk.tools.permissions import PermissionDecisionRecord
 from chulk.tools.web_search import tavily_search_tool
@@ -109,9 +114,18 @@ class TelegramAgentBot:
         try:
             try:
                 text = update.text.strip()
+                context_sections: list[TurnContextSection] | None = None
                 if update.attachment is not None:
-                    text = await self._process_attachment(update)
-                response = await self._dispatch(update.chat_id, text)
+                    text, context = await self._process_attachment(update)
+                    context_sections = [context]
+                response = await self._dispatch(
+                    update.chat_id,
+                    text,
+                    context_sections=context_sections,
+                )
+            except TelegramMediaError as exc:
+                LOGGER.warning("Telegram media request rejected (%s)", type(exc).__name__)
+                response = str(exc)
             except Exception as exc:
                 LOGGER.error("Telegram agent request failed (%s)", type(exc).__name__)
                 response = "The agent could not complete that request. Check the server logs and try again."
@@ -121,30 +135,45 @@ class TelegramAgentBot:
                 await typing_task
         await self._send(update.chat_id, response)
 
-    async def _process_attachment(self, update: TelegramUpdate) -> str:
+    async def _process_attachment(
+        self,
+        update: TelegramUpdate,
+    ) -> tuple[str, TurnContextSection]:
         attachment = update.attachment
         if attachment is None:
-            return update.text.strip()
+            raise TelegramMediaError("No supported attachment was found in this message.")
         if self._media_processor is None:
-            raise RuntimeError("Media processing is unavailable for the configured provider")
-        data = await asyncio.to_thread(
-            self.client.download_file,
-            attachment.file_id,
-            max_bytes=self.telegram_config.max_attachment_bytes,
-        )
-        extracted = await asyncio.to_thread(
-            self._media_processor.process,
-            attachment,
-            data,
-            instruction=update.text.strip(),
-        )
-        label = attachment.file_name or attachment.kind
+            raise TelegramMediaError(
+                "Attachment processing is unavailable for the configured model provider."
+            )
+        try:
+            data = await asyncio.to_thread(
+                self.client.download_file,
+                attachment.file_id,
+                max_bytes=self.telegram_config.max_attachment_bytes,
+            )
+            extracted = await asyncio.to_thread(
+                self._media_processor.process,
+                attachment,
+                data,
+                instruction=update.text.strip(),
+            )
+        except TelegramError as exc:
+            if "size limit" in str(exc):
+                raise TelegramMediaError(
+                    "That attachment is larger than the configured download limit."
+                ) from exc
+            raise TelegramMediaError(
+                "Telegram could not download that attachment. Please try sending it again."
+            ) from exc
+        except TelegramMediaError:
+            raise
+        except Exception as exc:
+            raise TelegramMediaError(
+                "The configured media provider could not interpret that attachment."
+            ) from exc
         instruction = update.text.strip() or "Respond to the attachment."
-        return (
-            f"{instruction}\n\n"
-            f"[Telegram attachment: {label}; type={attachment.mime_type}]\n"
-            f"{extracted}"
-        )
+        return instruction, attachment_context(attachment, extracted)
 
     async def close(self) -> None:
         """Close all cached agent runtimes."""
@@ -153,7 +182,13 @@ class TelegramAgentBot:
         for agent in agents:
             await agent.close()
 
-    async def _dispatch(self, chat_id: int, text: str) -> str:
+    async def _dispatch(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        context_sections: list[TurnContextSection] | None = None,
+    ) -> str:
         command, arguments = _parse_command(text)
         if command in {"/start", "/help"}:
             return _help_text()
@@ -184,6 +219,7 @@ class TelegramAgentBot:
             return "Send a text message for the agent."
         return await agent.run(
             text,
+            context_sections=context_sections,
             extension_metadata={"source": "telegram", "telegram_chat_id": chat_id},
         )
 
