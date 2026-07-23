@@ -177,6 +177,19 @@ Acceptance criteria:
 
 These stories are ordered after the maintenance tranche above.
 
+### Selected: Telegram Media
+
+- [x] Normalize image, document, audio, and voice-note updates without changing
+  the core agent message contract.
+- [x] Resolve Telegram file references and enforce a configurable byte bound
+  before media reaches a provider.
+- [x] Keep provider-specific multimodal processing in `chulk/llm/providers/`.
+- [x] Preserve captions as user instructions and feed extracted text through
+  the normal agent, memory, session, and trace path.
+- [x] Keep media bytes out of project files, durable memory, and trace payloads.
+- [x] Cover parsing, download limits, provider processing, routing, config, and
+  sanitized failures without live network calls.
+
 ### US-N1: Productize Trace Replay And Artifacts
 
 - [ ] Include all stable request, context, memory, skill, permission, tool,

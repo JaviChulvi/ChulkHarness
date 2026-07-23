@@ -67,8 +67,14 @@ while an agent request is running. Available commands are:
 - `/help` displays command help.
 
 Long responses are split into Telegram-sized messages. Attachments, voice
-messages, edits, reactions, and group conversations are intentionally ignored
-in this first adapter.
+notes, audio, images, and documents up to 10 MiB are downloaded into bounded
+memory and analyzed by Gemini before the normal agent turn. Caption text is
+preserved as the user's instruction. Set
+`CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES` between 1 KiB and Telegram's 20 MiB bot
+download limit to change the bound. Media bytes are not written into the
+project, memory, or traces. Media processing is currently available only when
+Gemini is the selected provider. Edits, reactions, and group conversations are
+ignored.
 
 The next Telegram polling offset is stored in SQLite after each handled update
 and never moves backward, preventing normal service restarts from replaying old

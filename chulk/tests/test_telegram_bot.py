@@ -9,7 +9,7 @@ import chulk.telegram.bot as telegram_bot_module
 from chulk.config import load_config
 from chulk.sessions import SessionRecorder, SQLiteSessionStore
 from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
-from chulk.telegram.client import TelegramUpdate
+from chulk.telegram.client import TelegramAttachment, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
 
 
@@ -21,6 +21,7 @@ class FakeClient:
         self.actions: list[tuple[int, str]] = []
         self.requested_offsets: list[int | None] = []
         self.commands_registered = 0
+        self.downloads: list[tuple[str, int]] = []
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int):
         assert timeout_seconds == 1
@@ -35,6 +36,10 @@ class FakeClient:
 
     def set_commands(self) -> None:
         self.commands_registered += 1
+
+    def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        self.downloads.append((file_id, max_bytes))
+        return b"media"
 
 
 class FakeAgent:
@@ -102,6 +107,14 @@ def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> Telegra
     )
 
 
+class FakeMediaProcessor:
+    def process(self, attachment, data: bytes, *, instruction: str) -> str:
+        assert attachment.file_id == "voice-1"
+        assert data == b"media"
+        assert instruction == "Summarize"
+        return "transcribed words"
+
+
 @pytest.mark.asyncio
 async def test_bot_ignores_unauthorized_users_and_rejects_group_chats(tmp_path: Path) -> None:
     client = FakeClient()
@@ -152,6 +165,29 @@ async def test_new_closes_cached_agent_and_starts_new_conversation(tmp_path: Pat
     assert len(agents) == 2
     assert agents[0].closed is True
     assert "Started a new conversation" in client.sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+    bot._media_processor = FakeMediaProcessor()
+    update = TelegramUpdate(
+        update_id=4,
+        chat_id=9,
+        user_id=7,
+        text="Summarize",
+        chat_type="private",
+        attachment=TelegramAttachment("voice-1", "voice", "audio/ogg"),
+    )
+
+    await bot.handle_update(update)
+
+    message, _kwargs = agents[0].calls[0][1]
+    assert "Summarize" in message
+    assert "transcribed words" in message
+    assert client.downloads == [("voice-1", 10 * 1024 * 1024)]
 
 
 @pytest.mark.asyncio

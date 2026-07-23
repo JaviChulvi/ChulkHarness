@@ -13,6 +13,7 @@ from chulk.config import Config
 from chulk.sessions import SQLiteSessionStore
 from chulk.telegram.client import TelegramClient, TelegramError, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
+from chulk.telegram.media import TelegramMediaProcessor
 from chulk.tools import PermissionDecision, PermissionRequest
 from chulk.tools.permissions import PermissionDecisionRecord
 from chulk.tools.web_search import tavily_search_tool
@@ -55,12 +56,14 @@ class TelegramAgentBot:
         client: TelegramClient,
         session_store: SQLiteSessionStore | None = None,
         agent_factory: AgentFactory | None = None,
+        media_processor: TelegramMediaProcessor | None = None,
     ) -> None:
         self.config = config
         self.telegram_config = telegram_config
         self.client = client
         self.session_store = session_store or SQLiteSessionStore(config.store_path)
         self._agent_factory = agent_factory or self._default_agent_factory
+        self._media_processor = media_processor
         self._agents: dict[int, TelegramAgent] = {}
         self._offset = self.session_store.get_adapter_cursor(TELEGRAM_CURSOR_NAME)
 
@@ -105,7 +108,10 @@ class TelegramAgentBot:
         typing_task = asyncio.create_task(self._refresh_typing(update.chat_id))
         try:
             try:
-                response = await self._dispatch(update.chat_id, update.text.strip())
+                text = update.text.strip()
+                if update.attachment is not None:
+                    text = await self._process_attachment(update)
+                response = await self._dispatch(update.chat_id, text)
             except Exception as exc:
                 LOGGER.error("Telegram agent request failed (%s)", type(exc).__name__)
                 response = "The agent could not complete that request. Check the server logs and try again."
@@ -114,6 +120,31 @@ class TelegramAgentBot:
             with suppress(asyncio.CancelledError):
                 await typing_task
         await self._send(update.chat_id, response)
+
+    async def _process_attachment(self, update: TelegramUpdate) -> str:
+        attachment = update.attachment
+        if attachment is None:
+            return update.text.strip()
+        if self._media_processor is None:
+            raise RuntimeError("Media processing is unavailable for the configured provider")
+        data = await asyncio.to_thread(
+            self.client.download_file,
+            attachment.file_id,
+            max_bytes=self.telegram_config.max_attachment_bytes,
+        )
+        extracted = await asyncio.to_thread(
+            self._media_processor.process,
+            attachment,
+            data,
+            instruction=update.text.strip(),
+        )
+        label = attachment.file_name or attachment.kind
+        instruction = update.text.strip() or "Respond to the attachment."
+        return (
+            f"{instruction}\n\n"
+            f"[Telegram attachment: {label}; type={attachment.mime_type}]\n"
+            f"{extracted}"
+        )
 
     async def close(self) -> None:
         """Close all cached agent runtimes."""
