@@ -20,6 +20,10 @@ TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = (
     ("reject", "Reject the pending plan"),
     ("help", "Show command help"),
 )
+TELEGRAM_SCHEDULING_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("reminders", "List scheduled tasks"),
+    ("cancel", "Cancel a scheduled task"),
+)
 JsonRequest = Callable[[str, dict[str, object], float], object]
 BinaryRequest = Callable[[str, float, int], bytes]
 
@@ -131,13 +135,16 @@ class TelegramClient:
         """Show a short-lived activity indicator in one chat."""
         self._call("sendChatAction", {"chat_id": chat_id, "action": action})
 
-    def set_commands(self) -> None:
+    def set_commands(
+        self,
+        commands: tuple[tuple[str, str], ...] = TELEGRAM_COMMANDS,
+    ) -> None:
         """Register the adapter's command menu with Telegram."""
-        commands = [
+        command_payload = [
             {"command": command, "description": description}
-            for command, description in TELEGRAM_COMMANDS
+            for command, description in commands
         ]
-        self._call("setMyCommands", {"commands": commands})
+        self._call("setMyCommands", {"commands": command_payload})
 
     def _call(
         self,

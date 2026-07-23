@@ -37,6 +37,9 @@ Optional web search uses Tavily and keeps its key in the same ignored `.env`:
 ```dotenv
 CHULK_TAVILY_API_KEY=replace-with-tavily-key
 CHULK_WEB_SEARCH_MAX_RESULTS=5
+CHULK_TELEGRAM_TIMEZONE=Europe/Madrid
+CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS=5
+CHULK_TELEGRAM_SCHEDULING_ENABLED=true
 ```
 
 When configured, the bot adds one bounded `web_search` tool. It submits concise
@@ -64,7 +67,40 @@ while an agent request is running. Available commands are:
 - `/plan <request>` asks the agent to prepare an approval plan.
 - `/approve` approves the pending plan.
 - `/reject` rejects the pending plan.
+- `/reminders` lists active one-off and recurring tasks.
+- `/cancel <task-id>` cancels a task shown by `/reminders`.
 - `/help` displays command help.
+
+## Reminders and recurring tasks
+
+Scheduling is disabled by default. Set
+`CHULK_TELEGRAM_SCHEDULING_ENABLED=true` to let the Telegram adapter attach the
+scheduling tools and start its delivery runner. The Telegram agent then
+exposes destination-scoped scheduling tools, so an
+allowlisted user can say, for example, “At 2026-07-24 09:00 remind me to call
+Alex” or “Every 3600 seconds check the project status.” Local date-times use
+`CHULK_TELEGRAM_TIMEZONE`; explicit ISO-8601 offsets take precedence.
+
+Jobs are stored in the shared SQLite database. A short lease prevents two
+runner iterations from deliberately claiming the same job, expired leases are
+recoverable after a crash, and recurring jobs advance from their scheduled
+time rather than accumulating drift. At execution time the stored prompt runs
+through the chat's normal agent with the same tools and permissions, and its
+answer is delivered to that Telegram chat. Failures are sanitized, retained
+for inspection, and retried after a bounded delay.
+
+Scheduling and cancellation are destination-scoped side effects. The Telegram
+permission callback allows only these dedicated scheduling operations; one
+chat cannot list or cancel another chat's jobs. The scheduler does not accept
+cron expressions or arbitrary code.
+
+The scheduler itself is channel-neutral and lives under `chulk.scheduling`.
+It is not part of the default Python SDK `Agent` or `AsyncAgent` tool set and
+does not start background work for SDK hosts. Another adapter or host can opt
+in explicitly by constructing a `SQLiteScheduleStore`, binding
+`scheduled_job_tools(...)` to its authenticated destination, and running its
+own delivery loop. Merely importing or constructing an SDK agent does not
+enable scheduling.
 
 Long responses are split into Telegram-sized messages. Attachments, voice
 notes, audio, images, short videos, and documents up to 10 MiB are downloaded into bounded

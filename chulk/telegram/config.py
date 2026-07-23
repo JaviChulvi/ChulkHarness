@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class TelegramConfigError(ValueError):
@@ -22,6 +23,9 @@ class TelegramConfig:
     retry_delay_seconds: float = 2.0
     tavily_api_key: str | None = None
     web_search_max_results: int = 5
+    timezone: str = "UTC"
+    scheduler_poll_seconds: float = 5.0
+    scheduling_enabled: bool = False
     max_attachment_bytes: int = 10 * 1024 * 1024
 
 
@@ -65,6 +69,17 @@ def load_telegram_config(
             minimum=1,
             maximum=10,
         ),
+        timezone=_timezone(env.get("CHULK_TELEGRAM_TIMEZONE") or "UTC"),
+        scheduler_poll_seconds=_positive_float(
+            env,
+            "CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS",
+            5.0,
+        ),
+        scheduling_enabled=_boolean(
+            env,
+            "CHULK_TELEGRAM_SCHEDULING_ENABLED",
+            False,
+        ),
         max_attachment_bytes=_bounded_int(
             env,
             "CHULK_TELEGRAM_MAX_ATTACHMENT_BYTES",
@@ -73,6 +88,15 @@ def load_telegram_config(
             maximum=20 * 1024 * 1024,
         ),
     )
+
+
+def _timezone(value: str) -> str:
+    clean = value.strip()
+    try:
+        ZoneInfo(clean)
+    except ZoneInfoNotFoundError as exc:
+        raise TelegramConfigError("CHULK_TELEGRAM_TIMEZONE must be a valid IANA timezone") from exc
+    return clean
 
 
 def _parse_env_file(path: Path | None) -> dict[str, str]:
@@ -132,6 +156,18 @@ def _positive_float(env: Mapping[str, str], key: str, default: float) -> float:
     if parsed <= 0:
         raise TelegramConfigError(f"{key} must be greater than zero")
     return parsed
+
+
+def _boolean(env: Mapping[str, str], key: str, default: bool) -> bool:
+    value = env.get(key)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise TelegramConfigError(f"{key} must be true or false")
 
 
 def _bounded_int(

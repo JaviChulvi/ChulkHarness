@@ -7,6 +7,9 @@ API is still pre-1.0.
 
 ## Unreleased
 
+- Add durable, destination-scoped Telegram reminders and recurring tasks with
+  timezone-aware SQLite scheduling and recoverable execution leases.
+
 ### Added
 
 - Added an allowlisted, private-chat-only Telegram adapter with durable

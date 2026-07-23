@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ class FakeClient:
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         self.actions.append((chat_id, action))
 
-    def set_commands(self) -> None:
+    def set_commands(self, _commands=()) -> None:
         self.commands_registered += 1
 
     def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
@@ -101,6 +102,7 @@ def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> Telegra
             bot_token="fake",
             allowed_user_ids=frozenset({7}),
             poll_timeout_seconds=1,
+            scheduling_enabled=True,
         ),
         client=client,  # type: ignore[arg-type]
         agent_factory=factory,
@@ -266,6 +268,46 @@ async def test_bot_registers_telegram_command_menu(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_executes_and_delivers_due_scheduled_job(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+    job = bot.schedule_store.create(
+        adapter="telegram",
+        destination_id="9",
+        prompt="scheduled research",
+        next_run_at=datetime.now(timezone.utc),
+    )
+
+    await bot.run_due_jobs_once()
+
+    assert agents[0].calls[0][0] == "run"
+    message, kwargs = agents[0].calls[0][1]
+    assert message == "scheduled research"
+    assert kwargs["extension_metadata"]["scheduled_job_id"] == job.id
+    assert client.sent == [(9, "answer: scheduled research")]
+    assert bot.schedule_store.get(job.id).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_bot_lists_and_cancels_only_chat_scheduled_jobs(tmp_path: Path) -> None:
+    client = FakeClient()
+    bot = _bot(tmp_path, client, [])
+    job = bot.schedule_store.create(
+        adapter="telegram",
+        destination_id="9",
+        prompt="remind me",
+        next_run_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+
+    await bot.handle_update(_update("/reminders"))
+    assert job.id[:8] in client.sent[-1][1]
+    await bot.handle_update(_update(f"/cancel {job.id[:8]}"))
+    assert "Cancelled" in client.sent[-1][1]
+    assert bot.schedule_store.get(job.id).status == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_default_agent_adds_only_bounded_web_network_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -288,6 +330,7 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
             allowed_user_ids=frozenset({7}),
             tavily_api_key="search-secret",
             web_search_max_results=3,
+            scheduling_enabled=True,
         ),
         client=client,  # type: ignore[arg-type]
     )
@@ -303,6 +346,10 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
             "search_memory",
             "list_memories",
             "summarize_memories",
+            "schedule_task",
+            "current_time",
+            "list_scheduled_tasks",
+            "cancel_scheduled_task",
             "web_search",
         }
         capabilities = captured["capabilities"]
@@ -326,3 +373,31 @@ def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None
 
     assert conversation is not None
     assert conversation.id == "telegram-conversation"
+
+
+def test_scheduling_is_not_added_when_adapter_does_not_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    bot._default_agent_factory(9, None)
+
+    assert bot.schedule_store is None
+    names = {tool.name for tool in captured["tools"]}
+    assert "schedule_task" not in names
+    assert "list_scheduled_tasks" not in names
