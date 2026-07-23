@@ -177,6 +177,19 @@ Acceptance criteria:
 
 These stories are ordered after the maintenance tranche above.
 
+### Selected: Durable Reminders And Recurring Tasks
+
+- [x] Add a channel-neutral SQLite job store with destination isolation.
+- [x] Support one-off and fixed-interval jobs with timezone-aware timestamps.
+- [x] Claim due jobs under short recoverable leases and advance recurring jobs
+  without schedule drift.
+- [x] Bind create/list/cancel tools to the authenticated Telegram chat.
+- [x] Execute due prompts through the normal agent permissions and deliver
+  results to the originating chat.
+- [x] Add deterministic `/reminders` and `/cancel` commands.
+- [x] Cover migration, isolation, claiming, recurrence, tools, execution, and
+  configuration without wall-clock sleeps or network calls.
+
 ### US-N1: Productize Trace Replay And Artifacts
 
 - [ ] Include all stable request, context, memory, skill, permission, tool,

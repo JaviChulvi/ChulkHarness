@@ -275,6 +275,42 @@ def _migrate_to_adapter_cursors(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_scheduled_jobs(conn: sqlite3.Connection) -> None:
+    """Create durable, destination-scoped scheduled jobs."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            id TEXT PRIMARY KEY,
+            adapter TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            next_run_at TEXT NOT NULL,
+            interval_seconds INTEGER,
+            status TEXT NOT NULL DEFAULT 'active',
+            lease_until TEXT,
+            last_run_at TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (interval_seconds IS NULL OR interval_seconds > 0),
+            CHECK (status IN ('active', 'running', 'paused', 'completed', 'cancelled'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due
+        ON scheduled_jobs(status, next_run_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_destination
+        ON scheduled_jobs(adapter, destination_id, created_at)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -314,6 +350,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
     SQLiteMigration(3, "adapter-cursors", _migrate_to_adapter_cursors),
+    SQLiteMigration(4, "scheduled-jobs", _migrate_to_scheduled_jobs),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

@@ -37,6 +37,8 @@ Optional web search uses Tavily and keeps its key in the same ignored `.env`:
 ```dotenv
 CHULK_TAVILY_API_KEY=replace-with-tavily-key
 CHULK_WEB_SEARCH_MAX_RESULTS=5
+CHULK_TELEGRAM_TIMEZONE=Europe/Madrid
+CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS=5
 ```
 
 When configured, the bot adds one bounded `web_search` tool. It submits concise
@@ -64,7 +66,29 @@ while an agent request is running. Available commands are:
 - `/plan <request>` asks the agent to prepare an approval plan.
 - `/approve` approves the pending plan.
 - `/reject` rejects the pending plan.
+- `/reminders` lists active one-off and recurring tasks.
+- `/cancel <task-id>` cancels a task shown by `/reminders`.
 - `/help` displays command help.
+
+## Reminders and recurring tasks
+
+The Telegram agent exposes destination-scoped scheduling tools, so an
+allowlisted user can say, for example, “At 2026-07-24 09:00 remind me to call
+Alex” or “Every 3600 seconds check the project status.” Local date-times use
+`CHULK_TELEGRAM_TIMEZONE`; explicit ISO-8601 offsets take precedence.
+
+Jobs are stored in the shared SQLite database. A short lease prevents two
+runner iterations from deliberately claiming the same job, expired leases are
+recoverable after a crash, and recurring jobs advance from their scheduled
+time rather than accumulating drift. At execution time the stored prompt runs
+through the chat's normal agent with the same tools and permissions, and its
+answer is delivered to that Telegram chat. Failures are sanitized, retained
+for inspection, and retried after a bounded delay.
+
+Scheduling and cancellation are destination-scoped side effects. The Telegram
+permission callback allows only these dedicated scheduling operations; one
+chat cannot list or cancel another chat's jobs. The scheduler does not accept
+cron expressions or arbitrary code.
 
 Long responses are split into Telegram-sized messages. Attachments, voice
 messages, edits, reactions, and group conversations are intentionally ignored

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +201,46 @@ async def test_bot_registers_telegram_command_menu(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bot_executes_and_delivers_due_scheduled_job(tmp_path: Path) -> None:
+    client = FakeClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+    job = bot.schedule_store.create(
+        adapter="telegram",
+        destination_id="9",
+        prompt="scheduled research",
+        next_run_at=datetime.now(timezone.utc),
+    )
+
+    await bot.run_due_jobs_once()
+
+    assert agents[0].calls[0][0] == "run"
+    message, kwargs = agents[0].calls[0][1]
+    assert message == "scheduled research"
+    assert kwargs["extension_metadata"]["scheduled_job_id"] == job.id
+    assert client.sent == [(9, "answer: scheduled research")]
+    assert bot.schedule_store.get(job.id).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_bot_lists_and_cancels_only_chat_scheduled_jobs(tmp_path: Path) -> None:
+    client = FakeClient()
+    bot = _bot(tmp_path, client, [])
+    job = bot.schedule_store.create(
+        adapter="telegram",
+        destination_id="9",
+        prompt="remind me",
+        next_run_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+
+    await bot.handle_update(_update("/reminders"))
+    assert job.id[:8] in client.sent[-1][1]
+    await bot.handle_update(_update(f"/cancel {job.id[:8]}"))
+    assert "Cancelled" in client.sent[-1][1]
+    assert bot.schedule_store.get(job.id).status == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_default_agent_adds_only_bounded_web_network_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -237,6 +278,10 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
             "search_memory",
             "list_memories",
             "summarize_memories",
+            "schedule_task",
+            "current_time",
+            "list_scheduled_tasks",
+            "cancel_scheduled_task",
             "web_search",
         }
         capabilities = captured["capabilities"]

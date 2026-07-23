@@ -17,6 +17,8 @@ TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = (
     ("plan", "Prepare an approval plan"),
     ("approve", "Approve the pending plan"),
     ("reject", "Reject the pending plan"),
+    ("reminders", "List scheduled tasks"),
+    ("cancel", "Cancel a scheduled task"),
     ("help", "Show command help"),
 )
 JsonRequest = Callable[[str, dict[str, object], float], object]

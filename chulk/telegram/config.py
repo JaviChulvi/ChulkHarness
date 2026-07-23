@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class TelegramConfigError(ValueError):
@@ -22,6 +23,8 @@ class TelegramConfig:
     retry_delay_seconds: float = 2.0
     tavily_api_key: str | None = None
     web_search_max_results: int = 5
+    timezone: str = "UTC"
+    scheduler_poll_seconds: float = 5.0
 
 
 def load_telegram_config(
@@ -64,7 +67,22 @@ def load_telegram_config(
             minimum=1,
             maximum=10,
         ),
+        timezone=_timezone(env.get("CHULK_TELEGRAM_TIMEZONE") or "UTC"),
+        scheduler_poll_seconds=_positive_float(
+            env,
+            "CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS",
+            5.0,
+        ),
     )
+
+
+def _timezone(value: str) -> str:
+    clean = value.strip()
+    try:
+        ZoneInfo(clean)
+    except ZoneInfoNotFoundError as exc:
+        raise TelegramConfigError("CHULK_TELEGRAM_TIMEZONE must be a valid IANA timezone") from exc
+    return clean
 
 
 def _parse_env_file(path: Path | None) -> dict[str, str]:
