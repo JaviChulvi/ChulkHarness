@@ -25,6 +25,7 @@ class TelegramConfig:
     web_search_max_results: int = 5
     timezone: str = "UTC"
     scheduler_poll_seconds: float = 5.0
+    scheduling_enabled: bool = False
 
 
 def load_telegram_config(
@@ -72,6 +73,11 @@ def load_telegram_config(
             env,
             "CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS",
             5.0,
+        ),
+        scheduling_enabled=_boolean(
+            env,
+            "CHULK_TELEGRAM_SCHEDULING_ENABLED",
+            False,
         ),
     )
 
@@ -142,6 +148,18 @@ def _positive_float(env: Mapping[str, str], key: str, default: float) -> float:
     if parsed <= 0:
         raise TelegramConfigError(f"{key} must be greater than zero")
     return parsed
+
+
+def _boolean(env: Mapping[str, str], key: str, default: bool) -> bool:
+    value = env.get(key)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise TelegramConfigError(f"{key} must be true or false")
 
 
 def _bounded_int(

@@ -34,7 +34,7 @@ class FakeClient:
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         self.actions.append((chat_id, action))
 
-    def set_commands(self) -> None:
+    def set_commands(self, _commands=()) -> None:
         self.commands_registered += 1
 
 
@@ -97,6 +97,7 @@ def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> Telegra
             bot_token="fake",
             allowed_user_ids=frozenset({7}),
             poll_timeout_seconds=1,
+            scheduling_enabled=True,
         ),
         client=client,  # type: ignore[arg-type]
         agent_factory=factory,
@@ -263,6 +264,7 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
             allowed_user_ids=frozenset({7}),
             tavily_api_key="search-secret",
             web_search_max_results=3,
+            scheduling_enabled=True,
         ),
         client=client,  # type: ignore[arg-type]
     )
@@ -305,3 +307,31 @@ def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None
 
     assert conversation is not None
     assert conversation.id == "telegram-conversation"
+
+
+def test_scheduling_is_not_added_when_adapter_does_not_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    bot._default_agent_factory(9, None)
+
+    assert bot.schedule_store is None
+    names = {tool.name for tool in captured["tools"]}
+    assert "schedule_task" not in names
+    assert "list_scheduled_tasks" not in names

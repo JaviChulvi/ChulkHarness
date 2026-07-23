@@ -184,6 +184,8 @@ These stories are ordered after the maintenance tranche above.
 - [x] Claim due jobs under short recoverable leases and advance recurring jobs
   without schedule drift.
 - [x] Bind create/list/cancel tools to the authenticated Telegram chat.
+- [x] Keep SDK agents unchanged and require adapters to opt in explicitly
+  before scheduling tools or background execution are enabled.
 - [x] Execute due prompts through the normal agent permissions and deliver
   results to the originating chat.
 - [x] Add deterministic `/reminders` and `/cancel` commands.

@@ -13,7 +13,13 @@ from chulk.config import Config
 from chulk.scheduling import SQLiteScheduleStore
 from chulk.scheduling.tools import format_jobs, scheduled_job_tools
 from chulk.sessions import SQLiteSessionStore
-from chulk.telegram.client import TelegramClient, TelegramError, TelegramUpdate
+from chulk.telegram.client import (
+    TELEGRAM_COMMANDS,
+    TELEGRAM_SCHEDULING_COMMANDS,
+    TelegramClient,
+    TelegramError,
+    TelegramUpdate,
+)
 from chulk.telegram.config import TelegramConfig
 from chulk.tools import PermissionDecision, PermissionRequest
 from chulk.tools.permissions import PermissionDecisionRecord
@@ -63,7 +69,11 @@ class TelegramAgentBot:
         self.telegram_config = telegram_config
         self.client = client
         self.session_store = session_store or SQLiteSessionStore(config.store_path)
-        self.schedule_store = schedule_store or SQLiteScheduleStore(config.store_path)
+        self.schedule_store = (
+            schedule_store or SQLiteScheduleStore(config.store_path)
+            if telegram_config.scheduling_enabled
+            else None
+        )
         self._agent_factory = agent_factory or self._default_agent_factory
         self._agents: dict[int, TelegramAgent] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -74,7 +84,8 @@ class TelegramAgentBot:
         scheduler_task: asyncio.Task[None] | None = None
         try:
             await self._prepare_with_retry()
-            scheduler_task = asyncio.create_task(self._scheduler_loop())
+            if self.schedule_store is not None:
+                scheduler_task = asyncio.create_task(self._scheduler_loop())
             while True:
                 try:
                     await self.poll_once()
@@ -160,11 +171,15 @@ class TelegramAgentBot:
         if command == "/reject":
             return await agent.reject()
         if command == "/reminders":
+            if self.schedule_store is None:
+                return "Scheduling is disabled for this Telegram agent."
             return format_jobs(
                 self.schedule_store.list(adapter="telegram", destination_id=str(chat_id)),
                 timezone_name=self.telegram_config.timezone,
             )
         if command == "/cancel":
+            if self.schedule_store is None:
+                return "Scheduling is disabled for this Telegram agent."
             if not arguments:
                 return "Usage: /cancel <task-id>"
             jobs = self.schedule_store.list(adapter="telegram", destination_id=str(chat_id))
@@ -210,13 +225,16 @@ class TelegramAgentBot:
             Tools.search_memory,
             Tools.list_memories,
             Tools.summarize_memories,
-            *scheduled_job_tools(
-                self.schedule_store,
-                adapter="telegram",
-                destination_id=str(chat_id),
-                timezone_name=self.telegram_config.timezone,
-            ),
         ]
+        if self.schedule_store is not None:
+            tool_specs.extend(
+                scheduled_job_tools(
+                    self.schedule_store,
+                    adapter="telegram",
+                    destination_id=str(chat_id),
+                    timezone_name=self.telegram_config.timezone,
+                )
+            )
         if self.telegram_config.tavily_api_key is not None:
             tool_specs.append(
                 tavily_search_tool(
@@ -246,7 +264,10 @@ class TelegramAgentBot:
     async def _prepare_with_retry(self) -> None:
         while True:
             try:
-                await asyncio.to_thread(self.client.set_commands)
+                commands = TELEGRAM_COMMANDS
+                if self.schedule_store is not None:
+                    commands += TELEGRAM_SCHEDULING_COMMANDS
+                await asyncio.to_thread(self.client.set_commands, commands)
                 return
             except TelegramError as exc:
                 LOGGER.warning("Telegram command registration failed: %s", exc)
@@ -276,7 +297,10 @@ class TelegramAgentBot:
 
     async def run_due_jobs_once(self) -> None:
         """Claim and execute one bounded batch of due Telegram jobs."""
-        jobs = await asyncio.to_thread(self.schedule_store.claim_due, adapter="telegram")
+        if self.schedule_store is None:
+            return
+        store = self.schedule_store
+        jobs = await asyncio.to_thread(store.claim_due, adapter="telegram")
         for job in jobs:
             try:
                 chat_id = int(job.destination_id)
@@ -290,11 +314,11 @@ class TelegramAgentBot:
                         },
                     )
                 await self._send(chat_id, response)
-                await asyncio.to_thread(self.schedule_store.complete, job.id)
+                await asyncio.to_thread(store.complete, job.id)
             except Exception as exc:
                 LOGGER.error("Scheduled Telegram job failed (%s)", type(exc).__name__)
                 await asyncio.to_thread(
-                    self.schedule_store.fail,
+                    store.fail,
                     job.id,
                     type(exc).__name__,
                 )
