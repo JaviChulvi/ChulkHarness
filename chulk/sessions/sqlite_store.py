@@ -128,6 +128,43 @@ class SQLiteSessionStore:
                 return record
         return None
 
+    def get_adapter_cursor(self, adapter: str) -> int | None:
+        """Return the durable next-update cursor for an external adapter."""
+        clean_adapter = adapter.strip()
+        if not clean_adapter:
+            raise ValueError("Adapter name cannot be empty")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT cursor FROM adapter_cursors WHERE adapter = ?",
+                (clean_adapter,),
+            ).fetchone()
+        return int(row["cursor"]) if row is not None else None
+
+    def save_adapter_cursor(self, adapter: str, cursor: int) -> int:
+        """Advance an adapter cursor atomically without allowing regression."""
+        clean_adapter = adapter.strip()
+        if not clean_adapter:
+            raise ValueError("Adapter name cannot be empty")
+        if cursor < 0:
+            raise ValueError("Adapter cursor cannot be negative")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO adapter_cursors (adapter, cursor, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(adapter) DO UPDATE SET
+                    cursor = MAX(adapter_cursors.cursor, excluded.cursor),
+                    updated_at = excluded.updated_at
+                """,
+                (clean_adapter, cursor, _utc_now()),
+            )
+            row = conn.execute(
+                "SELECT cursor FROM adapter_cursors WHERE adapter = ?",
+                (clean_adapter,),
+            ).fetchone()
+        assert row is not None
+        return int(row["cursor"])
+
     def latest_conversation(self, *, require_turn: bool = True) -> ConversationRecord | None:
         """Return the most recently updated resumable conversation."""
         where = (

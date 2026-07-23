@@ -11,6 +11,14 @@ from urllib.request import Request, urlopen
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("new", "Start a new conversation"),
+    ("status", "Show provider, model, and conversation"),
+    ("plan", "Prepare an approval plan"),
+    ("approve", "Approve the pending plan"),
+    ("reject", "Reject the pending plan"),
+    ("help", "Show command help"),
+)
 JsonRequest = Callable[[str, dict[str, object], float], object]
 
 
@@ -81,6 +89,18 @@ class TelegramClient:
         """Send text, splitting it at Telegram's message boundary."""
         for part in split_message(text):
             self._call("sendMessage", {"chat_id": chat_id, "text": part})
+
+    def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        """Show a short-lived activity indicator in one chat."""
+        self._call("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def set_commands(self) -> None:
+        """Register the adapter's command menu with Telegram."""
+        commands = [
+            {"command": command, "description": description}
+            for command, description in TELEGRAM_COMMANDS
+        ]
+        self._call("setMyCommands", {"commands": commands})
 
     def _call(
         self,

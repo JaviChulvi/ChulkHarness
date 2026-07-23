@@ -262,6 +262,19 @@ def _migrate_to_unique_message_ordinals(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_adapter_cursors(conn: sqlite3.Connection) -> None:
+    """Create durable cursors for polling-based external adapters."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adapter_cursors (
+            adapter TEXT PRIMARY KEY,
+            cursor INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -300,6 +313,7 @@ def _backfill_memory_tags(conn: sqlite3.Connection) -> None:
 SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
+    SQLiteMigration(3, "adapter-cursors", _migrate_to_adapter_cursors),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

@@ -1,6 +1,7 @@
 """Tests for durable conversation sessions."""
 
 import json
+from pathlib import Path
 import sqlite3
 
 import chulk.main as main_module
@@ -2029,3 +2030,10 @@ def test_cli_context_command_shows_latest_prompt_report(monkeypatch, tmp_path, c
     assert "estimated" in output
     assert "sections" in output
     assert "Conversation history" in output
+def test_adapter_cursor_is_durable_and_never_regresses(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+
+    assert store.get_adapter_cursor("telegram") is None
+    assert store.save_adapter_cursor("telegram", 42) == 42
+    assert store.save_adapter_cursor("telegram", 20) == 42
+    assert SQLiteSessionStore(tmp_path / "store.sqlite").get_adapter_cursor("telegram") == 42
