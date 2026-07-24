@@ -12,7 +12,7 @@ from chulk import MemoryMode
 from chulk.config import load_config
 from chulk.sessions import SessionRecorder, SQLiteSessionStore
 from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
-from chulk.telegram.client import TelegramAttachment, TelegramUpdate
+from chulk.telegram.client import TelegramAttachment, TelegramError, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
 
 
@@ -25,6 +25,7 @@ class FakeClient:
         self.requested_offsets: list[int | None] = []
         self.commands_registered = 0
         self.downloads: list[tuple[str, int]] = []
+        self.ignored_updates: tuple[tuple[int, str], ...] = ()
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int):
         assert timeout_seconds == 1
@@ -82,9 +83,15 @@ def _config(tmp_path: Path):
     )
 
 
-def _update(text: str, *, user_id: int = 7, chat_type: str = "private") -> TelegramUpdate:
+def _update(
+    text: str,
+    *,
+    update_id: int = 1,
+    user_id: int = 7,
+    chat_type: str = "private",
+) -> TelegramUpdate:
     return TelegramUpdate(
-        update_id=1,
+        update_id=update_id,
         chat_id=9,
         user_id=user_id,
         text=text,
@@ -257,6 +264,184 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
     restarted_bot = _bot(tmp_path, restarted_client, [])
     await restarted_bot.poll_once()
     assert restarted_client.requested_offsets == [100]
+
+
+@pytest.mark.asyncio
+async def test_poll_retry_after_send_failure_does_not_repeat_agent_execution(
+    tmp_path: Path,
+) -> None:
+    class FailingOnceClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__((_update("change remote state"),))
+            self.fail_next_send = True
+
+        def send_message(self, chat_id: int, text: str) -> None:
+            if self.fail_next_send:
+                self.fail_next_send = False
+                raise TelegramError("send failed")
+            super().send_message(chat_id, text)
+
+    client = FailingOnceClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    with pytest.raises(TelegramError, match="send failed"):
+        await bot.poll_once()
+    assert len(agents[0].calls) == 1
+    assert bot._offset is None
+    assert bot.update_ledger.get(adapter="telegram", update_id=1).status == "executed"
+
+    await bot.poll_once()
+
+    assert len(agents[0].calls) == 1
+    assert client.sent == [(9, "answer: change remote state")]
+    assert bot.update_ledger.get(adapter="telegram", update_id=1).status == "delivered"
+    assert bot._offset == 100
+
+
+@pytest.mark.asyncio
+async def test_restart_delivers_recorded_response_without_reexecuting_update(
+    tmp_path: Path,
+) -> None:
+    class AlwaysFailingClient(FakeClient):
+        def send_message(self, chat_id: int, text: str) -> None:
+            raise TelegramError("offline")
+
+    update = _update("one execution")
+    first_agents: list[FakeAgent] = []
+    first_bot = _bot(tmp_path, AlwaysFailingClient((update,)), first_agents)
+    with pytest.raises(TelegramError, match="offline"):
+        await first_bot.poll_once()
+    assert len(first_agents[0].calls) == 1
+
+    second_agents: list[FakeAgent] = []
+    second_client = FakeClient((update,))
+    restarted = _bot(tmp_path, second_client, second_agents)
+    await restarted.poll_once()
+
+    assert second_agents == []
+    assert second_client.sent == [(9, "answer: one execution")]
+    assert restarted.update_ledger.get(adapter="telegram", update_id=1).status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_multipart_retry_resumes_after_last_delivery_checkpoint(tmp_path: Path) -> None:
+    class LongAgent(FakeAgent):
+        async def run(self, message: str, **kwargs: object) -> str:
+            self.calls.append(("run", (message, kwargs)))
+            return "x" * 5_000
+
+    class SecondPartFailsOnceClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__((_update("long"),))
+            self.send_attempts = 0
+
+        def send_message(self, chat_id: int, text: str) -> None:
+            self.send_attempts += 1
+            if self.send_attempts == 2:
+                raise TelegramError("second part failed")
+            super().send_message(chat_id, text)
+
+    agents: list[LongAgent] = []
+
+    def factory(chat_id: int, conversation_id: str | None) -> LongAgent:
+        agent = LongAgent(conversation_id or f"long-{chat_id}")
+        agents.append(agent)
+        return agent
+
+    client = SecondPartFailsOnceClient()
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            poll_timeout_seconds=1,
+        ),
+        client=client,  # type: ignore[arg-type]
+        agent_factory=factory,
+    )
+
+    with pytest.raises(TelegramError, match="second part failed"):
+        await bot.poll_once()
+    await bot.poll_once()
+
+    assert len(agents) == 1
+    assert len(agents[0].calls) == 1
+    assert [len(text) for _chat_id, text in client.sent] == [4096, 904]
+    assert client.send_attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bot_does_not_execute_or_advance_an_active_update(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingAgent(FakeAgent):
+        async def run(self, message: str, **kwargs: object) -> str:
+            self.calls.append(("run", (message, kwargs)))
+            started.set()
+            await release.wait()
+            return "done"
+
+    first_agents: list[BlockingAgent] = []
+
+    def blocking_factory(chat_id: int, conversation_id: str | None) -> BlockingAgent:
+        agent = BlockingAgent(conversation_id or f"blocking-{chat_id}")
+        first_agents.append(agent)
+        return agent
+
+    update = _update("only once")
+    first = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            poll_timeout_seconds=1,
+        ),
+        client=FakeClient((update,)),  # type: ignore[arg-type]
+        agent_factory=blocking_factory,
+    )
+    second_agents: list[FakeAgent] = []
+    second = _bot(tmp_path, FakeClient((update,)), second_agents)
+
+    first_poll = asyncio.create_task(first.poll_once())
+    await started.wait()
+    await second.poll_once()
+
+    assert second_agents == []
+    assert second._offset is None
+    release.set()
+    await first_poll
+    assert len(first_agents[0].calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_retains_unauthorized_update_as_ignored(tmp_path: Path) -> None:
+    client = FakeClient((_update("no", user_id=99),))
+    bot = _bot(tmp_path, client, [])
+
+    await bot.poll_once()
+
+    record = bot.update_ledger.get(adapter="telegram", update_id=1)
+    assert record is not None
+    assert record.status == "ignored"
+    assert bot._offset == 100
+
+
+@pytest.mark.asyncio
+async def test_poll_retains_unsupported_update_as_ignored(tmp_path: Path) -> None:
+    client = FakeClient()
+    client.ignored_updates = ((4, "9"),)
+    bot = _bot(tmp_path, client, [])
+
+    await bot.poll_once()
+
+    record = bot.update_ledger.get(adapter="telegram", update_id=4)
+    assert record is not None
+    assert record.status == "ignored"
+    assert record.destination_id == "9"
 
 
 @pytest.mark.asyncio

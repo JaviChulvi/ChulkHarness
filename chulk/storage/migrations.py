@@ -330,6 +330,46 @@ def _migrate_to_claim_owned_scheduled_jobs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_adapter_update_ledger(conn: sqlite3.Connection) -> None:
+    """Create durable execution and response-delivery state for adapter updates."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adapter_updates (
+            adapter TEXT NOT NULL,
+            update_id INTEGER NOT NULL,
+            destination_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response_parts TEXT NOT NULL DEFAULT '[]',
+            next_response_part INTEGER NOT NULL DEFAULT 0,
+            execution_token TEXT,
+            execution_lease_until TEXT,
+            delivery_token TEXT,
+            delivery_lease_until TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            executed_at TEXT,
+            delivered_at TEXT,
+            PRIMARY KEY (adapter, update_id),
+            CHECK (update_id >= 0),
+            CHECK (next_response_part >= 0),
+            CHECK (
+                status IN (
+                    'processing', 'executed', 'delivering',
+                    'delivered', 'ignored'
+                )
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_adapter_updates_outbox
+        ON adapter_updates(adapter, status, updated_at)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -371,6 +411,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(3, "adapter-cursors", _migrate_to_adapter_cursors),
     SQLiteMigration(4, "scheduled-jobs", _migrate_to_scheduled_jobs),
     SQLiteMigration(5, "claim-owned-scheduled-jobs", _migrate_to_claim_owned_scheduled_jobs),
+    SQLiteMigration(6, "adapter-update-ledger", _migrate_to_adapter_update_ledger),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

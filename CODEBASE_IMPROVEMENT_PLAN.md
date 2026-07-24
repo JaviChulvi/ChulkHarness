@@ -2200,7 +2200,7 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | Unit | Status | Commit | Validation | Deviations | Remaining limitations |
 | --- | --- | --- | --- | --- | --- |
 | 1. Claim-owned scheduled-job state machine | Completed | This commit | Full suite: 1,036 passed; focused Ruff and compileall passed | None | External Telegram delivery remains intentionally at-least-once |
-| 2. Durable Telegram update execution ledger | Pending | Pending | Pending | None | Pending implementation |
+| 2. Durable Telegram update execution ledger | Completed | This commit | Full suite: 1,050 passed; 60 focused tests, focused Ruff, mypy, and compileall passed | None | Telegram send outcomes remain at-least-once; ambiguous execution is quarantined instead of replayed |
 | 3. Transactional patch commit | Pending | Pending | Pending | None | Pending implementation |
 | 4. Private trace filesystem policy | Pending | Pending | Pending | None | Pending implementation |
 | 5. Fatal safety transition | Pending | Pending | Pending | None | Pending implementation |

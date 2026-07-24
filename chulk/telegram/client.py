@@ -72,6 +72,7 @@ class TelegramClient:
         self._request_binary = request_binary or _request_binary
         self._request_timeout_seconds = request_timeout_seconds
         self.next_offset: int | None = None
+        self.ignored_updates: tuple[tuple[int, str], ...] = ()
 
     def get_updates(
         self,
@@ -94,14 +95,20 @@ class TelegramClient:
         if not isinstance(result, list):
             raise TelegramError("Telegram getUpdates returned an invalid result")
         updates: list[TelegramUpdate] = []
+        ignored_updates: list[tuple[int, str]] = []
         for item in result:
+            update_id: int | None = None
             if isinstance(item, dict):
-                update_id = item.get("update_id")
-                if isinstance(update_id, int):
-                    self.next_offset = max(self.next_offset or 0, update_id + 1)
+                raw_update_id = item.get("update_id")
+                if isinstance(raw_update_id, int):
+                    update_id = raw_update_id
+                    self.next_offset = max(self.next_offset or 0, raw_update_id + 1)
             update = _parse_text_update(item)
             if update is not None:
                 updates.append(update)
+            elif update_id is not None:
+                ignored_updates.append((update_id, _unsupported_destination(item)))
+        self.ignored_updates = tuple(ignored_updates)
         return tuple(updates)
 
     def send_message(self, chat_id: int, text: str) -> None:
@@ -220,6 +227,19 @@ def _parse_text_update(value: object) -> TelegramUpdate | None:
         chat_type=chat_type,
         attachment=attachment,
     )
+
+
+def _unsupported_destination(value: object) -> str:
+    if not isinstance(value, dict):
+        return "unknown"
+    message = value.get("message")
+    if not isinstance(message, dict):
+        return "unknown"
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return "unknown"
+    chat_id = chat.get("id")
+    return str(chat_id) if isinstance(chat_id, int) else "unknown"
 
 
 def _parse_attachment(message: dict[str, object]) -> TelegramAttachment | None:

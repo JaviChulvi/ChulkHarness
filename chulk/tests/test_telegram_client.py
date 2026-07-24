@@ -41,6 +41,7 @@ def test_get_updates_extracts_only_text_messages() -> None:
     }
     assert calls[0][2] >= 35
     assert client.next_offset == 9
+    assert client.ignored_updates == ((8, "11"),)
 
 
 def test_send_message_splits_long_responses() -> None:

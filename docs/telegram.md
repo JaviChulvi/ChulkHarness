@@ -135,10 +135,19 @@ understanding. Unknown binaries, archives, and executable formats are rejected
 before download. Attachment-derived text is injected as untrusted, turn-scoped
 external context and can never grant permissions or override instructions.
 
-The next Telegram polling offset is stored in SQLite after each handled update
-and never moves backward, preventing normal service restarts from replaying old
-messages. Delivery remains at-least-once: a process failure after sending a
-reply but before saving its cursor can cause Telegram to redeliver that update.
+Before the next Telegram polling offset advances, each supported update is
+recorded in a durable SQLite execution ledger. One update can create at most
+one agent turn: response text is committed to an outbox before delivery, so a
+send failure or restart retries the response without repeating model or tool
+effects. Multi-part replies checkpoint each confirmed part. A crash during an
+uncheckpointed execution is reported as uncertain and is not automatically
+re-run. Unsupported and unauthorized update ids are retained as ignored
+terminal records. Delivered and ignored entries are retained for 30 days and
+then purged in bounded batches.
+
+Bot API delivery itself remains at-least-once. If the network outcome of one
+`sendMessage` call is ambiguous, that response part can still be duplicated;
+the ledger does not claim impossible exactly-once external messaging.
 
 ## Run continuously with systemd
 

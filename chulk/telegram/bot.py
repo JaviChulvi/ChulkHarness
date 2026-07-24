@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Protocol
 
@@ -20,8 +21,10 @@ from chulk.telegram.client import (
     TelegramClient,
     TelegramError,
     TelegramUpdate,
+    split_message,
 )
 from chulk.telegram.config import TelegramConfig
+from chulk.telegram.ledger import SQLiteAdapterUpdateLedger
 from chulk.telegram.media import (
     TelegramMediaError,
     TelegramMediaProcessor,
@@ -39,6 +42,9 @@ TELEGRAM_CURSOR_NAME = "telegram"
 TELEGRAM_TYPING_REFRESH_SECONDS = 4.0
 SCHEDULE_LEASE_SECONDS = 120
 SCHEDULE_LEASE_RENEW_SECONDS = 40.0
+UPDATE_EXECUTION_LEASE_SECONDS = 300
+UPDATE_EXECUTION_RENEW_SECONDS = 100.0
+UPDATE_LEDGER_RETENTION_DAYS = 30
 
 
 class TelegramAgent(Protocol):
@@ -74,6 +80,7 @@ class TelegramAgentBot:
         agent_factory: AgentFactory | None = None,
         schedule_store: SQLiteScheduleStore | None = None,
         media_processor: TelegramMediaProcessor | None = None,
+        update_ledger: SQLiteAdapterUpdateLedger | None = None,
     ) -> None:
         self.config = config
         self.telegram_config = telegram_config
@@ -86,6 +93,7 @@ class TelegramAgentBot:
         )
         self._agent_factory = agent_factory or self._default_agent_factory
         self._media_processor = media_processor
+        self.update_ledger = update_ledger or SQLiteAdapterUpdateLedger(config.store_path)
         self._agents: dict[int, TelegramAgent] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._offset = self.session_store.get_adapter_cursor(TELEGRAM_CURSOR_NAME)
@@ -117,23 +125,88 @@ class TelegramAgentBot:
             offset=self._offset,
             timeout_seconds=self.telegram_config.poll_timeout_seconds,
         )
+        for update_id, destination_id in getattr(self.client, "ignored_updates", ()):
+            await asyncio.to_thread(
+                self.update_ledger.ignore,
+                adapter=TELEGRAM_CURSOR_NAME,
+                update_id=update_id,
+                destination_id=destination_id,
+            )
+        all_recorded = True
         for update in updates:
             if self._offset is not None and update.update_id < self._offset:
                 continue
-            await self.handle_update(update)
+            if not await self._handle_polled_update(update):
+                all_recorded = False
+                break
             self._save_offset(update.update_id + 1)
-        if self.client.next_offset is not None:
+        if all_recorded and self.client.next_offset is not None:
             self._save_offset(self.client.next_offset)
+        await asyncio.to_thread(
+            self.update_ledger.purge_terminal,
+            before=datetime.now(timezone.utc) - timedelta(days=UPDATE_LEDGER_RETENTION_DAYS),
+        )
 
     async def handle_update(self, update: TelegramUpdate) -> None:
-        """Handle one authorized private text message."""
+        """Handle one update directly without changing the polling ledger."""
+        response = await self._response_for_update(update)
+        if response is not None:
+            await self._send(update.chat_id, response)
+
+    async def _handle_polled_update(self, update: TelegramUpdate) -> bool:
+        """Execute a polled update once and retry only its durable response."""
+        if update.user_id not in self.telegram_config.allowed_user_ids:
+            await asyncio.to_thread(
+                self.update_ledger.ignore,
+                adapter=TELEGRAM_CURSOR_NAME,
+                update_id=update.update_id,
+                destination_id=str(update.chat_id),
+            )
+            LOGGER.warning("Ignored Telegram message from unauthorized user id %s", update.user_id)
+            return True
+
+        claim = await asyncio.to_thread(
+            self.update_ledger.begin_execution,
+            adapter=TELEGRAM_CURSOR_NAME,
+            update_id=update.update_id,
+            destination_id=str(update.chat_id),
+            lease_seconds=UPDATE_EXECUTION_LEASE_SECONDS,
+        )
+        if claim.should_execute:
+            assert claim.execution_token is not None
+            renewal_task = asyncio.create_task(
+                self._renew_update_execution(update.update_id, claim.execution_token)
+            )
+            try:
+                response = await self._response_for_update(update)
+                assert response is not None
+                recorded = await asyncio.to_thread(
+                    self.update_ledger.record_response,
+                    adapter=TELEGRAM_CURSOR_NAME,
+                    update_id=update.update_id,
+                    execution_token=claim.execution_token,
+                    response_parts=split_message(response),
+                )
+            finally:
+                renewal_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await renewal_task
+            if not recorded:
+                LOGGER.warning("Telegram update execution lost its durable claim")
+                return False
+        elif claim.record.status == "processing":
+            return False
+        elif claim.record.status in {"delivered", "ignored"}:
+            return True
+
+        return await self._deliver_polled_response(update.update_id)
+
+    async def _response_for_update(self, update: TelegramUpdate) -> str | None:
         if update.user_id not in self.telegram_config.allowed_user_ids:
             LOGGER.warning("Ignored Telegram message from unauthorized user id %s", update.user_id)
-            return
+            return None
         if update.chat_type != "private":
-            await self._send(update.chat_id, "For safety, this bot only works in private chats.")
-            return
-
+            return "For safety, this bot only works in private chats."
         await self._send_typing_once(update.chat_id)
         typing_task = asyncio.create_task(self._refresh_typing(update.chat_id))
         try:
@@ -159,7 +232,65 @@ class TelegramAgentBot:
             typing_task.cancel()
             with suppress(asyncio.CancelledError):
                 await typing_task
-        await self._send(update.chat_id, response)
+        return response
+
+    async def _renew_update_execution(self, update_id: int, execution_token: str) -> None:
+        while True:
+            await asyncio.sleep(UPDATE_EXECUTION_RENEW_SECONDS)
+            renewed = await asyncio.to_thread(
+                self.update_ledger.renew_execution,
+                adapter=TELEGRAM_CURSOR_NAME,
+                update_id=update_id,
+                execution_token=execution_token,
+                lease_seconds=UPDATE_EXECUTION_LEASE_SECONDS,
+            )
+            if not renewed:
+                LOGGER.warning("Telegram update execution renewal lost its claim")
+                return
+
+    async def _deliver_polled_response(self, update_id: int) -> bool:
+        claimed = await asyncio.to_thread(
+            self.update_ledger.claim_delivery,
+            adapter=TELEGRAM_CURSOR_NAME,
+            update_id=update_id,
+        )
+        if claimed is None:
+            current = await asyncio.to_thread(
+                self.update_ledger.get,
+                adapter=TELEGRAM_CURSOR_NAME,
+                update_id=update_id,
+            )
+            return current is not None and current.status in {"delivered", "ignored"}
+        assert claimed.delivery_token is not None
+        try:
+            for part_index in range(
+                claimed.next_response_part,
+                len(claimed.response_parts),
+            ):
+                await self._send(
+                    int(claimed.destination_id),
+                    claimed.response_parts[part_index],
+                )
+                checkpointed = await asyncio.to_thread(
+                    self.update_ledger.mark_response_part_delivered,
+                    adapter=TELEGRAM_CURSOR_NAME,
+                    update_id=update_id,
+                    delivery_token=claimed.delivery_token,
+                    expected_part=part_index,
+                )
+                if not checkpointed:
+                    LOGGER.warning("Telegram response delivery lost its durable claim")
+                    return False
+        except TelegramError as exc:
+            await asyncio.to_thread(
+                self.update_ledger.release_delivery,
+                adapter=TELEGRAM_CURSOR_NAME,
+                update_id=update_id,
+                delivery_token=claimed.delivery_token,
+                error=type(exc).__name__,
+            )
+            raise
+        return True
 
     async def _process_attachment(
         self,
