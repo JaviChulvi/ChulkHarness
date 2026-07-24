@@ -1,6 +1,7 @@
 """Tool implementations and registry primitives."""
 
 from chulk.tools.builtins import create_default_tool_registry
+from chulk.tools.artifacts import read_trace_artifact_tool
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import (
     FileReadPolicy,
@@ -49,6 +50,7 @@ from chulk.tools.public import (
     list_files,
     list_memories,
     read_file,
+    read_trace_artifact,
     restore_memory,
     run_cmd,
     save_memory,
@@ -110,6 +112,8 @@ __all__ = [
     "list_memories_tool",
     "read_file",
     "read_file_tool",
+    "read_trace_artifact",
+    "read_trace_artifact_tool",
     "restore_memory",
     "restore_memory_tool",
     "run_cmd",

@@ -40,6 +40,7 @@ from chulk.tools.permissions import (
     permission_policy_for_profile,
 )
 from chulk.tracing import JSONLTraceLogger
+from chulk.tracing.artifacts import TraceArtifactStore
 
 
 class LLMClientFactory(Protocol):
@@ -60,6 +61,7 @@ class RuntimeToolContext:
     shell_execution_policy: ShellExecutionPolicy | None = None
     require_shell_containment: bool = False
     memory_store: SQLiteMemoryStore | None = None
+    artifact_store: TraceArtifactStore | None = None
     deps: object | None = None
 
 
@@ -183,6 +185,7 @@ def create_agent(
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
+        artifact_store=trace_logger.artifact_store,
     )
     if active_mcp_servers:
         trace_logger.log(
@@ -534,6 +537,7 @@ def _create_tool_registry(
     deps: object | None,
     shell_execution_policy: ShellExecutionPolicy | None,
     require_shell_containment: bool,
+    artifact_store: TraceArtifactStore,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -562,6 +566,7 @@ def _create_tool_registry(
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
         memory_store=memory_store,
+        artifact_store=artifact_store,
         deps=deps,
     )
     registry = ToolRegistry()

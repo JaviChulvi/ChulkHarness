@@ -18,6 +18,35 @@ writing. Symlink and non-regular trace, artifact, and export targets are
 rejected instead of followed. Deferred loggers preserve lazy behavior and do
 not create a trace file until their activation event.
 
+## Opaque artifact reads
+
+When a tool result exceeds the model-facing output limit, its full text is
+stored under an opaque `art_<id>` reference. Observations and result metadata
+contain the id, byte/character counts, and SHA-256 digest, never a filesystem
+path. General file tools continue to reject trace and artifact paths.
+
+Hosts can retrieve evidence through the conversation-bound API:
+
+```python
+view = agent.read_artifact(
+    artifact_id,
+    mode="head_tail",  # also: head, tail, slice
+    max_bytes=8192,
+)
+```
+
+Reads validate the private manifest owner, fixed id-derived filename, regular
+file type, recorded size, maximum integrity-read size, and SHA-256 digest
+before returning content. A response is always bounded to at most 65,536 source
+bytes and reports the returned ranges and whether content was omitted.
+`slice` additionally accepts a non-negative byte offset.
+
+Applications may explicitly expose `Tools.read_trace_artifact` to the model.
+It is not in the default tool set: adding the tool is the host capability
+decision, and normal read permission policy still applies. The tool is bound
+to the current conversation, so an id from another trace, a forged id, a path,
+or a tampered/missing artifact fails closed.
+
 Action-request trace payloads identify `action_transport`, the effective native
 tool names, and a bounded provider-neutral declaration snapshot. The context
 report separates message tokens from out-of-band native declaration overhead.

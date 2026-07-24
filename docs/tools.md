@@ -104,6 +104,27 @@ This policy does not sandbox shell commands or custom tools; applications must
 disable or separately constrain those capabilities when file confidentiality is
 required.
 
+## Trace artifact reader
+
+`Tools.read_trace_artifact` is a separate, opt-in read capability for output
+that Chulk truncated and stored beside the active trace. It accepts only an
+opaque artifact id, never a path, and is bound by runtime assembly to the
+agent's current conversation. Reads validate ownership, file type, size, and
+hash, then return a bounded head, tail, head/tail, or byte slice.
+
+The tool is intentionally absent from default tool registries. A host must add
+it explicitly and its normal read permission policy still applies:
+
+```python
+agent = Agent(
+    llm=client,
+    tools=[Tools.read_trace_artifact],
+)
+```
+
+This capability does not grant general trace access and does not weaken the
+built-in file-read deny list.
+
 ## Structured output
 
 Declare an object output schema with `output_schema=` or `ToolOutputPolicy`.

@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
-import re
 from threading import RLock
 from time import monotonic
 from typing import Any
-from uuid import uuid4
 
 from chulk.redaction import redact_data
 from chulk.storage.private_files import prepare_private_directory, write_private_text
+from chulk.tracing.artifacts import (
+    ArtifactRead,
+    ArtifactReadMode,
+    DEFAULT_ARTIFACT_READ_BYTES,
+    TraceArtifactStore,
+)
 
 
 TRACE_SCHEMA_VERSION = 1
@@ -64,6 +67,11 @@ class JSONLTraceLogger:
         prepare_private_directory(self.traces_dir)
         self.path = self.traces_dir / f"{clean_conversation_id}.jsonl"
         self.artifacts_dir = self.traces_dir / f"{clean_conversation_id}_artifacts"
+        self.artifact_store = TraceArtifactStore(
+            self.traces_dir,
+            clean_conversation_id,
+            create=True,
+        )
         resumed = self.path.exists()
         self._defer_until_event = defer_until_event
         self._active = defer_until_event is None
@@ -173,16 +181,23 @@ class JSONLTraceLogger:
             if self._closed:
                 raise RuntimeError("Trace logger is closed")
             self.activate()
-            prepare_private_directory(self.artifacts_dir)
-            safe_name = _safe_artifact_name(name)
-            path = self.artifacts_dir / f"{safe_name}-{uuid4().hex}.txt"
-            write_private_text(path, content, overwrite=False)
-            return {
-                "path": str(path),
-                "char_count": len(content),
-                "byte_count": len(content.encode("utf-8")),
-                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-            }
+            return self.artifact_store.write(name, content).reference()
+
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> ArtifactRead:
+        """Read one validated, conversation-owned artifact view."""
+        return self.artifact_store.read(
+            artifact_id,
+            mode=mode,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
 
 
 def _validate_conversation_id(conversation_id: str) -> str:
@@ -221,12 +236,6 @@ def _add_turn_timing(payload: dict[str, Any], started_at: float | None) -> dict[
 
 def _duration_ms(started_at: float) -> float:
     return round(max(0.0, (monotonic() - started_at) * 1000), 3)
-
-
-def _safe_artifact_name(name: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip())
-    safe = safe.strip(".-")
-    return safe or "artifact"
 
 
 __all__ = ["JSONLTraceLogger", "TRACE_SCHEMA_VERSION", "TraceEvent"]

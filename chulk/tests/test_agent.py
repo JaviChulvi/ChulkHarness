@@ -3,8 +3,6 @@
 import asyncio
 from decimal import Decimal
 import json
-from pathlib import Path
-
 from chulk.core import Agent, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
@@ -2483,7 +2481,11 @@ def test_agent_truncates_tool_output_but_preserves_full_artifact(tmp_path):
     observation = agent.state.observations[0]["observation"]
     output_metadata = agent.state.observations[0]["output_metadata"]
     stdout_artifact = next(artifact for artifact in output_metadata["artifacts"] if artifact["field"] == "stdout")
-    artifact_text = Path(stdout_artifact["path"]).read_text(encoding="utf-8")
+    artifact_text = trace_logger.read_artifact(
+        stdout_artifact["artifact_id"],
+        mode="head",
+        max_bytes=20_000,
+    ).content
     trace_text = trace_logger.path.read_text(encoding="utf-8")
 
     assert response == "Reviewed."
@@ -2540,7 +2542,11 @@ def test_agent_preserves_artifact_when_full_observation_is_truncated(tmp_path):
     observation_artifact = next(
         artifact for artifact in output_metadata["artifacts"] if artifact["field"] == "observation"
     )
-    artifact_text = Path(observation_artifact["path"]).read_text(encoding="utf-8")
+    artifact_text = trace_logger.read_artifact(
+        observation_artifact["artifact_id"],
+        mode="head",
+        max_bytes=20_000,
+    ).content
 
     assert len(observation) <= 500
     assert "full observation saved" in observation

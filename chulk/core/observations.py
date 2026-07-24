@@ -146,7 +146,7 @@ def _append_artifact_note(
 
 def _artifact_note(field: str, artifact: dict[str, Any]) -> str:
     return (
-        f"[full {field} saved to {artifact['path']}; "
+        f"[full {field} saved as trace artifact {artifact['artifact_id']}; "
         f"chars={artifact['char_count']}; sha256={artifact['sha256']}]"
     )
 

@@ -31,6 +31,10 @@ from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
+from chulk.tracing.artifacts import (
+    ArtifactReadMode,
+    DEFAULT_ARTIFACT_READ_BYTES,
+)
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
@@ -207,6 +211,25 @@ class AgentHandle:
             return
         self._closed = True
         self.runtime.close()
+
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        """Return a bounded artifact view owned by this conversation."""
+        logger = self.runtime.trace_logger
+        if logger is None:
+            raise RuntimeError("Trace artifacts are unavailable")
+        return logger.read_artifact(
+            artifact_id,
+            mode=mode,
+            offset=offset,
+            max_bytes=max_bytes,
+        ).to_dict()
 
     async def aclose(self) -> None:
         """Close owned runtime resources exactly once from an async host."""
@@ -555,6 +578,25 @@ class Agent:
 
         return self._invoke("list_memory_proposals", operation)
 
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        """Read one bounded artifact view through the agent ownership boundary."""
+        return self._invoke(
+            "read_artifact",
+            lambda: self._handle.read_artifact(
+                artifact_id,
+                mode=mode,
+                offset=offset,
+                max_bytes=max_bytes,
+            ),
+        )
+
     def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         """Approve one pending memory proposal."""
         def operation() -> MemoryProposal:
@@ -724,6 +766,22 @@ class AsyncAgent:
 
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
+
+    async def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._agent.read_artifact,
+            artifact_id,
+            mode=mode,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
 
     async def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         return await asyncio.to_thread(self._agent.approve_memory_proposal, proposal_id)

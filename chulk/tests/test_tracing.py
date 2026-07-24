@@ -112,12 +112,14 @@ def test_logger_repairs_private_trace_and_artifact_modes(tmp_path):
 
     artifact = logger.write_artifact("full output", "sensitive")
     logger.close()
-    artifact_path = Path(artifact["path"])
+    artifact_path = logger.artifacts_dir / f"{artifact['artifact_id']}.txt"
 
     assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
     assert stat.S_IMODE(trace_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(logger.artifacts_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(artifact_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(logger.artifact_store.manifest_path.stat().st_mode) == 0o600
+    assert "path" not in artifact
 
 
 @pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
