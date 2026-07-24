@@ -69,6 +69,8 @@ class HostedOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
         max_retries: int = 2,
         client: Any | None = None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         normalized_model = _required_value(model, "model", provider=self.provider)
         normalized_api_key = _required_value(
@@ -92,6 +94,8 @@ class HostedOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
             max_retries=max_retries,
             client=client,
             async_client=async_client,
+            owns_client=owns_client,
+            owns_async_client=owns_async_client,
         )
 
 
@@ -113,6 +117,8 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
         max_retries: int = 2,
         client: Any | None = None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         normalized_model = _required_value(model, "model", provider=self.provider)
         normalized_api_key = _required_value(
@@ -131,6 +137,7 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
             site_url=site_url, app_name=app_name
         )
         build_sync_client = client is None
+        build_async_client = async_client is None and build_sync_client
         if build_sync_client and self.default_headers:
             client = _openai_sdk_client(
                 api_key=normalized_api_key,
@@ -158,6 +165,12 @@ class OpenRouterChatCompletionsClient(OpenAICompatibleChatCompletionsClient):
             max_retries=max_retries,
             client=client,
             async_client=async_client,
+            owns_client=build_sync_client if owns_client is None else owns_client,
+            owns_async_client=(
+                build_async_client
+                if owns_async_client is None
+                else owns_async_client
+            ),
         )
 
 

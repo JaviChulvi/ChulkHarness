@@ -62,6 +62,30 @@ def test_mcp_config_parses_streamable_http_server(tmp_path):
         ({"servers": [{"label": "docs", "transport": "stdio", "server_url": "https://mcp.example"}]}, "unsupported transport"),
         ({"servers": [{"label": "docs", "server_url": "file:///tmp/server"}]}, "http"),
         ({"servers": [{"label": "docs", "server_url": "https://mcp.example", "authorization_env": "MISSING"}]}, "MISSING"),
+        (
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example",
+                        "authorization": "Bearer literal-secret",
+                    }
+                ]
+            },
+            "authorization_env",
+        ),
+        (
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example",
+                        "headers": {"X-API-Key": "literal-secret"},
+                    }
+                ]
+            },
+            "authorization_env",
+        ),
     ],
 )
 def test_mcp_config_validation_errors(tmp_path, payload, message):

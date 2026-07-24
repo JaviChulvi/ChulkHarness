@@ -7,16 +7,22 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 import json
+import os
 from pathlib import Path
+import stat
 from string import Template
 from typing import Any
 
 from chulk.errors import ErrorDetails, TraceError
+from chulk.tracing.artifacts import TraceArtifactStore
 from chulk.tracing.logger import TRACE_SCHEMA_VERSION
 
 
 LEGACY_TRACE_SCHEMA_VERSION = 0
 SUPPORTED_TRACE_SCHEMA_VERSIONS = frozenset({LEGACY_TRACE_SCHEMA_VERSION, TRACE_SCHEMA_VERSION})
+DEFAULT_TRACE_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_TRACE_MAX_EVENTS = 100_000
+DEFAULT_TRACE_MAX_LINE_BYTES = 4 * 1024 * 1024
 _FAILURE_EVENT_TYPES = {"turn_failed", "tool_call_failed", "model_stream_failed"}
 _TURN_SCOPED_EVENT_TYPES = {
     "context_summary_created",
@@ -111,88 +117,163 @@ class Trace:
 
     path: Path
     events: tuple[TraceRecord, ...]
+    source_byte_count: int = 0
+    limits_applied: bool = True
 
     @classmethod
-    def from_jsonl(cls, path: Path | str) -> "Trace":
-        trace_path = Path(path).expanduser().resolve()
-        if not trace_path.exists():
-            raise TraceFormatError(f"Trace file does not exist: {trace_path}", trace_path=trace_path)
-        if not trace_path.is_file():
-            raise TraceFormatError(f"Trace path is not a file: {trace_path}", trace_path=trace_path)
-
-        try:
-            trace_text = trace_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise TraceFormatError(
-                f"Trace file is not valid UTF-8: {trace_path}",
-                trace_path=trace_path,
-            ) from exc
+    def from_jsonl(
+        cls,
+        path: Path | str,
+        *,
+        max_bytes: int | None = None,
+        max_events: int | None = None,
+        unbounded: bool = False,
+    ) -> "Trace":
+        trace_path = Path(path).expanduser().absolute()
+        byte_limit = DEFAULT_TRACE_MAX_BYTES if max_bytes is None else max_bytes
+        event_limit = DEFAULT_TRACE_MAX_EVENTS if max_events is None else max_events
+        if byte_limit < 1:
+            raise ValueError("trace max_bytes must be greater than zero")
+        if event_limit < 1:
+            raise ValueError("trace max_events must be greater than zero")
 
         events: list[TraceRecord] = []
         active_turn_id: str | None = None
         versioned_conversation_id: str | None = None
-        for line_number, raw_line in enumerate(trace_text.splitlines(), start=1):
-            if not raw_line.strip():
-                continue
-            value = _parse_json_line(raw_line, line_number=line_number, trace_path=trace_path)
-            schema_version = _schema_version(value, line_number=line_number, trace_path=trace_path)
-            event_type = _event_type(value, line_number=line_number, trace_path=trace_path)
-            payload = _event_payload(value, line_number=line_number, trace_path=trace_path)
-            timestamp = _event_timestamp(
-                value,
-                schema_version=schema_version,
-                line_number=line_number,
-                trace_path=trace_path,
-            )
-            conversation_id = _event_conversation_id(
-                value,
-                payload,
-                schema_version=schema_version,
-                default=trace_path.stem,
-                line_number=line_number,
-                trace_path=trace_path,
-            )
-            if schema_version > LEGACY_TRACE_SCHEMA_VERSION:
-                if versioned_conversation_id is None:
-                    versioned_conversation_id = conversation_id
-                elif conversation_id != versioned_conversation_id:
-                    raise TraceFormatError(
-                        f"Trace line {line_number} changes conversation_id from "
-                        f"{versioned_conversation_id!r} to {conversation_id!r}",
+        descriptor, source_byte_count = _open_trace(
+            trace_path,
+            max_bytes=byte_limit,
+            unbounded=unbounded,
+        )
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                line_number = 0
+                bytes_read = 0
+                while True:
+                    raw_line = (
+                        stream.readline()
+                        if unbounded
+                        else stream.readline(DEFAULT_TRACE_MAX_LINE_BYTES + 1)
+                    )
+                    if not raw_line:
+                        break
+                    line_number += 1
+                    bytes_read += len(raw_line)
+                    if not unbounded and bytes_read > byte_limit:
+                        raise TraceFormatError(
+                            f"Trace exceeds the {byte_limit}-byte parse limit; "
+                            "raise --max-bytes or pass --unbounded as a trusted operator",
+                            trace_path=trace_path,
+                        )
+                    if not unbounded and len(raw_line) > DEFAULT_TRACE_MAX_LINE_BYTES:
+                        raise TraceFormatError(
+                            f"Trace line {line_number} exceeds the "
+                            f"{DEFAULT_TRACE_MAX_LINE_BYTES}-byte line limit",
+                            trace_path=trace_path,
+                        )
+                    try:
+                        text_line = raw_line.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise TraceFormatError(
+                            f"Trace line {line_number} is not valid UTF-8",
+                            trace_path=trace_path,
+                        ) from exc
+                    if not text_line.strip():
+                        continue
+                    if not unbounded and len(events) >= event_limit:
+                        raise TraceFormatError(
+                            f"Trace exceeds the {event_limit}-event parse limit; "
+                            "raise --max-events or pass --unbounded as a trusted operator",
+                            trace_path=trace_path,
+                        )
+                    value = _parse_json_line(
+                        text_line,
+                        line_number=line_number,
                         trace_path=trace_path,
                     )
+                    schema_version = _schema_version(
+                        value,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    event_type = _event_type(
+                        value,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    payload = _event_payload(
+                        value,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    timestamp = _event_timestamp(
+                        value,
+                        schema_version=schema_version,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    conversation_id = _event_conversation_id(
+                        value,
+                        payload,
+                        schema_version=schema_version,
+                        default=trace_path.stem,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    if schema_version > LEGACY_TRACE_SCHEMA_VERSION:
+                        if versioned_conversation_id is None:
+                            versioned_conversation_id = conversation_id
+                        elif conversation_id != versioned_conversation_id:
+                            raise TraceFormatError(
+                                f"Trace line {line_number} changes conversation_id from "
+                                f"{versioned_conversation_id!r} to {conversation_id!r}",
+                                trace_path=trace_path,
+                            )
 
-            turn_id = _event_turn_id(
-                value,
-                payload,
-                event_type=event_type,
-                schema_version=schema_version,
-                active_turn_id=active_turn_id,
-                line_number=line_number,
-                trace_path=trace_path,
-            )
-            if event_type == "turn_started" and turn_id is not None:
-                active_turn_id = turn_id
-            events.append(
-                TraceRecord(
-                    schema_version=schema_version,
-                    conversation_id=conversation_id,
-                    type=event_type,
-                    payload=payload,
-                    timestamp=timestamp,
-                    line_number=line_number,
-                    turn_id=turn_id,
-                )
-            )
-            if event_type == "turn_finished" and turn_id == active_turn_id:
-                active_turn_id = None
+                    turn_id = _event_turn_id(
+                        value,
+                        payload,
+                        event_type=event_type,
+                        schema_version=schema_version,
+                        active_turn_id=active_turn_id,
+                        line_number=line_number,
+                        trace_path=trace_path,
+                    )
+                    if event_type == "turn_started" and turn_id is not None:
+                        active_turn_id = turn_id
+                    events.append(
+                        TraceRecord(
+                            schema_version=schema_version,
+                            conversation_id=conversation_id,
+                            type=event_type,
+                            payload=payload,
+                            timestamp=timestamp,
+                            line_number=line_number,
+                            turn_id=turn_id,
+                        )
+                    )
+                    if event_type == "turn_finished" and turn_id == active_turn_id:
+                        active_turn_id = None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
         if not events:
             raise TraceFormatError(f"Trace file contains no events: {trace_path}", trace_path=trace_path)
-        return cls(path=trace_path, events=tuple(events))
+        return cls(
+            path=trace_path,
+            events=tuple(events),
+            source_byte_count=source_byte_count,
+            limits_applied=not unbounded,
+        )
 
     def summary(self) -> dict[str, Any]:
         counts = Counter(event.type for event in self.events)
+        artifacts = self.artifact_manifest()
+        artifact_integrity = Counter(
+            str(item.get("integrity") or "unknown") for item in artifacts
+        )
         final_answer = None
         conversation_id = _trace_conversation_id(self.path, self.events)
         usage: dict[str, Any] | None = None
@@ -212,6 +293,8 @@ class Trace:
                 event.schema_version == LEGACY_TRACE_SCHEMA_VERSION for event in self.events
             ),
             "event_count": len(self.events),
+            "source_byte_count": self.source_byte_count,
+            "limits_applied": self.limits_applied,
             "session_count": counts.get("session_started", 0),
             "turn_count": counts.get("turn_started", 0),
             "started_at": self.events[0].timestamp,
@@ -221,7 +304,23 @@ class Trace:
             "failure_count": sum(counts.get(event_type, 0) for event_type in _FAILURE_EVENT_TYPES),
             "final_answer": final_answer,
             "usage": usage,
+            "artifact_count": len(artifacts),
+            "artifact_total_bytes": sum(
+                int(item["byte_count"])
+                for item in artifacts
+                if isinstance(item.get("byte_count"), int)
+            ),
+            "artifact_integrity": dict(sorted(artifact_integrity.items())),
+            "artifacts": artifacts,
         }
+
+    def artifact_manifest(self) -> list[dict[str, Any]]:
+        """Return integrity status for artifacts owned by this trace."""
+        conversation_id = _trace_conversation_id(self.path, self.events)
+        return TraceArtifactStore(
+            self.path.parent,
+            conversation_id,
+        ).inventory()
 
     def replay(self) -> dict[str, Any]:
         """Deterministically reconstruct a trace without executing runtime work."""
@@ -309,6 +408,16 @@ class Trace:
                 f"<pre>{payload}</pre>"
                 "</details>"
             )
+        artifact_rows = []
+        for artifact in summary["artifacts"]:
+            artifact_rows.append(
+                "<tr>"
+                f"<td>{escape(str(artifact.get('artifact_id') or 'unknown'))}</td>"
+                f"<td>{escape(str(artifact.get('label') or 'unknown'))}</td>"
+                f"<td>{escape(str(artifact.get('byte_count') or 0))}</td>"
+                f"<td>{escape(str(artifact.get('integrity') or 'unknown'))}</td>"
+                "</tr>"
+            )
         final_answer = summary.get("final_answer") or "No final answer recorded."
         template = Template("""<!doctype html>
 <html lang="en">
@@ -329,6 +438,8 @@ class Trace:
     summary { display: flex; justify-content: space-between; gap: 16px; padding: 12px; cursor: pointer; }
     time { color: #a9b8ac; font-size: 0.85rem; }
     pre { margin: 0; padding: 14px; overflow: auto; border-top: 1px solid #315438; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 24px; }
+    th, td { padding: 10px; border: 1px solid #315438; text-align: left; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -345,6 +456,12 @@ class Trace:
   <pre>$final_answer</pre>
   <h2>Events</h2>
   $event_rows
+  <h2>Artifacts</h2>
+  <p class="notice">Inventory only; artifact content is not embedded.</p>
+  <table>
+    <thead><tr><th>Id</th><th>Label</th><th>Bytes</th><th>Integrity</th></tr></thead>
+    <tbody>$artifact_rows</tbody>
+  </table>
 </body>
 </html>
 """)
@@ -356,7 +473,53 @@ class Trace:
             failure_count=str(summary["failure_count"]),
             final_answer=escape(str(final_answer)),
             event_rows="\n".join(event_rows),
+            artifact_rows="\n".join(artifact_rows),
         )
+
+
+def _open_trace(
+    trace_path: Path,
+    *,
+    max_bytes: int,
+    unbounded: bool,
+) -> tuple[int, int]:
+    try:
+        mode = trace_path.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise TraceFormatError(
+            f"Trace file does not exist: {trace_path}",
+            trace_path=trace_path,
+        ) from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise TraceFormatError(
+            f"Trace path is not a regular file: {trace_path}",
+            trace_path=trace_path,
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(trace_path, flags)
+    except OSError as exc:
+        raise TraceFormatError(
+            f"Trace file could not be opened safely: {trace_path}",
+            trace_path=trace_path,
+        ) from exc
+    file_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(file_stat.st_mode):
+        os.close(descriptor)
+        raise TraceFormatError(
+            f"Trace path is not a regular file: {trace_path}",
+            trace_path=trace_path,
+        )
+    if not unbounded and file_stat.st_size > max_bytes:
+        os.close(descriptor)
+        raise TraceFormatError(
+            f"Trace exceeds the {max_bytes}-byte parse limit; "
+            "raise --max-bytes or pass --unbounded as a trusted operator",
+            trace_path=trace_path,
+        )
+    return descriptor, file_stat.st_size
 
 
 def _parse_json_line(raw_line: str, *, line_number: int, trace_path: Path) -> dict[str, Any]:
@@ -673,6 +836,9 @@ def _elapsed_ms(started_at: str, ended_at: str) -> float | None:
 
 
 __all__ = [
+    "DEFAULT_TRACE_MAX_BYTES",
+    "DEFAULT_TRACE_MAX_EVENTS",
+    "DEFAULT_TRACE_MAX_LINE_BYTES",
     "LEGACY_TRACE_SCHEMA_VERSION",
     "SUPPORTED_TRACE_SCHEMA_VERSIONS",
     "Trace",

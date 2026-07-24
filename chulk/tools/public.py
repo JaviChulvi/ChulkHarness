@@ -11,6 +11,7 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
+from chulk.tools.artifacts import read_trace_artifact_tool
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
@@ -179,6 +180,15 @@ def _memory_tool(factory: Callable[[Any], Tool]) -> Callable[[Any], Tool]:
     return bind
 
 
+def _artifact_tool(factory: Callable[[Any], Tool]) -> Callable[[Any], Tool]:
+    def bind(context: Any) -> Tool:
+        if context.artifact_store is None:
+            raise ValueError("Trace artifact tool requires a bound artifact store")
+        return factory(context)
+
+    return bind
+
+
 calculator = ToolRef("calculator", lambda _context: calculator_tool())
 run_cmd = ToolRef(
     "run_cmd",
@@ -196,6 +206,12 @@ apply_patch = ToolRef("apply_patch", lambda context: apply_patch_tool(context.pr
 write_file = ToolRef("write_file", lambda context: write_file_tool(context.project_root))
 list_files = ToolRef("list_files", lambda context: list_files_tool(context.project_root))
 search_files = ToolRef("search_files", lambda context: search_files_tool(context.project_root))
+read_trace_artifact = ToolRef(
+    "read_trace_artifact",
+    _artifact_tool(
+        lambda context: read_trace_artifact_tool(context.artifact_store)
+    ),
+)
 save_memory = ToolRef("save_memory", _memory_tool(lambda context: save_memory_tool(context.memory_store)))
 search_memory = ToolRef("search_memory", _memory_tool(lambda context: search_memory_tool(context.memory_store)))
 list_memories = ToolRef("list_memories", _memory_tool(lambda context: list_memories_tool(context.memory_store)))
@@ -584,6 +600,7 @@ __all__ = [
     "list_files",
     "list_memories",
     "read_file",
+    "read_trace_artifact",
     "restore_memory",
     "run_cmd",
     "save_memory",

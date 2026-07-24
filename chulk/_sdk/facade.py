@@ -31,6 +31,10 @@ from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
+from chulk.tracing.artifacts import (
+    ArtifactReadMode,
+    DEFAULT_ARTIFACT_READ_BYTES,
+)
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
@@ -207,6 +211,32 @@ class AgentHandle:
             return
         self._closed = True
         self.runtime.close()
+
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        """Return a bounded artifact view owned by this conversation."""
+        logger = self.runtime.trace_logger
+        if logger is None:
+            raise RuntimeError("Trace artifacts are unavailable")
+        return logger.read_artifact(
+            artifact_id,
+            mode=mode,
+            offset=offset,
+            max_bytes=max_bytes,
+        ).to_dict()
+
+    async def aclose(self) -> None:
+        """Close owned runtime resources exactly once from an async host."""
+        if self._closed:
+            return
+        self._closed = True
+        await self.runtime.aclose()
 
     def __enter__(self) -> "AgentHandle":
         self._ensure_open()
@@ -407,7 +437,7 @@ class AsyncAgentHandle:
         return await asyncio.to_thread(self.handle.reject_result, on_delta=on_delta, on_event=on_event)
 
     async def close(self) -> None:
-        self.handle.close()
+        await self.handle.aclose()
 
     async def __aenter__(self) -> "AsyncAgentHandle":
         self.handle._ensure_open()
@@ -438,6 +468,7 @@ class Agent:
         redaction_fail_closed: bool = False,
         capabilities: Capabilities | None = None,
         memory_mode: MemoryMode | str | None = None,
+        memory_namespace: str | None = None,
         deps: object | None = None,
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
@@ -459,6 +490,7 @@ class Agent:
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,
                 capabilities=selected_capabilities,
+                memory_namespace=memory_namespace,
                 deps=deps,
                 shell_execution_policy=shell_execution_policy,
                 require_shell_containment=require_shell_containment,
@@ -545,6 +577,25 @@ class Agent:
             return tuple(memory_proposal_snapshot(item) for item in policy.list_pending())
 
         return self._invoke("list_memory_proposals", operation)
+
+    def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        """Read one bounded artifact view through the agent ownership boundary."""
+        return self._invoke(
+            "read_artifact",
+            lambda: self._handle.read_artifact(
+                artifact_id,
+                mode=mode,
+                offset=offset,
+                max_bytes=max_bytes,
+            ),
+        )
 
     def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         """Approve one pending memory proposal."""
@@ -716,6 +767,22 @@ class AsyncAgent:
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
 
+    async def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._agent.read_artifact,
+            artifact_id,
+            mode=mode,
+            offset=offset,
+            max_bytes=max_bytes,
+        )
+
     async def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         return await asyncio.to_thread(self._agent.approve_memory_proposal, proposal_id)
 
@@ -829,6 +896,7 @@ def _build_handle(
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
+    memory_namespace: str | None = None,
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
@@ -850,6 +918,7 @@ def _build_handle(
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,
         capabilities=capabilities,
+        memory_namespace=_selected_memory_namespace(config, memory_namespace),
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
@@ -870,6 +939,17 @@ def _selected_capabilities(
     if memory_mode is not None:
         selected = selected.with_memory(memory_mode)
     return selected
+
+
+def _selected_memory_namespace(
+    config: Config | AgentConfig | None,
+    memory_namespace: str | None,
+) -> str | None:
+    if memory_namespace is not None:
+        return memory_namespace
+    if isinstance(config, AgentConfig):
+        return config.memory_namespace
+    return None
 
 
 def agent(**kwargs: Any) -> Agent:

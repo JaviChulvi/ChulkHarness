@@ -14,7 +14,12 @@ from uuid import uuid4
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory.extraction import extract_memory_candidates
 from chulk.memory.markdown import parse_markdown_memory_line as _parse_markdown_memory_line
-from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord, MemoryRecord
+from chulk.memory.models import (
+    MemoryExtractionCandidate,
+    MemoryProposalRecord,
+    MemoryRecord,
+    normalize_memory_namespace,
+)
 from chulk.memory.security import ensure_memory_payload_safe
 from chulk.memory.retrieval import (
     choose_memory_to_keep as _choose_memory_to_keep,
@@ -43,8 +48,9 @@ from chulk.storage import initialize_sqlite_database, sqlite_connection
 class SQLiteMemoryStore:
     """Small SQLite store for durable user, project, and preference memories."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, namespace: str | None = None) -> None:
         self.db_path = Path(db_path)
+        self.namespace = normalize_memory_namespace(namespace)
         self.fts_enabled = False
         self.initialize()
 
@@ -117,7 +123,11 @@ class SQLiteMemoryStore:
         """Persist one normalized memory inside the caller's transaction."""
         ensure_memory_payload_safe(content=content, tags=tags, metadata=metadata, source=source)
         if dedupe:
-            duplicate = _find_duplicate_memory_in_connection(conn, content)
+            duplicate = _find_duplicate_memory_in_connection(
+                conn,
+                content,
+                namespace=self.namespace,
+            )
             if duplicate is not None:
                 next_tags = _merge_tags(duplicate.tags, tags)
                 next_metadata = {**duplicate.metadata, **metadata}
@@ -134,7 +144,7 @@ class SQLiteMemoryStore:
                     UPDATE memories
                     SET updated_at = ?, tags = ?, metadata = ?, importance = ?,
                         source = ?, confidence = ?, embedding = ?, archived_at = NULL
-                    WHERE id = ?
+                    WHERE id = ? AND namespace = ?
                     """,
                     (
                         _utc_now(),
@@ -145,6 +155,7 @@ class SQLiteMemoryStore:
                         max(duplicate.confidence, confidence),
                         json.dumps(next_embedding),
                         duplicate.id,
+                        self.namespace,
                     ),
                 )
                 _replace_memory_tags(conn, duplicate.id, next_tags)
@@ -156,6 +167,7 @@ class SQLiteMemoryStore:
                     tags=next_tags,
                     metadata=next_metadata,
                     source=next_source,
+                    namespace=self.namespace,
                 )
                 return duplicate.id
 
@@ -165,9 +177,10 @@ class SQLiteMemoryStore:
             """
             INSERT INTO memories (
                 id, content, created_at, updated_at, tags, metadata, importance,
-                source, confidence, embedding, archived_at, access_count, last_accessed_at
+                source, confidence, embedding, archived_at, access_count,
+                last_accessed_at, namespace
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)
             """,
             (
                 memory_id,
@@ -180,6 +193,7 @@ class SQLiteMemoryStore:
                 source,
                 confidence,
                 json.dumps(embedding),
+                self.namespace,
             ),
         )
         _replace_memory_tags(conn, memory_id, tags)
@@ -191,6 +205,7 @@ class SQLiteMemoryStore:
             tags=tags,
             metadata=metadata,
             source=source,
+            namespace=self.namespace,
         )
         return memory_id
 
@@ -210,7 +225,10 @@ class SQLiteMemoryStore:
         """Update an existing memory. Returns False when the id is unknown."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM memories WHERE id = ? AND namespace = ?",
+                (memory_id, self.namespace),
+            ).fetchone()
             if row is None:
                 return False
             existing = _row_to_memory(row)
@@ -240,7 +258,7 @@ class SQLiteMemoryStore:
                 UPDATE memories
                 SET content = ?, updated_at = ?, tags = ?, metadata = ?, importance = ?,
                     source = ?, confidence = ?, embedding = ?, archived_at = ?
-                WHERE id = ?
+                WHERE id = ? AND namespace = ?
                 """,
                 (
                     next_content,
@@ -253,6 +271,7 @@ class SQLiteMemoryStore:
                     json.dumps(next_embedding),
                     next_archived_at,
                     memory_id,
+                    self.namespace,
                 ),
             )
             _replace_memory_tags(conn, memory_id, next_tags)
@@ -264,6 +283,7 @@ class SQLiteMemoryStore:
                 tags=next_tags,
                 metadata=next_metadata,
                 source=next_source,
+                namespace=self.namespace,
             )
         return cursor.rowcount > 0
 
@@ -271,8 +291,12 @@ class SQLiteMemoryStore:
         """Restore an archived memory."""
         with self._connect() as conn:
             cursor = conn.execute(
-                "UPDATE memories SET archived_at = NULL, updated_at = ? WHERE id = ? AND archived_at IS NOT NULL",
-                (_utc_now(), memory_id),
+                """
+                UPDATE memories
+                SET archived_at = NULL, updated_at = ?
+                WHERE id = ? AND namespace = ? AND archived_at IS NOT NULL
+                """,
+                (_utc_now(), memory_id, self.namespace),
             )
         return cursor.rowcount > 0
 
@@ -280,7 +304,13 @@ class SQLiteMemoryStore:
         """Return one memory by id."""
         archived_filter = "" if include_archived else " AND archived_at IS NULL"
         with self._connect() as conn:
-            row = conn.execute(f"SELECT * FROM memories WHERE id = ?{archived_filter}", (memory_id,)).fetchone()
+            row = conn.execute(
+                f"""
+                SELECT * FROM memories
+                WHERE id = ? AND namespace = ?{archived_filter}
+                """,
+                (memory_id, self.namespace),
+            ).fetchone()
         return _row_to_memory(row) if row else None
 
     def search_memory(
@@ -335,15 +365,17 @@ class SQLiteMemoryStore:
         clean_embedding = _normalize_embedding(embedding)
         if clean_embedding is None:
             return []
-        archived_filter = "" if include_archived else "WHERE archived_at IS NULL"
+        archived_filter = "" if include_archived else "AND archived_at IS NULL"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM memories
+                WHERE namespace = ?
                 {archived_filter}
                 ORDER BY importance DESC, confidence DESC, updated_at DESC
                 LIMIT 1000
-                """
+                """,
+                (self.namespace,),
             ).fetchall()
         records = [_row_to_memory(row) for row in rows]
         scored = [
@@ -371,12 +403,13 @@ class SQLiteMemoryStore:
                 SELECT DISTINCT memories.*
                 FROM memories
                 JOIN memory_tags ON memory_tags.memory_id = memories.id
-                WHERE memory_tags.tag IN ({",".join("?" for _ in clean_tags)})
+                WHERE memories.namespace = ?
+                  AND memory_tags.tag IN ({",".join("?" for _ in clean_tags)})
                 {archived_filter}
                 ORDER BY memories.confidence DESC, memories.importance DESC, memories.updated_at DESC
                 LIMIT ?
                 """,
-                (*clean_tags, clean_limit),
+                (self.namespace, *clean_tags, clean_limit),
             ).fetchall()
 
         results = [_row_to_memory(row) for row in rows]
@@ -391,33 +424,46 @@ class SQLiteMemoryStore:
     def list_memories(self, limit: int = 50, *, include_archived: bool = False) -> list[MemoryRecord]:
         """List newest memories first, weighted by importance."""
         clean_limit = _normalize_limit(limit)
-        archived_filter = "" if include_archived else "WHERE archived_at IS NULL"
+        archived_filter = "" if include_archived else "AND archived_at IS NULL"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM memories
+                WHERE namespace = ?
                 {archived_filter}
                 ORDER BY importance DESC, confidence DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (clean_limit,),
+                (self.namespace, clean_limit),
             ).fetchall()
         return [_row_to_memory(row) for row in rows]
 
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory by id."""
         with self._connect() as conn:
-            conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
-            _delete_memory_fts(conn, enabled=self.fts_enabled, memory_id=memory_id)
-            cursor = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            cursor = conn.execute(
+                "DELETE FROM memories WHERE id = ? AND namespace = ?",
+                (memory_id, self.namespace),
+            )
+            if cursor.rowcount:
+                _delete_memory_fts(
+                    conn,
+                    enabled=self.fts_enabled,
+                    memory_id=memory_id,
+                    namespace=self.namespace,
+                )
         return cursor.rowcount > 0
 
     def archive_memory(self, memory_id: str) -> bool:
         """Archive a memory without deleting it."""
         with self._connect() as conn:
             cursor = conn.execute(
-                "UPDATE memories SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL",
-                (_utc_now(), _utc_now(), memory_id),
+                """
+                UPDATE memories
+                SET archived_at = ?, updated_at = ?
+                WHERE id = ? AND namespace = ? AND archived_at IS NULL
+                """,
+                (_utc_now(), _utc_now(), memory_id, self.namespace),
             )
         return cursor.rowcount > 0
 
@@ -431,9 +477,9 @@ class SQLiteMemoryStore:
                 """
                 UPDATE memories
                 SET archived_at = ?, updated_at = ?
-                WHERE updated_at < ? AND archived_at IS NULL
+                WHERE namespace = ? AND updated_at < ? AND archived_at IS NULL
                 """,
-                (_utc_now(), _utc_now(), cutoff),
+                (_utc_now(), _utc_now(), self.namespace, cutoff),
             )
         return cursor.rowcount
 
@@ -449,10 +495,10 @@ class SQLiteMemoryStore:
                 """
                 UPDATE memories
                 SET importance = max(1, importance - ?), updated_at = ?
-                WHERE archived_at IS NULL
+                WHERE namespace = ? AND archived_at IS NULL
                   AND (last_accessed_at IS NULL OR last_accessed_at < ?)
                 """,
-                (amount, _utc_now(), cutoff),
+                (amount, _utc_now(), self.namespace, cutoff),
             )
         return cursor.rowcount
 
@@ -543,9 +589,10 @@ class SQLiteMemoryStore:
                 """
                 INSERT INTO memory_proposals (
                     id, content, tags, metadata, importance, source, confidence,
-                    evidence, conversation_id, turn_id, status, created_at
+                    evidence, conversation_id, turn_id, status, created_at,
+                    namespace
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     proposal_id,
@@ -559,6 +606,7 @@ class SQLiteMemoryStore:
                     conversation_id,
                     turn_id,
                     _utc_now(),
+                    self.namespace,
                 ),
             )
         return proposal_id
@@ -567,11 +615,11 @@ class SQLiteMemoryStore:
         """List durable proposals, newest first."""
         if status is not None and status not in {"pending", "approved", "rejected"}:
             raise ValueError("proposal status must be pending, approved, rejected, or None")
-        query = "SELECT * FROM memory_proposals"
-        parameters: tuple[object, ...] = ()
+        query = "SELECT * FROM memory_proposals WHERE namespace = ?"
+        parameters: tuple[object, ...] = (self.namespace,)
         if status is not None:
-            query += " WHERE status = ?"
-            parameters = (status,)
+            query += " AND status = ?"
+            parameters = (self.namespace, status)
         query += " ORDER BY created_at DESC"
         with self._connect() as conn:
             rows = conn.execute(query, parameters).fetchall()
@@ -579,14 +627,26 @@ class SQLiteMemoryStore:
 
     def get_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+            row = conn.execute(
+                """
+                SELECT * FROM memory_proposals
+                WHERE id = ? AND namespace = ?
+                """,
+                (proposal_id, self.namespace),
+            ).fetchone()
         return _row_to_memory_proposal(row) if row is not None else None
 
     def approve_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord:
         """Accept one pending proposal and persist it as a retrievable memory."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+            row = conn.execute(
+                """
+                SELECT * FROM memory_proposals
+                WHERE id = ? AND namespace = ?
+                """,
+                (proposal_id, self.namespace),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown memory proposal: {proposal_id}")
             proposal = _row_to_memory_proposal(row)
@@ -615,13 +675,16 @@ class SQLiteMemoryStore:
                 """
                 UPDATE memory_proposals
                 SET status = 'approved', reviewed_at = ?, accepted_memory_id = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND namespace = ? AND status = 'pending'
                 """,
-                (_utc_now(), memory_id, proposal_id),
+                (_utc_now(), memory_id, proposal_id, self.namespace),
             )
             approved_row = conn.execute(
-                "SELECT * FROM memory_proposals WHERE id = ?",
-                (proposal_id,),
+                """
+                SELECT * FROM memory_proposals
+                WHERE id = ? AND namespace = ?
+                """,
+                (proposal_id, self.namespace),
             ).fetchone()
             assert approved_row is not None
             return _row_to_memory_proposal(approved_row)
@@ -630,7 +693,13 @@ class SQLiteMemoryStore:
         """Reject one pending proposal without creating a memory."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)).fetchone()
+            row = conn.execute(
+                """
+                SELECT * FROM memory_proposals
+                WHERE id = ? AND namespace = ?
+                """,
+                (proposal_id, self.namespace),
+            ).fetchone()
             if row is None:
                 raise KeyError(f"Unknown memory proposal: {proposal_id}")
             proposal = _row_to_memory_proposal(row)
@@ -640,13 +709,16 @@ class SQLiteMemoryStore:
                 """
                 UPDATE memory_proposals
                 SET status = 'rejected', reviewed_at = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND namespace = ? AND status = 'pending'
                 """,
-                (_utc_now(), proposal_id),
+                (_utc_now(), proposal_id, self.namespace),
             )
             rejected_row = conn.execute(
-                "SELECT * FROM memory_proposals WHERE id = ?",
-                (proposal_id,),
+                """
+                SELECT * FROM memory_proposals
+                WHERE id = ? AND namespace = ?
+                """,
+                (proposal_id, self.namespace),
             ).fetchone()
             assert rejected_row is not None
             return _row_to_memory_proposal(rejected_row)
@@ -726,12 +798,19 @@ class SQLiteMemoryStore:
                     FROM memories_fts
                     JOIN memories ON memories.id = memories_fts.memory_id
                     WHERE memories_fts MATCH ?
+                      AND memories_fts.namespace = ?
+                      AND memories.namespace = ?
                     {archived_filter}
                     ORDER BY bm25(memories_fts), memories.importance DESC,
                              memories.confidence DESC, memories.updated_at DESC
                     LIMIT ?
                     """,
-                    (fts_query, clean_limit),
+                    (
+                        fts_query,
+                        self.namespace,
+                        self.namespace,
+                        clean_limit,
+                    ),
                 ).fetchall()
         except sqlite3.OperationalError:
             return []
@@ -747,10 +826,13 @@ class SQLiteMemoryStore:
         like_values = [f"%{term}%" for term in terms]
         clauses = " OR ".join(["lower(content || ' ' || tags || ' ' || metadata || ' ' || source) LIKE ?"] * len(like_values))
         archived_filter = "" if include_archived else "AND archived_at IS NULL"
-        sql = f"SELECT * FROM memories WHERE ({clauses}) {archived_filter}"
+        sql = (
+            f"SELECT * FROM memories "
+            f"WHERE namespace = ? AND ({clauses}) {archived_filter}"
+        )
 
         with self._connect() as conn:
-            rows = conn.execute(sql, like_values).fetchall()
+            rows = conn.execute(sql, (self.namespace, *like_values)).fetchall()
 
         scored = [(_score_memory(_row_to_memory(row), terms), _row_to_memory(row)) for row in rows]
         scored = [(score, memory) for score, memory in scored if score > 0]
@@ -767,9 +849,12 @@ class SQLiteMemoryStore:
                 """
                 UPDATE memories
                 SET access_count = access_count + 1, last_accessed_at = ?
-                WHERE id = ?
+                WHERE id = ? AND namespace = ?
                 """,
-                [(_utc_now(), memory_id) for memory_id in memory_ids],
+                [
+                    (_utc_now(), memory_id, self.namespace)
+                    for memory_id in memory_ids
+                ],
             )
 
     @contextmanager
@@ -820,6 +905,7 @@ def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
         archived_at=row["archived_at"],
         access_count=row["access_count"],
         last_accessed_at=row["last_accessed_at"],
+        namespace=normalize_memory_namespace(row["namespace"]),
     )
 
 
@@ -839,6 +925,7 @@ def _row_to_memory_proposal(row: sqlite3.Row) -> MemoryProposalRecord:
         created_at=row["created_at"],
         reviewed_at=row["reviewed_at"],
         accepted_memory_id=row["accepted_memory_id"],
+        namespace=normalize_memory_namespace(row["namespace"]),
     )
 
 
@@ -846,6 +933,7 @@ def _find_duplicate_memory_in_connection(
     conn: sqlite3.Connection,
     content: str,
     *,
+    namespace: str,
     threshold: float = 0.90,
 ) -> MemoryRecord | None:
     """Find an active duplicate without leaving the current transaction."""
@@ -853,10 +941,11 @@ def _find_duplicate_memory_in_connection(
     rows = conn.execute(
         """
         SELECT * FROM memories
-        WHERE archived_at IS NULL
+        WHERE namespace = ? AND archived_at IS NULL
         ORDER BY importance DESC, confidence DESC, updated_at DESC
         LIMIT 1000
-        """
+        """,
+        (namespace,),
     ).fetchall()
     for row in rows:
         candidate = _row_to_memory(row)
@@ -869,10 +958,23 @@ def _find_duplicate_memory_in_connection(
 
 def _ensure_fts(conn: sqlite3.Connection) -> bool:
     try:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(memories_fts)")
+        }
+        if columns and "namespace" not in columns:
+            conn.execute("DROP TABLE memories_fts")
         conn.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
-            USING fts5(memory_id UNINDEXED, content, tags, metadata, source)
+            USING fts5(
+                memory_id UNINDEXED,
+                namespace UNINDEXED,
+                content,
+                tags,
+                metadata,
+                source
+            )
             """
         )
     except sqlite3.OperationalError:
@@ -897,22 +999,49 @@ def _replace_memory_fts(
     tags: list[str],
     metadata: dict[str, Any],
     source: str,
+    namespace: str,
 ) -> None:
     if not enabled:
         return
-    _delete_memory_fts(conn, enabled=enabled, memory_id=memory_id)
+    _delete_memory_fts(
+        conn,
+        enabled=enabled,
+        memory_id=memory_id,
+        namespace=namespace,
+    )
     conn.execute(
         """
-        INSERT INTO memories_fts (memory_id, content, tags, metadata, source)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO memories_fts (
+            memory_id, namespace, content, tags, metadata, source
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (memory_id, content, " ".join(tags), json.dumps(metadata, sort_keys=True), source),
+        (
+            memory_id,
+            namespace,
+            content,
+            " ".join(tags),
+            json.dumps(metadata, sort_keys=True),
+            source,
+        ),
     )
 
 
-def _delete_memory_fts(conn: sqlite3.Connection, *, enabled: bool, memory_id: str) -> None:
+def _delete_memory_fts(
+    conn: sqlite3.Connection,
+    *,
+    enabled: bool,
+    memory_id: str,
+    namespace: str,
+) -> None:
     if enabled:
-        conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
+        conn.execute(
+            """
+            DELETE FROM memories_fts
+            WHERE memory_id = ? AND namespace = ?
+            """,
+            (memory_id, namespace),
+        )
 
 
 def _backfill_memory_fts(conn: sqlite3.Connection) -> None:
@@ -925,6 +1054,7 @@ def _backfill_memory_fts(conn: sqlite3.Connection) -> None:
             conn,
             enabled=True,
             memory_id=row["id"],
+            namespace=row["namespace"],
             content=row["content"],
             tags=_normalize_tags(_safe_json_list(row["tags"])),
             metadata=_safe_json_dict(row["metadata"]),

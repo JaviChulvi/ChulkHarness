@@ -7,7 +7,15 @@ import json
 
 import pytest
 
-from chulk import Agent, AgentConfig, AgentHandle, AsyncAgent, ConfigurationError, ProviderError
+from chulk import (
+    Agent,
+    AgentConfig,
+    AgentHandle,
+    AsyncAgent,
+    AsyncAgentHandle,
+    ConfigurationError,
+    ProviderError,
+)
 from chulk.core import Agent as CoreAgent, TraceEvent
 from chulk.llm import LLMClient, LLMError
 from chulk.tracing import JSONLTraceLogger
@@ -41,6 +49,7 @@ class FailingLLMClient(LLMClient):
 class HangingAsyncLLMClient(LLMClient):
     def __init__(self, started: asyncio.Event) -> None:
         self.started = started
+        self.close_count = 0
 
     def complete(self, messages, *, max_output_tokens=None) -> str:
         raise AssertionError("the sync provider path must not run")
@@ -49,6 +58,20 @@ class HangingAsyncLLMClient(LLMClient):
         self.started.set()
         await asyncio.Future()
         raise AssertionError(f"unreachable: {messages!r} {kwargs!r}")
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
+class AsyncCloseLLMClient(LLMClient):
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def complete(self, messages, *, max_output_tokens=None) -> str:
+        return "done"
+
+    async def aclose(self) -> None:
+        self.close_count += 1
 
 
 def _agent(tmp_path, *, llm: FakeLLMClient | None = None) -> Agent:
@@ -131,6 +154,37 @@ def test_compatibility_handle_closes_owned_resource_once():
     assert resource.close_count == 1
 
 
+@pytest.mark.asyncio
+async def test_async_compatibility_handle_awaits_owned_resource_once():
+    resource = AsyncCloseLLMClient()
+    handle = AsyncAgentHandle(
+        AgentHandle(CoreAgent(resource, owned_resources=[resource]))
+    )
+
+    await handle.close()
+    await handle.close()
+
+    assert resource.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_cancellation_then_close_awaits_owned_provider(tmp_path):
+    started = asyncio.Event()
+    resource = HangingAsyncLLMClient(started)
+    handle = AsyncAgentHandle(
+        AgentHandle(CoreAgent(resource, owned_resources=[resource]))
+    )
+    task = asyncio.create_task(handle.run("wait"))
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await handle.close()
+
+    assert resource.close_count == 1
+
+
 def test_runtime_finishes_trace_after_owned_resource_cleanup(tmp_path):
     trace_logger = JSONLTraceLogger(tmp_path / "traces", "cleanup-order")
 
@@ -168,6 +222,21 @@ def test_caller_injected_llm_is_not_owned_by_public_facade(tmp_path):
 
 def test_runtime_construction_failure_closes_factory_owned_client(tmp_path, monkeypatch):
     client = FakeLLMClient()
+
+    def fail_agent(*args, **kwargs):
+        raise RuntimeError("construction failed")
+
+    monkeypatch.setattr(runtime_module, "Agent", fail_agent)
+    config = AgentConfig(project_root=tmp_path).to_config()
+
+    with pytest.raises(RuntimeError, match="construction failed"):
+        runtime_module.create_agent(config, llm_client_factory=lambda _: client)
+
+    assert client.close_count == 1
+
+
+def test_runtime_construction_failure_closes_async_factory_transport(tmp_path, monkeypatch):
+    client = AsyncCloseLLMClient()
 
     def fail_agent(*args, **kwargs):
         raise RuntimeError("construction failed")

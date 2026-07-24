@@ -12,10 +12,21 @@ guardrails. Direct local execution does not claim containment, and
 `require_shell_containment=True` fails before process creation unless the host
 policy explicitly asserts that it applied containment.
 
+Hard safety failures use the `fatal_safety` tool failure kind. Built-in
+destructive/out-of-root shell blocks, missing required containment, and a host
+policy denial explicitly marked `fatal=True` record the tool observation and
+then fail the turn immediately without another model request or normal retry.
+Ordinary capability, approval, and host-policy denials remain recoverable
+`user_blocked` observations so the model can explain the limitation or choose
+an allowed alternative. A terminal internal permission denial maps to the
+public `SafetyError`; ordinary permission errors retain
+`PermissionDeniedError`.
+
 Embedding applications remain responsible for:
 
 - exposing the smallest tool and capability set;
-- isolating tenants, runtime directories, credentials, and application deps;
+- isolating tenants with distinct memory namespaces and appropriately separated
+  runtime directories, credentials, and application deps;
 - sandboxing shell or code execution and setting underlying I/O timeouts;
 - approving mutating, network, destructive, or external-service calls;
 - validating tool outputs before using them in business decisions;

@@ -5,12 +5,22 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 import pytest
 
 from chulk.cli.maintenance import run_doctor
 from chulk.main import main
+
+
+def _check_ignore(project_root: Path, path: str) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-q", "--", path],
+        cwd=project_root,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def test_init_creates_safe_project_scaffolding_and_is_idempotent(tmp_path, capsys):
@@ -32,9 +42,76 @@ def test_init_creates_safe_project_scaffolding_and_is_idempotent(tmp_path, capsy
     gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
     assert all(
         entry in gitignore
-        for entry in (".env", "!.env.example", ".chulk/", "traces/", "chulk/store.sqlite", "*.sqlite")
+        for entry in (
+            ".env",
+            "!.env.example",
+            "!.chulk/",
+            ".chulk/*",
+            "!.chulk/mcp.json",
+            "!.chulk/skills/",
+            "!.chulk/skills/**",
+            "traces/",
+            "chulk/store.sqlite",
+            "*.sqlite",
+            "*.sqlite.backup*",
+        )
     )
     assert all(change["action"] == "exists" for change in second_payload["changes"])
+
+
+def test_init_migrates_blanket_chulk_ignore_to_narrow_policy(tmp_path, capsys):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / ".gitignore").write_text(".chulk/\n", encoding="utf-8")
+
+    exit_code = main(["init", "--project-root", str(project_root)])
+    capsys.readouterr()
+    skill_path = project_root / ".chulk" / "skills" / "reviewer" / "SKILL.md"
+    skill_path.parent.mkdir()
+    skill_path.write_text("# Reviewer\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+
+    assert exit_code == 0
+    assert _check_ignore(project_root, ".chulk/mcp.json") is False
+    assert _check_ignore(project_root, ".chulk/skills/reviewer/SKILL.md") is False
+    assert _check_ignore(project_root, ".chulk/store.sqlite") is True
+    assert _check_ignore(project_root, ".chulk/traces/session.jsonl") is True
+
+
+def test_init_reorders_managed_gitignore_rules_as_one_canonical_block(
+    tmp_path,
+    capsys,
+):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / ".gitignore").write_text(
+        "custom-cache/\n!.chulk/mcp.json\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["init", "--project-root", str(project_root)])
+    capsys.readouterr()
+
+    gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(project_root),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "local-test-model",
+        }
+    )
+    gitignore_check = next(
+        check for check in report.checks if check.name == "gitignore"
+    )
+
+    assert exit_code == 0
+    assert gitignore.startswith("custom-cache/\n\n# Chulk runtime state\n")
+    assert gitignore.index(".chulk/*") < gitignore.index("!.chulk/mcp.json")
+    assert gitignore.count("!.chulk/mcp.json") == 1
+    assert _check_ignore(project_root, ".chulk/mcp.json") is False
+    assert _check_ignore(project_root, ".chulk/store.sqlite") is True
+    assert gitignore_check.status == "pass"
 
 
 def test_init_read_only_uses_safe_permission_default(tmp_path, capsys):
@@ -538,6 +615,122 @@ def test_doctor_reports_ignored_runtime_state_already_tracked_by_git(tmp_path):
     assert "chulk/store.sqlite" in gitignore_check.detail
 
 
+def test_doctor_accepts_tracked_secret_free_mcp_and_skill_config(tmp_path, capsys):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    assert main(["init", "--project-root", str(tmp_path)]) == 0
+    capsys.readouterr()
+    skill_path = tmp_path / ".chulk" / "skills" / "reviewer" / "SKILL.md"
+    skill_path.parent.mkdir()
+    skill_path.write_text("# Reviewer\nReview project code.\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore", ".chulk/mcp.json", ".chulk/skills"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "local-test-model",
+        }
+    )
+    gitignore_check = next(
+        check for check in report.checks if check.name == "gitignore"
+    )
+
+    assert report.ok is True
+    assert gitignore_check.status == "pass"
+    assert "declarative MCP/skill config is trackable" in gitignore_check.detail
+
+
+@pytest.mark.parametrize(
+    "tracked_path",
+    [
+        ".env",
+        ".chulk/store.sqlite",
+        ".chulk/traces/session.jsonl",
+        ".chulk/traces/session_artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+        ".chulk/store.sqlite.backup-v7",
+        "chulk/store.sqlite-wal",
+    ],
+)
+def test_doctor_rejects_tracked_credentials_and_runtime_state(
+    tmp_path,
+    tracked_path,
+):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(
+        "\n".join(
+            (
+                ".env",
+                ".chulk/*",
+                "!.chulk/mcp.json",
+                "!.chulk/skills/",
+                "!.chulk/skills/**",
+                "traces/",
+                "*.sqlite",
+                "*.sqlite-*",
+                "*.sqlite.backup*",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / tracked_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("local-sensitive-state", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-f", tracked_path], cwd=tmp_path, check=True)
+
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "local-test-model",
+        }
+    )
+    gitignore_check = next(
+        check for check in report.checks if check.name == "gitignore"
+    )
+
+    assert report.ok is False
+    assert gitignore_check.status == "fail"
+    assert tracked_path in gitignore_check.detail
+
+
+def test_doctor_rejects_literal_mcp_credentials(tmp_path):
+    mcp_path = tmp_path / ".chulk" / "mcp.json"
+    mcp_path.parent.mkdir()
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example",
+                        "authorization": "Bearer literal-secret",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "local-test-model",
+        }
+    )
+
+    assert report.ok is False
+    assert report.checks[0].name == "configuration"
+    assert report.checks[0].status == "fail"
+    assert "authorization_env" in report.checks[0].detail
+
+
 def test_trace_inspect_and_export_are_machine_readable_and_escape_html(tmp_path, capsys):
     trace_path = tmp_path / "conversation-1.jsonl"
     trace_path.write_text(
@@ -591,6 +784,119 @@ def test_trace_inspect_and_export_are_machine_readable_and_escape_html(tmp_path,
     assert "&lt;script&gt;alert" in html
     assert "<script>alert" not in html
     assert "Trace exports may contain sensitive runtime data" in html
+    if os.name == "posix":
+        assert stat.S_IMODE(html_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode assertions")
+def test_trace_export_preserves_existing_destination_directory_mode(
+    tmp_path,
+    capsys,
+):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    export_dir = tmp_path / "shared"
+    export_dir.mkdir(mode=0o755)
+    export_dir.chmod(0o755)
+    destination = export_dir / "report.html"
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert stat.S_IMODE(export_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
+def test_trace_export_rejects_symlink_destination(tmp_path, capsys):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.html"
+    outside.write_text("preserved", encoding="utf-8")
+    destination = tmp_path / "report.html"
+    destination.symlink_to(outside)
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--force",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "trace_error"
+    assert "not a regular file" in payload["error"]
+    assert outside.read_text(encoding="utf-8") == "preserved"
+
+
+def test_trace_export_rejects_non_regular_destination(tmp_path, capsys):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "report.html"
+    destination.mkdir()
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--force",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "trace_error"
+    assert "not a regular file" in payload["error"]
 
 
 def test_trace_commands_report_malformed_input_cleanly(tmp_path, capsys):

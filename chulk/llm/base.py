@@ -165,6 +165,13 @@ class LLMClient:
 
     model_capabilities: LLMModelCapabilities | None = None
 
+    def close(self) -> None:
+        """Close factory-owned transport resources."""
+
+    async def aclose(self) -> None:
+        """Close factory-owned transport resources from an async host."""
+        self.close()
+
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a normal text response."""
         raise NotImplementedError

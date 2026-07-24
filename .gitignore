@@ -33,12 +33,22 @@ dist/
 htmlcov/
 coverage.xml
 
+# Declarative Chulk project config; everything else under .chulk is runtime state
+!.chulk/
+.chulk/*
+!.chulk/mcp.json
+!.chulk/skills/
+!.chulk/skills/**
+
 # Local databases and runtime state
-.chulk/
 *.sqlite
 *.sqlite3
 *.sqlite-*
 *.sqlite3-*
+*.sqlite.bak
+*.sqlite3.bak
+*.sqlite.backup*
+*.sqlite3.backup*
 examples/runtime/
 chulk/store.sqlite
 logs/

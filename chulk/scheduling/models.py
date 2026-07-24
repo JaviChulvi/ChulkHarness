@@ -15,6 +15,9 @@ class ScheduledJob:
     next_run_at: datetime
     interval_seconds: int | None
     status: str
+    scheduled_for: datetime
+    claim_token: str | None = None
+    lease_until: datetime | None = None
     last_run_at: datetime | None = None
     last_error: str | None = None
 

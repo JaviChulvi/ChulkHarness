@@ -26,6 +26,7 @@ from chulk.storage import (
     initialize_sqlite_database,
     sqlite_connection,
 )
+from chulk.storage.migrations import SQLITE_MIGRATIONS
 
 
 def test_new_database_uses_shared_schema_and_explicit_connection_policy(tmp_path):
@@ -127,6 +128,110 @@ def test_legacy_database_is_backed_up_migrated_and_deterministically_renumbered(
     assert [row["tag"] for row in tags] == ["project"]
     assert {"source", "confidence", "embedding", "archived_at"} <= columns
     assert backup_ordinals == [(1,), (1,)]
+
+
+def test_memory_namespace_migration_preserves_v6_rows_and_rebuilds_fts(tmp_path):
+    path = tmp_path / "legacy-memory-v6.sqlite"
+    initialize_sqlite_database(path, migrations=SQLITE_MIGRATIONS[:6])
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            INSERT INTO memories (
+                id, content, created_at, updated_at, tags, metadata, importance,
+                source, confidence, embedding, archived_at, access_count,
+                last_accessed_at
+            )
+            VALUES (
+                'memory-1', 'legacy scoped memory', '2026-01-01', '2026-01-02',
+                '["project"]', '{"origin":"v6"}', 7, 'manual', 0.8,
+                '[0.1, 0.2]', NULL, 3, '2026-01-03'
+            );
+            INSERT INTO memory_tags (memory_id, tag)
+            VALUES ('memory-1', 'project');
+            INSERT INTO memory_proposals (
+                id, content, tags, metadata, importance, source, confidence,
+                evidence, conversation_id, turn_id, status, created_at,
+                reviewed_at, accepted_memory_id
+            )
+            VALUES (
+                'proposal-1', 'legacy proposal', '["workflow"]', '{}', 4,
+                'manual_review', 0.9, 'evidence', 'conversation-1', 'turn-1',
+                'pending', '2026-01-04', NULL, NULL
+            );
+            CREATE VIRTUAL TABLE memories_fts
+            USING fts5(memory_id UNINDEXED, content, tags, metadata, source);
+            INSERT INTO memories_fts
+            VALUES ('stale-id', 'stale content', '', '{}', 'manual');
+            """
+        )
+
+    store = SQLiteMemoryStore(path)
+    memory = store.get_memory("memory-1")
+    proposal = store.get_memory_proposal("proposal-1")
+
+    assert memory is not None
+    assert memory.namespace == "default"
+    assert memory.content == "legacy scoped memory"
+    assert memory.tags == ["project"]
+    assert memory.metadata == {"origin": "v6"}
+    assert memory.importance == 7
+    assert memory.access_count == 3
+    assert proposal is not None
+    assert proposal.namespace == "default"
+    assert proposal.content == "legacy proposal"
+    assert proposal.to_dict()["namespace"] == "default"
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        memory_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(memories)")
+        }
+        proposal_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(memory_proposals)")
+        }
+        fts_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(memories_fts)")
+        }
+        indexes = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'index'"
+            )
+        }
+        fts_rows = conn.execute(
+            "SELECT memory_id, namespace FROM memories_fts"
+        ).fetchall()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+
+    backups = list(tmp_path.glob("legacy-memory-v6.sqlite.backup-v6-*.sqlite"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as backup:
+        backup_columns = {
+            row[1] for row in backup.execute("PRAGMA table_info(memories)")
+        }
+        backup_row = backup.execute(
+            "SELECT content, tags, metadata, importance FROM memories WHERE id = 'memory-1'"
+        ).fetchone()
+        assert backup.execute("PRAGMA user_version").fetchone()[0] == 6
+
+    assert "namespace" in memory_columns
+    assert "namespace" in proposal_columns
+    assert "namespace" in fts_columns
+    assert {
+        "idx_memories_namespace_active",
+        "idx_memory_proposals_namespace_status",
+    } <= indexes
+    assert [(row["memory_id"], row["namespace"]) for row in fts_rows] == [
+        ("memory-1", "default")
+    ]
+    assert "namespace" not in backup_columns
+    assert backup_row == (
+        "legacy scoped memory",
+        '["project"]',
+        '{"origin":"v6"}',
+        7,
+    )
 
 
 @pytest.mark.parametrize("store_type", [SQLiteMemoryStore, SQLiteSessionStore])

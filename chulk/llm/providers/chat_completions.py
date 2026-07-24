@@ -15,6 +15,7 @@ from chulk.llm.base import (
     provider_error_from_exception,
 )
 from chulk.llm.capabilities import LLMCapabilities
+from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
     PlanningToolAvailability,
@@ -61,6 +62,8 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         max_retries: int,
         client: Any | None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         self.profile = profile
         self.provider = profile.provider
@@ -68,6 +71,13 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         self.model = model
         self.base_url = _validate_base_url(base_url)
         self._async_client = async_client
+        self._owns_client = (client is None) if owns_client is None else owns_client
+        self._owns_async_client = (
+            (client is None and async_client is None)
+            if owns_async_client is None
+            else owns_async_client
+        )
+        self._closed = False
 
         if client is not None:
             self._client = client
@@ -104,12 +114,37 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         if async_client is not None:
             self._async_client = async_client
         elif AsyncOpenAI is not None:
-            self._async_client = AsyncOpenAI(
-                api_key=resolved_api_key,
-                base_url=self.base_url,
-                timeout=timeout_seconds,
-                max_retries=max_retries,
-            )
+            try:
+                self._async_client = AsyncOpenAI(
+                    api_key=resolved_api_key,
+                    base_url=self.base_url,
+                    timeout=timeout_seconds,
+                    max_retries=max_retries,
+                )
+            except BaseException:
+                if self._owns_client:
+                    close_resources((self._client,))
+                raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_resources(self._owned_transports())
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await aclose_resources(self._owned_transports())
+
+    def _owned_transports(self) -> tuple[object, ...]:
+        resources: list[object] = []
+        if self._owns_client:
+            resources.append(self._client)
+        if self._owns_async_client and self._async_client is not None:
+            resources.append(self._async_client)
+        return tuple(resources)
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response through the configured Chat Completions endpoint."""

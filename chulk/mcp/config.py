@@ -17,6 +17,16 @@ from chulk.errors import ConfigurationError
 LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 SUPPORTED_TRANSPORTS = {"streamable_http"}
 SUPPORTED_APPROVALS = {"always", "never"}
+_FORBIDDEN_FILE_CREDENTIAL_FIELDS = {
+    "api_key",
+    "apikey",
+    "access_token",
+    "authorization",
+    "bearer_token",
+    "headers",
+    "http_headers",
+    "token",
+}
 
 
 class MCPConfigError(ConfigurationError, ValueError):
@@ -90,12 +100,38 @@ def load_mcp_servers(path: Path, env: Mapping[str, str] | None = None) -> tuple[
     for index, raw_server in enumerate(raw_servers, start=1):
         if not isinstance(raw_server, dict):
             raise MCPConfigError(f"MCP server #{index} must be an object")
+        credential_field = _literal_credential_field(raw_server)
+        if credential_field is not None:
+            raise MCPConfigError(
+                f"MCP server #{index} field {credential_field!r} may contain a literal "
+                "credential; use authorization_env instead"
+            )
         server = _parse_server(raw_server, env_values, index=index)
         if server.label in labels:
             raise MCPConfigError(f"Duplicate MCP server label: {server.label}")
         labels.add(server.label)
         servers.append(server)
     return tuple(servers)
+
+
+def _literal_credential_field(value: object) -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                normalized = key.strip().lower().replace("-", "_")
+                if normalized != "authorization_env" and normalized in (
+                    _FORBIDDEN_FILE_CREDENTIAL_FIELDS
+                ):
+                    return key
+            nested = _literal_credential_field(item)
+            if nested is not None:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _literal_credential_field(item)
+            if nested is not None:
+                return nested
+    return None
 
 
 def build_mcp_server_config(

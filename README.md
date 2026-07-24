@@ -86,7 +86,10 @@ python scripts/check_docs.py
 ```
 
 Architecture and contribution rules live in [AGENTS.md](AGENTS.md). Keep local
-credentials in `.env`; never commit API keys, `.chulk/` state, sensitive traces,
-or local SQLite databases. The implementation roadmap is [TODO.md](TODO.md).
+credentials in `.env`. Secret-free `.chulk/mcp.json` and `.chulk/skills/`
+playbooks are reviewable project configuration and may be committed; never
+commit API keys, other `.chulk/` runtime state, sensitive traces, artifacts,
+backups, or local SQLite databases. The implementation roadmap is
+[TODO.md](TODO.md).
 
 ChulkHarness is licensed under the [MIT License](LICENSE).

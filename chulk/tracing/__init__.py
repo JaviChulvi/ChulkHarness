@@ -1,7 +1,16 @@
 """Tracing and logging primitives."""
 
+from chulk.tracing.artifacts import (
+    ArtifactAccessError,
+    ArtifactRead,
+    ArtifactRecord,
+    TraceArtifactStore,
+)
 from chulk.tracing.logger import JSONLTraceLogger, TRACE_SCHEMA_VERSION, TraceEvent
 from chulk.tracing.reader import (
+    DEFAULT_TRACE_MAX_BYTES,
+    DEFAULT_TRACE_MAX_EVENTS,
+    DEFAULT_TRACE_MAX_LINE_BYTES,
     LEGACY_TRACE_SCHEMA_VERSION,
     SUPPORTED_TRACE_SCHEMA_VERSIONS,
     Trace,
@@ -11,6 +20,12 @@ from chulk.tracing.reader import (
 
 __all__ = [
     "JSONLTraceLogger",
+    "ArtifactAccessError",
+    "ArtifactRead",
+    "ArtifactRecord",
+    "DEFAULT_TRACE_MAX_BYTES",
+    "DEFAULT_TRACE_MAX_EVENTS",
+    "DEFAULT_TRACE_MAX_LINE_BYTES",
     "LEGACY_TRACE_SCHEMA_VERSION",
     "SUPPORTED_TRACE_SCHEMA_VERSIONS",
     "TRACE_SCHEMA_VERSION",
@@ -18,4 +33,5 @@ __all__ = [
     "TraceEvent",
     "TraceFormatError",
     "TraceRecord",
+    "TraceArtifactStore",
 ]

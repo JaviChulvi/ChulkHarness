@@ -1,6 +1,22 @@
 """Tests for the SQLite-backed long-term memory store."""
 
-from chulk.memory import SQLiteMemoryStore, select_memories_for_prompt, text_to_embedding
+import pytest
+
+from chulk.memory import (
+    DEFAULT_MEMORY_NAMESPACE,
+    SQLiteMemoryStore,
+    normalize_memory_namespace,
+    select_memories_for_prompt,
+    text_to_embedding,
+)
+
+
+def test_memory_namespace_normalization_is_opaque_and_compatible() -> None:
+    assert normalize_memory_namespace(None) == DEFAULT_MEMORY_NAMESPACE
+    assert normalize_memory_namespace(" Tenant:Workspace-1 ") == "tenant:workspace-1"
+    for invalid in ("", "two words", "../escape", "üser", "x" * 129):
+        with pytest.raises(ValueError, match="Memory namespace"):
+            normalize_memory_namespace(invalid)
 
 
 def test_sqlite_memory_store_saves_searches_lists_and_deletes(tmp_path):
@@ -24,6 +40,7 @@ def test_sqlite_memory_store_saves_searches_lists_and_deletes(tmp_path):
     assert search_results[0].source == "manual"
     assert search_results[0].confidence == 1.0
     assert search_results[0].embedding
+    assert search_results[0].namespace == DEFAULT_MEMORY_NAMESPACE
     assert listed[0].id == memory_id
     assert store.delete_memory(memory_id)
     assert store.search_memory("repo implementation") == []

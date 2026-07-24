@@ -59,6 +59,7 @@ def test_manual_mode_persists_proposals_across_restart_and_approves(tmp_path):
 
     assert len(proposals) == 1
     assert proposals[0].status is MemoryProposalStatus.PENDING
+    assert proposals[0].namespace == "default"
     assert facade.runtime.memory_store.list_memories() == []
     proposal_id = proposals[0].id
     facade.close()

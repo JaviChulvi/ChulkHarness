@@ -362,6 +362,7 @@ def _format_memories(memories: list[Any]) -> str:
             "archived_at": memory.archived_at,
             "access_count": memory.access_count,
             "last_accessed_at": memory.last_accessed_at,
+            "namespace": memory.namespace,
         }
         for memory in memories
     ]

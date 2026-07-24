@@ -61,6 +61,7 @@ class ShellExecutionDecision:
     environment: Mapping[str, str] | None = None
     containment_applied: bool = False
     denial_reason: str | None = None
+    fatal: bool = False
 
     @classmethod
     def allow(
@@ -83,9 +84,20 @@ class ShellExecutionDecision:
         )
 
     @classmethod
-    def deny(cls, reason: str, *, policy_name: str) -> ShellExecutionDecision:
+    def deny(
+        cls,
+        reason: str,
+        *,
+        policy_name: str,
+        fatal: bool = False,
+    ) -> ShellExecutionDecision:
         """Deny execution before a child process is created."""
-        return cls(command=None, policy_name=policy_name, denial_reason=reason)
+        return cls(
+            command=None,
+            policy_name=policy_name,
+            denial_reason=reason,
+            fatal=fatal,
+        )
 
 
 class ShellExecutionPolicy(Protocol):
@@ -186,7 +198,7 @@ def run_shell_command(
             success=False,
             observation=f"Blocked command: {blocked_reason}",
             error="blocked_command",
-            failure_kind=ToolFailureKind.USER_BLOCKED,
+            failure_kind=ToolFailureKind.FATAL_SAFETY,
             metadata={"command": command, "cwd": str(root), "child_process_started": False},
         )
 
@@ -231,7 +243,11 @@ def run_shell_command(
             success=False,
             observation=f"Shell execution denied by host policy: {decision.denial_reason or 'no reason provided'}",
             error="execution_policy_denied",
-            failure_kind=ToolFailureKind.USER_BLOCKED,
+            failure_kind=(
+                ToolFailureKind.FATAL_SAFETY
+                if decision.fatal
+                else ToolFailureKind.USER_BLOCKED
+            ),
             metadata={**base_metadata, "child_process_started": False},
         )
     if require_containment and not decision.containment_applied:
@@ -243,7 +259,7 @@ def run_shell_command(
                 "did not assert that containment was applied."
             ),
             error="containment_required",
-            failure_kind=ToolFailureKind.USER_BLOCKED,
+            failure_kind=ToolFailureKind.FATAL_SAFETY,
             metadata={**base_metadata, "child_process_started": False},
         )
     popen_kwargs: dict[str, Any] = {}
@@ -437,7 +453,12 @@ class _BoundedStreamCapture:
         return bytes(self.head[:head_length]) + _TRUNCATION_MARKER + bytes(tail)
 
     def preview_text(self) -> str:
-        return self.preview_bytes().decode("utf-8", errors="replace")
+        return (
+            self.preview_bytes()
+            .decode("utf-8", errors="replace")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
 
     def metadata(self, stream_name: str) -> dict[str, Any]:
         preview = self.preview_bytes()
@@ -514,6 +535,8 @@ def _validate_execution_decision(decision: ShellExecutionDecision) -> str | None
         return "policy_name must not be empty"
     if decision.command is None:
         return None
+    if decision.fatal:
+        return "fatal=True is only valid for a denied decision"
     if decision.shell and not isinstance(decision.command, str):
         return "shell=True requires a string command"
     if not decision.shell and (
@@ -530,12 +553,15 @@ def _validate_execution_decision(decision: ShellExecutionDecision) -> str | None
 
 
 def _policy_metadata(decision: ShellExecutionDecision, *, require_containment: bool) -> dict[str, Any]:
-    return {
+    metadata = {
         "name": decision.policy_name,
         "containment_required": require_containment,
         "containment_applied": decision.containment_applied,
         "uses_shell": decision.shell,
     }
+    if decision.fatal:
+        metadata["fatal"] = True
+    return metadata
 
 
 def _validate_output_limit(name: str, value: int) -> None:

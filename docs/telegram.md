@@ -18,10 +18,15 @@ webhook.
    CHULK_TELEGRAM_ALLOWED_USER_IDS=123456789
    ```
 
-Multiple users can be allowlisted with comma-separated numeric ids. The bot
-ignores every other user and refuses group chats, even when an allowlisted user
-sends the message. Rotate the BotFather token immediately if it appears in
-chat, shell history, logs, or version control.
+Multiple users can be allowlisted with comma-separated numeric ids. Each
+private chat is bound to a non-configurable
+`telegram:chat:<chat_id>` durable-memory namespace, so prompt retrieval and
+memory query tools cannot cross chat boundaries.
+`CHULK_TELEGRAM_MEMORY_ENABLED=false` disables long-term memory, prompt
+selection, and all memory tools for every chat.
+The bot ignores every other user and refuses group chats, even when an
+allowlisted user sends the message. Rotate the BotFather token immediately if
+it appears in chat, shell history, logs, or version control.
 
 The same `.env` must contain the selected model provider credentials. For
 Gemini, for example:
@@ -81,13 +86,16 @@ allowlisted user can say, for example, “At 2026-07-24 09:00 remind me to call
 Alex” or “Every 3600 seconds check the project status.” Local date-times use
 `CHULK_TELEGRAM_TIMEZONE`; explicit ISO-8601 offsets take precedence.
 
-Jobs are stored in the shared SQLite database. A short lease prevents two
-runner iterations from deliberately claiming the same job, expired leases are
-recoverable after a crash, and recurring jobs advance from their scheduled
-time rather than accumulating drift. At execution time the stored prompt runs
-through the chat's normal agent with the same tools and permissions, and its
-answer is delivered to that Telegram chat. Failures are sanitized, retained
-for inspection, and retried after a bounded delay.
+Jobs are stored in the shared SQLite database. Each execution owns an opaque,
+renewable lease: only that claim may complete or retry the job, cancellation
+stays terminal, and an expired claim cannot overwrite a newer worker. Expired
+leases remain recoverable after a crash. Recurring jobs retain their original
+scheduled-time anchor across retries instead of accumulating drift. At
+execution time the stored prompt runs through the chat's normal agent with the
+same tools and permissions, and its answer is delivered to that Telegram chat.
+Failures are sanitized, retained for inspection, and retried after a bounded
+delay. A recoverable scheduler-iteration failure is logged without stopping
+later polling iterations.
 
 Scheduling and cancellation are destination-scoped side effects. The Telegram
 permission callback allows only these dedicated scheduling operations; one
@@ -128,10 +136,19 @@ understanding. Unknown binaries, archives, and executable formats are rejected
 before download. Attachment-derived text is injected as untrusted, turn-scoped
 external context and can never grant permissions or override instructions.
 
-The next Telegram polling offset is stored in SQLite after each handled update
-and never moves backward, preventing normal service restarts from replaying old
-messages. Delivery remains at-least-once: a process failure after sending a
-reply but before saving its cursor can cause Telegram to redeliver that update.
+Before the next Telegram polling offset advances, each supported update is
+recorded in a durable SQLite execution ledger. One update can create at most
+one agent turn: response text is committed to an outbox before delivery, so a
+send failure or restart retries the response without repeating model or tool
+effects. Multi-part replies checkpoint each confirmed part. A crash during an
+uncheckpointed execution is reported as uncertain and is not automatically
+re-run. Unsupported and unauthorized update ids are retained as ignored
+terminal records. Delivered and ignored entries are retained for 30 days and
+then purged in bounded batches.
+
+Bot API delivery itself remains at-least-once. If the network outcome of one
+`sendMessage` call is ambiguous, that response part can still be duplicated;
+the ledger does not claim impossible exactly-once external messaging.
 
 ## Run continuously with systemd
 
@@ -176,8 +193,10 @@ permission policy independently controls what those prompts may cause.
 
 ## Operations and security
 
-- Keep `.env`, `.chulk/`, SQLite files, and traces readable only by the service
-  account.
+- Keep `.env`, SQLite files, traces, artifacts, backups, and other `.chulk/`
+  runtime state readable only by the service account. Secret-free
+  `.chulk/mcp.json` and `.chulk/skills/` are the only reviewable configuration
+  exceptions.
 - Do not expose the bot process itself to the internet; polling only needs
   outbound HTTPS access to Telegram and the configured model provider.
 - Logs intentionally omit the bot token, model-provider keys, prompt content,

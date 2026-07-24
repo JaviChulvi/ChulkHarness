@@ -105,6 +105,44 @@ def _failure_registry() -> ToolRegistry:
     return registry
 
 
+def _fatal_safety_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="dangerous_operation",
+            description="Return a deterministic fatal safety failure.",
+            args_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=lambda _arguments: ToolResult(
+                tool_name="dangerous_operation",
+                success=False,
+                observation="The operation violated a hard safety boundary.",
+                error="blocked_command",
+                failure_kind=ToolFailureKind.FATAL_SAFETY,
+            ),
+        )
+    )
+    return registry
+
+
+def _ordinary_denial_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="approval_required",
+            description="Return a recoverable permission denial.",
+            args_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            callable=lambda _arguments: ToolResult(
+                tool_name="approval_required",
+                success=False,
+                observation="The user did not approve this operation.",
+                error="permission_denied",
+                failure_kind=ToolFailureKind.USER_BLOCKED,
+            ),
+        )
+    )
+    return registry
+
+
 def _retry_success_registry() -> ToolRegistry:
     attempts = 0
 
@@ -321,6 +359,47 @@ def test_sync_and_async_tool_outcomes_have_parity(
     assert result["turn"]["tool_calls"][0]["success"] is success
     assert result["turn"]["tool_call_count"] == 1
     assert result["turn"]["model_request_count"] == 2
+
+
+@pytest.mark.parametrize("planned", [False, True], ids=["unplanned", "planned"])
+def test_sync_and_async_fatal_safety_stops_without_second_model_request(
+    planned: bool,
+) -> None:
+    responses = (
+        [_plan(), _tool_call("dangerous_operation")]
+        if planned
+        else [_tool_call("dangerous_operation")]
+    )
+
+    result = _assert_driver_parity(
+        responses,
+        _fatal_safety_registry,
+        planned=planned,
+    )
+
+    assert result["turn"]["status"] == "failed"
+    assert result["turn"]["model_request_count"] == (2 if planned else 1)
+    assert result["turn"]["tool_call_count"] == 1
+    assert result["turn"]["tool_calls"][0]["failure_kind"] == "fatal_safety"
+    assert result["response"].startswith("Fatal safety policy stopped the turn.")
+    assert [event_type for event_type, _payload in result["events"]][-2:] == [
+        "turn_failed",
+        "turn_finished",
+    ]
+
+
+def test_ordinary_permission_denial_remains_recoverable() -> None:
+    result = _assert_driver_parity(
+        [
+            _tool_call("approval_required"),
+            _final_answer("Explained the approval requirement."),
+        ],
+        _ordinary_denial_registry,
+    )
+
+    assert result["turn"]["status"] == "completed"
+    assert result["turn"]["model_request_count"] == 2
+    assert result["turn"]["tool_calls"][0]["failure_kind"] == "user_blocked"
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,9 @@ callable tools and are not durable memory.
 The registry reads lightweight metadata first, selects relevant skills for the
 turn, and only then injects bounded `SKILL.md` content. Keep skill instructions
 reviewable, avoid secrets, and treat third-party playbooks as untrusted prompt
-content. A skill cannot grant a capability or bypass tool permissions.
+content. Secret-free `.chulk/skills/` playbooks may be committed as declarative
+project configuration; other `.chulk/` content remains ignored runtime state.
+A skill cannot grant a capability or bypass tool permissions.
 
 See `examples/13_per_agent_skills.py`, [configuration](configuration.md), and
 [permissions](permissions.md).

@@ -293,14 +293,14 @@ def read_file(
     if safety_error:
         return ToolResult("read_file", False, safety_error, error="sensitive_path")
     if not path.exists() or not path.is_file():
-        return ToolResult("read_file", False, f"File not found: {path.relative_to(root)}", error="not_found")
+        return ToolResult("read_file", False, f"File not found: {_relative_path(path, root)}", error="not_found")
     if path.stat().st_size > MAX_TEXT_FILE_BYTES:
         return ToolResult("read_file", False, "File is too large to read safely.", error="file_too_large")
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return ToolResult("read_file", False, "File is not valid UTF-8 text.", error="not_text")
-    return ToolResult("read_file", True, content, metadata={"path": str(path.relative_to(root))})
+    return ToolResult("read_file", True, content, metadata={"path": _relative_path(path, root)})
 
 
 def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
@@ -332,7 +332,7 @@ def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     return ToolResult(
         "write_file",
         True,
-        f"Wrote {len(content.encode('utf-8'))} bytes to {path.relative_to(project_root)}.",
+        f"Wrote {len(content.encode('utf-8'))} bytes to {_relative_path(path, project_root)}.",
         metadata={
             "path": _relative_path(path, project_root),
             "status": "modified" if old_text is not None else "created",
@@ -350,9 +350,16 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     except PatchError as exc:
         return ToolResult("apply_patch", False, str(exc), error=exc.code, metadata=exc.metadata)
 
-    for pending in pending_writes:
-        pending.path.parent.mkdir(parents=True, exist_ok=True)
-        pending.path.write_text(pending.new_text, encoding="utf-8")
+    try:
+        _commit_patch_writes(pending_writes, project_root.resolve())
+    except PatchCommitError as exc:
+        return ToolResult(
+            "apply_patch",
+            False,
+            str(exc),
+            error=exc.code,
+            metadata=exc.metadata,
+        )
 
     changes: list[dict[str, Any]] = [
         {
@@ -380,6 +387,110 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     )
 
 
+class PatchCommitError(RuntimeError):
+    """Raised after a patch commit fails and rollback has been attempted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.metadata = metadata
+
+
+def _commit_patch_writes(
+    pending_writes: list[PendingPatchWrite],
+    project_root: Path,
+) -> None:
+    attempted: list[PendingPatchWrite] = []
+    created_directories: set[Path] = set()
+    try:
+        for pending in pending_writes:
+            created_directories.update(
+                _create_patch_parent_directories(pending.path.parent, project_root)
+            )
+            attempted.append(pending)
+            _write_patch_text(pending.path, pending.new_text)
+    except BaseException as exc:
+        rollback_errors = _rollback_patch_writes(attempted, created_directories)
+        if rollback_errors:
+            raise PatchCommitError(
+                "Patch commit failed and rollback could not fully restore the workspace.",
+                code="patch_rollback_failed",
+                metadata={
+                    "cause": type(exc).__name__,
+                    "rollback_errors": rollback_errors,
+                },
+            ) from exc
+        if isinstance(exc, Exception):
+            raise PatchCommitError(
+                "Patch commit failed; the workspace was restored.",
+                code="patch_commit_failed",
+                metadata={"cause": type(exc).__name__},
+            ) from exc
+        raise
+
+
+def _create_patch_parent_directories(parent: Path, project_root: Path) -> tuple[Path, ...]:
+    missing: list[Path] = []
+    candidate = parent
+    while candidate != project_root and not candidate.exists():
+        missing.append(candidate)
+        candidate = candidate.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    return tuple(missing)
+
+
+def _write_patch_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def _restore_patch_write(pending: PendingPatchWrite) -> None:
+    if pending.old_text is None:
+        pending.path.unlink(missing_ok=True)
+        return
+    pending.path.write_text(pending.old_text, encoding="utf-8")
+
+
+def _rollback_patch_writes(
+    attempted: list[PendingPatchWrite],
+    created_directories: set[Path],
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for pending in reversed(attempted):
+        try:
+            _restore_patch_write(pending)
+        except BaseException as exc:
+            errors.append(
+                {
+                    "path": pending.relative_path,
+                    "error": type(exc).__name__,
+                }
+            )
+    for directory in sorted(
+        created_directories,
+        key=lambda value: len(value.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if directory.exists():
+                errors.append(
+                    {
+                        "path": str(directory),
+                        "error": type(exc).__name__,
+                    }
+                )
+    return errors
+
+
 def list_files(
     arguments: dict[str, Any],
     project_root: Path,
@@ -397,7 +508,12 @@ def list_files(
     if safety_error:
         return ToolResult("list_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("list_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
+        return ToolResult(
+            "list_files",
+            False,
+            f"Directory not found: {_relative_path(directory, root)}",
+            error="not_found",
+        )
 
     iterator = directory.rglob(pattern) if recursive else directory.glob(pattern)
     results: list[str] = []
@@ -408,7 +524,7 @@ def list_files(
             or not path.is_file()
         ):
             continue
-        results.append(str(path.relative_to(root)))
+        results.append(_relative_path(path, root))
         if len(results) >= max_results:
             break
     return ToolResult("list_files", True, "\n".join(sorted(results)) or "No files found.")
@@ -430,7 +546,12 @@ def search_files(
     if safety_error:
         return ToolResult("search_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("search_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
+        return ToolResult(
+            "search_files",
+            False,
+            f"Directory not found: {_relative_path(directory, root)}",
+            error="not_found",
+        )
 
     if shutil.which("rg"):
         return _search_with_rg(root, directory, query, pattern, max_results, read_policy)
@@ -483,7 +604,7 @@ def _search_with_rg(
             path = project_root / path
         if safe_read_error(path, project_root, read_policy) is not None:
             continue
-        relative_path = path.relative_to(project_root)
+        relative_path = _relative_path(path, project_root)
         normalized_line = line_text.rstrip("\r\n")
         results.append(f"{relative_path}:{data['line_number']}:{normalized_line}")
         if len(results) >= max_results:
@@ -514,7 +635,7 @@ def _search_with_python(
             continue
         for index, line in enumerate(lines, start=1):
             if query in line:
-                results.append(f"{path.relative_to(project_root)}:{index}:{line}")
+                results.append(f"{_relative_path(path, project_root)}:{index}:{line}")
                 if len(results) >= max_results:
                     return ToolResult("search_files", True, "\n".join(results))
     return ToolResult("search_files", True, "\n".join(results) or "No matches found.")
@@ -872,7 +993,7 @@ def _looks_key_like_name(name: str) -> bool:
 
 
 def _relative_path(path: Path, project_root: Path) -> str:
-    return str(path.resolve().relative_to(project_root.resolve()))
+    return path.resolve().relative_to(project_root.resolve()).as_posix()
 
 
 def _sha256_text(text: str) -> str:

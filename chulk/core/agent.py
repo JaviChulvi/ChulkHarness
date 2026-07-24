@@ -19,6 +19,7 @@ from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
 from chulk.llm.capabilities import client_requires_mcp_bridge
+from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
@@ -203,11 +204,30 @@ class Agent:
         self._closed = True
         failures: list[Exception] = []
         for resource in reversed(self._owned_resources):
-            close = getattr(resource, "close", None)
-            if not callable(close):
-                continue
             try:
-                close()
+                close_resources((resource,))
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        if self.trace_logger is not None:
+            try:
+                self.trace_logger.close()
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        self.event_callback = None
+        self.event_sink = None
+        self._tool_contexts.clear()
+        if failures:
+            raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
+
+    async def aclose(self) -> None:
+        """Finalize owned closeable resources exactly once from an async host."""
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[Exception] = []
+        for resource in reversed(self._owned_resources):
+            try:
+                await aclose_resources((resource,))
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
         if self.trace_logger is not None:
@@ -713,6 +733,7 @@ class Agent:
                     "memory_ids": list(result.accepted_memory_ids),
                     "proposal_ids": list(result.proposal_ids),
                     "memory_mode": self.memory_policy.mode.value,
+                    "memory_namespace": self.memory_store.namespace,
                 },
             )
 
@@ -727,7 +748,11 @@ class Agent:
 
         self._trace(
             TraceEvent.MEMORY_SEARCH_STARTED,
-            {"turn_id": self.state.current_turn_id, "query": user_message},
+            {
+                "turn_id": self.state.current_turn_id,
+                "query": user_message,
+                "memory_namespace": self.memory_store.namespace,
+            },
         )
         profile, relevant = select_memories_for_prompt(self.memory_store, user_message)
         self._profile_memories = profile
@@ -740,6 +765,7 @@ class Agent:
                 "profile_memory_ids": [memory.id for memory in profile],
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
+                "memory_namespace": self.memory_store.namespace,
             },
         )
 

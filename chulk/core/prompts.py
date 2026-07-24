@@ -137,7 +137,7 @@ def format_action_protocol_for_prompt(
         lines.extend(
             [
                 "<rule>Use each observation to choose the next allowed action.</rule>",
-                "<rule>When an observation is truncated, inspect its artifact or make a narrower call if omitted content is required.</rule>",
+                "<rule>When an observation is truncated, use the dedicated trace-artifact reader if the host exposed it, ask the host for a bounded artifact view, or make a narrower call.</rule>",
             ]
         )
     lines.extend(["</rules>", "</response_protocol>"])

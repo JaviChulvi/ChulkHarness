@@ -16,6 +16,7 @@ from chulk.llm.base import (
     provider_error_from_exception,
 )
 from chulk.llm.capabilities import LLMCapabilities
+from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
     PlanningToolAvailability,
@@ -55,6 +56,8 @@ class GeminiGenerateContentClient(LLMClient):
         max_retries: int = 2,
         client: Any | None = None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         if not model.strip():
             raise LLMConfigurationError(
@@ -69,6 +72,13 @@ class GeminiGenerateContentClient(LLMClient):
         self.model = model.strip()
         self.base_url = base_url.strip() if base_url is not None else None
         self._async_client = async_client
+        self._owns_client = (client is None) if owns_client is None else owns_client
+        self._owns_async_client = (
+            (client is None and async_client is None)
+            if owns_async_client is None
+            else owns_async_client
+        )
+        self._closed = False
         if base_url is not None and not self.base_url:
             raise ValueError("base_url must be non-empty when provided")
 
@@ -107,6 +117,26 @@ class GeminiGenerateContentClient(LLMClient):
             http_options=cast(Any, http_options),
         )
         self._async_client = async_client or getattr(self._client, "aio", None)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_resources(self._owned_transports())
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await aclose_resources(self._owned_transports())
+
+    def _owned_transports(self) -> tuple[object, ...]:
+        resources: list[object] = []
+        if self._owns_client:
+            resources.append(self._client)
+        if self._owns_async_client and self._async_client is not None:
+            resources.append(self._async_client)
+        return tuple(resources)
 
     def complete(
         self,

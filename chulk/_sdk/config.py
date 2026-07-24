@@ -19,6 +19,7 @@ from chulk.config import (
     load_config,
 )
 from chulk.mcp import MCPServerConfig, build_mcp_server_config
+from chulk.memory import normalize_memory_namespace
 
 
 SDK_DEFAULT_RUNTIME_DIR = ".chulk"
@@ -82,6 +83,7 @@ class AgentConfig:
     max_reflection_attempts: int | None = None
     capabilities: Capabilities | None = None
     memory_mode: MemoryMode | str | None = None
+    memory_namespace: str | None = None
     local_context_window_tokens: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -94,6 +96,12 @@ class AgentConfig:
             capabilities = base.with_memory(self.memory_mode)
             object.__setattr__(self, "capabilities", capabilities)
             object.__setattr__(self, "memory_mode", capabilities.memory)
+        if self.memory_namespace is not None:
+            object.__setattr__(
+                self,
+                "memory_namespace",
+                normalize_memory_namespace(self.memory_namespace),
+            )
 
     def resolved_capabilities(self) -> Capabilities:
         """Return explicit capabilities or the safe SDK default."""

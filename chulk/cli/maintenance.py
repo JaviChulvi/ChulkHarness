@@ -12,6 +12,7 @@ from typing import Any
 
 from chulk.config import Config, load_config, resolve_cli_environment
 from chulk.llm.capabilities import resolve_runtime_model_capabilities
+from chulk.storage.private_files import write_private_text
 from chulk.tracing import Trace, TraceFormatError
 
 
@@ -25,6 +26,28 @@ _PROVIDER_SDK_REQUIREMENTS = {
     "bedrock": ("openai", "openai", "openai"),
     "gemini": ("google.genai", "google-genai", "gemini"),
 }
+
+_GITIGNORE_HEADING = "# Chulk runtime state"
+_GITIGNORE_RULES = (
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.chulk/",
+    ".chulk/*",
+    "!.chulk/mcp.json",
+    "!.chulk/skills/",
+    "!.chulk/skills/**",
+    "traces/",
+    "chulk/store.sqlite",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.sqlite-*",
+    "*.sqlite3-*",
+    "*.sqlite.bak",
+    "*.sqlite3.bak",
+    "*.sqlite.backup*",
+    "*.sqlite3.backup*",
+)
 
 
 @dataclass(frozen=True)
@@ -161,13 +184,35 @@ def format_init_changes(project_root: Path | str, changes: tuple[InitChange, ...
     return "\n".join(lines)
 
 
-def inspect_trace(path: Path | str) -> dict[str, Any]:
-    return Trace.from_jsonl(path).summary()
+def inspect_trace(
+    path: Path | str,
+    *,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
+) -> dict[str, Any]:
+    return Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    ).summary()
 
 
-def replay_trace(path: Path | str) -> dict[str, Any]:
+def replay_trace(
+    path: Path | str,
+    *,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
+) -> dict[str, Any]:
     """Reconstruct recorded turns without running tools, models, or network calls."""
-    return Trace.from_jsonl(path).replay()
+    return Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    ).replay()
 
 
 def format_trace_summary(summary: dict[str, Any]) -> str:
@@ -179,12 +224,17 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         f"  conversation  {summary.get('conversation_id')}",
         f"  schemas       {_format_schema_versions(summary.get('schema_versions'))}",
         f"  events        {summary.get('event_count')}",
+        f"  bytes         {summary.get('source_byte_count')}",
+        f"  limits        {'bounded' if summary.get('limits_applied') else 'trusted unbounded'}",
         f"  sessions      {summary.get('session_count')}",
         f"  turns         {summary.get('turn_count')}",
         f"  failures      {summary.get('failure_count')}",
         f"  started       {summary.get('started_at')}",
         f"  ended         {summary.get('ended_at')}",
         f"  event types   {type_text or 'none'}",
+        f"  artifacts     {summary.get('artifact_count', 0)} "
+        f"({summary.get('artifact_total_bytes', 0)} bytes)",
+        f"  integrity     {_format_integrity(summary.get('artifact_integrity'))}",
     ]
     if summary.get("final_answer"):
         lines.extend(["  final answer", *[f"    {line}" for line in str(summary["final_answer"]).splitlines()]])
@@ -246,24 +296,42 @@ def _format_schema_versions(value: object) -> str:
     return ", ".join(str(item) for item in value)
 
 
+def _format_integrity(value: object) -> str:
+    if not isinstance(value, dict) or not value:
+        return "none"
+    return ", ".join(f"{key} x{count}" for key, count in sorted(value.items()))
+
+
 def export_trace_html(
     path: Path | str,
     *,
     output_path: Path | str | None = None,
     force: bool = False,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
 ) -> Path:
-    trace = Trace.from_jsonl(path)
+    trace = Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    )
     destination = (
-        Path(output_path).expanduser().resolve()
+        Path(output_path).expanduser().absolute()
         if output_path is not None
         else trace.path.with_suffix(".html")
     )
-    if destination == trace.path or (destination.exists() and destination.samefile(trace.path)):
+    if destination.resolve() == trace.path.resolve():
         raise ValueError(f"Trace export output cannot overwrite the source trace: {trace.path}")
     if destination.exists() and not force:
         raise FileExistsError(f"Output already exists: {destination}. Pass --force to replace it.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(trace.to_html(), encoding="utf-8")
+    write_private_text(
+        destination,
+        trace.to_html(),
+        overwrite=force,
+        private_parent=False,
+    )
     return destination
 
 
@@ -483,18 +551,59 @@ def _gitignore_check(config: Config) -> DiagnosticCheck:
             "runtime paths are already tracked by Git: " + ", ".join(tracked),
             "Remove runtime state from the index with git rm --cached, then keep the ignore rules.",
         )
-    candidates = tuple(
+    runtime_candidates = tuple(
         str(project_prefix / candidate)
-        for candidate in (".chulk/store.sqlite", "traces/example.jsonl", "chulk/store.sqlite", "state.sqlite")
+        for candidate in (
+            ".env",
+            ".chulk/store.sqlite",
+            ".chulk/store.sqlite-wal",
+            ".chulk/store.sqlite.backup-20260724",
+            ".chulk/traces/example.jsonl",
+            ".chulk/traces/example_artifacts/art_example.txt",
+            "traces/example.jsonl",
+            "traces/example_artifacts/art_example.txt",
+            "chulk/store.sqlite",
+            "chulk/store.sqlite-wal",
+            "chulk/store.sqlite.backup-20260724",
+            "state.sqlite",
+        )
     )
-    missing = [candidate for candidate in candidates if not _git_ignores(git_root, candidate)]
-    if not missing:
-        return DiagnosticCheck("gitignore", "pass", "runtime databases and traces are ignored")
+    missing = [
+        candidate
+        for candidate in runtime_candidates
+        if not _git_ignores(git_root, candidate)
+    ]
+    declarative_candidates = tuple(
+        str(project_prefix / candidate)
+        for candidate in (
+            ".chulk/mcp.json",
+            ".chulk/skills/example/SKILL.md",
+        )
+    )
+    blocked_config = [
+        candidate
+        for candidate in declarative_candidates
+        if _git_ignores(git_root, candidate)
+    ]
+    if not missing and not blocked_config:
+        return DiagnosticCheck(
+            "gitignore",
+            "pass",
+            "declarative MCP/skill config is trackable; credentials and runtime state are ignored",
+        )
+    details: list[str] = []
+    if missing:
+        details.append("runtime paths are not fully ignored: " + ", ".join(missing))
+    if blocked_config:
+        details.append(
+            "declarative project config is incorrectly ignored: "
+            + ", ".join(blocked_config)
+        )
     return DiagnosticCheck(
         "gitignore",
         "fail",
-        "runtime paths are not fully ignored: " + ", ".join(missing),
-        "Run chulk init or add .chulk/, traces/, chulk/store.sqlite, and *.sqlite to .gitignore.",
+        "; ".join(details),
+        "Run chulk init to install the narrow declarative-config and runtime-state rules.",
     )
 
 
@@ -569,12 +678,11 @@ def _tracked_runtime_paths(git_root: Path, config: Config) -> tuple[str, ...]:
     if result.returncode != 0:
         return ()
 
-    directory_prefixes = tuple(
-        relative
-        for directory in (config.runtime_dir, config.traces_dir)
-        if (relative := _relative_to_git_root(directory, git_root)) is not None
-    )
+    runtime_prefix = _relative_to_git_root(config.runtime_dir, git_root)
+    trace_prefix = _relative_to_git_root(config.traces_dir, git_root)
     store_path = _relative_to_git_root(config.store_path, git_root)
+    mcp_path = _relative_to_git_root(config.mcp_config_path, git_root)
+    skills_prefix = _relative_to_git_root(config.skills_dir, git_root)
     project_prefix = _relative_to_git_root(config.project_root, git_root)
     tracked: list[str] = []
     for raw_path in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
@@ -588,12 +696,35 @@ def _tracked_runtime_paths(git_root: Path, config: Config) -> tuple[str, ...]:
             except ValueError:
                 pass
         if (
-            any(path == prefix or prefix in path.parents for prefix in directory_prefixes)
+            _is_sensitive_project_path(project_path)
             or path == store_path
-            or (project_path is not None and project_path.suffix in {".sqlite", ".sqlite3"})
+            or _is_at_or_below(path, trace_prefix)
+            or (
+                _is_at_or_below(path, runtime_prefix)
+                and path != mcp_path
+                and not _is_at_or_below(path, skills_prefix)
+            )
         ):
             tracked.append(raw_path)
     return tuple(sorted(tracked))
+
+
+def _is_at_or_below(path: Path, prefix: Path | None) -> bool:
+    return prefix is not None and (path == prefix or prefix in path.parents)
+
+
+def _is_sensitive_project_path(path: Path | None) -> bool:
+    if path is None:
+        return False
+    name = path.name.lower()
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return True
+    return (
+        ".sqlite" in name
+        or ".sqlite3" in name
+        or name.endswith((".bak", ".backup"))
+        or ".backup-" in name
+    )
 
 
 def _relative_to_git_root(path: Path, git_root: Path) -> Path | None:
@@ -627,26 +758,23 @@ def _validate_init_target(project_root: Path, target: Path) -> None:
 
 
 def _ensure_gitignore(path: Path) -> str:
-    required = [
-        ".env",
-        ".env.*",
-        "!.env.example",
-        ".chulk/",
-        "traces/",
-        "chulk/store.sqlite",
-        "*.sqlite",
-        "*.sqlite3",
-    ]
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    existing_lines = {line.strip() for line in existing.splitlines()}
-    missing = [line for line in required if line not in existing_lines]
-    if not missing:
+    managed_lines = {_GITIGNORE_HEADING, *_GITIGNORE_RULES}
+    unmanaged_lines = [
+        line
+        for line in existing.splitlines()
+        if line.strip() not in managed_lines
+    ]
+    while unmanaged_lines and not unmanaged_lines[-1].strip():
+        unmanaged_lines.pop()
+    managed_block = "\n".join((_GITIGNORE_HEADING, *_GITIGNORE_RULES))
+    content = (
+        "\n".join(unmanaged_lines) + "\n\n" + managed_block + "\n"
+        if unmanaged_lines
+        else managed_block + "\n"
+    )
+    if content == existing:
         return "exists"
-    if existing:
-        prefix = "\n" if existing.endswith("\n") else "\n\n"
-        content = existing + prefix + "# Chulk runtime state\n" + "\n".join(missing) + "\n"
-    else:
-        content = "# Chulk runtime state\n" + "\n".join(missing) + "\n"
     path.write_text(content, encoding="utf-8")
     return "created" if not existing else "updated"
 

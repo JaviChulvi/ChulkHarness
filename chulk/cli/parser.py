@@ -69,18 +69,39 @@ def _add_trace_parser(subparsers: argparse._SubParsersAction) -> None:
     inspect_parser = trace_subparsers.add_parser("inspect", help="Summarize a trace file.")
     inspect_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
     inspect_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
+    _add_trace_limits(inspect_parser)
     replay_parser = trace_subparsers.add_parser(
         "replay",
         help="Reconstruct recorded turns without executing them.",
     )
     replay_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
     replay_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
+    _add_trace_limits(replay_parser)
     export_parser = trace_subparsers.add_parser("export", help="Export a trace report.")
     export_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
     export_parser.add_argument("--format", choices=("html",), default="html")
     export_parser.add_argument("--output", help="Destination path (defaults beside the trace).")
     export_parser.add_argument("--force", action="store_true", help="Replace an existing destination.")
     export_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
+    _add_trace_limits(export_parser)
+
+
+def _add_trace_limits(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        help="Maximum trace bytes to parse (default: 67108864).",
+    )
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        help="Maximum non-empty trace events to parse (default: 100000).",
+    )
+    parser.add_argument(
+        "--unbounded",
+        action="store_true",
+        help="Trusted-operator override that disables trace parse limits.",
+    )
 
 
 __all__ = ["build_parser"]

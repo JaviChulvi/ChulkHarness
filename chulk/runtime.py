@@ -21,6 +21,7 @@ from chulk.llm import (
     provider_capabilities,
     provider_connection_from_config,
 )
+from chulk.llm.lifecycle import close_resources
 from chulk.llm.capabilities import (
     client_requires_mcp_bridge,
     client_supports_hosted_mcp_tools,
@@ -39,6 +40,7 @@ from chulk.tools.permissions import (
     permission_policy_for_profile,
 )
 from chulk.tracing import JSONLTraceLogger
+from chulk.tracing.artifacts import TraceArtifactStore
 
 
 class LLMClientFactory(Protocol):
@@ -59,6 +61,7 @@ class RuntimeToolContext:
     shell_execution_policy: ShellExecutionPolicy | None = None
     require_shell_containment: bool = False
     memory_store: SQLiteMemoryStore | None = None
+    artifact_store: TraceArtifactStore | None = None
     deps: object | None = None
 
 
@@ -101,6 +104,7 @@ def create_agent(
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
+    memory_namespace: str | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -108,7 +112,10 @@ def create_agent(
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
-    memory_store = SQLiteMemoryStore(config.store_path)
+    memory_store = SQLiteMemoryStore(
+        config.store_path,
+        namespace=memory_namespace,
+    )
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
     session_store = SQLiteSessionStore(config.store_path)
@@ -178,6 +185,7 @@ def create_agent(
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
+        artifact_store=trace_logger.artifact_store,
     )
     if active_mcp_servers:
         trace_logger.log(
@@ -241,9 +249,7 @@ def create_agent(
         )
     except Exception:
         for resource in reversed(owned_resources):
-            close = getattr(resource, "close", None)
-            if callable(close):
-                close()
+            close_resources((resource,))
         raise
     agent.session_store = session_store
     agent.session_recorder = session_recorder
@@ -531,6 +537,7 @@ def _create_tool_registry(
     deps: object | None,
     shell_execution_policy: ShellExecutionPolicy | None,
     require_shell_containment: bool,
+    artifact_store: TraceArtifactStore,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -559,6 +566,7 @@ def _create_tool_registry(
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
         memory_store=memory_store,
+        artifact_store=artifact_store,
         deps=deps,
     )
     registry = ToolRegistry()

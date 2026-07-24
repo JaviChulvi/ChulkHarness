@@ -311,6 +311,88 @@ def _migrate_to_scheduled_jobs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_claim_owned_scheduled_jobs(conn: sqlite3.Connection) -> None:
+    """Add claim identity and a stable recurrence anchor to scheduled jobs."""
+    _ensure_column(conn, "scheduled_jobs", "claim_token", "TEXT")
+    _ensure_column(conn, "scheduled_jobs", "scheduled_for", "TEXT")
+    conn.execute(
+        """
+        UPDATE scheduled_jobs
+        SET scheduled_for = next_run_at
+        WHERE scheduled_for IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_claim
+        ON scheduled_jobs(id, claim_token)
+        """
+    )
+
+
+def _migrate_to_adapter_update_ledger(conn: sqlite3.Connection) -> None:
+    """Create durable execution and response-delivery state for adapter updates."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adapter_updates (
+            adapter TEXT NOT NULL,
+            update_id INTEGER NOT NULL,
+            destination_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response_parts TEXT NOT NULL DEFAULT '[]',
+            next_response_part INTEGER NOT NULL DEFAULT 0,
+            execution_token TEXT,
+            execution_lease_until TEXT,
+            delivery_token TEXT,
+            delivery_lease_until TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            executed_at TEXT,
+            delivered_at TEXT,
+            PRIMARY KEY (adapter, update_id),
+            CHECK (update_id >= 0),
+            CHECK (next_response_part >= 0),
+            CHECK (
+                status IN (
+                    'processing', 'executed', 'delivering',
+                    'delivered', 'ignored'
+                )
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_adapter_updates_outbox
+        ON adapter_updates(adapter, status, updated_at)
+        """
+    )
+
+
+def _migrate_to_memory_namespaces(conn: sqlite3.Connection) -> None:
+    """Backfill the compatibility namespace for memories and proposals."""
+    _ensure_column(conn, "memories", "namespace", "TEXT NOT NULL DEFAULT 'default'")
+    _ensure_column(
+        conn,
+        "memory_proposals",
+        "namespace",
+        "TEXT NOT NULL DEFAULT 'default'",
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_memories_namespace_active
+        ON memories(namespace, archived_at, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_memory_proposals_namespace_status
+        ON memory_proposals(namespace, status, created_at)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -351,6 +433,9 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
     SQLiteMigration(3, "adapter-cursors", _migrate_to_adapter_cursors),
     SQLiteMigration(4, "scheduled-jobs", _migrate_to_scheduled_jobs),
+    SQLiteMigration(5, "claim-owned-scheduled-jobs", _migrate_to_claim_owned_scheduled_jobs),
+    SQLiteMigration(6, "adapter-update-ledger", _migrate_to_adapter_update_ledger),
+    SQLiteMigration(7, "memory-namespaces", _migrate_to_memory_namespaces),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

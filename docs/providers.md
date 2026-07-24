@@ -56,6 +56,19 @@ provider's credential aliases, Chulk uses this exact first-nonempty order:
 Provider credentials remain host-owned. Do not put them in prompts, tool
 arguments, memory, MCP files, source control, or shared traces.
 
+## Transport ownership and cleanup
+
+Built-in provider wrappers own the SDK transports they create and close their
+sync and async clients exactly once when the agent closes. A transport injected
+directly into a provider wrapper is caller-owned by default; pass the wrapper's
+explicit `owns_client` or `owns_async_client` option only when transferring
+that responsibility. Public `Agent` and `AsyncAgent` facades likewise do not
+close a caller-injected top-level LLM client.
+
+Use `with Agent(...)` or `async with AsyncAgent(...)` where possible. In an
+async host, cancel and await active work before awaiting `agent.close()` so
+native async provider cleanup runs after the turn unwinds.
+
 ## Configuration examples
 
 OpenAI, DeepSeek, and local can use their documented model defaults:

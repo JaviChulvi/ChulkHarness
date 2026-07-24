@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any
 
 import pytest
 
 import chulk.telegram.bot as telegram_bot_module
+from chulk import MemoryMode
 from chulk.config import load_config
 from chulk.sessions import SessionRecorder, SQLiteSessionStore
 from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
-from chulk.telegram.client import TelegramAttachment, TelegramUpdate
+from chulk.telegram.client import TelegramAttachment, TelegramError, TelegramUpdate
 from chulk.telegram.config import TelegramConfig
 
 
@@ -23,6 +26,7 @@ class FakeClient:
         self.requested_offsets: list[int | None] = []
         self.commands_registered = 0
         self.downloads: list[tuple[str, int]] = []
+        self.ignored_updates: tuple[tuple[int, str], ...] = ()
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int):
         assert timeout_seconds == 1
@@ -80,9 +84,15 @@ def _config(tmp_path: Path):
     )
 
 
-def _update(text: str, *, user_id: int = 7, chat_type: str = "private") -> TelegramUpdate:
+def _update(
+    text: str,
+    *,
+    update_id: int = 1,
+    user_id: int = 7,
+    chat_type: str = "private",
+) -> TelegramUpdate:
     return TelegramUpdate(
-        update_id=1,
+        update_id=update_id,
         chat_id=9,
         user_id=user_id,
         text=text,
@@ -110,11 +120,17 @@ def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> Telegra
 
 
 class FakeMediaProcessor:
+    def __init__(self) -> None:
+        self.close_count = 0
+
     def process(self, attachment, data: bytes, *, instruction: str) -> str:
         assert attachment.file_id == "voice-1"
         assert data == b"media"
         assert instruction == "Summarize"
         return "transcribed words"
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 @pytest.mark.asyncio
@@ -197,6 +213,73 @@ async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_bot_closes_owned_media_processor_once(tmp_path: Path) -> None:
+    processor = FakeMediaProcessor()
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+        media_processor=processor,
+        owns_media_processor=True,
+    )
+
+    await bot.close()
+    await bot.close()
+
+    assert processor.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_media_deadline_is_sanitized_and_releases_chat_lock(tmp_path: Path) -> None:
+    class BlockingMediaProcessor:
+        def process(self, *_args: object, **_kwargs: object) -> str:
+            time.sleep(0.05)
+            return "too late"
+
+    client = FakeClient()
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "gemini",
+            "CHULK_MODEL": "gemini-test",
+            "CHULK_GEMINI_API_KEY": "fake",
+            "CHULK_LLM_TIMEOUT_SECONDS": "0.01",
+        }
+    )
+    bot = TelegramAgentBot(
+        config=config,
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=client,  # type: ignore[arg-type]
+        media_processor=BlockingMediaProcessor(),
+        agent_factory=lambda chat_id, conversation_id: FakeAgent(
+            conversation_id or f"new-{chat_id}"
+        ),
+    )
+    update = TelegramUpdate(
+        update_id=5,
+        chat_id=9,
+        user_id=7,
+        text="Summarize",
+        chat_type="private",
+        attachment=TelegramAttachment("voice-1", "voice", "audio/ogg"),
+    )
+
+    await bot.handle_update(update)
+
+    assert client.sent[-1] == (
+        9,
+        "The configured media provider could not interpret that attachment.",
+    )
+    assert bot._chat_locks[9].locked() is False
+
+
+@pytest.mark.asyncio
 async def test_bot_rejects_iwork_package_before_download(tmp_path: Path) -> None:
     client = FakeClient()
     bot = _bot(tmp_path, client, [])
@@ -258,6 +341,184 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_poll_retry_after_send_failure_does_not_repeat_agent_execution(
+    tmp_path: Path,
+) -> None:
+    class FailingOnceClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__((_update("change remote state"),))
+            self.fail_next_send = True
+
+        def send_message(self, chat_id: int, text: str) -> None:
+            if self.fail_next_send:
+                self.fail_next_send = False
+                raise TelegramError("send failed")
+            super().send_message(chat_id, text)
+
+    client = FailingOnceClient()
+    agents: list[FakeAgent] = []
+    bot = _bot(tmp_path, client, agents)
+
+    with pytest.raises(TelegramError, match="send failed"):
+        await bot.poll_once()
+    assert len(agents[0].calls) == 1
+    assert bot._offset is None
+    assert bot.update_ledger.get(adapter="telegram", update_id=1).status == "executed"
+
+    await bot.poll_once()
+
+    assert len(agents[0].calls) == 1
+    assert client.sent == [(9, "answer: change remote state")]
+    assert bot.update_ledger.get(adapter="telegram", update_id=1).status == "delivered"
+    assert bot._offset == 100
+
+
+@pytest.mark.asyncio
+async def test_restart_delivers_recorded_response_without_reexecuting_update(
+    tmp_path: Path,
+) -> None:
+    class AlwaysFailingClient(FakeClient):
+        def send_message(self, chat_id: int, text: str) -> None:
+            raise TelegramError("offline")
+
+    update = _update("one execution")
+    first_agents: list[FakeAgent] = []
+    first_bot = _bot(tmp_path, AlwaysFailingClient((update,)), first_agents)
+    with pytest.raises(TelegramError, match="offline"):
+        await first_bot.poll_once()
+    assert len(first_agents[0].calls) == 1
+
+    second_agents: list[FakeAgent] = []
+    second_client = FakeClient((update,))
+    restarted = _bot(tmp_path, second_client, second_agents)
+    await restarted.poll_once()
+
+    assert second_agents == []
+    assert second_client.sent == [(9, "answer: one execution")]
+    assert restarted.update_ledger.get(adapter="telegram", update_id=1).status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_multipart_retry_resumes_after_last_delivery_checkpoint(tmp_path: Path) -> None:
+    class LongAgent(FakeAgent):
+        async def run(self, message: str, **kwargs: object) -> str:
+            self.calls.append(("run", (message, kwargs)))
+            return "x" * 5_000
+
+    class SecondPartFailsOnceClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__((_update("long"),))
+            self.send_attempts = 0
+
+        def send_message(self, chat_id: int, text: str) -> None:
+            self.send_attempts += 1
+            if self.send_attempts == 2:
+                raise TelegramError("second part failed")
+            super().send_message(chat_id, text)
+
+    agents: list[LongAgent] = []
+
+    def factory(chat_id: int, conversation_id: str | None) -> LongAgent:
+        agent = LongAgent(conversation_id or f"long-{chat_id}")
+        agents.append(agent)
+        return agent
+
+    client = SecondPartFailsOnceClient()
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            poll_timeout_seconds=1,
+        ),
+        client=client,  # type: ignore[arg-type]
+        agent_factory=factory,
+    )
+
+    with pytest.raises(TelegramError, match="second part failed"):
+        await bot.poll_once()
+    await bot.poll_once()
+
+    assert len(agents) == 1
+    assert len(agents[0].calls) == 1
+    assert [len(text) for _chat_id, text in client.sent] == [4096, 904]
+    assert client.send_attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bot_does_not_execute_or_advance_an_active_update(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingAgent(FakeAgent):
+        async def run(self, message: str, **kwargs: object) -> str:
+            self.calls.append(("run", (message, kwargs)))
+            started.set()
+            await release.wait()
+            return "done"
+
+    first_agents: list[BlockingAgent] = []
+
+    def blocking_factory(chat_id: int, conversation_id: str | None) -> BlockingAgent:
+        agent = BlockingAgent(conversation_id or f"blocking-{chat_id}")
+        first_agents.append(agent)
+        return agent
+
+    update = _update("only once")
+    first = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+            poll_timeout_seconds=1,
+        ),
+        client=FakeClient((update,)),  # type: ignore[arg-type]
+        agent_factory=blocking_factory,
+    )
+    second_agents: list[FakeAgent] = []
+    second = _bot(tmp_path, FakeClient((update,)), second_agents)
+
+    first_poll = asyncio.create_task(first.poll_once())
+    await started.wait()
+    await second.poll_once()
+
+    assert second_agents == []
+    assert second._offset is None
+    release.set()
+    await first_poll
+    assert len(first_agents[0].calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_retains_unauthorized_update_as_ignored(tmp_path: Path) -> None:
+    client = FakeClient((_update("no", user_id=99),))
+    bot = _bot(tmp_path, client, [])
+
+    await bot.poll_once()
+
+    record = bot.update_ledger.get(adapter="telegram", update_id=1)
+    assert record is not None
+    assert record.status == "ignored"
+    assert bot._offset == 100
+
+
+@pytest.mark.asyncio
+async def test_poll_retains_unsupported_update_as_ignored(tmp_path: Path) -> None:
+    client = FakeClient()
+    client.ignored_updates = ((4, "9"),)
+    bot = _bot(tmp_path, client, [])
+
+    await bot.poll_once()
+
+    record = bot.update_ledger.get(adapter="telegram", update_id=4)
+    assert record is not None
+    assert record.status == "ignored"
+    assert record.destination_id == "9"
+
+
+@pytest.mark.asyncio
 async def test_bot_registers_telegram_command_menu(tmp_path: Path) -> None:
     client = FakeClient()
     bot = _bot(tmp_path, client, [])
@@ -287,6 +548,33 @@ async def test_bot_executes_and_delivers_due_scheduled_job(tmp_path: Path) -> No
     assert kwargs["extension_metadata"]["scheduled_job_id"] == job.id
     assert client.sent == [(9, "answer: scheduled research")]
     assert bot.schedule_store.get(job.id).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_survives_a_recoverable_iteration_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _bot(tmp_path, FakeClient(), [])
+    calls = 0
+
+    async def flaky_iteration() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary")
+        raise asyncio.CancelledError
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bot, "run_due_jobs_once", flaky_iteration)
+    monkeypatch.setattr(telegram_bot_module.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await bot._scheduler_loop()
+
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -355,8 +643,88 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
         capabilities = captured["capabilities"]
         assert capabilities.network is True
         assert capabilities.shell is False
+        assert captured["memory_namespace"] == "telegram:chat:9"
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_user_safe_mode_excludes_memory_tools_and_prompt_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7, 8}),
+            long_term_memory_enabled=False,
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    agent = bot._default_agent_factory(9, None)
+    try:
+        names = {tool.name for tool in captured["tools"]}
+        assert {
+            "search_memory",
+            "list_memories",
+            "summarize_memories",
+        }.isdisjoint(names)
+        assert captured["capabilities"].memory is MemoryMode.OFF
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_user_agents_receive_distinct_nondefault_memory_namespaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(dict(kwargs))
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7, 8}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    first = bot._default_agent_factory(9, None)
+    second = bot._default_agent_factory(10, None)
+    try:
+        assert [item["memory_namespace"] for item in captured] == [
+            "telegram:chat:9",
+            "telegram:chat:10",
+        ]
+        for item in captured:
+            assert item["capabilities"].memory is MemoryMode.READ_ONLY
+            assert {"search_memory", "list_memories", "summarize_memories"} <= {
+                tool.name for tool in item["tools"]
+            }
+    finally:
+        await first.close()
+        await second.close()
 
 
 def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None:

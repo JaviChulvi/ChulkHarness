@@ -201,7 +201,7 @@ class ExecuteToolEffect:
 class FinishToolEffect:
     """Record a tool result using the reducer-selected plan disposition."""
 
-    disposition: Literal["none", "evidence", "retry_scheduled", "block"]
+    disposition: Literal["none", "evidence", "retry_scheduled", "block", "fatal_safety"]
     retry_metadata: dict[str, object] | None = None
     blocked_reason: str | None = None
 
@@ -446,6 +446,17 @@ def _reduce_tool_result(
     snapshot: ActionLoopSnapshot,
     signal: ToolResultSignal,
 ) -> ActionTransition:
+    if not signal.success and signal.failure_kind == "fatal_safety":
+        return ActionTransition(
+            effect=FinishToolEffect(
+                disposition="fatal_safety",
+                blocked_reason=(
+                    f"Fatal safety policy stopped the turn. "
+                    f"{_format_tool_failure_reason(signal)}"
+                ),
+            ),
+            outcome=TransitionOutcome.STOP,
+        )
     if not signal.has_plan_step:
         return ActionTransition(
             effect=FinishToolEffect(disposition="none"),

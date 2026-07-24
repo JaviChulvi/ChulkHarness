@@ -11,6 +11,42 @@ output, or credentials are absent. Restrict access, set retention, and scrub
 before sharing. Truncated tool-output artifacts beside a trace require the same
 handling.
 
+Trace directories and artifact directories are created owner-only (`0700`) on
+POSIX; JSONL traces, full-output artifacts, and HTML exports are owner-only
+(`0600`). Existing modes are repaired when a sensitive file is opened for
+writing. Symlink and non-regular trace, artifact, and export targets are
+rejected instead of followed. Deferred loggers preserve lazy behavior and do
+not create a trace file until their activation event.
+
+## Opaque artifact reads
+
+When a tool result exceeds the model-facing output limit, its full text is
+stored under an opaque `art_<id>` reference. Observations and result metadata
+contain the id, byte/character counts, and SHA-256 digest, never a filesystem
+path. General file tools continue to reject trace and artifact paths.
+
+Hosts can retrieve evidence through the conversation-bound API:
+
+```python
+view = agent.read_artifact(
+    artifact_id,
+    mode="head_tail",  # also: head, tail, slice
+    max_bytes=8192,
+)
+```
+
+Reads validate the private manifest owner, fixed id-derived filename, regular
+file type, recorded size, maximum integrity-read size, and SHA-256 digest
+before returning content. A response is always bounded to at most 65,536 source
+bytes and reports the returned ranges and whether content was omitted.
+`slice` additionally accepts a non-negative byte offset.
+
+Applications may explicitly expose `Tools.read_trace_artifact` to the model.
+It is not in the default tool set: adding the tool is the host capability
+decision, and normal read permission policy still applies. The tool is bound
+to the current conversation, so an id from another trace, a forged id, a path,
+or a tampered/missing artifact fails closed.
+
 Action-request trace payloads identify `action_transport`, the effective native
 tool names, and a bounded provider-neutral declaration snapshot. The context
 report separates message tokens from out-of-band native declaration overhead.
@@ -45,6 +81,12 @@ include elapsed milliseconds measured with a monotonic clock.
 events (reported as schema version `0`). A trace created before an upgrade can
 therefore contain both versions. Unknown future versions fail closed with
 `TraceFormatError` instead of being interpreted with the wrong contract.
+The reader consumes JSONL incrementally. By default it rejects traces larger
+than 64 MiB, traces with more than 100,000 non-empty events, and individual
+lines larger than 4 MiB. Callers can set lower or higher positive
+`max_bytes`/`max_events` values. The CLI exposes the same controls; trusted
+operators can deliberately bypass all three parser limits with `--unbounded`.
+Limits fail with an error and never return a partial trace.
 
 The internal event payload catalog remains trace-only and may evolve without a
 compatibility release. The envelope version and legacy reader support make
@@ -61,14 +103,23 @@ chulk trace inspect .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl --json
 chulk trace export .chulk/traces/<conversation-id>.jsonl --format html
+chulk trace inspect .chulk/traces/<conversation-id>.jsonl --max-events 50000
+chulk trace inspect .chulk/traces/<conversation-id>.jsonl --unbounded
 ```
 
-`inspect` summarizes the envelope versions and event counts. `replay`
+`inspect` summarizes the envelope versions, source bytes, event counts, parser
+limit mode, and an artifact inventory. Inventory entries expose opaque ids,
+safe metadata, and integrity status without artifact content or filesystem
+paths. Counts and total recorded bytes provide retention visibility; Chulk
+does not delete artifacts automatically. Missing, unrecorded, unsafe,
+oversized, size-mismatched, and hash-mismatched artifacts are reported.
+`replay`
 deterministically reconstructs recorded sessions, turns, model-request counts,
 tool outcomes, failures, and answers. It never calls a model, invokes a tool,
 or accesses the network, and it does not modify the source trace. This is
 diagnostic reconstruction, not executable regression replay. `export` writes
-an escaped, self-contained HTML report.
+an escaped, self-contained HTML report with the same inventory but never
+embeds artifact content.
 
 Command output can repeat sensitive content from the trace and must receive the
 same handling as the source file.
