@@ -11,6 +11,13 @@ output, or credentials are absent. Restrict access, set retention, and scrub
 before sharing. Truncated tool-output artifacts beside a trace require the same
 handling.
 
+Trace directories and artifact directories are created owner-only (`0700`) on
+POSIX; JSONL traces, full-output artifacts, and HTML exports are owner-only
+(`0600`). Existing modes are repaired when a sensitive file is opened for
+writing. Symlink and non-regular trace, artifact, and export targets are
+rejected instead of followed. Deferred loggers preserve lazy behavior and do
+not create a trace file until their activation event.
+
 Action-request trace payloads identify `action_transport`, the effective native
 tool names, and a bounded provider-neutral declaration snapshot. The context
 report separates message tokens from out-of-band native declaration overhead.

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -98,6 +100,63 @@ def test_deferred_logger_close_preserves_lazy_no_trace_behavior(tmp_path):
     logger.close()
 
     assert logger.path.exists() is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode assertions")
+def test_logger_repairs_private_trace_and_artifact_modes(tmp_path):
+    tmp_path.chmod(0o755)
+    trace_path = tmp_path / "conversation-1.jsonl"
+    trace_path.write_text("", encoding="utf-8")
+    trace_path.chmod(0o644)
+    logger = JSONLTraceLogger(tmp_path, "conversation-1")
+
+    artifact = logger.write_artifact("full output", "sensitive")
+    logger.close()
+    artifact_path = Path(artifact["path"])
+
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(trace_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(logger.artifacts_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifact_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
+def test_logger_rejects_symlink_trace_and_artifact_targets(tmp_path):
+    traces_dir = tmp_path / "traces"
+    traces_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("preserved", encoding="utf-8")
+    (traces_dir / "linked.jsonl").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        JSONLTraceLogger(traces_dir, "linked")
+    assert outside.read_text(encoding="utf-8") == "preserved"
+
+    logger = JSONLTraceLogger(traces_dir, "artifact-owner")
+    outside_directory = tmp_path / "outside-artifacts"
+    outside_directory.mkdir()
+    logger.artifacts_dir.symlink_to(outside_directory, target_is_directory=True)
+    with pytest.raises(ValueError, match="not a regular directory"):
+        logger.write_artifact("output", "sensitive")
+
+
+def test_logger_rejects_non_regular_trace_target(tmp_path):
+    (tmp_path / "not-a-file.jsonl").mkdir()
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        JSONLTraceLogger(tmp_path, "not-a-file")
+
+
+def test_deferred_logger_checks_target_only_when_activated(tmp_path):
+    logger = JSONLTraceLogger(
+        tmp_path,
+        "lazy",
+        defer_until_event="turn_started",
+    )
+    logger.path.mkdir()
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        logger.log("turn_started", {"turn_id": "turn-1"})
 
 
 def test_reader_normalizes_v0_and_replay_is_deterministic_and_read_only(tmp_path, capsys):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 import pytest
@@ -591,6 +592,80 @@ def test_trace_inspect_and_export_are_machine_readable_and_escape_html(tmp_path,
     assert "&lt;script&gt;alert" in html
     assert "<script>alert" not in html
     assert "Trace exports may contain sensitive runtime data" in html
+    if os.name == "posix":
+        assert stat.S_IMODE(html_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
+def test_trace_export_rejects_symlink_destination(tmp_path, capsys):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.html"
+    outside.write_text("preserved", encoding="utf-8")
+    destination = tmp_path / "report.html"
+    destination.symlink_to(outside)
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--force",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "trace_error"
+    assert "not a regular file" in payload["error"]
+    assert outside.read_text(encoding="utf-8") == "preserved"
+
+
+def test_trace_export_rejects_non_regular_destination(tmp_path, capsys):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "report.html"
+    destination.mkdir()
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--force",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["status"] == "trace_error"
+    assert "not a regular file" in payload["error"]
 
 
 def test_trace_commands_report_malformed_input_cleanly(tmp_path, capsys):

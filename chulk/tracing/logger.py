@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from chulk.redaction import redact_data
+from chulk.storage.private_files import prepare_private_directory, write_private_text
 
 
 TRACE_SCHEMA_VERSION = 1
@@ -60,7 +61,7 @@ class JSONLTraceLogger:
         clean_conversation_id = _validate_conversation_id(conversation_id)
         self.traces_dir = Path(traces_dir)
         self.conversation_id = clean_conversation_id
-        self.traces_dir.mkdir(parents=True, exist_ok=True)
+        prepare_private_directory(self.traces_dir)
         self.path = self.traces_dir / f"{clean_conversation_id}.jsonl"
         self.artifacts_dir = self.traces_dir / f"{clean_conversation_id}_artifacts"
         resumed = self.path.exists()
@@ -159,8 +160,11 @@ class JSONLTraceLogger:
         self._append_event(event)
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        with self.path.open("a", encoding="utf-8") as trace_file:
-            trace_file.write(json.dumps(event, sort_keys=True) + "\n")
+        write_private_text(
+            self.path,
+            json.dumps(event, sort_keys=True) + "\n",
+            append=True,
+        )
         self._event_count += 1
 
     def write_artifact(self, name: str, content: str) -> dict[str, Any]:
@@ -169,10 +173,10 @@ class JSONLTraceLogger:
             if self._closed:
                 raise RuntimeError("Trace logger is closed")
             self.activate()
-            self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+            prepare_private_directory(self.artifacts_dir)
             safe_name = _safe_artifact_name(name)
             path = self.artifacts_dir / f"{safe_name}-{uuid4().hex}.txt"
-            path.write_text(content, encoding="utf-8")
+            write_private_text(path, content, overwrite=False)
             return {
                 "path": str(path),
                 "char_count": len(content),

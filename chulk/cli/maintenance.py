@@ -12,6 +12,7 @@ from typing import Any
 
 from chulk.config import Config, load_config, resolve_cli_environment
 from chulk.llm.capabilities import resolve_runtime_model_capabilities
+from chulk.storage.private_files import write_private_text
 from chulk.tracing import Trace, TraceFormatError
 
 
@@ -254,16 +255,19 @@ def export_trace_html(
 ) -> Path:
     trace = Trace.from_jsonl(path)
     destination = (
-        Path(output_path).expanduser().resolve()
+        Path(output_path).expanduser().absolute()
         if output_path is not None
         else trace.path.with_suffix(".html")
     )
-    if destination == trace.path or (destination.exists() and destination.samefile(trace.path)):
+    if destination.resolve() == trace.path.resolve():
         raise ValueError(f"Trace export output cannot overwrite the source trace: {trace.path}")
     if destination.exists() and not force:
         raise FileExistsError(f"Output already exists: {destination}. Pass --force to replace it.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(trace.to_html(), encoding="utf-8")
+    write_private_text(
+        destination,
+        trace.to_html(),
+        overwrite=force,
+    )
     return destination
 
 

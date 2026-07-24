@@ -2202,7 +2202,7 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | 1. Claim-owned scheduled-job state machine | Completed | This commit | Full suite: 1,036 passed; focused Ruff and compileall passed | None | External Telegram delivery remains intentionally at-least-once |
 | 2. Durable Telegram update execution ledger | Completed | This commit | Full suite: 1,050 passed; 60 focused tests, focused Ruff, mypy, and compileall passed | None | Telegram send outcomes remain at-least-once; ambiguous execution is quarantined instead of replayed |
 | 3. Transactional patch commit | Completed | This commit | 54 focused tool tests passed; focused Ruff, mypy, and compileall passed | None | Irrecoverable host filesystem rollback failures are surfaced explicitly with affected paths |
-| 4. Private trace filesystem policy | Pending | Pending | Pending | None | Pending implementation |
+| 4. Private trace filesystem policy | Completed | This commit | 73 focused tracing and CLI tests passed; focused Ruff, mypy, and compileall passed | None | POSIX modes are enforced where the platform exposes them; Windows still receives target-type checks |
 | 5. Fatal safety transition | Pending | Pending | Pending | None | Pending implementation |
 | 6. Built-in provider and media lifecycle | Pending | Pending | Pending | None | Pending implementation |
 | 7. Safe artifact identity and bounded read | Pending | Pending | Pending | None | Pending implementation |
