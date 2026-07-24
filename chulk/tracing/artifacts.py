@@ -201,38 +201,67 @@ class TraceArtifactStore:
             truncated=sum(end - start for start, end in ranges) < size,
         )
 
+    def inventory(
+        self,
+        *,
+        max_artifact_bytes: int = MAX_ARTIFACT_FILE_BYTES,
+    ) -> list[dict[str, Any]]:
+        """Return recorded artifacts and integrity status without their content."""
+        if not self.artifacts_dir.exists():
+            return []
+        records = self._load_manifest_records(allow_missing=True)
+        inventory: list[dict[str, Any]] = []
+        recorded_ids = {record.artifact_id for record in records}
+        for record in records:
+            entry = {
+                key: value
+                for key, value in record.to_dict().items()
+                if key != "filename"
+            }
+            if record.conversation_id != self.conversation_id:
+                entry.update(
+                    integrity="owner_mismatch",
+                    integrity_error="recorded conversation does not own this artifact",
+                )
+            elif record.filename != f"{record.artifact_id}.txt":
+                entry.update(
+                    integrity="invalid_manifest",
+                    integrity_error="recorded filename is not id-derived",
+                )
+            else:
+                integrity, error = self._inspect_integrity(
+                    record,
+                    max_artifact_bytes=max_artifact_bytes,
+                )
+                entry["integrity"] = integrity
+                entry["integrity_error"] = error
+            inventory.append(entry)
+
+        for candidate in sorted(self.artifacts_dir.iterdir(), key=lambda item: item.name):
+            match = re.fullmatch(r"(art_[0-9a-f]{32})\.txt", candidate.name)
+            if match is None or match.group(1) in recorded_ids:
+                continue
+            mode = candidate.lstat().st_mode
+            inventory.append(
+                {
+                    "artifact_id": match.group(1),
+                    "conversation_id": self.conversation_id,
+                    "label": None,
+                    "char_count": None,
+                    "byte_count": candidate.stat().st_size if stat.S_ISREG(mode) else None,
+                    "sha256": None,
+                    "created_at": None,
+                    "integrity": "unrecorded",
+                    "integrity_error": "artifact file has no manifest record",
+                }
+            )
+        return inventory
+
     def _find_record(self, artifact_id: str) -> ArtifactRecord:
-        _validate_artifact_directory(
-            self.artifacts_dir,
-            artifact_id=artifact_id,
-        )
-        descriptor = _open_regular_read_only(
-            self.manifest_path,
-            artifact_id=artifact_id,
-        )
-        matches: list[ArtifactRecord] = []
-        try:
-            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-                descriptor = -1
-                for raw_line in stream:
-                    if len(raw_line.encode("utf-8")) > MAX_MANIFEST_LINE_BYTES:
-                        raise ArtifactAccessError(
-                            "Artifact manifest contains an oversized record",
-                            artifact_id=artifact_id,
-                        )
-                    try:
-                        value = json.loads(raw_line)
-                    except json.JSONDecodeError as exc:
-                        raise ArtifactAccessError(
-                            "Artifact manifest contains invalid JSON",
-                            artifact_id=artifact_id,
-                        ) from exc
-                    if not isinstance(value, dict) or value.get("artifact_id") != artifact_id:
-                        continue
-                    matches.append(_record_from_dict(value, artifact_id=artifact_id))
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+        records = self._load_manifest_records()
+        matches = [
+            record for record in records if record.artifact_id == artifact_id
+        ]
         if len(matches) != 1:
             reason = "not recorded" if not matches else "recorded more than once"
             raise ArtifactAccessError(
@@ -240,6 +269,93 @@ class TraceArtifactStore:
                 artifact_id=artifact_id,
             )
         return matches[0]
+
+    def _load_manifest_records(
+        self,
+        *,
+        allow_missing: bool = False,
+    ) -> list[ArtifactRecord]:
+        _validate_artifact_directory(
+            self.artifacts_dir,
+            artifact_id="manifest",
+        )
+        if allow_missing and not self.manifest_path.exists():
+            return []
+        descriptor = _open_regular_read_only(
+            self.manifest_path,
+            artifact_id="manifest",
+        )
+        records: list[ArtifactRecord] = []
+        try:
+            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                descriptor = -1
+                for raw_line in stream:
+                    if len(raw_line.encode("utf-8")) > MAX_MANIFEST_LINE_BYTES:
+                        raise ArtifactAccessError(
+                            "Artifact manifest contains an oversized record",
+                            artifact_id="manifest",
+                        )
+                    try:
+                        value = json.loads(raw_line)
+                    except json.JSONDecodeError as exc:
+                        raise ArtifactAccessError(
+                            "Artifact manifest contains invalid JSON",
+                            artifact_id="manifest",
+                        ) from exc
+                    if not isinstance(value, dict):
+                        raise ArtifactAccessError(
+                            "Artifact manifest record is invalid",
+                            artifact_id="manifest",
+                        )
+                    raw_artifact_id = value.get("artifact_id")
+                    if not isinstance(raw_artifact_id, str):
+                        raise ArtifactAccessError(
+                            "Artifact manifest record is invalid",
+                            artifact_id="manifest",
+                        )
+                    records.append(
+                        _record_from_dict(
+                            value,
+                            artifact_id=raw_artifact_id,
+                        )
+                    )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        identities = [record.artifact_id for record in records]
+        if len(set(identities)) != len(identities):
+            raise ArtifactAccessError(
+                "Artifact manifest contains duplicate ids",
+                artifact_id="manifest",
+            )
+        return records
+
+    def _inspect_integrity(
+        self,
+        record: ArtifactRecord,
+        *,
+        max_artifact_bytes: int,
+    ) -> tuple[str, str | None]:
+        path = self.artifacts_dir / record.filename
+        try:
+            descriptor = _open_regular_read_only(
+                path,
+                artifact_id=record.artifact_id,
+            )
+        except ArtifactAccessError as exc:
+            status = "missing" if "missing" in str(exc) else "unsafe_target"
+            return status, str(exc)
+        try:
+            size = os.fstat(descriptor).st_size
+            if size != record.byte_count:
+                return "size_mismatch", "file size differs from the manifest"
+            if size > max_artifact_bytes:
+                return "oversized", "file exceeds the integrity-read bound"
+            if _hash_descriptor(descriptor) != record.sha256:
+                return "hash_mismatch", "file hash differs from the manifest"
+        finally:
+            os.close(descriptor)
+        return "valid", None
 
 
 def _record_from_dict(value: dict[str, Any], *, artifact_id: str) -> ArtifactRecord:

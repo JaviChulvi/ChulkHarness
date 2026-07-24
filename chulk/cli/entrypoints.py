@@ -163,21 +163,41 @@ def run_trace_command(
     json_output: bool,
     output_path: Path | str | None,
     force: bool,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
     output_func: Callable[[str], None],
     error_func: Callable[[str], None],
 ) -> int:
     try:
         if command == "inspect":
-            summary = inspect_trace(path)
+            summary = inspect_trace(
+                path,
+                max_bytes=max_bytes,
+                max_events=max_events,
+                unbounded=unbounded,
+            )
             output_func(json_text(summary) if json_output else format_trace_summary(summary))
             return EXIT_OK
         if command == "replay":
-            replay = replay_trace(path)
+            replay = replay_trace(
+                path,
+                max_bytes=max_bytes,
+                max_events=max_events,
+                unbounded=unbounded,
+            )
             output_func(json_text(replay) if json_output else format_trace_replay(replay))
             return EXIT_OK
         if command != "export":
             raise ValueError(f"Unknown trace command: {command}")
-        destination = export_trace_html(path, output_path=output_path, force=force)
+        destination = export_trace_html(
+            path,
+            output_path=output_path,
+            force=force,
+            max_bytes=max_bytes,
+            max_events=max_events,
+            unbounded=unbounded,
+        )
         payload = {
             "ok": True,
             "status": "exported",

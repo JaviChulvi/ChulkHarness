@@ -7,7 +7,12 @@ import pytest
 
 from chulk import Agent, AgentConfig, Tools
 from chulk.testing import ScriptedLLMClient
-from chulk.tracing import ArtifactAccessError, JSONLTraceLogger, TraceArtifactStore
+from chulk.tracing import (
+    ArtifactAccessError,
+    JSONLTraceLogger,
+    Trace,
+    TraceArtifactStore,
+)
 
 
 def test_artifact_reads_are_bounded_and_support_slice_head_tail(tmp_path) -> None:
@@ -96,6 +101,66 @@ def test_artifact_reader_rejects_oversized_and_hash_mismatch(tmp_path) -> None:
     tampered_path.write_text("modified", encoding="utf-8")
     with pytest.raises(ArtifactAccessError, match="hash"):
         logger.read_artifact(tampered["artifact_id"])
+
+
+def test_trace_manifest_reports_artifact_integrity_without_embedding_content(
+    tmp_path,
+) -> None:
+    traces_dir = tmp_path / "traces"
+    logger = JSONLTraceLogger(traces_dir, "owner")
+    valid = logger.write_artifact("valid output", "valid sensitive content")
+    tampered = logger.write_artifact("tampered output", "same-size secret")
+    logger.close()
+    tampered_path = logger.artifacts_dir / f"{tampered['artifact_id']}.txt"
+    tampered_path.write_text("altered-secret!!", encoding="utf-8")
+
+    trace = Trace.from_jsonl(logger.path)
+    summary = trace.summary()
+    by_id = {item["artifact_id"]: item for item in summary["artifacts"]}
+    html = trace.to_html()
+
+    assert summary["artifact_count"] == 2
+    assert summary["artifact_total_bytes"] == len("valid sensitive content") + len(
+        "same-size secret"
+    )
+    assert summary["artifact_integrity"] == {"hash_mismatch": 1, "valid": 1}
+    assert by_id[valid["artifact_id"]]["integrity"] == "valid"
+    assert by_id[tampered["artifact_id"]]["integrity"] == "hash_mismatch"
+    assert "filename" not in by_id[valid["artifact_id"]]
+    assert valid["artifact_id"] in html
+    assert "valid sensitive content" not in html
+    assert "same-size secret" not in html
+
+
+def test_artifact_inventory_reports_missing_and_unrecorded_files(tmp_path) -> None:
+    logger = JSONLTraceLogger(tmp_path / "traces", "owner")
+    missing = logger.write_artifact("missing", "gone")
+    missing_path = logger.artifacts_dir / f"{missing['artifact_id']}.txt"
+    missing_path.unlink()
+    unrecorded_id = "art_" + ("a" * 32)
+    (logger.artifacts_dir / f"{unrecorded_id}.txt").write_text(
+        "orphan",
+        encoding="utf-8",
+    )
+
+    inventory = logger.artifact_store.inventory()
+    by_id = {item["artifact_id"]: item for item in inventory}
+
+    assert by_id[missing["artifact_id"]]["integrity"] == "missing"
+    assert by_id[unrecorded_id]["integrity"] == "unrecorded"
+
+
+def test_artifact_manifest_duplicate_ids_fail_closed(tmp_path) -> None:
+    logger = JSONLTraceLogger(tmp_path / "traces", "owner")
+    reference = logger.write_artifact("output", "content")
+    manifest = logger.artifact_store.manifest_path
+    record = manifest.read_text(encoding="utf-8")
+    manifest.write_text(record + record, encoding="utf-8")
+
+    with pytest.raises(ArtifactAccessError, match="duplicate ids"):
+        logger.artifact_store.inventory()
+    with pytest.raises(ArtifactAccessError, match="duplicate ids"):
+        logger.read_artifact(reference["artifact_id"])
 
 
 def test_artifact_reader_is_opt_in_as_tool_and_available_as_host_api(tmp_path) -> None:

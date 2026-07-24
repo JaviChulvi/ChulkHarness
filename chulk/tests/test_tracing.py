@@ -10,7 +10,12 @@ import stat
 import pytest
 
 from chulk.main import main
-from chulk.tracing import JSONLTraceLogger, TRACE_SCHEMA_VERSION, Trace, TraceFormatError
+from chulk.tracing import (
+    JSONLTraceLogger,
+    TRACE_SCHEMA_VERSION,
+    Trace,
+    TraceFormatError,
+)
 
 
 def _write_legacy_trace(path: Path) -> str:
@@ -235,6 +240,101 @@ def test_reader_accepts_mixed_legacy_and_v1_events_from_an_upgraded_trace(tmp_pa
     assert trace.summary()["schema_versions"] == [0, 1]
     assert [event.conversation_id for event in trace.events] == ["conversation-1"] * 2
     assert [event.turn_id for event in trace.events] == ["turn-old"] * 2
+
+
+def test_reader_streams_large_jsonl_and_enforces_byte_and_event_limits(
+    tmp_path,
+    monkeypatch,
+):
+    trace_path = tmp_path / "large.jsonl"
+    event = {
+        "schema_version": 1,
+        "conversation_id": "large",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "type": "model_request_started",
+        "payload": {"request_index": 1},
+    }
+    trace_text = "".join(json.dumps(event) + "\n" for _ in range(2_000))
+    trace_path.write_text(trace_text, encoding="utf-8")
+
+    def fail_whole_file_read(*_args, **_kwargs):
+        raise AssertionError("trace parsing must not call Path.read_text")
+
+    monkeypatch.setattr(Path, "read_text", fail_whole_file_read)
+
+    trace = Trace.from_jsonl(
+        trace_path,
+        max_bytes=len(trace_text.encode("utf-8")),
+        max_events=2_000,
+    )
+
+    assert len(trace.events) == 2_000
+    assert trace.source_byte_count == len(trace_text.encode("utf-8"))
+    assert trace.limits_applied is True
+    with pytest.raises(TraceFormatError, match="1999-event parse limit"):
+        Trace.from_jsonl(trace_path, max_events=1_999)
+    with pytest.raises(TraceFormatError, match="byte parse limit"):
+        Trace.from_jsonl(
+            trace_path,
+            max_bytes=len(trace_text.encode("utf-8")) - 1,
+        )
+
+
+def test_reader_trusted_unbounded_override_preserves_replay_shape(tmp_path):
+    trace_path = tmp_path / "legacy-conversation.jsonl"
+    _write_legacy_trace(trace_path)
+    bounded_replay = Trace.from_jsonl(trace_path).replay()
+
+    trace = Trace.from_jsonl(
+        trace_path,
+        max_bytes=1,
+        max_events=1,
+        unbounded=True,
+    )
+
+    assert trace.limits_applied is False
+    assert trace.replay() == bounded_replay
+
+
+def test_trace_cli_exposes_limits_and_trusted_override(tmp_path, capsys):
+    trace_path = tmp_path / "legacy-conversation.jsonl"
+    _write_legacy_trace(trace_path)
+
+    limited_exit = main(
+        ["trace", "inspect", str(trace_path), "--max-events", "1", "--json"]
+    )
+    limited = json.loads(capsys.readouterr().out)
+    override_exit = main(
+        [
+            "trace",
+            "inspect",
+            str(trace_path),
+            "--max-events",
+            "1",
+            "--max-bytes",
+            "1",
+            "--unbounded",
+            "--json",
+        ]
+    )
+    override = json.loads(capsys.readouterr().out)
+
+    assert limited_exit == 1
+    assert "1-event parse limit" in limited["error"]
+    assert override_exit == 0
+    assert override["event_count"] == 7
+    assert override["limits_applied"] is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink behavior")
+def test_trace_reader_rejects_symlink_target(tmp_path):
+    target = tmp_path / "target.jsonl"
+    _write_legacy_trace(target)
+    linked = tmp_path / "linked.jsonl"
+    linked.symlink_to(target)
+
+    with pytest.raises(TraceFormatError, match="not a regular file"):
+        Trace.from_jsonl(linked)
 
 
 def test_reader_preserves_turnless_session_event_while_turn_is_active(tmp_path):

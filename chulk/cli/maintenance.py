@@ -162,13 +162,35 @@ def format_init_changes(project_root: Path | str, changes: tuple[InitChange, ...
     return "\n".join(lines)
 
 
-def inspect_trace(path: Path | str) -> dict[str, Any]:
-    return Trace.from_jsonl(path).summary()
+def inspect_trace(
+    path: Path | str,
+    *,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
+) -> dict[str, Any]:
+    return Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    ).summary()
 
 
-def replay_trace(path: Path | str) -> dict[str, Any]:
+def replay_trace(
+    path: Path | str,
+    *,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
+) -> dict[str, Any]:
     """Reconstruct recorded turns without running tools, models, or network calls."""
-    return Trace.from_jsonl(path).replay()
+    return Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    ).replay()
 
 
 def format_trace_summary(summary: dict[str, Any]) -> str:
@@ -180,12 +202,17 @@ def format_trace_summary(summary: dict[str, Any]) -> str:
         f"  conversation  {summary.get('conversation_id')}",
         f"  schemas       {_format_schema_versions(summary.get('schema_versions'))}",
         f"  events        {summary.get('event_count')}",
+        f"  bytes         {summary.get('source_byte_count')}",
+        f"  limits        {'bounded' if summary.get('limits_applied') else 'trusted unbounded'}",
         f"  sessions      {summary.get('session_count')}",
         f"  turns         {summary.get('turn_count')}",
         f"  failures      {summary.get('failure_count')}",
         f"  started       {summary.get('started_at')}",
         f"  ended         {summary.get('ended_at')}",
         f"  event types   {type_text or 'none'}",
+        f"  artifacts     {summary.get('artifact_count', 0)} "
+        f"({summary.get('artifact_total_bytes', 0)} bytes)",
+        f"  integrity     {_format_integrity(summary.get('artifact_integrity'))}",
     ]
     if summary.get("final_answer"):
         lines.extend(["  final answer", *[f"    {line}" for line in str(summary["final_answer"]).splitlines()]])
@@ -247,13 +274,27 @@ def _format_schema_versions(value: object) -> str:
     return ", ".join(str(item) for item in value)
 
 
+def _format_integrity(value: object) -> str:
+    if not isinstance(value, dict) or not value:
+        return "none"
+    return ", ".join(f"{key} x{count}" for key, count in sorted(value.items()))
+
+
 def export_trace_html(
     path: Path | str,
     *,
     output_path: Path | str | None = None,
     force: bool = False,
+    max_bytes: int | None = None,
+    max_events: int | None = None,
+    unbounded: bool = False,
 ) -> Path:
-    trace = Trace.from_jsonl(path)
+    trace = Trace.from_jsonl(
+        path,
+        max_bytes=max_bytes,
+        max_events=max_events,
+        unbounded=unbounded,
+    )
     destination = (
         Path(output_path).expanduser().absolute()
         if output_path is not None

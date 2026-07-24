@@ -81,6 +81,12 @@ include elapsed milliseconds measured with a monotonic clock.
 events (reported as schema version `0`). A trace created before an upgrade can
 therefore contain both versions. Unknown future versions fail closed with
 `TraceFormatError` instead of being interpreted with the wrong contract.
+The reader consumes JSONL incrementally. By default it rejects traces larger
+than 64 MiB, traces with more than 100,000 non-empty events, and individual
+lines larger than 4 MiB. Callers can set lower or higher positive
+`max_bytes`/`max_events` values. The CLI exposes the same controls; trusted
+operators can deliberately bypass all three parser limits with `--unbounded`.
+Limits fail with an error and never return a partial trace.
 
 The internal event payload catalog remains trace-only and may evolve without a
 compatibility release. The envelope version and legacy reader support make
@@ -97,14 +103,23 @@ chulk trace inspect .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl --json
 chulk trace export .chulk/traces/<conversation-id>.jsonl --format html
+chulk trace inspect .chulk/traces/<conversation-id>.jsonl --max-events 50000
+chulk trace inspect .chulk/traces/<conversation-id>.jsonl --unbounded
 ```
 
-`inspect` summarizes the envelope versions and event counts. `replay`
+`inspect` summarizes the envelope versions, source bytes, event counts, parser
+limit mode, and an artifact inventory. Inventory entries expose opaque ids,
+safe metadata, and integrity status without artifact content or filesystem
+paths. Counts and total recorded bytes provide retention visibility; Chulk
+does not delete artifacts automatically. Missing, unrecorded, unsafe,
+oversized, size-mismatched, and hash-mismatched artifacts are reported.
+`replay`
 deterministically reconstructs recorded sessions, turns, model-request counts,
 tool outcomes, failures, and answers. It never calls a model, invokes a tool,
 or accesses the network, and it does not modify the source trace. This is
 diagnostic reconstruction, not executable regression replay. `export` writes
-an escaped, self-contained HTML report.
+an escaped, self-contained HTML report with the same inventory but never
+embeds artifact content.
 
 Command output can repeat sensitive content from the trace and must receive the
 same handling as the source file.
