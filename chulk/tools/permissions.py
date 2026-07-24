@@ -35,6 +35,7 @@ class TerminalPermissionDenied(PermissionError):
         self.tool_name = tool_name
         self.reason = reason
         self.policy_name = policy_name
+        self.failure_kind = "fatal_safety"
         super().__init__(f"Permission denied for tool {tool_name}: {reason}")
 
 

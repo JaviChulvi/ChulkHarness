@@ -487,6 +487,35 @@ def test_reduce_reflection_result(
             "block",
             TransitionOutcome.STOP,
         ),
+        (
+            _snapshot(),
+            ToolResultSignal(
+                tool_name="run_cmd",
+                phase="execution",
+                success=False,
+                has_plan_step=False,
+                error="blocked_command",
+                failure_kind="fatal_safety",
+            ),
+            "fatal_safety",
+            TransitionOutcome.STOP,
+        ),
+        (
+            _snapshot(
+                active_plan_step_id="implementation",
+                active_plan_step_retry_limit=3,
+            ),
+            ToolResultSignal(
+                tool_name="run_cmd",
+                phase="execution",
+                success=False,
+                has_plan_step=True,
+                error="containment_required",
+                failure_kind="fatal_safety",
+            ),
+            "fatal_safety",
+            TransitionOutcome.STOP,
+        ),
     ],
     ids=[
         "unplanned-failure",
@@ -494,6 +523,8 @@ def test_reduce_reflection_result(
         "plan-retry",
         "plan-retry-exhausted",
         "plan-tool-limit-exhausted",
+        "unplanned-fatal-safety",
+        "planned-fatal-safety",
     ],
 )
 def test_reduce_tool_result(

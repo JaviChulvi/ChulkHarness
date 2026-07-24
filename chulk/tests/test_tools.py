@@ -528,6 +528,7 @@ def test_shell_blocks_destructive_command(tmp_path):
 
     assert not result.success
     assert result.error == "blocked_command"
+    assert result.failure_kind == ToolFailureKind.FATAL_SAFETY
 
 
 def test_shell_blocks_recursive_force_rm_variants(tmp_path):
@@ -544,6 +545,7 @@ def test_shell_blocks_recursive_force_rm_variants(tmp_path):
 
         assert not result.success, command
         assert result.error == "blocked_command", command
+        assert result.failure_kind == ToolFailureKind.FATAL_SAFETY, command
 
 
 def test_shell_allows_benign_rm_like_commands(tmp_path):
@@ -566,6 +568,7 @@ def test_shell_blocks_output_redirection_outside_root(tmp_path):
 
     assert not result.success
     assert result.error == "blocked_command"
+    assert result.failure_kind == ToolFailureKind.FATAL_SAFETY
     assert "outside the project root" in result.observation
 
 

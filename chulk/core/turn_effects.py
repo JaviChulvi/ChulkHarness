@@ -169,7 +169,11 @@ class TurnEffects:
                 result=tool_result,
             )
             if blocked_message is not None:
-                response = self.block_turn(blocked_message, turn)
+                response = (
+                    self.fail_turn(blocked_message, turn)
+                    if effect.disposition == "fatal_safety"
+                    else self.block_turn(blocked_message, turn)
+                )
         else:
             raise TypeError(f"Unsupported transition effect: {type(effect).__name__}")
 
@@ -416,6 +420,10 @@ class TurnEffects:
                 "turn": turn.to_dict(),
             },
         )
+        if effect.disposition == "fatal_safety":
+            if effect.blocked_reason is None:
+                raise RuntimeError("Fatal safety tool result requires a reason")
+            return effect.blocked_reason
         if pending.plan_step is None:
             if effect.disposition != "none":
                 raise RuntimeError("Reducer selected plan evidence without a plan step")

@@ -42,6 +42,7 @@ class ToolFailureKind:
     CANCELLED = "cancelled"
     ENVIRONMENT = "environment_failure"
     USER_BLOCKED = "user_blocked"
+    FATAL_SAFETY = "fatal_safety"
     INVALID_OUTPUT = "invalid_output"
     TIMEOUT = "timeout"
 

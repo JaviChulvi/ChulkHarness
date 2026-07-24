@@ -12,7 +12,7 @@ import time
 import pytest
 
 from chulk.capabilities import Capabilities, FileAccess, MemoryMode
-from chulk.tools import create_default_tool_registry
+from chulk.tools import ToolFailureKind, create_default_tool_registry
 from chulk.tools.shell import (
     ShellExecutionDecision,
     ShellExecutionRequest,
@@ -156,6 +156,7 @@ def test_required_containment_fails_closed_before_starting_child(tmp_path: Path)
 
     assert not result.success
     assert result.error == "containment_required"
+    assert result.failure_kind == ToolFailureKind.FATAL_SAFETY
     assert result.metadata["child_process_started"] is False
     assert result.metadata["execution_policy"] == {
         "name": "direct-local",
@@ -220,7 +221,30 @@ def test_host_policy_can_deny_without_starting_child(tmp_path: Path) -> None:
 
     assert not result.success
     assert result.error == "execution_policy_denied"
+    assert result.failure_kind == ToolFailureKind.USER_BLOCKED
     assert "tenant has no shell allocation" in result.observation
+    assert result.metadata["child_process_started"] is False
+
+
+def test_host_policy_can_mark_a_denial_as_fatal(tmp_path: Path) -> None:
+    class FatalPolicy:
+        def prepare(self, request: ShellExecutionRequest) -> ShellExecutionDecision:
+            return ShellExecutionDecision.deny(
+                "host safety invariant failed",
+                policy_name="host-safety",
+                fatal=True,
+            )
+
+    result = run_shell_command(
+        {"command": "printf denied"},
+        tmp_path,
+        execution_policy=FatalPolicy(),
+    )
+
+    assert not result.success
+    assert result.error == "execution_policy_denied"
+    assert result.failure_kind == ToolFailureKind.FATAL_SAFETY
+    assert result.metadata["execution_policy"]["fatal"] is True
     assert result.metadata["child_process_started"] is False
 
 

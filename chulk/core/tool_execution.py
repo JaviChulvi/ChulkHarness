@@ -269,6 +269,7 @@ def _should_retry(result, retry_policy, attempt_number: int, max_attempts: int) 
     if result.failure_kind in {
         ToolFailureKind.CANCELLED,
         ToolFailureKind.USER_BLOCKED,
+        ToolFailureKind.FATAL_SAFETY,
         ToolFailureKind.UNKNOWN_TOOL,
         ToolFailureKind.INVALID_ARGUMENTS,
         ToolFailureKind.ASYNC_REQUIRED,
