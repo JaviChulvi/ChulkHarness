@@ -14,7 +14,12 @@ from uuid import uuid4
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory.extraction import extract_memory_candidates
 from chulk.memory.markdown import parse_markdown_memory_line as _parse_markdown_memory_line
-from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord, MemoryRecord
+from chulk.memory.models import (
+    DEFAULT_MEMORY_NAMESPACE,
+    MemoryExtractionCandidate,
+    MemoryProposalRecord,
+    MemoryRecord,
+)
 from chulk.memory.security import ensure_memory_payload_safe
 from chulk.memory.retrieval import (
     choose_memory_to_keep as _choose_memory_to_keep,
@@ -820,6 +825,7 @@ def _row_to_memory(row: sqlite3.Row) -> MemoryRecord:
         archived_at=row["archived_at"],
         access_count=row["access_count"],
         last_accessed_at=row["last_accessed_at"],
+        namespace=row["namespace"],
     )
 
 
@@ -839,6 +845,7 @@ def _row_to_memory_proposal(row: sqlite3.Row) -> MemoryProposalRecord:
         created_at=row["created_at"],
         reviewed_at=row["reviewed_at"],
         accepted_memory_id=row["accepted_memory_id"],
+        namespace=row["namespace"],
     )
 
 
@@ -869,10 +876,23 @@ def _find_duplicate_memory_in_connection(
 
 def _ensure_fts(conn: sqlite3.Connection) -> bool:
     try:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(memories_fts)")
+        }
+        if columns and "namespace" not in columns:
+            conn.execute("DROP TABLE memories_fts")
         conn.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
-            USING fts5(memory_id UNINDEXED, content, tags, metadata, source)
+            USING fts5(
+                memory_id UNINDEXED,
+                namespace UNINDEXED,
+                content,
+                tags,
+                metadata,
+                source
+            )
             """
         )
     except sqlite3.OperationalError:
@@ -897,16 +917,26 @@ def _replace_memory_fts(
     tags: list[str],
     metadata: dict[str, Any],
     source: str,
+    namespace: str = DEFAULT_MEMORY_NAMESPACE,
 ) -> None:
     if not enabled:
         return
     _delete_memory_fts(conn, enabled=enabled, memory_id=memory_id)
     conn.execute(
         """
-        INSERT INTO memories_fts (memory_id, content, tags, metadata, source)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO memories_fts (
+            memory_id, namespace, content, tags, metadata, source
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (memory_id, content, " ".join(tags), json.dumps(metadata, sort_keys=True), source),
+        (
+            memory_id,
+            namespace,
+            content,
+            " ".join(tags),
+            json.dumps(metadata, sort_keys=True),
+            source,
+        ),
     )
 
 
@@ -925,6 +955,7 @@ def _backfill_memory_fts(conn: sqlite3.Connection) -> None:
             conn,
             enabled=True,
             memory_id=row["id"],
+            namespace=row["namespace"],
             content=row["content"],
             tags=_normalize_tags(_safe_json_list(row["tags"])),
             metadata=_safe_json_dict(row["metadata"]),

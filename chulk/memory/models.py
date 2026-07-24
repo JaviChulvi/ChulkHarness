@@ -3,7 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
+
+
+DEFAULT_MEMORY_NAMESPACE = "default"
+_MEMORY_NAMESPACE_PATTERN = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
+
+
+def normalize_memory_namespace(namespace: str | None) -> str:
+    """Return one opaque, stable memory namespace key."""
+    normalized = DEFAULT_MEMORY_NAMESPACE if namespace is None else namespace.strip().lower()
+    if not _MEMORY_NAMESPACE_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "Memory namespace must be 1-128 lowercase ASCII letters, digits, "
+            "dots, underscores, colons, or hyphens"
+        )
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -23,6 +39,7 @@ class MemoryRecord:
     archived_at: str | None = None
     access_count: int = 0
     last_accessed_at: str | None = None
+    namespace: str = DEFAULT_MEMORY_NAMESPACE
 
 
 @dataclass(frozen=True)
@@ -55,6 +72,7 @@ class MemoryProposalRecord:
     created_at: str
     reviewed_at: str | None = None
     accepted_memory_id: str | None = None
+    namespace: str = DEFAULT_MEMORY_NAMESPACE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,4 +90,14 @@ class MemoryProposalRecord:
             "created_at": self.created_at,
             "reviewed_at": self.reviewed_at,
             "accepted_memory_id": self.accepted_memory_id,
+            "namespace": self.namespace,
         }
+
+
+__all__ = [
+    "DEFAULT_MEMORY_NAMESPACE",
+    "MemoryExtractionCandidate",
+    "MemoryProposalRecord",
+    "MemoryRecord",
+    "normalize_memory_namespace",
+]

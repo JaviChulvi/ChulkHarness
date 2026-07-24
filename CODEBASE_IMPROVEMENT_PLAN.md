@@ -2208,7 +2208,7 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | 7. Safe artifact identity and bounded read | Pending | Pending | Pending | None | Pending implementation |
 | 8. Streaming trace inspection and artifact manifest | Pending | Pending | Pending | None | Pending implementation |
 | 9. Immediate Telegram multi-user memory guard | Completed | This commit | 27 focused Telegram tests passed; focused Ruff and compileall passed | None | Multi-user long-term memory stays disabled until Units 10 and 11 complete |
-| 10. Memory namespace migration and models | Pending | Pending | Pending | None | Pending implementation |
+| 10. Memory namespace migration and models | Completed | This commit | Full suite: 1,091 passed; 64 focused storage/memory tests, Ruff, mypy, and compileall passed | None | Store operations continue to use the compatibility default until Unit 11 binds and enforces scope |
 | 11. Scope every memory operation | Pending | Pending | Pending | None | Pending implementation |
 | 12. Windows validation lane | Completed | This commit | CI YAML parsed; 73 portability/docs tests and docs contract passed locally | Remote Windows runner was not available because this branch must not be pushed | Required Windows 3.12 result remains pending external CI execution |
 | 13. MCP configuration versus runtime-state policy | Pending | Pending | Pending | None | Pending implementation |
