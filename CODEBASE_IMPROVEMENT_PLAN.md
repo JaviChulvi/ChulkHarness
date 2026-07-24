@@ -2207,8 +2207,8 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | 6. Built-in provider and media lifecycle | Completed | This commit | Full suite: 1,089 passed; 259 focused tests, Ruff, mypy, and compileall passed | None | A timed-out synchronous media SDK call can only unwind cooperatively in its worker thread; the provider timeout bounds that cleanup |
 | 7. Safe artifact identity and bounded read | Pending | Pending | Pending | None | Pending implementation |
 | 8. Streaming trace inspection and artifact manifest | Pending | Pending | Pending | None | Pending implementation |
-| 9. Immediate Telegram multi-user memory guard | Completed | This commit | 27 focused Telegram tests passed; focused Ruff and compileall passed | None | Multi-user long-term memory stays disabled until Units 10 and 11 complete |
-| 10. Memory namespace migration and models | Completed | This commit | Full suite: 1,091 passed; 64 focused storage/memory tests, Ruff, mypy, and compileall passed | None | Store operations continue to use the compatibility default until Unit 11 binds and enforces scope |
-| 11. Scope every memory operation | Pending | Pending | Pending | None | Pending implementation |
+| 9. Immediate Telegram multi-user memory guard | Completed | This commit | 27 focused Telegram tests passed; focused Ruff and compileall passed | None | Temporary guard was superseded by enforced per-chat namespaces in Unit 11 |
+| 10. Memory namespace migration and models | Completed | This commit | Full suite: 1,091 passed; 64 focused storage/memory tests, Ruff, mypy, and compileall passed | None | None after Unit 11 completed operation scoping |
+| 11. Scope every memory operation | Completed | This commit | Full suite: 1,098 passed; 335 focused memory/storage/tool/runtime/Telegram/docs tests, Ruff, mypy, and compileall passed | None | Unscoped SDK calls intentionally retain the documented `default` compatibility namespace |
 | 12. Windows validation lane | Completed | This commit | CI YAML parsed; 73 portability/docs tests and docs contract passed locally | Remote Windows runner was not available because this branch must not be pushed | Required Windows 3.12 result remains pending external CI execution |
 | 13. MCP configuration versus runtime-state policy | Pending | Pending | Pending | None | Pending implementation |

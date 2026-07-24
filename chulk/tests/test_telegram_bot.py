@@ -643,6 +643,7 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
         capabilities = captured["capabilities"]
         assert capabilities.network is True
         assert capabilities.shell is False
+        assert captured["memory_namespace"] == "telegram:chat:9"
     finally:
         await agent.close()
 
@@ -683,6 +684,47 @@ async def test_multi_user_safe_mode_excludes_memory_tools_and_prompt_selection(
         assert captured["capabilities"].memory is MemoryMode.OFF
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_user_agents_receive_distinct_nondefault_memory_namespaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(dict(kwargs))
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7, 8}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    first = bot._default_agent_factory(9, None)
+    second = bot._default_agent_factory(10, None)
+    try:
+        assert [item["memory_namespace"] for item in captured] == [
+            "telegram:chat:9",
+            "telegram:chat:10",
+        ]
+        for item in captured:
+            assert item["capabilities"].memory is MemoryMode.READ_ONLY
+            assert {"search_memory", "list_memories", "summarize_memories"} <= {
+                tool.name for tool in item["tools"]
+            }
+    finally:
+        await first.close()
+        await second.close()
 
 
 def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None:

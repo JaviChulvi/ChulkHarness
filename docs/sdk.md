@@ -6,6 +6,13 @@ with`. A closed facade rejects further work. Construction, provider, safety,
 tool, memory, and trace failures map to the stable [SDK exception
 family](sdk-errors.md).
 
+When several logical users or workspaces share a `store_path`, set
+`AgentConfig(memory_namespace="tenant:workspace-key")` (or pass
+`memory_namespace` directly to `Agent`). Omitting it preserves the
+single-project compatibility namespace `default`; it is not a safe
+multi-tenant boundary. See [memory](memory.md) for the normalization and
+isolation contract.
+
 ```python
 from chulk import Agent, AgentConfig
 from chulk.testing import ScriptedLLMClient

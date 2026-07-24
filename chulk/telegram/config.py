@@ -29,13 +29,6 @@ class TelegramConfig:
     max_attachment_bytes: int = 10 * 1024 * 1024
     long_term_memory_enabled: bool = True
 
-    def __post_init__(self) -> None:
-        if len(self.allowed_user_ids) > 1 and self.long_term_memory_enabled:
-            raise TelegramConfigError(
-                "Multi-user Telegram access requires CHULK_TELEGRAM_MEMORY_ENABLED=false "
-                "until durable memory namespaces are enabled"
-            )
-
 
 def load_telegram_config(
     environ: Mapping[str, str] | None = None,

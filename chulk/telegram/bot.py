@@ -460,6 +460,7 @@ class TelegramAgentBot:
             )
         return AsyncAgent(
             config=self.config,
+            memory_namespace=f"telegram:chat:{chat_id}",
             tools=tool_specs,
             capabilities=Capabilities(
                 files=FileAccess.READ,

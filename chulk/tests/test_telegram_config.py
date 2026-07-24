@@ -112,23 +112,23 @@ def test_scheduling_is_disabled_by_default_and_rejects_invalid_boolean() -> None
         )
 
 
-def test_multi_user_memory_must_be_explicitly_disabled() -> None:
+def test_multi_user_memory_is_enabled_with_durable_namespaces() -> None:
     values = {
         "CHULK_TELEGRAM_BOT_TOKEN": "secret",
         "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1,2",
     }
-    with pytest.raises(TelegramConfigError, match="MEMORY_ENABLED=false"):
-        load_telegram_config(values)
+    enabled = load_telegram_config(values)
 
-    config = load_telegram_config(
+    disabled = load_telegram_config(
         {
             **values,
             "CHULK_TELEGRAM_MEMORY_ENABLED": "false",
         }
     )
 
-    assert config.allowed_user_ids == frozenset({1, 2})
-    assert config.long_term_memory_enabled is False
+    assert enabled.allowed_user_ids == frozenset({1, 2})
+    assert enabled.long_term_memory_enabled is True
+    assert disabled.long_term_memory_enabled is False
 
 
 def test_single_user_memory_is_enabled_by_default() -> None:

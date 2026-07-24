@@ -324,6 +324,7 @@ class MemoryProposal:
     created_at: str
     reviewed_at: str | None = None
     accepted_memory_id: str | None = None
+    namespace: str = "default"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))

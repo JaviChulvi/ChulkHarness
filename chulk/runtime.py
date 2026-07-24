@@ -102,6 +102,7 @@ def create_agent(
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
+    memory_namespace: str | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -109,7 +110,10 @@ def create_agent(
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
-    memory_store = SQLiteMemoryStore(config.store_path)
+    memory_store = SQLiteMemoryStore(
+        config.store_path,
+        namespace=memory_namespace,
+    )
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
     session_store = SQLiteSessionStore(config.store_path)

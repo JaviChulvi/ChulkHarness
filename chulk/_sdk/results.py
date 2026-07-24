@@ -174,6 +174,7 @@ def memory_proposal_snapshot(value: object) -> MemoryProposal:
         created_at=str(payload.get("created_at") or ""),
         reviewed_at=_optional_str(payload.get("reviewed_at")),
         accepted_memory_id=_optional_str(payload.get("accepted_memory_id")),
+        namespace=str(payload.get("namespace") or "default"),
     )
 
 

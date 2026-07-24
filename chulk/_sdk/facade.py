@@ -445,6 +445,7 @@ class Agent:
         redaction_fail_closed: bool = False,
         capabilities: Capabilities | None = None,
         memory_mode: MemoryMode | str | None = None,
+        memory_namespace: str | None = None,
         deps: object | None = None,
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
@@ -466,6 +467,7 @@ class Agent:
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,
                 capabilities=selected_capabilities,
+                memory_namespace=memory_namespace,
                 deps=deps,
                 shell_execution_policy=shell_execution_policy,
                 require_shell_containment=require_shell_containment,
@@ -836,6 +838,7 @@ def _build_handle(
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
     capabilities: Capabilities | None = None,
+    memory_namespace: str | None = None,
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
@@ -857,6 +860,7 @@ def _build_handle(
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,
         capabilities=capabilities,
+        memory_namespace=_selected_memory_namespace(config, memory_namespace),
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
@@ -877,6 +881,17 @@ def _selected_capabilities(
     if memory_mode is not None:
         selected = selected.with_memory(memory_mode)
     return selected
+
+
+def _selected_memory_namespace(
+    config: Config | AgentConfig | None,
+    memory_namespace: str | None,
+) -> str | None:
+    if memory_namespace is not None:
+        return memory_namespace
+    if isinstance(config, AgentConfig):
+        return config.memory_namespace
+    return None
 
 
 def agent(**kwargs: Any) -> Agent:

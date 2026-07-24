@@ -733,6 +733,7 @@ class Agent:
                     "memory_ids": list(result.accepted_memory_ids),
                     "proposal_ids": list(result.proposal_ids),
                     "memory_mode": self.memory_policy.mode.value,
+                    "memory_namespace": self.memory_store.namespace,
                 },
             )
 
@@ -747,7 +748,11 @@ class Agent:
 
         self._trace(
             TraceEvent.MEMORY_SEARCH_STARTED,
-            {"turn_id": self.state.current_turn_id, "query": user_message},
+            {
+                "turn_id": self.state.current_turn_id,
+                "query": user_message,
+                "memory_namespace": self.memory_store.namespace,
+            },
         )
         profile, relevant = select_memories_for_prompt(self.memory_store, user_message)
         self._profile_memories = profile
@@ -760,6 +765,7 @@ class Agent:
                 "profile_memory_ids": [memory.id for memory in profile],
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
+                "memory_namespace": self.memory_store.namespace,
             },
         )
 

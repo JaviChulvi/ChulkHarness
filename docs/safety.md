@@ -25,7 +25,8 @@ public `SafetyError`; ordinary permission errors retain
 Embedding applications remain responsible for:
 
 - exposing the smallest tool and capability set;
-- isolating tenants, runtime directories, credentials, and application deps;
+- isolating tenants with distinct memory namespaces and appropriately separated
+  runtime directories, credentials, and application deps;
 - sandboxing shell or code execution and setting underlying I/O timeouts;
 - approving mutating, network, destructive, or external-service calls;
 - validating tool outputs before using them in business decisions;
