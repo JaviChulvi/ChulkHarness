@@ -37,6 +37,8 @@ LOGGER = logging.getLogger(__name__)
 TELEGRAM_CHAT_METADATA_KEY = "telegram_chat_id"
 TELEGRAM_CURSOR_NAME = "telegram"
 TELEGRAM_TYPING_REFRESH_SECONDS = 4.0
+SCHEDULE_LEASE_SECONDS = 120
+SCHEDULE_LEASE_RENEW_SECONDS = 40.0
 
 
 class TelegramAgent(Protocol):
@@ -361,7 +363,10 @@ class TelegramAgentBot:
 
     async def _scheduler_loop(self) -> None:
         while True:
-            await self.run_due_jobs_once()
+            try:
+                await self.run_due_jobs_once()
+            except Exception as exc:
+                LOGGER.error("Telegram scheduler iteration failed (%s)", type(exc).__name__)
             await asyncio.sleep(self.telegram_config.scheduler_poll_seconds)
 
     async def run_due_jobs_once(self) -> None:
@@ -369,8 +374,18 @@ class TelegramAgentBot:
         if self.schedule_store is None:
             return
         store = self.schedule_store
-        jobs = await asyncio.to_thread(store.claim_due, adapter="telegram")
+        jobs = await asyncio.to_thread(
+            store.claim_due,
+            adapter="telegram",
+            lease_seconds=SCHEDULE_LEASE_SECONDS,
+        )
         for job in jobs:
+            if job.claim_token is None:
+                LOGGER.error("Scheduled Telegram job has no claim token")
+                continue
+            renewal_task = asyncio.create_task(
+                self._renew_schedule_lease(job.id, job.claim_token)
+            )
             try:
                 chat_id = int(job.destination_id)
                 async with self._chat_lock(chat_id):
@@ -383,14 +398,36 @@ class TelegramAgentBot:
                         },
                     )
                 await self._send(chat_id, response)
-                await asyncio.to_thread(store.complete, job.id)
+                completed = await asyncio.to_thread(store.complete, job.id, job.claim_token)
+                if not completed:
+                    LOGGER.warning("Scheduled Telegram job completion lost its claim")
             except Exception as exc:
                 LOGGER.error("Scheduled Telegram job failed (%s)", type(exc).__name__)
                 await asyncio.to_thread(
                     store.fail,
                     job.id,
+                    job.claim_token,
                     type(exc).__name__,
                 )
+            finally:
+                renewal_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await renewal_task
+
+    async def _renew_schedule_lease(self, job_id: str, claim_token: str) -> None:
+        if self.schedule_store is None:
+            return
+        while True:
+            await asyncio.sleep(SCHEDULE_LEASE_RENEW_SECONDS)
+            renewed = await asyncio.to_thread(
+                self.schedule_store.renew_lease,
+                job_id,
+                claim_token,
+                lease_seconds=SCHEDULE_LEASE_SECONDS,
+            )
+            if not renewed:
+                LOGGER.warning("Scheduled Telegram job lease renewal lost its claim")
+                return
 
 
 def _parse_command(text: str) -> tuple[str | None, str]:

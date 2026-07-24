@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -287,6 +288,33 @@ async def test_bot_executes_and_delivers_due_scheduled_job(tmp_path: Path) -> No
     assert kwargs["extension_metadata"]["scheduled_job_id"] == job.id
     assert client.sent == [(9, "answer: scheduled research")]
     assert bot.schedule_store.get(job.id).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_survives_a_recoverable_iteration_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = _bot(tmp_path, FakeClient(), [])
+    calls = 0
+
+    async def flaky_iteration() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary")
+        raise asyncio.CancelledError
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(bot, "run_due_jobs_once", flaky_iteration)
+    monkeypatch.setattr(telegram_bot_module.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await bot._scheduler_loop()
+
+    assert calls == 2
 
 
 @pytest.mark.asyncio

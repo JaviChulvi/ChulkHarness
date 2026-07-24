@@ -311,6 +311,25 @@ def _migrate_to_scheduled_jobs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_claim_owned_scheduled_jobs(conn: sqlite3.Connection) -> None:
+    """Add claim identity and a stable recurrence anchor to scheduled jobs."""
+    _ensure_column(conn, "scheduled_jobs", "claim_token", "TEXT")
+    _ensure_column(conn, "scheduled_jobs", "scheduled_for", "TEXT")
+    conn.execute(
+        """
+        UPDATE scheduled_jobs
+        SET scheduled_for = next_run_at
+        WHERE scheduled_for IS NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_claim
+        ON scheduled_jobs(id, claim_token)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -351,6 +370,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
     SQLiteMigration(3, "adapter-cursors", _migrate_to_adapter_cursors),
     SQLiteMigration(4, "scheduled-jobs", _migrate_to_scheduled_jobs),
+    SQLiteMigration(5, "claim-owned-scheduled-jobs", _migrate_to_claim_owned_scheduled_jobs),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

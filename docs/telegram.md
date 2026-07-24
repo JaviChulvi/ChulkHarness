@@ -81,13 +81,16 @@ allowlisted user can say, for example, “At 2026-07-24 09:00 remind me to call
 Alex” or “Every 3600 seconds check the project status.” Local date-times use
 `CHULK_TELEGRAM_TIMEZONE`; explicit ISO-8601 offsets take precedence.
 
-Jobs are stored in the shared SQLite database. A short lease prevents two
-runner iterations from deliberately claiming the same job, expired leases are
-recoverable after a crash, and recurring jobs advance from their scheduled
-time rather than accumulating drift. At execution time the stored prompt runs
-through the chat's normal agent with the same tools and permissions, and its
-answer is delivered to that Telegram chat. Failures are sanitized, retained
-for inspection, and retried after a bounded delay.
+Jobs are stored in the shared SQLite database. Each execution owns an opaque,
+renewable lease: only that claim may complete or retry the job, cancellation
+stays terminal, and an expired claim cannot overwrite a newer worker. Expired
+leases remain recoverable after a crash. Recurring jobs retain their original
+scheduled-time anchor across retries instead of accumulating drift. At
+execution time the stored prompt runs through the chat's normal agent with the
+same tools and permissions, and its answer is delivered to that Telegram chat.
+Failures are sanitized, retained for inspection, and retried after a bounded
+delay. A recoverable scheduler-iteration failure is logged without stopping
+later polling iterations.
 
 Scheduling and cancellation are destination-scoped side effects. The Telegram
 permission callback allows only these dedicated scheduling operations; one
