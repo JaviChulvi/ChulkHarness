@@ -78,6 +78,42 @@ def test_init_migrates_blanket_chulk_ignore_to_narrow_policy(tmp_path, capsys):
     assert _check_ignore(project_root, ".chulk/traces/session.jsonl") is True
 
 
+def test_init_reorders_managed_gitignore_rules_as_one_canonical_block(
+    tmp_path,
+    capsys,
+):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / ".gitignore").write_text(
+        "custom-cache/\n!.chulk/mcp.json\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["init", "--project-root", str(project_root)])
+    capsys.readouterr()
+
+    gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+    report = run_doctor(
+        environ={
+            "CHULK_PROJECT_ROOT": str(project_root),
+            "CHULK_LLM_PROVIDER": "local",
+            "CHULK_MODEL": "local-test-model",
+        }
+    )
+    gitignore_check = next(
+        check for check in report.checks if check.name == "gitignore"
+    )
+
+    assert exit_code == 0
+    assert gitignore.startswith("custom-cache/\n\n# Chulk runtime state\n")
+    assert gitignore.index(".chulk/*") < gitignore.index("!.chulk/mcp.json")
+    assert gitignore.count("!.chulk/mcp.json") == 1
+    assert _check_ignore(project_root, ".chulk/mcp.json") is False
+    assert _check_ignore(project_root, ".chulk/store.sqlite") is True
+    assert gitignore_check.status == "pass"
+
+
 def test_init_read_only_uses_safe_permission_default(tmp_path, capsys):
     project_root = tmp_path / "read-only-project"
 
@@ -750,6 +786,45 @@ def test_trace_inspect_and_export_are_machine_readable_and_escape_html(tmp_path,
     assert "Trace exports may contain sensitive runtime data" in html
     if os.name == "posix":
         assert stat.S_IMODE(html_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode assertions")
+def test_trace_export_preserves_existing_destination_directory_mode(
+    tmp_path,
+    capsys,
+):
+    trace_path = tmp_path / "conversation.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "type": "final_answer",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "payload": {"content": "safe"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    export_dir = tmp_path / "shared"
+    export_dir.mkdir(mode=0o755)
+    export_dir.chmod(0o755)
+    destination = export_dir / "report.html"
+
+    exit_code = main(
+        [
+            "trace",
+            "export",
+            str(trace_path),
+            "--output",
+            str(destination),
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert stat.S_IMODE(export_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name != "posix", reason="symlink behavior")

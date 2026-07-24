@@ -32,10 +32,14 @@ def write_private_text(
     *,
     append: bool = False,
     overwrite: bool = True,
+    private_parent: bool = True,
 ) -> Path:
     """Write owner-only UTF-8 text while rejecting symlink and special targets."""
     destination = Path(path)
-    prepare_private_directory(destination.parent)
+    if private_parent:
+        prepare_private_directory(destination.parent)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
     exists = _validate_private_file_target(destination)
     if exists and not overwrite and not append:
         raise FileExistsError(f"Output already exists: {destination}")

@@ -27,6 +27,28 @@ _PROVIDER_SDK_REQUIREMENTS = {
     "gemini": ("google.genai", "google-genai", "gemini"),
 }
 
+_GITIGNORE_HEADING = "# Chulk runtime state"
+_GITIGNORE_RULES = (
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.chulk/",
+    ".chulk/*",
+    "!.chulk/mcp.json",
+    "!.chulk/skills/",
+    "!.chulk/skills/**",
+    "traces/",
+    "chulk/store.sqlite",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.sqlite-*",
+    "*.sqlite3-*",
+    "*.sqlite.bak",
+    "*.sqlite3.bak",
+    "*.sqlite.backup*",
+    "*.sqlite3.backup*",
+)
+
 
 @dataclass(frozen=True)
 class DiagnosticCheck:
@@ -308,6 +330,7 @@ def export_trace_html(
         destination,
         trace.to_html(),
         overwrite=force,
+        private_parent=False,
     )
     return destination
 
@@ -735,36 +758,23 @@ def _validate_init_target(project_root: Path, target: Path) -> None:
 
 
 def _ensure_gitignore(path: Path) -> str:
-    required = [
-        ".env",
-        ".env.*",
-        "!.env.example",
-        "!.chulk/",
-        ".chulk/*",
-        "!.chulk/mcp.json",
-        "!.chulk/skills/",
-        "!.chulk/skills/**",
-        "traces/",
-        "chulk/store.sqlite",
-        "*.sqlite",
-        "*.sqlite3",
-        "*.sqlite-*",
-        "*.sqlite3-*",
-        "*.sqlite.bak",
-        "*.sqlite3.bak",
-        "*.sqlite.backup*",
-        "*.sqlite3.backup*",
-    ]
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    existing_lines = {line.strip() for line in existing.splitlines()}
-    missing = [line for line in required if line not in existing_lines]
-    if not missing:
+    managed_lines = {_GITIGNORE_HEADING, *_GITIGNORE_RULES}
+    unmanaged_lines = [
+        line
+        for line in existing.splitlines()
+        if line.strip() not in managed_lines
+    ]
+    while unmanaged_lines and not unmanaged_lines[-1].strip():
+        unmanaged_lines.pop()
+    managed_block = "\n".join((_GITIGNORE_HEADING, *_GITIGNORE_RULES))
+    content = (
+        "\n".join(unmanaged_lines) + "\n\n" + managed_block + "\n"
+        if unmanaged_lines
+        else managed_block + "\n"
+    )
+    if content == existing:
         return "exists"
-    if existing:
-        prefix = "\n" if existing.endswith("\n") else "\n\n"
-        content = existing + prefix + "# Chulk runtime state\n" + "\n".join(missing) + "\n"
-    else:
-        content = "# Chulk runtime state\n" + "\n".join(missing) + "\n"
     path.write_text(content, encoding="utf-8")
     return "created" if not existing else "updated"
 
