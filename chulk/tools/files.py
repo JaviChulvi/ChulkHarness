@@ -293,14 +293,14 @@ def read_file(
     if safety_error:
         return ToolResult("read_file", False, safety_error, error="sensitive_path")
     if not path.exists() or not path.is_file():
-        return ToolResult("read_file", False, f"File not found: {path.relative_to(root)}", error="not_found")
+        return ToolResult("read_file", False, f"File not found: {_relative_path(path, root)}", error="not_found")
     if path.stat().st_size > MAX_TEXT_FILE_BYTES:
         return ToolResult("read_file", False, "File is too large to read safely.", error="file_too_large")
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return ToolResult("read_file", False, "File is not valid UTF-8 text.", error="not_text")
-    return ToolResult("read_file", True, content, metadata={"path": str(path.relative_to(root))})
+    return ToolResult("read_file", True, content, metadata={"path": _relative_path(path, root)})
 
 
 def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
@@ -332,7 +332,7 @@ def write_file(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     return ToolResult(
         "write_file",
         True,
-        f"Wrote {len(content.encode('utf-8'))} bytes to {path.relative_to(project_root)}.",
+        f"Wrote {len(content.encode('utf-8'))} bytes to {_relative_path(path, project_root)}.",
         metadata={
             "path": _relative_path(path, project_root),
             "status": "modified" if old_text is not None else "created",
@@ -508,7 +508,12 @@ def list_files(
     if safety_error:
         return ToolResult("list_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("list_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
+        return ToolResult(
+            "list_files",
+            False,
+            f"Directory not found: {_relative_path(directory, root)}",
+            error="not_found",
+        )
 
     iterator = directory.rglob(pattern) if recursive else directory.glob(pattern)
     results: list[str] = []
@@ -519,7 +524,7 @@ def list_files(
             or not path.is_file()
         ):
             continue
-        results.append(str(path.relative_to(root)))
+        results.append(_relative_path(path, root))
         if len(results) >= max_results:
             break
     return ToolResult("list_files", True, "\n".join(sorted(results)) or "No files found.")
@@ -541,7 +546,12 @@ def search_files(
     if safety_error:
         return ToolResult("search_files", False, safety_error, error="sensitive_path")
     if not directory.exists() or not directory.is_dir():
-        return ToolResult("search_files", False, f"Directory not found: {directory.relative_to(root)}", error="not_found")
+        return ToolResult(
+            "search_files",
+            False,
+            f"Directory not found: {_relative_path(directory, root)}",
+            error="not_found",
+        )
 
     if shutil.which("rg"):
         return _search_with_rg(root, directory, query, pattern, max_results, read_policy)
@@ -594,7 +604,7 @@ def _search_with_rg(
             path = project_root / path
         if safe_read_error(path, project_root, read_policy) is not None:
             continue
-        relative_path = path.relative_to(project_root)
+        relative_path = _relative_path(path, project_root)
         normalized_line = line_text.rstrip("\r\n")
         results.append(f"{relative_path}:{data['line_number']}:{normalized_line}")
         if len(results) >= max_results:
@@ -625,7 +635,7 @@ def _search_with_python(
             continue
         for index, line in enumerate(lines, start=1):
             if query in line:
-                results.append(f"{path.relative_to(project_root)}:{index}:{line}")
+                results.append(f"{_relative_path(path, project_root)}:{index}:{line}")
                 if len(results) >= max_results:
                     return ToolResult("search_files", True, "\n".join(results))
     return ToolResult("search_files", True, "\n".join(results) or "No matches found.")
@@ -983,7 +993,7 @@ def _looks_key_like_name(name: str) -> bool:
 
 
 def _relative_path(path: Path, project_root: Path) -> str:
-    return str(path.resolve().relative_to(project_root.resolve()))
+    return path.resolve().relative_to(project_root.resolve()).as_posix()
 
 
 def _sha256_text(text: str) -> str:

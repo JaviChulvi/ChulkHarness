@@ -528,18 +528,59 @@ def _gitignore_check(config: Config) -> DiagnosticCheck:
             "runtime paths are already tracked by Git: " + ", ".join(tracked),
             "Remove runtime state from the index with git rm --cached, then keep the ignore rules.",
         )
-    candidates = tuple(
+    runtime_candidates = tuple(
         str(project_prefix / candidate)
-        for candidate in (".chulk/store.sqlite", "traces/example.jsonl", "chulk/store.sqlite", "state.sqlite")
+        for candidate in (
+            ".env",
+            ".chulk/store.sqlite",
+            ".chulk/store.sqlite-wal",
+            ".chulk/store.sqlite.backup-20260724",
+            ".chulk/traces/example.jsonl",
+            ".chulk/traces/example_artifacts/art_example.txt",
+            "traces/example.jsonl",
+            "traces/example_artifacts/art_example.txt",
+            "chulk/store.sqlite",
+            "chulk/store.sqlite-wal",
+            "chulk/store.sqlite.backup-20260724",
+            "state.sqlite",
+        )
     )
-    missing = [candidate for candidate in candidates if not _git_ignores(git_root, candidate)]
-    if not missing:
-        return DiagnosticCheck("gitignore", "pass", "runtime databases and traces are ignored")
+    missing = [
+        candidate
+        for candidate in runtime_candidates
+        if not _git_ignores(git_root, candidate)
+    ]
+    declarative_candidates = tuple(
+        str(project_prefix / candidate)
+        for candidate in (
+            ".chulk/mcp.json",
+            ".chulk/skills/example/SKILL.md",
+        )
+    )
+    blocked_config = [
+        candidate
+        for candidate in declarative_candidates
+        if _git_ignores(git_root, candidate)
+    ]
+    if not missing and not blocked_config:
+        return DiagnosticCheck(
+            "gitignore",
+            "pass",
+            "declarative MCP/skill config is trackable; credentials and runtime state are ignored",
+        )
+    details: list[str] = []
+    if missing:
+        details.append("runtime paths are not fully ignored: " + ", ".join(missing))
+    if blocked_config:
+        details.append(
+            "declarative project config is incorrectly ignored: "
+            + ", ".join(blocked_config)
+        )
     return DiagnosticCheck(
         "gitignore",
         "fail",
-        "runtime paths are not fully ignored: " + ", ".join(missing),
-        "Run chulk init or add .chulk/, traces/, chulk/store.sqlite, and *.sqlite to .gitignore.",
+        "; ".join(details),
+        "Run chulk init to install the narrow declarative-config and runtime-state rules.",
     )
 
 
@@ -614,12 +655,11 @@ def _tracked_runtime_paths(git_root: Path, config: Config) -> tuple[str, ...]:
     if result.returncode != 0:
         return ()
 
-    directory_prefixes = tuple(
-        relative
-        for directory in (config.runtime_dir, config.traces_dir)
-        if (relative := _relative_to_git_root(directory, git_root)) is not None
-    )
+    runtime_prefix = _relative_to_git_root(config.runtime_dir, git_root)
+    trace_prefix = _relative_to_git_root(config.traces_dir, git_root)
     store_path = _relative_to_git_root(config.store_path, git_root)
+    mcp_path = _relative_to_git_root(config.mcp_config_path, git_root)
+    skills_prefix = _relative_to_git_root(config.skills_dir, git_root)
     project_prefix = _relative_to_git_root(config.project_root, git_root)
     tracked: list[str] = []
     for raw_path in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
@@ -633,12 +673,35 @@ def _tracked_runtime_paths(git_root: Path, config: Config) -> tuple[str, ...]:
             except ValueError:
                 pass
         if (
-            any(path == prefix or prefix in path.parents for prefix in directory_prefixes)
+            _is_sensitive_project_path(project_path)
             or path == store_path
-            or (project_path is not None and project_path.suffix in {".sqlite", ".sqlite3"})
+            or _is_at_or_below(path, trace_prefix)
+            or (
+                _is_at_or_below(path, runtime_prefix)
+                and path != mcp_path
+                and not _is_at_or_below(path, skills_prefix)
+            )
         ):
             tracked.append(raw_path)
     return tuple(sorted(tracked))
+
+
+def _is_at_or_below(path: Path, prefix: Path | None) -> bool:
+    return prefix is not None and (path == prefix or prefix in path.parents)
+
+
+def _is_sensitive_project_path(path: Path | None) -> bool:
+    if path is None:
+        return False
+    name = path.name.lower()
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return True
+    return (
+        ".sqlite" in name
+        or ".sqlite3" in name
+        or name.endswith((".bak", ".backup"))
+        or ".backup-" in name
+    )
 
 
 def _relative_to_git_root(path: Path, git_root: Path) -> Path | None:
@@ -676,11 +739,21 @@ def _ensure_gitignore(path: Path) -> str:
         ".env",
         ".env.*",
         "!.env.example",
-        ".chulk/",
+        "!.chulk/",
+        ".chulk/*",
+        "!.chulk/mcp.json",
+        "!.chulk/skills/",
+        "!.chulk/skills/**",
         "traces/",
         "chulk/store.sqlite",
         "*.sqlite",
         "*.sqlite3",
+        "*.sqlite-*",
+        "*.sqlite3-*",
+        "*.sqlite.bak",
+        "*.sqlite3.bak",
+        "*.sqlite.backup*",
+        "*.sqlite3.backup*",
     ]
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     existing_lines = {line.strip() for line in existing.splitlines()}

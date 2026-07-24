@@ -255,7 +255,7 @@ def test_reader_streams_large_jsonl_and_enforces_byte_and_event_limits(
         "payload": {"request_index": 1},
     }
     trace_text = "".join(json.dumps(event) + "\n" for _ in range(2_000))
-    trace_path.write_text(trace_text, encoding="utf-8")
+    trace_path.write_bytes(trace_text.encode("utf-8"))
 
     def fail_whole_file_read(*_args, **_kwargs):
         raise AssertionError("trace parsing must not call Path.read_text")

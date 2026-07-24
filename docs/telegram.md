@@ -193,8 +193,10 @@ permission policy independently controls what those prompts may cause.
 
 ## Operations and security
 
-- Keep `.env`, `.chulk/`, SQLite files, and traces readable only by the service
-  account.
+- Keep `.env`, SQLite files, traces, artifacts, backups, and other `.chulk/`
+  runtime state readable only by the service account. Secret-free
+  `.chulk/mcp.json` and `.chulk/skills/` are the only reviewable configuration
+  exceptions.
 - Do not expose the bot process itself to the internet; polling only needs
   outbound HTTPS access to Telegram and the configured model provider.
 - Logs intentionally omit the bot token, model-provider keys, prompt content,

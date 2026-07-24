@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -54,7 +55,16 @@ def test_gemini_media_inherits_timeout_retry_and_owns_factory_client(
         captured.update(kwargs)
         return client
 
-    monkeypatch.setattr("google.genai.Client", create_client)
+    google_module = ModuleType("google")
+    genai_module = ModuleType("google.genai")
+    types_module = ModuleType("google.genai.types")
+    genai_module.Client = create_client
+    types_module.Part = SimpleNamespace(from_bytes=lambda **kwargs: kwargs)
+    genai_module.types = types_module
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+    monkeypatch.setitem(sys.modules, "google.genai.types", types_module)
     processor = GeminiMediaProcessor(
         model="gemini-test",
         api_key="secret",

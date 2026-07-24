@@ -128,16 +128,17 @@ def public_api_smoke_source() -> str:
         assert any(url.startswith("Repository, https://github.com/JaviChulvi/ChulkHarness") for url in project_urls)
         assert importlib.util.find_spec("chulk.tests") is None
 
+        project_root = Path.cwd().resolve()
         config = AgentConfig.local(
-            project_root=Path.cwd(),
+            project_root=project_root,
             runtime_dir=".chulk",
             permission_profile="read-only",
         ).to_config()
-        assert config.runtime_dir == Path.cwd() / ".chulk"
-        assert config.store_path == Path.cwd() / ".chulk" / "store.sqlite"
-        assert config.traces_dir == Path.cwd() / ".chulk" / "traces"
-        assert config.skills_dir == Path.cwd() / ".chulk" / "skills"
-        assert config.mcp_config_path == Path.cwd() / ".chulk" / "mcp.json"
+        assert config.runtime_dir == project_root / ".chulk"
+        assert config.store_path == project_root / ".chulk" / "store.sqlite"
+        assert config.traces_dir == project_root / ".chulk" / "traces"
+        assert config.skills_dir == project_root / ".chulk" / "skills"
+        assert config.mcp_config_path == project_root / ".chulk" / "mcp.json"
 
         bundled_dir = bundled_skills_dir()
         registry = SkillRegistry(bundled_dir, skills_dirs=(bundled_dir,))

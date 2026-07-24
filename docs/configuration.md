@@ -24,11 +24,18 @@ config = AgentConfig(
 )
 ```
 
-The default runtime home is `<project_root>/.chulk`: `store.sqlite` holds
-memory/session state, `traces/` holds sensitive JSONL diagnostics, `skills/`
-holds project playbooks, and `mcp.json` describes external servers. Applications
-own cleanup, retention, permissions, backup, and multi-tenant isolation for
-these paths. Never place real secrets in configuration files or traces.
+The default runtime home is `<project_root>/.chulk`, but its contents have two
+different ownership classes:
+
+- Secret-free `.chulk/mcp.json` and `.chulk/skills/` playbooks are declarative,
+  reviewable project configuration and may be committed.
+- `.chulk/store.sqlite`, sidecars, backups, traces, artifacts, and all other
+  `.chulk/` contents are sensitive runtime state and must remain ignored.
+
+Applications own cleanup, retention, permissions, backup, and multi-tenant
+isolation for runtime state. Never place real secrets in configuration files,
+skills, or traces. MCP authorization values belong in environment variables
+named by `authorization_env`.
 
 Provider-specific options are covered in [providers](providers.md), while
 runtime authority is covered in [permissions](permissions.md).
@@ -60,7 +67,11 @@ for the exact credential and base-URL precedence.
 Run `chulk doctor` to check the selected primary provider and every configured
 fallback for their required model, credential, endpoint, and optional SDK
 dependency. The command does not make a billable provider request or prove that
-an account can access a particular model.
+an account can access a particular model. It also verifies that declarative
+MCP/skill configuration is trackable while credential files, databases,
+sidecars, backups, traces, and artifacts are ignored and not already tracked.
+`chulk init` installs the matching narrow Git rules and upgrades older blanket
+`.chulk/` ignore rules without relocating existing configuration.
 
 Run `chulk --show-config` to inspect resolved non-secret settings. API keys are
 reported only as set or not set. Provider base URLs keep their scheme, host,

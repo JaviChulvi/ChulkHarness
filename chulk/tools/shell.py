@@ -453,7 +453,12 @@ class _BoundedStreamCapture:
         return bytes(self.head[:head_length]) + _TRUNCATION_MARKER + bytes(tail)
 
     def preview_text(self) -> str:
-        return self.preview_bytes().decode("utf-8", errors="replace")
+        return (
+            self.preview_bytes()
+            .decode("utf-8", errors="replace")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+        )
 
     def metadata(self, stream_name: str) -> dict[str, Any]:
         preview = self.preview_bytes()

@@ -22,7 +22,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+  "tzdata>=2025.2; platform_system == 'Windows'",
+]
 
 [project.urls]
 Homepage = "https://github.com/JaviChulvi/ChulkHarness"
@@ -37,7 +39,7 @@ dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
   "pytest-cov>=6.0",
-  "ruff>=0.14",
+  "ruff>=0.14,<0.15",
   "mypy>=1.11",
   "setuptools>=77",
 ]

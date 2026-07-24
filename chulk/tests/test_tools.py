@@ -4,6 +4,7 @@ import asyncio
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -223,7 +224,7 @@ def test_registry_run_async_offloads_executor_tool():
 
 def test_default_run_cmd_yields_event_loop_when_run_async(tmp_path):
     registry = create_default_tool_registry(tmp_path)
-    command = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(0.3)\""
+    command = _python_command("import time; time.sleep(0.3)")
 
     async def run_probe():
         command_task = asyncio.create_task(
@@ -573,12 +574,19 @@ def test_shell_blocks_output_redirection_outside_root(tmp_path):
 
 
 def test_shell_command_timeout(tmp_path):
-    command = f"{sys.executable} -c 'import time; time.sleep(2)'"
+    command = _python_command("import time; time.sleep(2)")
 
     result = run_shell_command({"command": command, "timeout_seconds": 1}, tmp_path, default_timeout_seconds=1)
 
     assert not result.success
     assert result.error == "timeout"
+
+
+def _python_command(source: str) -> str:
+    arguments = [sys.executable, "-c", source]
+    if os.name == "nt":
+        return subprocess.list2cmdline(arguments)
+    return shlex.join(arguments)
 
 
 def test_shell_command_timeout_kills_child_processes(tmp_path):

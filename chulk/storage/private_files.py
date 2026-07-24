@@ -53,7 +53,12 @@ def write_private_text(
             raise ValueError(f"Sensitive runtime target is not a regular file: {destination}")
         if os.name == "posix":
             os.fchmod(descriptor, PRIVATE_FILE_MODE)
-        with os.fdopen(descriptor, "a" if append else "w", encoding="utf-8") as stream:
+        with os.fdopen(
+            descriptor,
+            "a" if append else "w",
+            encoding="utf-8",
+            newline="",
+        ) as stream:
             descriptor = -1
             stream.write(content)
     finally:
