@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+import chulk.tools.files as files_module
+import pytest
 from chulk.memory import SQLiteMemoryStore
 from chulk.tools import FileReadPolicy, Tool, ToolRegistry, calculator_tool, create_default_tool_registry
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
@@ -971,6 +973,143 @@ def test_apply_patch_tool_is_atomic_on_multi_file_failure(tmp_path):
     assert result.error == "patch_context_mismatch"
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a\n"
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
+
+
+def test_apply_patch_rolls_back_after_second_commit_write_fails(monkeypatch, tmp_path):
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+    original_write = files_module._write_patch_text
+    calls = 0
+
+    def fail_second_write(path, text):
+        nonlocal calls
+        calls += 1
+        original_write(path, text)
+        if calls == 2:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(files_module, "_write_patch_text", fail_second_write)
+    result = apply_patch_tool(tmp_path).callable(
+        {
+            "patch": "\n".join(
+                [
+                    "--- a/a.txt",
+                    "+++ b/a.txt",
+                    "@@ -1 +1 @@",
+                    "-a",
+                    "+A",
+                    "--- a/b.txt",
+                    "+++ b/b.txt",
+                    "@@ -1 +1 @@",
+                    "-b",
+                    "+B",
+                ]
+            )
+        }
+    )
+
+    assert not result.success
+    assert result.error == "patch_commit_failed"
+    assert result.metadata["cause"] == "OSError"
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
+
+
+def test_apply_patch_rolls_back_created_files_and_directories(monkeypatch, tmp_path):
+    original_write = files_module._write_patch_text
+    calls = 0
+
+    def fail_second_write(path, text):
+        nonlocal calls
+        calls += 1
+        original_write(path, text)
+        if calls == 2:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(files_module, "_write_patch_text", fail_second_write)
+    result = apply_patch_tool(tmp_path).callable(
+        {
+            "patch": "\n".join(
+                [
+                    "--- /dev/null",
+                    "+++ b/new/first.txt",
+                    "@@ -0,0 +1 @@",
+                    "+first",
+                    "--- /dev/null",
+                    "+++ b/new/nested/second.txt",
+                    "@@ -0,0 +1 @@",
+                    "+second",
+                ]
+            )
+        }
+    )
+
+    assert not result.success
+    assert result.error == "patch_commit_failed"
+    assert not (tmp_path / "new").exists()
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_apply_patch_rolls_back_base_exceptions(monkeypatch, tmp_path, interruption):
+    path = tmp_path / "a.txt"
+    path.write_text("a\n", encoding="utf-8")
+
+    def interrupt_after_write(target, text):
+        target.write_text(text, encoding="utf-8")
+        raise interruption
+
+    monkeypatch.setattr(files_module, "_write_patch_text", interrupt_after_write)
+    with pytest.raises(interruption):
+        apply_patch_tool(tmp_path).callable(
+            {
+                "patch": "\n".join(
+                    [
+                        "--- a/a.txt",
+                        "+++ b/a.txt",
+                        "@@ -1 +1 @@",
+                        "-a",
+                        "+A",
+                    ]
+                )
+            }
+        )
+
+    assert path.read_text(encoding="utf-8") == "a\n"
+
+
+def test_apply_patch_reports_rollback_failure(monkeypatch, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_text("a\n", encoding="utf-8")
+
+    def fail_commit(target, text):
+        target.write_text(text, encoding="utf-8")
+        raise OSError("commit failed")
+
+    def fail_rollback(_pending):
+        raise OSError("rollback failed")
+
+    monkeypatch.setattr(files_module, "_write_patch_text", fail_commit)
+    monkeypatch.setattr(files_module, "_restore_patch_write", fail_rollback)
+    result = apply_patch_tool(tmp_path).callable(
+        {
+            "patch": "\n".join(
+                [
+                    "--- a/a.txt",
+                    "+++ b/a.txt",
+                    "@@ -1 +1 @@",
+                    "-a",
+                    "+A",
+                ]
+            )
+        }
+    )
+
+    assert not result.success
+    assert result.error == "patch_rollback_failed"
+    assert result.metadata["cause"] == "OSError"
+    assert result.metadata["rollback_errors"] == [
+        {"path": "a.txt", "error": "OSError"}
+    ]
 
 
 def test_write_file_blocks_unsafe_paths_and_guards_overwrites(tmp_path):

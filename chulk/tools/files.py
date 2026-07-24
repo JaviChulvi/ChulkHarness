@@ -350,9 +350,16 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
     except PatchError as exc:
         return ToolResult("apply_patch", False, str(exc), error=exc.code, metadata=exc.metadata)
 
-    for pending in pending_writes:
-        pending.path.parent.mkdir(parents=True, exist_ok=True)
-        pending.path.write_text(pending.new_text, encoding="utf-8")
+    try:
+        _commit_patch_writes(pending_writes, project_root.resolve())
+    except PatchCommitError as exc:
+        return ToolResult(
+            "apply_patch",
+            False,
+            str(exc),
+            error=exc.code,
+            metadata=exc.metadata,
+        )
 
     changes: list[dict[str, Any]] = [
         {
@@ -378,6 +385,110 @@ def apply_patch(arguments: dict[str, Any], project_root: Path) -> ToolResult:
             "modified_count": modified_count,
         },
     )
+
+
+class PatchCommitError(RuntimeError):
+    """Raised after a patch commit fails and rollback has been attempted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.metadata = metadata
+
+
+def _commit_patch_writes(
+    pending_writes: list[PendingPatchWrite],
+    project_root: Path,
+) -> None:
+    attempted: list[PendingPatchWrite] = []
+    created_directories: set[Path] = set()
+    try:
+        for pending in pending_writes:
+            created_directories.update(
+                _create_patch_parent_directories(pending.path.parent, project_root)
+            )
+            attempted.append(pending)
+            _write_patch_text(pending.path, pending.new_text)
+    except BaseException as exc:
+        rollback_errors = _rollback_patch_writes(attempted, created_directories)
+        if rollback_errors:
+            raise PatchCommitError(
+                "Patch commit failed and rollback could not fully restore the workspace.",
+                code="patch_rollback_failed",
+                metadata={
+                    "cause": type(exc).__name__,
+                    "rollback_errors": rollback_errors,
+                },
+            ) from exc
+        if isinstance(exc, Exception):
+            raise PatchCommitError(
+                "Patch commit failed; the workspace was restored.",
+                code="patch_commit_failed",
+                metadata={"cause": type(exc).__name__},
+            ) from exc
+        raise
+
+
+def _create_patch_parent_directories(parent: Path, project_root: Path) -> tuple[Path, ...]:
+    missing: list[Path] = []
+    candidate = parent
+    while candidate != project_root and not candidate.exists():
+        missing.append(candidate)
+        candidate = candidate.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    return tuple(missing)
+
+
+def _write_patch_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def _restore_patch_write(pending: PendingPatchWrite) -> None:
+    if pending.old_text is None:
+        pending.path.unlink(missing_ok=True)
+        return
+    pending.path.write_text(pending.old_text, encoding="utf-8")
+
+
+def _rollback_patch_writes(
+    attempted: list[PendingPatchWrite],
+    created_directories: set[Path],
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for pending in reversed(attempted):
+        try:
+            _restore_patch_write(pending)
+        except BaseException as exc:
+            errors.append(
+                {
+                    "path": pending.relative_path,
+                    "error": type(exc).__name__,
+                }
+            )
+    for directory in sorted(
+        created_directories,
+        key=lambda value: len(value.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if directory.exists():
+                errors.append(
+                    {
+                        "path": str(directory),
+                        "error": type(exc).__name__,
+                    }
+                )
+    return errors
 
 
 def list_files(
