@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import chulk.telegram.bot as telegram_bot_module
+from chulk import MemoryMode
 from chulk.config import load_config
 from chulk.sessions import SessionRecorder, SQLiteSessionStore
 from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
@@ -383,6 +384,44 @@ async def test_default_agent_adds_only_bounded_web_network_tool(
         capabilities = captured["capabilities"]
         assert capabilities.network is True
         assert capabilities.shell is False
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_user_safe_mode_excludes_memory_tools_and_prompt_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7, 8}),
+            long_term_memory_enabled=False,
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    agent = bot._default_agent_factory(9, None)
+    try:
+        names = {tool.name for tool in captured["tools"]}
+        assert {
+            "search_memory",
+            "list_memories",
+            "summarize_memories",
+        }.isdisjoint(names)
+        assert captured["capabilities"].memory is MemoryMode.OFF
     finally:
         await agent.close()
 

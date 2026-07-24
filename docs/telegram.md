@@ -18,10 +18,14 @@ webhook.
    CHULK_TELEGRAM_ALLOWED_USER_IDS=123456789
    ```
 
-Multiple users can be allowlisted with comma-separated numeric ids. The bot
-ignores every other user and refuses group chats, even when an allowlisted user
-sends the message. Rotate the BotFather token immediately if it appears in
-chat, shell history, logs, or version control.
+Multiple users can be allowlisted with comma-separated numeric ids. Until the
+durable memory store is namespace-aware, multi-user startup requires
+`CHULK_TELEGRAM_MEMORY_ENABLED=false`; this removes memory prompt selection and
+all memory tools instead of exposing one global store to several users.
+Single-user installations keep read-only long-term memory enabled by default.
+The bot ignores every other user and refuses group chats, even when an
+allowlisted user sends the message. Rotate the BotFather token immediately if
+it appears in chat, shell history, logs, or version control.
 
 The same `.env` must contain the selected model provider credentials. For
 Gemini, for example:

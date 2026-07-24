@@ -293,10 +293,15 @@ class TelegramAgentBot:
             Tools.read_file,
             Tools.list_files,
             Tools.search_files,
-            Tools.search_memory,
-            Tools.list_memories,
-            Tools.summarize_memories,
         ]
+        if self.telegram_config.long_term_memory_enabled:
+            tool_specs.extend(
+                (
+                    Tools.search_memory,
+                    Tools.list_memories,
+                    Tools.summarize_memories,
+                )
+            )
         if self.schedule_store is not None:
             tool_specs.extend(
                 scheduled_job_tools(
@@ -319,7 +324,11 @@ class TelegramAgentBot:
             capabilities=Capabilities(
                 files=FileAccess.READ,
                 shell=False,
-                memory=MemoryMode.READ_ONLY,
+                memory=(
+                    MemoryMode.READ_ONLY
+                    if self.telegram_config.long_term_memory_enabled
+                    else MemoryMode.OFF
+                ),
                 network=self.telegram_config.tavily_api_key is not None,
                 external_services=False,
                 utilities=True,

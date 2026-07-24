@@ -27,6 +27,14 @@ class TelegramConfig:
     scheduler_poll_seconds: float = 5.0
     scheduling_enabled: bool = False
     max_attachment_bytes: int = 10 * 1024 * 1024
+    long_term_memory_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if len(self.allowed_user_ids) > 1 and self.long_term_memory_enabled:
+            raise TelegramConfigError(
+                "Multi-user Telegram access requires CHULK_TELEGRAM_MEMORY_ENABLED=false "
+                "until durable memory namespaces are enabled"
+            )
 
 
 def load_telegram_config(
@@ -86,6 +94,11 @@ def load_telegram_config(
             10 * 1024 * 1024,
             minimum=1024,
             maximum=20 * 1024 * 1024,
+        ),
+        long_term_memory_enabled=_boolean(
+            env,
+            "CHULK_TELEGRAM_MEMORY_ENABLED",
+            True,
         ),
     )
 

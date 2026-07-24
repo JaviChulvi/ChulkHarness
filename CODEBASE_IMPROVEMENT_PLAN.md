@@ -2207,7 +2207,7 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | 6. Built-in provider and media lifecycle | Pending | Pending | Pending | None | Pending implementation |
 | 7. Safe artifact identity and bounded read | Pending | Pending | Pending | None | Pending implementation |
 | 8. Streaming trace inspection and artifact manifest | Pending | Pending | Pending | None | Pending implementation |
-| 9. Immediate Telegram multi-user memory guard | Pending | Pending | Pending | None | Pending implementation |
+| 9. Immediate Telegram multi-user memory guard | Completed | This commit | 27 focused Telegram tests passed; focused Ruff and compileall passed | None | Multi-user long-term memory stays disabled until Units 10 and 11 complete |
 | 10. Memory namespace migration and models | Pending | Pending | Pending | None | Pending implementation |
 | 11. Scope every memory operation | Pending | Pending | Pending | None | Pending implementation |
 | 12. Windows validation lane | Pending | Pending | Pending | None | Pending implementation |

@@ -26,6 +26,7 @@ def test_load_telegram_config_parses_environment_values() -> None:
             "CHULK_TELEGRAM_TIMEZONE": "Europe/Madrid",
             "CHULK_TELEGRAM_SCHEDULER_POLL_SECONDS": "2.5",
             "CHULK_TELEGRAM_SCHEDULING_ENABLED": "true",
+            "CHULK_TELEGRAM_MEMORY_ENABLED": "false",
         }
     )
 
@@ -38,6 +39,7 @@ def test_load_telegram_config_parses_environment_values() -> None:
     assert config.timezone == "Europe/Madrid"
     assert config.scheduler_poll_seconds == 2.5
     assert config.scheduling_enabled is True
+    assert config.long_term_memory_enabled is False
     assert config.max_attachment_bytes == 10 * 1024 * 1024
 
 
@@ -108,6 +110,36 @@ def test_scheduling_is_disabled_by_default_and_rejects_invalid_boolean() -> None
                 "CHULK_TELEGRAM_SCHEDULING_ENABLED": "sometimes",
             }
         )
+
+
+def test_multi_user_memory_must_be_explicitly_disabled() -> None:
+    values = {
+        "CHULK_TELEGRAM_BOT_TOKEN": "secret",
+        "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1,2",
+    }
+    with pytest.raises(TelegramConfigError, match="MEMORY_ENABLED=false"):
+        load_telegram_config(values)
+
+    config = load_telegram_config(
+        {
+            **values,
+            "CHULK_TELEGRAM_MEMORY_ENABLED": "false",
+        }
+    )
+
+    assert config.allowed_user_ids == frozenset({1, 2})
+    assert config.long_term_memory_enabled is False
+
+
+def test_single_user_memory_is_enabled_by_default() -> None:
+    config = load_telegram_config(
+        {
+            "CHULK_TELEGRAM_BOT_TOKEN": "secret",
+            "CHULK_TELEGRAM_ALLOWED_USER_IDS": "1",
+        }
+    )
+
+    assert config.long_term_memory_enabled is True
 
 
 def test_load_telegram_config_validates_attachment_bound() -> None:
