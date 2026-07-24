@@ -29,3 +29,8 @@ Public event schema changes follow `EVENT_SCHEMA_VERSION`; unknown future enum
 values map to explicit `UNKNOWN` states where documented. Additive fields use
 extension mappings. See [SDK](sdk.md), [events](events.md), and
 [tracing](tracing.md).
+
+The OS-independent package claim is backed by required CI on Ubuntu for Python
+3.11, 3.12, and 3.13 plus Windows on Python 3.12. The Windows lane runs the
+complete credential-free suite, compile and lint checks, and a clean-wheel
+install/import smoke test. Provider network calls remain outside required CI.
