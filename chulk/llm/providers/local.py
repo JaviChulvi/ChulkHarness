@@ -50,6 +50,8 @@ class LocalOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
         max_retries: int = 2,
         client: Any | None = None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         super().__init__(
             profile=LOCAL_TRANSPORT_PROFILE,
@@ -60,4 +62,6 @@ class LocalOpenAICompatibleClient(OpenAICompatibleChatCompletionsClient):
             max_retries=max_retries,
             client=client,
             async_client=async_client,
+            owns_client=owns_client,
+            owns_async_client=owns_async_client,
         )

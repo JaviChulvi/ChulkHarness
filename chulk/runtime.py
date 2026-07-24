@@ -21,6 +21,7 @@ from chulk.llm import (
     provider_capabilities,
     provider_connection_from_config,
 )
+from chulk.llm.lifecycle import close_resources
 from chulk.llm.capabilities import (
     client_requires_mcp_bridge,
     client_supports_hosted_mcp_tools,
@@ -241,9 +242,7 @@ def create_agent(
         )
     except Exception:
         for resource in reversed(owned_resources):
-            close = getattr(resource, "close", None)
-            if callable(close):
-                close()
+            close_resources((resource,))
         raise
     agent.session_store = session_store
     agent.session_recorder = session_recorder

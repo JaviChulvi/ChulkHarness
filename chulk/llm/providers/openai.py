@@ -15,6 +15,7 @@ from chulk.llm.base import (
     provider_error_from_exception,
 )
 from chulk.llm.capabilities import LLMCapabilities
+from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.messages import split_instructions
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import (
@@ -56,10 +57,19 @@ class OpenAIResponsesClient(LLMClient):
         max_output_tokens: int | None = None,
         client: Any | None = None,
         async_client: Any | None = None,
+        owns_client: bool | None = None,
+        owns_async_client: bool | None = None,
     ) -> None:
         self.model = model
         self.max_output_tokens = _validate_max_output_tokens(max_output_tokens)
         self._async_client = async_client
+        self._owns_client = (client is None) if owns_client is None else owns_client
+        self._owns_async_client = (
+            (client is None and async_client is None)
+            if owns_async_client is None
+            else owns_async_client
+        )
+        self._closed = False
 
         if client is not None:
             self._client = client
@@ -94,11 +104,36 @@ class OpenAIResponsesClient(LLMClient):
             except ImportError:
                 self._async_client = None
             else:
-                self._async_client = AsyncOpenAI(
-                    api_key=api_key,
-                    timeout=timeout_seconds,
-                    max_retries=max_retries,
-                )
+                try:
+                    self._async_client = AsyncOpenAI(
+                        api_key=api_key,
+                        timeout=timeout_seconds,
+                        max_retries=max_retries,
+                    )
+                except BaseException:
+                    if self._owns_client:
+                        close_resources((self._client,))
+                    raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_resources(self._owned_transports())
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await aclose_resources(self._owned_transports())
+
+    def _owned_transports(self) -> tuple[object, ...]:
+        resources: list[object] = []
+        if self._owns_client:
+            resources.append(self._client)
+        if self._owns_async_client and self._async_client is not None:
+            resources.append(self._async_client)
+        return tuple(resources)
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         """Return a text response using OpenAI's Responses API."""

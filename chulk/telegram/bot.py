@@ -12,6 +12,7 @@ from typing import Protocol
 from chulk import AsyncAgent, Capabilities, FileAccess, MemoryMode, Tools
 from chulk.config import Config
 from chulk.core.context import TurnContextSection
+from chulk.llm.lifecycle import aclose_resources
 from chulk.scheduling import SQLiteScheduleStore
 from chulk.scheduling.tools import format_jobs, scheduled_job_tools
 from chulk.sessions import SQLiteSessionStore
@@ -81,6 +82,7 @@ class TelegramAgentBot:
         schedule_store: SQLiteScheduleStore | None = None,
         media_processor: TelegramMediaProcessor | None = None,
         update_ledger: SQLiteAdapterUpdateLedger | None = None,
+        owns_media_processor: bool = False,
     ) -> None:
         self.config = config
         self.telegram_config = telegram_config
@@ -93,6 +95,7 @@ class TelegramAgentBot:
         )
         self._agent_factory = agent_factory or self._default_agent_factory
         self._media_processor = media_processor
+        self._owns_media_processor = owns_media_processor
         self.update_ledger = update_ledger or SQLiteAdapterUpdateLedger(config.store_path)
         self._agents: dict[int, TelegramAgent] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -310,11 +313,14 @@ class TelegramAgentBot:
                 attachment.file_id,
                 max_bytes=self.telegram_config.max_attachment_bytes,
             )
-            extracted = await asyncio.to_thread(
-                self._media_processor.process,
-                attachment,
-                data,
-                instruction=update.text.strip(),
+            extracted = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._media_processor.process,
+                    attachment,
+                    data,
+                    instruction=update.text.strip(),
+                ),
+                timeout=self.config.llm_timeout_seconds,
             )
         except TelegramError as exc:
             if "size limit" in str(exc):
@@ -339,6 +345,9 @@ class TelegramAgentBot:
         self._agents.clear()
         for agent in agents:
             await agent.close()
+        if self._owns_media_processor and self._media_processor is not None:
+            await aclose_resources((self._media_processor,))
+            self._owns_media_processor = False
 
     async def _dispatch(
         self,

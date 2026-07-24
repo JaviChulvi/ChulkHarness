@@ -208,6 +208,13 @@ class AgentHandle:
         self._closed = True
         self.runtime.close()
 
+    async def aclose(self) -> None:
+        """Close owned runtime resources exactly once from an async host."""
+        if self._closed:
+            return
+        self._closed = True
+        await self.runtime.aclose()
+
     def __enter__(self) -> "AgentHandle":
         self._ensure_open()
         return self
@@ -407,7 +414,7 @@ class AsyncAgentHandle:
         return await asyncio.to_thread(self.handle.reject_result, on_delta=on_delta, on_event=on_event)
 
     async def close(self) -> None:
-        self.handle.close()
+        await self.handle.aclose()
 
     async def __aenter__(self) -> "AsyncAgentHandle":
         self.handle._ensure_open()

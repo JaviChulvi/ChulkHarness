@@ -2204,7 +2204,7 @@ tests. A final ledger-only commit replaces those markers with exact hashes.
 | 3. Transactional patch commit | Completed | This commit | 54 focused tool tests passed; focused Ruff, mypy, and compileall passed | None | Irrecoverable host filesystem rollback failures are surfaced explicitly with affected paths |
 | 4. Private trace filesystem policy | Completed | This commit | 73 focused tracing and CLI tests passed; focused Ruff, mypy, and compileall passed | None | POSIX modes are enforced where the platform exposes them; Windows still receives target-type checks |
 | 5. Fatal safety transition | Completed | This commit | Full suite: 1,067 passed; 146 focused tests, focused Ruff, mypy, and compileall passed | None | Fatal host denials require the host to set the explicit decision flag |
-| 6. Built-in provider and media lifecycle | Pending | Pending | Pending | None | Pending implementation |
+| 6. Built-in provider and media lifecycle | Completed | This commit | Full suite: 1,089 passed; 259 focused tests, Ruff, mypy, and compileall passed | None | A timed-out synchronous media SDK call can only unwind cooperatively in its worker thread; the provider timeout bounds that cleanup |
 | 7. Safe artifact identity and bounded read | Pending | Pending | Pending | None | Pending implementation |
 | 8. Streaming trace inspection and artifact manifest | Pending | Pending | Pending | None | Pending implementation |
 | 9. Immediate Telegram multi-user memory guard | Completed | This commit | 27 focused Telegram tests passed; focused Ruff and compileall passed | None | Multi-user long-term memory stays disabled until Units 10 and 11 complete |

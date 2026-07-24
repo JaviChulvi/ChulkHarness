@@ -6,6 +6,8 @@ import asyncio
 import logging
 
 from chulk.config import ConfigValueError, load_config
+from chulk.llm.base import LLMConfigurationError
+from chulk.llm.lifecycle import close_resources
 from chulk.llm.providers.gemini_media import GeminiMediaProcessor
 from chulk.telegram.bot import TelegramAgentBot
 from chulk.telegram.client import TelegramClient
@@ -23,17 +25,28 @@ def main() -> int:
         return 2
 
     media_processor = None
-    if config.llm_provider == "gemini":
-        media_processor = GeminiMediaProcessor(
-            model=config.model,
-            api_key=config.gemini_api_key,
+    try:
+        if config.llm_provider == "gemini":
+            media_processor = GeminiMediaProcessor(
+                model=config.model,
+                api_key=config.gemini_api_key,
+                timeout_seconds=config.llm_timeout_seconds,
+                max_retries=config.llm_max_retries,
+            )
+        bot = TelegramAgentBot(
+            config=config,
+            telegram_config=telegram_config,
+            client=TelegramClient(telegram_config.bot_token),
+            media_processor=media_processor,
+            owns_media_processor=media_processor is not None,
         )
-    bot = TelegramAgentBot(
-        config=config,
-        telegram_config=telegram_config,
-        client=TelegramClient(telegram_config.bot_token),
-        media_processor=media_processor,
-    )
+    except (LLMConfigurationError, ValueError) as exc:
+        close_resources((media_processor,))
+        logging.error("configuration error: %s", exc)
+        return 2
+    except BaseException:
+        close_resources((media_processor,))
+        raise
     logging.info(
         "starting Telegram agent with provider=%s model=%s",
         config.llm_provider,

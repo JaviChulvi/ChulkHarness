@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any
 
 import pytest
@@ -119,11 +120,17 @@ def _bot(tmp_path: Path, client: FakeClient, agents: list[FakeAgent]) -> Telegra
 
 
 class FakeMediaProcessor:
+    def __init__(self) -> None:
+        self.close_count = 0
+
     def process(self, attachment, data: bytes, *, instruction: str) -> str:
         assert attachment.file_id == "voice-1"
         assert data == b"media"
         assert instruction == "Summarize"
         return "transcribed words"
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 @pytest.mark.asyncio
@@ -203,6 +210,73 @@ async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> N
     assert context_sections[0].source == "telegram_attachment"
     assert context_sections[0].metadata["trusted"] is False
     assert client.downloads == [("voice-1", 10 * 1024 * 1024)]
+
+
+@pytest.mark.asyncio
+async def test_bot_closes_owned_media_processor_once(tmp_path: Path) -> None:
+    processor = FakeMediaProcessor()
+    bot = TelegramAgentBot(
+        config=_config(tmp_path),
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+        media_processor=processor,
+        owns_media_processor=True,
+    )
+
+    await bot.close()
+    await bot.close()
+
+    assert processor.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_media_deadline_is_sanitized_and_releases_chat_lock(tmp_path: Path) -> None:
+    class BlockingMediaProcessor:
+        def process(self, *_args: object, **_kwargs: object) -> str:
+            time.sleep(0.05)
+            return "too late"
+
+    client = FakeClient()
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "gemini",
+            "CHULK_MODEL": "gemini-test",
+            "CHULK_GEMINI_API_KEY": "fake",
+            "CHULK_LLM_TIMEOUT_SECONDS": "0.01",
+        }
+    )
+    bot = TelegramAgentBot(
+        config=config,
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=client,  # type: ignore[arg-type]
+        media_processor=BlockingMediaProcessor(),
+        agent_factory=lambda chat_id, conversation_id: FakeAgent(
+            conversation_id or f"new-{chat_id}"
+        ),
+    )
+    update = TelegramUpdate(
+        update_id=5,
+        chat_id=9,
+        user_id=7,
+        text="Summarize",
+        chat_type="private",
+        attachment=TelegramAttachment("voice-1", "voice", "audio/ogg"),
+    )
+
+    await bot.handle_update(update)
+
+    assert client.sent[-1] == (
+        9,
+        "The configured media provider could not interpret that attachment.",
+    )
+    assert bot._chat_locks[9].locked() is False
 
 
 @pytest.mark.asyncio

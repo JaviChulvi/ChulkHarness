@@ -24,6 +24,7 @@ from chulk.llm.base import (
 )
 from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
 from chulk.llm.factory import create_llm_client, provider_connection_from_config
+from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
 
@@ -294,6 +295,7 @@ class FallbackChain(LLMClient):
     last_success_provider: LLMClient | None = field(default=None, init=False, repr=False)
     _action_attempts: list[ProviderAttempt] | None = field(default=None, init=False, repr=False)
     model_capabilities: LLMModelCapabilities | None = field(default=None, init=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -315,6 +317,22 @@ class FallbackChain(LLMClient):
             else:
                 raise TypeError(f"Unsupported fallback provider: {provider!r}")
         return FallbackChain(providers=list(bound), strategy=self.strategy)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_resources(
+            provider for provider in reversed(self.providers) if isinstance(provider, LLMClient)
+        )
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await aclose_resources(
+            provider for provider in reversed(self.providers) if isinstance(provider, LLMClient)
+        )
 
     def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
         return self.complete_response(messages, max_output_tokens=max_output_tokens).content
