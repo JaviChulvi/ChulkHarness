@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+from hmac import compare_digest
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
@@ -220,7 +221,11 @@ class SkillPackage:
     digest: str
 
 
-def load_skill_package(path: Path | str) -> SkillPackage:
+def load_skill_package(
+    path: Path | str,
+    *,
+    expected_digest: str | None = None,
+) -> SkillPackage:
     """Load and validate one `SKILL.md` package without executing resources."""
     manifest_path = Path(path)
     if manifest_path.is_dir():
@@ -238,11 +243,16 @@ def load_skill_package(path: Path | str) -> SkillPackage:
         compatibility_mode=compatibility_mode,
     )
     _validate_declared_resources(root, manifest)
+    digest = skill_package_digest(root)
+    if expected_digest is not None and not compare_digest(digest, expected_digest):
+        raise SkillManifestError(
+            f"skill package digest mismatch: expected {expected_digest}, got {digest}"
+        )
     return SkillPackage(
         root=root,
         manifest_path=manifest_path,
         manifest=manifest,
-        digest=skill_package_digest(root),
+        digest=digest,
     )
 
 
@@ -272,10 +282,14 @@ def split_skill_front_matter(text: str) -> tuple[dict[str, Any], str]:
         raise SkillManifestError("skill YAML front matter must be a mapping")
     if any(not isinstance(key, str) for key in payload):
         raise SkillManifestError("skill manifest keys must be strings")
-    normalized = {
-        key.strip().lower().replace("-", "_"): value
-        for key, value in payload.items()
-    }
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        normalized_key = key.strip().lower().replace("-", "_")
+        if normalized_key in normalized:
+            raise SkillManifestError(
+                f"duplicate normalized skill manifest key: {normalized_key}"
+            )
+        normalized[normalized_key] = value
     return normalized, "\n".join(lines[closing_index + 1 :])
 
 
@@ -290,7 +304,7 @@ def skill_package_digest(root: Path | str) -> str:
     )
     for path in files:
         resolved = _resolve_inside_root(package_root, path)
-        relative = resolved.relative_to(package_root).as_posix()
+        relative = path.relative_to(package_root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(resolved.read_bytes())

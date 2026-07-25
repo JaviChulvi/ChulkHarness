@@ -105,6 +105,10 @@ Package metadata.
             "schema_version: 1\nname: example\nowner: core",
             "unsupported skill manifest fields",
         ),
+        (
+            "schema-version: 1\nschema_version: 1\nname: example",
+            "duplicate normalized skill manifest key",
+        ),
     ],
 )
 def test_manifest_rejects_unsafe_or_unsupported_yaml(
@@ -222,6 +226,30 @@ def test_package_digest_is_stable_and_changes_with_resources(tmp_path):
 
     assert first == second
     assert skill_package_digest(path.parent) != first
+
+
+def test_package_digest_mismatch_blocks_late_content_changes(tmp_path):
+    path = write_package(
+        tmp_path,
+        "# Example\n\nUse this skill when an example is needed.\n",
+    )
+    package = load_skill_package(path)
+
+    path.write_text("# Changed\n\nUnexpected instructions.\n", encoding="utf-8")
+
+    with pytest.raises(SkillManifestError, match="digest mismatch"):
+        load_skill_package(path, expected_digest=package.digest)
+
+    registry = SkillRegistry(tmp_path)
+    path.write_text(
+        "# Example\n\nUse this skill when an example is needed.\n",
+        encoding="utf-8",
+    )
+    registry.load_metadata()
+    path.write_text("# Changed\n\nUnexpected instructions.\n", encoding="utf-8")
+
+    with pytest.raises(SkillManifestError, match="digest mismatch"):
+        registry.load_content("example")
 
 
 def test_registry_progressively_loads_references_within_budget(tmp_path):

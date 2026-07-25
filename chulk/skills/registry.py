@@ -600,6 +600,8 @@ class SkillRegistry:
         """Progressively load entrypoint and reference text under one budget."""
         skill = self._skills[_normalize_skill_name(name)]
         if skill.loaded_content is None:
+            if skill.digest is not None:
+                load_skill_package(skill.path, expected_digest=skill.digest)
             root = skill.root or skill.path.parent.resolve(strict=True)
             manifest = skill.manifest
             entrypoint = (
