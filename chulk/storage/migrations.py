@@ -787,6 +787,81 @@ def _migrate_to_control_decisions(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_durable_goals(conn: sqlite3.Connection) -> None:
+    """Create revisioned goals, append-only events, and action checkpoints."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS goals (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            cancellation_requested INTEGER NOT NULL DEFAULT 0,
+            claim_token TEXT,
+            runner_id TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            CHECK (
+                status IN (
+                    'draft', 'approved', 'running', 'paused', 'blocked',
+                    'completed', 'cancelled', 'failed'
+                )
+            ),
+            CHECK (revision >= 0),
+            CHECK (cancellation_requested IN (0, 1)),
+            CHECK (
+                (claim_token IS NULL AND runner_id IS NULL AND lease_until IS NULL)
+                OR
+                (claim_token IS NOT NULL AND runner_id IS NOT NULL AND lease_until IS NOT NULL)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_goals_profile_status
+        ON goals(profile_id, status, updated_at DESC, id);
+
+        CREATE TABLE IF NOT EXISTS goal_events (
+            id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE (goal_id, revision),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+            CHECK (revision >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_events_goal
+        ON goal_events(profile_id, goal_id, revision);
+
+        CREATE TABLE IF NOT EXISTS goal_action_checkpoints (
+            id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            action_kind TEXT NOT NULL,
+            action_ref TEXT,
+            state TEXT NOT NULL,
+            claim_token TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (goal_id, idempotency_key),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+            CHECK (state IN ('started', 'completed', 'failed', 'uncertain'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_goal_action_recovery
+        ON goal_action_checkpoints(profile_id, goal_id, state, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -841,6 +916,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(12, "public-control-plane", _migrate_to_public_control_plane),
     SQLiteMigration(13, "conversation-dispatch", _migrate_to_conversation_dispatch),
     SQLiteMigration(14, "idempotent-control-decisions", _migrate_to_control_decisions),
+    SQLiteMigration(15, "durable-goals", _migrate_to_durable_goals),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

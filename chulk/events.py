@@ -37,6 +37,11 @@ class EventName(str, Enum):
     LEARNING_PROPOSAL_CHANGED = "learning.proposal.changed"
     PLAN_CREATED = "plan.created"
     PLAN_APPROVED = "plan.approved"
+    GOAL_CREATED = "goal.created"
+    GOAL_STATE_CHANGED = "goal.state.changed"
+    GOAL_STEERED = "goal.steered"
+    GOAL_EVIDENCE_RECORDED = "goal.evidence.recorded"
+    GOAL_CANCELLATION_REQUESTED = "goal.cancellation.requested"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
 
@@ -120,6 +125,15 @@ class PlanPayload(ExtensiblePayload):
 
 
 @dataclass(frozen=True)
+class GoalChangedPayload(ExtensiblePayload):
+    goal_id: str
+    status: str
+    revision: int
+    action: str
+    step_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RunCompletedPayload(ExtensiblePayload):
     result: RunResult
 
@@ -155,6 +169,7 @@ EventPayload: TypeAlias = (
     | ResourcesLoadedPayload
     | LearningProposalChangedPayload
     | PlanPayload
+    | GoalChangedPayload
     | RunCompletedPayload
     | RunFailedPayload
     | SerializedEventPayload
@@ -234,6 +249,7 @@ __all__ = [
     "BudgetPayload",
     "EventName",
     "EventPayload",
+    "GoalChangedPayload",
     "LearningProposalChangedPayload",
     "ModelDeltaPayload",
     "ModelRequestPayload",

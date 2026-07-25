@@ -61,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_parser(subparsers)
     _add_plugins_parser(subparsers)
     _add_usage_parser(subparsers)
+    _add_goal_parser(subparsers)
     _add_session_parser(subparsers)
     _add_gateway_parser(subparsers)
     _add_server_parser(subparsers)
@@ -376,6 +377,112 @@ def _add_usage_query_options(
     )
     parser.add_argument("--channel")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_goal_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "goal",
+        help="Promote, inspect, and control durable goals.",
+    )
+    commands = parser.add_subparsers(dest="goal_command", required=True)
+
+    list_parser = commands.add_parser("list", help="List profile-owned goals.")
+    list_parser.add_argument(
+        "--status",
+        choices=(
+            "draft",
+            "approved",
+            "running",
+            "paused",
+            "blocked",
+            "completed",
+            "cancelled",
+            "failed",
+        ),
+    )
+    list_parser.add_argument("--limit", type=int, default=100)
+    list_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    inspect = commands.add_parser("inspect", help="Inspect one durable goal.")
+    inspect.add_argument("goal_id")
+    inspect.add_argument("--json", action="store_true", dest="json_output")
+
+    export = commands.add_parser(
+        "export",
+        help="Write one bounded redacted goal and its event history.",
+    )
+    export.add_argument("goal_id")
+    export.add_argument("--output", required=True)
+    export.add_argument("--force", action="store_true")
+    export.add_argument("--json", action="store_true", dest="json_output")
+
+    promote = commands.add_parser(
+        "promote",
+        help="Copy a persisted conversation plan into a durable goal.",
+    )
+    promote.add_argument("conversation_id")
+    promote.add_argument("--turn", dest="turn_id")
+    promote.add_argument("--max-model-calls", type=int)
+    promote.add_argument("--max-tool-calls", type=int)
+    promote.add_argument("--max-tokens", type=int)
+    promote.add_argument("--max-cost")
+    promote.add_argument("--deadline")
+    promote.add_argument("--actor", default="cli")
+    promote.add_argument("--json", action="store_true", dest="json_output")
+
+    for name, help_text in (
+        ("approve", "Approve a draft goal."),
+        ("run", "Move an approved goal into running state."),
+        ("pause", "Pause a goal between actions."),
+        ("resume", "Resume a paused or blocked goal."),
+        ("cancel", "Request durable goal cancellation."),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        _add_goal_mutation_options(command)
+        if name == "approve":
+            command.add_argument("--reason")
+
+    steer = commands.add_parser("steer", help="Append operator steering.")
+    steer.add_argument("goal_id")
+    steer.add_argument("instruction", nargs="+")
+    steer.add_argument("--revision", type=int, required=True)
+    steer.add_argument("--actor", default="cli")
+    steer.add_argument("--json", action="store_true", dest="json_output")
+
+    approve_step = commands.add_parser(
+        "approve-step",
+        help="Approve one selected high-risk step.",
+    )
+    _add_goal_step_mutation_options(approve_step)
+    approve_step.add_argument("--reason")
+
+    skip_step = commands.add_parser(
+        "skip-step",
+        help="Skip one step with an auditable operator reason.",
+    )
+    _add_goal_step_mutation_options(skip_step)
+    skip_step.add_argument("--reason", required=True)
+
+    retry_step = commands.add_parser(
+        "retry-step",
+        help="Retry a blocked, failed, or uncertain step.",
+    )
+    _add_goal_step_mutation_options(retry_step)
+
+
+def _add_goal_mutation_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("goal_id")
+    parser.add_argument("--revision", type=int, required=True)
+    parser.add_argument("--actor", default="cli")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_goal_step_mutation_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("goal_id")
+    parser.add_argument("step_id")
+    parser.add_argument("--revision", type=int, required=True)
+    parser.add_argument("--actor", default="cli")
     parser.add_argument("--json", action="store_true", dest="json_output")
 
 

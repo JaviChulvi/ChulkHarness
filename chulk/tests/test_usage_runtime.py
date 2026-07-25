@@ -8,11 +8,18 @@ import pytest
 from chulk.config import load_config
 from chulk import Agent as PublicAgent
 from chulk import AgentConfig, BudgetPayload, RunFailedPayload
+from chulk.goals import (
+    GoalLeaseConflictError,
+    GoalService,
+    GoalStep,
+    GoalStore,
+)
 from chulk.llm import FallbackChain, LLMActionError, LLMClient, LLMError
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.usage import LLMUsage
 from chulk.runtime import create_agent
 from chulk.testing import ScriptedLLMClient
+from chulk.tools import Tool, ToolResult
 from chulk.usage import (
     BudgetExceededError,
     ExactCost,
@@ -141,6 +148,145 @@ def test_cost_budget_stops_before_the_provider_request(tmp_path: Path) -> None:
     assert turn.model_request_count == 1
     assert turn.extension_metadata["budget_exhausted"]["dimension"] == "cost"
     assert SQLiteUsageStore(config.store_path).list_entries() == ()
+
+
+def test_tool_budget_stops_before_the_next_tool_attempt_and_records_goal_usage(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    client = OpenAIScriptedClient(
+        [
+            {
+                "type": "tool_call",
+                "tool_name": "calculator",
+                "arguments": {"expression": "1 + 1"},
+            },
+            {
+                "type": "tool_call",
+                "tool_name": "calculator",
+                "arguments": {"expression": "2 + 2"},
+            },
+            {"type": "final_answer", "content": "must not run"},
+        ]
+    )
+    agent = create_agent(
+        config,
+        llm_client=client,
+        run_budget=RunBudget(
+            scope="goal",
+            max_tool_calls=1,
+        ),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-1",
+        ),
+    )
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        agent.run_turn("calculate twice")
+
+    assert exc_info.value.dimension == "tool_calls"
+    assert client.remaining == 1
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    tool_entries = [item for item in entries if item.resource_kind.value == "tool"]
+    assert len(tool_entries) == 1
+    assert tool_entries[0].tool_or_service == "calculator"
+    assert tool_entries[0].dimensions.goal_id == "goal-1"
+    assert tool_entries[0].units["tool_calls"] == 1
+    assert agent.state.turns[-1].extension_metadata["budget_exhausted"][
+        "resource_kind"
+    ] == "tool"
+
+
+def test_goal_runtime_checkpoints_active_tool_then_observes_pause_boundary(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    service = GoalService(GoalStore(config.store_path))
+    goal = service.create(
+        title="Pause safely",
+        acceptance_criteria=("The active action is recorded.",),
+        steps=(
+            GoalStep(
+                id="work",
+                title="Work",
+                description="Run one governed tool.",
+                acceptance_criterion_ids=("criterion-1",),
+            ),
+        ),
+        budget=RunBudget(
+            scope="goal",
+            max_model_calls=3,
+            max_tool_calls=2,
+        ),
+    )
+    goal = service.approve(
+        goal.id,
+        expected_revision=goal.revision,
+        approved_by="owner",
+    )
+    goal = service.run(
+        goal.id,
+        expected_revision=goal.revision,
+        actor="owner",
+    )
+    goal = service.start_step(
+        goal.id,
+        "work",
+        expected_revision=goal.revision,
+        actor="runner",
+    )
+    execution = service.claim_execution(
+        goal.id,
+        "work",
+        expected_revision=goal.revision,
+        runner_id="runner",
+    )
+
+    def pause_goal(_arguments: dict) -> ToolResult:
+        current = service.store.get(goal.id)
+        service.pause(
+            goal.id,
+            expected_revision=current.revision,
+            actor="owner",
+        )
+        return ToolResult("pause_goal", True, "paused")
+
+    client = OpenAIScriptedClient(
+        [
+            {
+                "type": "tool_call",
+                "tool_name": "pause_goal",
+                "arguments": {},
+            },
+            {"type": "final_answer", "content": "must not run"},
+        ]
+    )
+    agent = create_agent(
+        config,
+        llm_client=client,
+        tool_specs=[
+            Tool(
+                name="pause_goal",
+                description="Pause the governed goal.",
+                args_schema={"type": "object", "properties": {}},
+                callable=pause_goal,
+            )
+        ],
+        goal_execution=execution,
+    )
+
+    with pytest.raises(GoalLeaseConflictError, match="not running"):
+        agent.run_turn("work until paused")
+
+    checkpoints = service.store.action_checkpoints(goal.id)
+    assert len(checkpoints) == 1
+    assert checkpoints[0].state.value == "completed"
+    assert service.store.get(goal.id).status.value == "paused"
+    assert client.remaining == 1
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    assert {entry.dimensions.goal_id for entry in entries} == {goal.id}
+    assert {entry.resource_kind.value for entry in entries} == {"model", "tool"}
 
 
 def test_budget_exhaustion_is_a_typed_public_error_and_event(
