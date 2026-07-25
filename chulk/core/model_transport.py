@@ -664,11 +664,18 @@ class ModelTransport:
     ) -> None:
         if not isinstance(attempts, (list, tuple)) or not attempts:
             return
+        profile_attempts = [
+            attempt
+            for attempt in attempts
+            if isinstance(getattr(attempt, "model_profile_id", None), str)
+        ]
+        if not profile_attempts:
+            return
         serialized = [
             attempt.to_dict()
             if hasattr(attempt, "to_dict")
             else {"attempt": str(attempt)}
-            for attempt in attempts
+            for attempt in profile_attempts
         ]
         turn.extension_metadata["model_attempts"] = serialized
         selection = turn.extension_metadata.get("model_selection")
@@ -677,7 +684,7 @@ class ModelTransport:
         successful = next(
             (
                 attempt
-                for attempt in attempts
+                for attempt in profile_attempts
                 if getattr(attempt, "success", False)
                 and isinstance(
                     getattr(attempt, "model_profile_id", None),
@@ -694,7 +701,7 @@ class ModelTransport:
         if selected_id == previous_id:
             return
         failed_count = sum(
-            1 for attempt in attempts if not getattr(attempt, "success", False)
+            1 for attempt in profile_attempts if not getattr(attempt, "success", False)
         )
         reason = (
             f"runtime fallback selected after {failed_count} failed or "

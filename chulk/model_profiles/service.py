@@ -13,8 +13,8 @@ from chulk.llm import (
     LLMError,
     LLMModelCapabilities,
     create_llm_client,
-    resolve_model_capabilities,
 )
+from chulk.llm.capabilities import resolve_runtime_model_capabilities
 from chulk.llm.public import ProviderAttempt
 from chulk.llm.base import LLMErrorCode
 from chulk.model_profiles.client import RefreshingLLMClient, RequestClientLease
@@ -213,7 +213,13 @@ class ModelProfileService:
         profiles_by_id: dict[str, ModelProfile] = {}
         for candidate in runtime.candidates:
             profile = candidate.profile
-            base = resolve_model_capabilities(profile.provider, profile.model)
+            base = resolve_runtime_model_capabilities(
+                profile.provider,
+                profile.model,
+                local_context_window_tokens=(
+                    profile.context_window_tokens or config.local_context_window_tokens
+                ),
+            )
             model_capabilities = base
             if (
                 profile.context_window_tokens is not None
@@ -266,8 +272,10 @@ class ModelProfileService:
                         timeout_seconds=config.llm_timeout_seconds,
                         max_retries=config.llm_max_retries,
                     ),
-                    sensitive_values=(
-                        (connection.api_key,) if connection.api_key else ()
+                    sensitive_values=tuple(
+                        value
+                        for value in (connection.api_key, connection.base_url)
+                        if value
                     ),
                 )
 

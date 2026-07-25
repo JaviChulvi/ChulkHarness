@@ -35,8 +35,13 @@ def discover_endpoint_models(
     if connection.api_key:
         headers["Authorization"] = f"Bearer {connection.api_key}"
     request = Request(endpoint, headers=headers, method="GET")
-    with opener(request, timeout=timeout_seconds) as response:
-        payload = response.read(_MAX_DISCOVERY_BYTES + 1)
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            payload = response.read(_MAX_DISCOVERY_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(
+            f"model discovery request failed ({type(exc).__name__})"
+        ) from exc
     if len(payload) > _MAX_DISCOVERY_BYTES:
         raise ValueError("model discovery response exceeds the safe size limit")
     try:

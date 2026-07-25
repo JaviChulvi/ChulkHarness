@@ -489,6 +489,31 @@ def test_credential_reference_is_refreshed_for_each_request(
     assert observed_keys == ["first", "second"]
 
 
+def test_local_profile_uses_the_configured_deployment_context_window(
+    tmp_path: Path,
+) -> None:
+    config, agent_profile, _store, service = _runtime(tmp_path)
+    service.create(
+        ModelProfile(
+            id="local-runtime",
+            provider="local",
+            model="qwen/qwen3.5-35b-a3b",
+        )
+    )
+    runtime = service.resolve_for_agent(
+        agent_profile,
+        requested_profile_id="local-runtime",
+    )
+
+    chain = service.create_chain(config, runtime)
+
+    assert chain.model_capabilities is not None
+    assert (
+        chain.model_capabilities.context_window_tokens
+        == config.local_context_window_tokens
+    )
+
+
 class _SecretEchoingClient(LLMClient):
     def __init__(self, secret: str) -> None:
         self.secret = secret
