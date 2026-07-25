@@ -35,8 +35,10 @@ from chulk.llm.capabilities import (
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
+from chulk.redaction import redact_text
 from chulk.sessions import (
     ConversationSummaryRecord,
+    SessionSearchService,
     SQLiteSessionStore,
     SessionRecorder,
 )
@@ -88,6 +90,7 @@ class RuntimeToolContext:
     shell_execution_policy: ShellExecutionPolicy | None = None
     require_shell_containment: bool = False
     memory_store: SQLiteMemoryStore | None = None
+    session_search_service: SessionSearchService | None = None
     artifact_store: TraceArtifactStore | None = None
     deps: object | None = None
 
@@ -171,6 +174,22 @@ def create_agent(
         config.traces_dir,
         state.conversation_id,
         defer_until_event=TraceEvent.TURN_STARTED if conversation_id is None else None,
+    )
+    def audit_session_read(
+        event_type: str,
+        payload: dict,
+    ) -> None:
+        trace_logger.activate()
+        trace_logger.log(event_type, payload)
+
+    session_search_service = SessionSearchService(
+        session_store,
+        profile_id=effective_profile_id,
+        redactor=_session_result_redactor(
+            redaction_callback,
+            fail_closed=redaction_fail_closed,
+        ),
+        audit_callback=audit_session_read,
     )
     skill_registry.load_metadata()
     skill_resolution = _resolve_skill_specs(skill_registry, skill_specs)
@@ -296,6 +315,7 @@ def create_agent(
         llm_client=client,
         capabilities=selected_capabilities,
         memory_policy=memory_policy,
+        session_search_service=session_search_service,
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
@@ -381,7 +401,32 @@ def create_agent(
         raise
     agent.session_store = session_store
     agent.session_recorder = session_recorder
+    agent.session_search_service = session_search_service
     return agent
+
+
+def _session_result_redactor(
+    callback: Callable[[str, str, dict], str] | None,
+    *,
+    fail_closed: bool,
+) -> Callable[[str], str]:
+    """Compose baseline secret redaction with an optional host policy."""
+
+    def redact(value: str) -> str:
+        safe_value = redact_text(value)
+        if callback is None:
+            return safe_value
+        try:
+            custom_value = callback(
+                "session_search_result",
+                safe_value,
+                {"source": "session_search"},
+            )
+        except Exception:
+            return "[redaction failed]" if fail_closed else safe_value
+        return redact_text(str(custom_value))
+
+    return redact
 
 
 def _summary_source_ordinal(summary: ConversationSummaryRecord | None) -> int:
@@ -669,6 +714,7 @@ def _create_tool_registry(
     llm_client: LLMClient | None = None,
     capabilities: Capabilities,
     memory_policy: MemoryPolicy,
+    session_search_service: SessionSearchService,
     deps: object | None,
     shell_execution_policy: ShellExecutionPolicy | None,
     require_shell_containment: bool,
@@ -681,6 +727,7 @@ def _create_tool_registry(
             memory_store=memory_store,
             capabilities=capabilities,
             memory_policy=memory_policy,
+            session_search_service=session_search_service,
             max_tool_stdout_bytes=config.max_tool_stdout_chars,
             max_tool_stderr_bytes=config.max_tool_stderr_chars,
             shell_execution_policy=shell_execution_policy,
@@ -701,6 +748,7 @@ def _create_tool_registry(
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
         memory_store=memory_store,
+        session_search_service=session_search_service,
         artifact_store=artifact_store,
         deps=deps,
     )

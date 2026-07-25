@@ -30,6 +30,11 @@ from chulk.execution import ExecutionBackend
 from chulk.mcp import MCPServerConfig
 from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
+from chulk.sessions import (
+    SessionSearchPage,
+    SessionSearchService,
+    SessionWindow,
+)
 from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
 from chulk.tracing.artifacts import (
@@ -622,6 +627,56 @@ class Agent:
             lambda: self.usage_ledger.group(group_by, **kwargs),
         )
 
+    @property
+    def session_search(self) -> SessionSearchService:
+        """Return the exact-search service bound to this runtime profile."""
+        service = getattr(self.runtime, "session_search_service", None)
+        if not isinstance(service, SessionSearchService):
+            raise RuntimeError("Session search is not configured")
+        return service
+
+    def search_sessions(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> SessionSearchPage:
+        """Search eligible profile-owned prior-session messages."""
+        return self._invoke(
+            "search_sessions",
+            lambda: self.session_search.search(
+                query,
+                limit=limit,
+                cursor=cursor,
+            ),
+        )
+
+    def read_session_window(
+        self,
+        conversation_id: str,
+        *,
+        ordinal: int,
+        before: int = 3,
+        after: int = 3,
+        limit: int = 20,
+        cursor: str | None = None,
+        include_sensitive: bool = False,
+    ) -> SessionWindow:
+        """Read a bounded session window, with an explicit trusted-host override."""
+        return self._invoke(
+            "read_session_window",
+            lambda: self.session_search.read_window(
+                conversation_id,
+                ordinal=ordinal,
+                before=before,
+                after=after,
+                limit=limit,
+                cursor=cursor,
+                include_sensitive=include_sensitive,
+            ),
+        )
+
     def read_artifact(
         self,
         artifact_id: str,
@@ -818,6 +873,10 @@ class AsyncAgent:
     def usage_ledger(self) -> UsageLedger:
         return self._agent.usage_ledger
 
+    @property
+    def session_search(self) -> SessionSearchService:
+        return self._agent.session_search
+
     async def query_usage(self, **kwargs: Any) -> UsagePage:
         return await asyncio.to_thread(self._agent.query_usage, **kwargs)
 
@@ -830,6 +889,42 @@ class AsyncAgent:
             self._agent.group_usage,
             group_by,
             **kwargs,
+        )
+
+    async def search_sessions(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> SessionSearchPage:
+        return await asyncio.to_thread(
+            self._agent.search_sessions,
+            query,
+            limit=limit,
+            cursor=cursor,
+        )
+
+    async def read_session_window(
+        self,
+        conversation_id: str,
+        *,
+        ordinal: int,
+        before: int = 3,
+        after: int = 3,
+        limit: int = 20,
+        cursor: str | None = None,
+        include_sensitive: bool = False,
+    ) -> SessionWindow:
+        return await asyncio.to_thread(
+            self._agent.read_session_window,
+            conversation_id,
+            ordinal=ordinal,
+            before=before,
+            after=after,
+            limit=limit,
+            cursor=cursor,
+            include_sensitive=include_sensitive,
         )
 
     async def read_artifact(

@@ -2037,3 +2037,104 @@ def test_adapter_cursor_is_durable_and_never_regresses(tmp_path: Path) -> None:
     assert store.save_adapter_cursor("telegram", 42) == 42
     assert store.save_adapter_cursor("telegram", 20) == 42
     assert SQLiteSessionStore(tmp_path / "store.sqlite").get_adapter_cursor("telegram") == 42
+
+
+def test_session_search_index_backfills_and_tracks_only_eligible_messages(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "store.sqlite"
+    store = SQLiteSessionStore(path)
+    store.create_conversation("conversation-1", provider="test", model="mock")
+    store.save_message(
+        "conversation-1",
+        role="user",
+        content="eligible user evidence",
+        message_key="eligible-user",
+    )
+    store.save_message(
+        "conversation-1",
+        role="assistant",
+        content="eligible assistant evidence",
+        message_key="eligible-assistant",
+    )
+    store.save_message(
+        "conversation-1",
+        role="assistant",
+        content="hidden internal prompt",
+        message_key="internal",
+        metadata={"internal": True},
+    )
+    store.save_message(
+        "conversation-1",
+        role="user",
+        content="sensitive customer token",
+        message_key="sensitive",
+        metadata={"sensitive": True},
+    )
+    store.save_message(
+        "conversation-1",
+        role="observation",
+        content="raw tool output",
+        message_key="observation",
+    )
+
+    if not store.fts_enabled:
+        pytest.skip("SQLite build does not provide FTS5")
+    with store._connect() as conn:
+        indexed = conn.execute(
+            "SELECT content FROM session_messages_fts ORDER BY rowid"
+        ).fetchall()
+
+    assert [row["content"] for row in indexed] == [
+        "eligible user evidence",
+        "eligible assistant evidence",
+    ]
+
+    with store._connect() as conn:
+        conn.execute("DELETE FROM session_messages_fts")
+    assert store.rebuild_search_index() == 2
+    with store._connect() as conn:
+        rebuilt = conn.execute(
+            "SELECT content FROM session_messages_fts ORDER BY rowid"
+        ).fetchall()
+    assert [row["content"] for row in rebuilt] == [
+        "eligible user evidence",
+        "eligible assistant evidence",
+    ]
+
+
+def test_session_search_index_backfills_messages_written_before_store_open(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "store.sqlite"
+    initial = SQLiteSessionStore(path)
+    initial.create_conversation("conversation-1", provider="test", model="mock")
+    with initial._connect() as conn:
+        conn.execute("DELETE FROM session_messages_fts")
+        conn.execute(
+            """
+            INSERT INTO conversation_messages (
+                id, conversation_id, turn_id, role, content, ordinal,
+                message_key, created_at, metadata
+            )
+            VALUES (
+                'legacy-message', 'conversation-1', 'turn-1', 'user',
+                'legacy indexed phrase', 1, 'legacy-key',
+                '2026-07-25T10:00:00+00:00', '{}'
+            )
+            """
+        )
+
+    reopened = SQLiteSessionStore(path)
+    if not reopened.fts_enabled:
+        pytest.skip("SQLite build does not provide FTS5")
+    with reopened._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT message_id
+            FROM session_messages_fts
+            WHERE session_messages_fts MATCH 'legacy'
+            """
+        ).fetchone()
+
+    assert row["message_id"] == "legacy-message"
