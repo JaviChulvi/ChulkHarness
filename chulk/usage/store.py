@@ -231,6 +231,30 @@ class SQLiteUsageStore:
             raise KeyError(f"usage reservation {reservation_id!r} does not exist")
         return _row_to_reservation(row)
 
+    def active_constraint_reservations(
+        self,
+        source_event_id: str,
+    ) -> tuple[BudgetReservation, ...]:
+        """Return shared-scope reservations tied to one primary usage event."""
+        clean_source = source_event_id.strip()
+        if not clean_source:
+            raise ValueError("source_event_id cannot be empty")
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM usage_reservations
+                WHERE source_event_id = ? AND state = ?
+                  AND idempotency_key LIKE ?
+                ORDER BY budget_scope, id
+                """,
+                (
+                    clean_source,
+                    ReservationState.ACTIVE.value,
+                    f"{clean_source}:constraint:%",
+                ),
+            ).fetchall()
+        return tuple(_row_to_reservation(row) for row in rows)
+
     def list_entries(self, *, limit: int = 100) -> tuple[UsageEntry, ...]:
         clean_limit = max(1, min(limit, 10_000))
         with sqlite_connection(self.db_path) as conn:
@@ -615,9 +639,9 @@ def _reserved_totals(
                reserved_cost_amount AS cost_amount,
                pricing_known
         FROM usage_reservations
-        WHERE state = ? AND {where}
+        WHERE state = ? AND budget_scope = ? AND {where}
         """,
-        (ReservationState.ACTIVE.value, *params),
+        (ReservationState.ACTIVE.value, scope.value, *params),
     ).fetchall()
     return _sum_totals(rows)
 

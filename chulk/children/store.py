@@ -126,6 +126,7 @@ class ChildTaskStore:
                         )
                     return existing
             _validate_lineage(conn, task)
+            _validate_goal_ownership(conn, task)
             dependency_statuses = _dependency_statuses(
                 conn,
                 task.dependency_ids,
@@ -282,6 +283,7 @@ class ChildTaskStore:
                 raise ChildTaskLeaseConflictError(
                     "child task dependencies are not completed"
                 )
+            _assert_parent_parallelism(conn, current)
             changed = start_attempt(current).with_revision(
                 current.revision + 1,
                 now=observed,
@@ -911,6 +913,8 @@ def _validate_lineage(conn: sqlite3.Connection, task: ChildTask) -> None:
     parent = _task_from_row(
         _task_row(conn, lineage.parent_task_id, task.profile_id)
     )
+    if parent.terminal or parent.cancellation_requested:
+        raise ValueError("terminal or cancelling child task cannot create descendants")
     expected_root = parent.lineage.root_task_id or parent.id
     if lineage.root_task_id != expected_root:
         raise ValueError("child task root lineage does not match its parent")
@@ -920,6 +924,33 @@ def _validate_lineage(conn: sqlite3.Connection, task: ChildTask) -> None:
         raise ValueError("leaf child task cannot create descendants")
     if lineage.depth > parent.spec.max_depth or lineage.depth > task.spec.max_depth:
         raise ValueError("child task exceeds the allowed delegation depth")
+
+
+def _validate_goal_ownership(conn: sqlite3.Connection, task: ChildTask) -> None:
+    if task.goal_id is None:
+        if task.goal_step_id is not None:
+            raise ValueError("goal_step_id requires goal_id")
+        return
+    row = conn.execute(
+        "SELECT profile_id, snapshot_json FROM goals WHERE id = ?",
+        (task.goal_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"goal {task.goal_id!r} does not exist")
+    if str(row["profile_id"]) != task.profile_id:
+        raise ValueError("child task goal belongs to another profile")
+    if task.goal_step_id is None:
+        return
+    snapshot = json.loads(str(row["snapshot_json"]))
+    steps = snapshot.get("steps", []) if isinstance(snapshot, dict) else []
+    if not any(
+        isinstance(step, dict) and step.get("id") == task.goal_step_id
+        for step in steps
+    ):
+        raise ValueError(
+            f"goal step {task.goal_step_id!r} does not exist in goal "
+            f"{task.goal_id!r}"
+        )
 
 
 def _initial_state(
@@ -948,6 +979,31 @@ def _initial_state(
             f"Dependencies require operator action: {', '.join(blocking)}",
         )
     return task
+
+
+def _assert_parent_parallelism(
+    conn: sqlite3.Connection,
+    task: ChildTask,
+) -> None:
+    parent_id = task.lineage.parent_task_id
+    if parent_id is None:
+        return
+    parent = _task_from_row(_task_row(conn, parent_id, task.profile_id))
+    active = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM child_tasks
+            WHERE profile_id = ? AND parent_task_id = ?
+              AND status IN ('running', 'waiting')
+            """,
+            (task.profile_id, parent_id),
+        ).fetchone()["count"]
+    )
+    if active >= parent.spec.max_parallelism:
+        raise ChildTaskLeaseConflictError(
+            f"parent child-task parallelism limit "
+            f"{parent.spec.max_parallelism} is already active"
+        )
 
 
 def _dependency_statuses(

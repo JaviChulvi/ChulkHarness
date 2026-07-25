@@ -149,6 +149,7 @@ def create_agent(
     allowed_skill_names: Iterable[str] | None = None,
     runtime_metadata: dict | None = None,
     run_budget: RunBudget | None = None,
+    additional_run_budgets: Iterable[RunBudget] = (),
     usage_dimensions: UsageDimensions | None = None,
     learning_review_policy: LearningReviewPolicy | None = None,
     learning_review_quota: LearningReviewQuota | None = None,
@@ -371,6 +372,7 @@ def create_agent(
             if goal_snapshot is not None
             else run_budget or RunBudget()
         ),
+        additional_budgets=additional_run_budgets,
         max_output_tokens=(
             model_capabilities.max_output_tokens
             or model_capabilities.default_response_reserve_tokens

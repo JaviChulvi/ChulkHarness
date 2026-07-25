@@ -22,6 +22,7 @@ from chulk.testing import ScriptedLLMClient
 from chulk.tools import Tool, ToolResult
 from chulk.usage import (
     BudgetExceededError,
+    BudgetScope,
     ExactCost,
     ReservationState,
     RunBudget,
@@ -148,6 +149,67 @@ def test_cost_budget_stops_before_the_provider_request(tmp_path: Path) -> None:
     assert turn.model_request_count == 1
     assert turn.extension_metadata["budget_exhausted"]["dimension"] == "cost"
     assert SQLiteUsageStore(config.store_path).list_entries() == ()
+
+
+def test_shared_goal_reservation_prevents_parallel_children_overspending(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=10,
+    )
+    goal_budget = RunBudget(
+        scope=BudgetScope.GOAL,
+        max_model_calls=3,
+    )
+    holder = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "held"}]
+        ),
+        run_budget=child_budget,
+        additional_run_budgets=(goal_budget,),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-shared",
+            child_task_id="child-a",
+        ),
+    )
+    assert holder.usage_accounting is not None
+    held = holder.usage_accounting.reserve_model_request(
+        turn_id="held-turn",
+        request_index=1,
+        messages=[{"role": "user", "content": "hold allowance"}],
+        purpose="child",
+    )
+    blocked_client = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "must not run"}]
+    )
+    blocked = create_agent(
+        config,
+        llm_client=blocked_client,
+        run_budget=child_budget,
+        additional_run_budgets=(goal_budget,),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-shared",
+            child_task_id="child-b",
+        ),
+    )
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        blocked.run_turn("compete for the same goal budget")
+
+    assert exc_info.value.scope is BudgetScope.GOAL
+    assert blocked_client.remaining == 1
+    assert holder.usage_accounting.release_model_request(
+        turn_id="held-turn",
+        request_index=1,
+    ) is not None
+    assert SQLiteUsageStore(config.store_path).get_reservation(
+        held.id
+    ).state is ReservationState.RELEASED
 
 
 def test_tool_budget_stops_before_the_next_tool_attempt_and_records_goal_usage(
@@ -373,6 +435,18 @@ def test_checkpoint_reconciles_an_interrupted_ledger_commit(
         llm_client=OpenAIScriptedClient(
             [{"type": "final_answer", "content": "checkpointed"}]
         ),
+        run_budget=RunBudget(
+            scope=BudgetScope.CHILD_TASK,
+            max_model_calls=10,
+        ),
+        additional_run_budgets=(
+            RunBudget(scope=BudgetScope.GOAL, max_model_calls=10),
+        ),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-recovery",
+            child_task_id="child-recovery",
+        ),
     )
 
     with pytest.raises(RuntimeError, match="simulated crash"):
@@ -380,8 +454,11 @@ def test_checkpoint_reconciles_an_interrupted_ledger_commit(
 
     conversation_id = first.state.conversation_id
     reservations = SQLiteUsageStore(config.store_path).list_reservations()
-    assert len(reservations) == 1
-    assert reservations[0].state is ReservationState.ACTIVE
+    assert len(reservations) == 2
+    assert all(
+        reservation.state is ReservationState.ACTIVE
+        for reservation in reservations
+    )
     assert SQLiteUsageStore(config.store_path).list_entries() == ()
 
     monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
@@ -399,7 +476,11 @@ def test_checkpoint_reconciles_an_interrupted_ledger_commit(
     assert entries[0].metadata["recovered"] is True
     assert entries[0].units["model_calls"] == 1
     assert entries[0].units["total_tokens"] > 0
-    assert reservations[0].state is ReservationState.COMMITTED
+    assert len(reservations) == 2
+    assert all(
+        reservation.state is ReservationState.COMMITTED
+        for reservation in reservations
+    )
 
     reopened = create_agent(
         config,
