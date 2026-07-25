@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from collections.abc import Sequence
+from dataclasses import replace
 import sys
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -29,8 +30,9 @@ from chulk.cli.entrypoints import (
     run_trace_command,
 )
 from chulk.cli.profiles import run_profile_command
+from chulk.cli.models import run_model_command
 from chulk.cli.parser import build_parser
-from chulk.config import Config, load_cli_config
+from chulk.config import Config, LLMFallbackProviderConfig, load_cli_config
 from chulk.core import Agent
 from chulk.llm import (
     AnthropicProvider,
@@ -48,6 +50,14 @@ from chulk.llm import (
     OpenRouterProvider,
 )
 from chulk.presets import software_engineer
+from chulk.model_profiles import (
+    ModelCapabilityRequirements,
+    ModelProfileNotFoundError,
+    ModelProfileService,
+    ModelProfileStore,
+    ModelProfileValidator,
+    ResolvedModelRuntime,
+)
 from chulk.profiles import (
     AgentProfile,
     ProfileAlreadyExistsError,
@@ -56,8 +66,16 @@ from chulk.profiles import (
     ProfileRuntimeFactory,
 )
 from chulk.runtime import create_agent
-from chulk.sessions import AmbiguousSessionError, SessionNotFoundError, SQLiteSessionStore
-from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
+from chulk.sessions import (
+    AmbiguousSessionError,
+    SessionNotFoundError,
+    SQLiteSessionStore,
+)
+from chulk.tools.permissions import (
+    PermissionDecision,
+    PermissionDecisionRecord,
+    PermissionRequest,
+)
 
 
 def format_config(config: Config) -> str:
@@ -82,8 +100,12 @@ def format_config(config: Config) -> str:
         "local_api_key": "set" if config.local_api_key else "not set",
         "local_base_url": _format_base_url(config.local_base_url),
         "local_context_window_tokens": config.local_context_window_tokens,
-        "openai_compatible_api_key": "set" if config.openai_compatible_api_key else "not set",
-        "openai_compatible_base_url": _format_base_url(config.openai_compatible_base_url),
+        "openai_compatible_api_key": "set"
+        if config.openai_compatible_api_key
+        else "not set",
+        "openai_compatible_base_url": _format_base_url(
+            config.openai_compatible_base_url
+        ),
         "openrouter_api_key": "set" if config.openrouter_api_key else "not set",
         "openrouter_base_url": _format_base_url(config.openrouter_base_url),
         "anthropic_api_key": "set" if config.anthropic_api_key else "not set",
@@ -136,6 +158,7 @@ def create_cli_agent(
     *,
     conversation_id: str | None = None,
     profile: AgentProfile | None = None,
+    runtime_metadata: dict | None = None,
 ) -> Agent:
     """Create the default CLI coding-agent runtime."""
     preset = software_engineer()
@@ -153,7 +176,9 @@ def create_cli_agent(
     mcp_servers = config.mcp_servers
     if profile is not None and profile.allowed_mcp_servers is not None:
         allowed_mcp_servers = set(profile.allowed_mcp_servers)
-        mcp_servers = tuple(server for server in mcp_servers if server.label in allowed_mcp_servers)
+        mcp_servers = tuple(
+            server for server in mcp_servers if server.label in allowed_mcp_servers
+        )
     if llm_client_factory is not None:
         return create_agent(
             config,
@@ -166,6 +191,7 @@ def create_cli_agent(
             memory_namespace=memory_namespace,
             allowed_skill_names=allowed_skill_names,
             mcp_servers=mcp_servers,
+            runtime_metadata=runtime_metadata,
         )
     return create_agent(
         config,
@@ -178,7 +204,84 @@ def create_cli_agent(
         memory_namespace=memory_namespace,
         allowed_skill_names=allowed_skill_names,
         mcp_servers=mcp_servers,
+        runtime_metadata=runtime_metadata,
     )
+
+
+def resolve_cli_model(
+    base_config: Config,
+    config: Config,
+    profile: AgentProfile,
+    service: ModelProfileService,
+    *,
+    requested_profile_id: str | None = None,
+    channel: str = "cli",
+    build_client: bool = True,
+) -> tuple[Config, ResolvedModelRuntime, FallbackChain | None]:
+    """Resolve one model selection and preserve the legacy default path."""
+    runtime = service.resolve_for_agent(
+        profile,
+        requested_profile_id=requested_profile_id,
+        channel=channel,
+    )
+    if runtime.legacy_compatibility:
+        return config, runtime, None
+    candidates = runtime.candidates
+    selected_config = replace(
+        config,
+        llm_provider=candidates[0].profile.provider,
+        model=candidates[0].profile.model,
+        llm_fallback_providers=tuple(
+            LLMFallbackProviderConfig(
+                provider=candidate.profile.provider,
+                model=candidate.profile.model,
+            )
+            for candidate in candidates[1:]
+        ),
+    )
+    return (
+        selected_config,
+        runtime,
+        service.create_chain(base_config, runtime) if build_client else None,
+    )
+
+
+def create_selected_cli_agent(
+    base_config: Config,
+    config: Config,
+    profile: AgentProfile,
+    service: ModelProfileService,
+    llm_client_factory: Callable[[Config], LLMClient] | None,
+    *,
+    requested_profile_id: str | None = None,
+    conversation_id: str | None = None,
+    channel: str = "cli",
+) -> tuple[Agent, Config, ResolvedModelRuntime]:
+    """Build a CLI agent from the current constrained model selection."""
+    selected_config, runtime, chain = resolve_cli_model(
+        base_config,
+        config,
+        profile,
+        service,
+        requested_profile_id=requested_profile_id,
+        channel=channel,
+        build_client=llm_client_factory is None,
+    )
+    selected_factory = llm_client_factory
+    if chain is not None:
+
+        def _chain_factory(_config: Config) -> LLMClient:
+            return chain
+
+        selected_factory = _chain_factory
+    agent = create_cli_agent(
+        selected_config,
+        selected_factory,
+        conversation_id=conversation_id,
+        profile=profile,
+        runtime_metadata={"model_selection": runtime.selection.to_dict()},
+    )
+    return agent, selected_config, runtime
 
 
 def create_cli_llm(config: Config) -> FallbackChain:
@@ -228,7 +331,10 @@ def _create_provider_spec(
 def _format_fallback_providers(config: Config) -> str:
     if not config.llm_fallback_providers:
         return "none"
-    return ", ".join(f"{provider.provider}:{provider.model}" for provider in config.llm_fallback_providers)
+    return ", ".join(
+        f"{provider.provider}:{provider.model}"
+        for provider in config.llm_fallback_providers
+    )
 
 
 def run_chat_loop(
@@ -237,6 +343,9 @@ def run_chat_loop(
     config: Config | None = None,
     terminal: TerminalUI | None = None,
     agent_factory: Callable[[str], Agent] | None = None,
+    model_selector: Callable[[str, str], tuple[Agent, Config, str]] | None = None,
+    model_profile_id: str | None = None,
+    active_model_profile_id: str | None = None,
     input_func: Callable[[str], str] = input,
     output_func: Callable[[str], None] = print,
     error_func: Callable[[str], None] | None = None,
@@ -261,7 +370,9 @@ def run_chat_loop(
         before_prompt=progress_reporter.close,
     )
     agent.permission_callback = permission_callback
-    session_store = SQLiteSessionStore(config.store_path) if config is not None else None
+    session_store = (
+        SQLiteSessionStore(config.store_path) if config is not None else None
+    )
     prompt_history = PromptHistory.create(enabled=input_func is input)
     if hasattr(prompt_history, "configure_completion"):
         prompt_history.configure_completion(command_completion_candidates())
@@ -272,14 +383,26 @@ def run_chat_loop(
         output_func("ChulkHarness CLI")
     output_func(terminal.hint())
 
-    def switch_agent(next_agent: Agent) -> None:
+    def switch_runtime(next_agent: Agent, next_config: Config | None = None) -> None:
+        nonlocal config, session_store
         progress_reporter.close()
+        previous_agent = command_context.agent
         progress_reporter.agent = next_agent
         progress_reporter.previous_callback = next_agent.event_callback
         next_agent.event_callback = progress_reporter.callback
         next_agent.permission_callback = permission_callback
         command_context.agent = next_agent
+        if next_config is not None:
+            config = next_config
+            command_context.config = next_config
+            progress_reporter.config = next_config
+            session_store = SQLiteSessionStore(next_config.store_path)
+            command_context.session_store = session_store
         _load_prompt_history(prompt_history, session_store, next_agent)
+        previous_agent.close()
+
+    def switch_agent(next_agent: Agent) -> None:
+        switch_runtime(next_agent)
 
     command_context = CLICommandContext(
         agent=agent,
@@ -295,6 +418,13 @@ def run_chat_loop(
         session_store=session_store,
         agent_factory=agent_factory,
         switch_agent=switch_agent,
+        model_profile_id=model_profile_id,
+        active_model_profile_id=active_model_profile_id,
+        model_selector=model_selector,
+        switch_runtime=lambda next_agent, next_config: switch_runtime(
+            next_agent,
+            next_config,
+        ),
     )
 
     while True:
@@ -335,7 +465,11 @@ def run_chat_loop(
             continue
 
         if command_context.agent.has_pending_plan():
-            output_func(terminal.warning("A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."))
+            output_func(
+                terminal.warning(
+                    "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
+                )
+            )
             continue
         if command_context.agent.has_resumable_plan():
             output_func(
@@ -421,7 +555,11 @@ def main(
         base_config = load_cli_config()
     except (OSError, ValueError, LLMConfigurationError) as exc:
         if args.command == "exec" and getattr(args, "json_output", False):
-            output_func(json_text({"ok": False, "status": "configuration_error", "error": str(exc)}))
+            output_func(
+                json_text(
+                    {"ok": False, "status": "configuration_error", "error": str(exc)}
+                )
+            )
         else:
             error_func(terminal.error(f"configuration error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
@@ -456,15 +594,72 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        model_service = ModelProfileService(
+            ModelProfileStore(
+                base_config.runtime_dir / "control.sqlite",
+                base_config=base_config,
+            ),
+            ModelProfileValidator(base_config),
+        )
+        if args.command == "model":
+            return run_model_command(
+                args.model_command,
+                service=model_service,
+                agent_profile=profile,
+                profile_id=getattr(args, "model_profile_id", None),
+                provider=getattr(args, "provider", None),
+                model=getattr(args, "model", None),
+                credential_ref=getattr(args, "credential_ref", None),
+                endpoint_ref=getattr(args, "endpoint_ref", None),
+                fallback_profile_ids=tuple(getattr(args, "fallback", ())),
+                required_capabilities=ModelCapabilityRequirements(
+                    structured_output=bool(
+                        getattr(args, "require_structured_output", False)
+                    ),
+                    json_mode=bool(getattr(args, "require_json_mode", False)),
+                    streaming=bool(getattr(args, "require_streaming", False)),
+                    native_tool_calling=bool(
+                        getattr(args, "require_native_tools", False)
+                    ),
+                    hosted_mcp_tools=bool(getattr(args, "require_hosted_mcp", False)),
+                ),
+                context_window_tokens=getattr(args, "context_window_tokens", None),
+                response_reserve_tokens=getattr(
+                    args,
+                    "response_reserve_tokens",
+                    None,
+                ),
+                max_output_tokens=getattr(args, "max_output_tokens", None),
+                max_cost_per_turn=getattr(args, "max_cost_per_turn", None),
+                channel=getattr(args, "channel", None),
+                probe=bool(getattr(args, "probe", False)),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
+        requested_model_profile_id = getattr(args, "model_profile", None)
+        config, _model_runtime, _model_chain = resolve_cli_model(
+            base_config,
+            config,
+            profile,
+            model_service,
+            requested_profile_id=requested_model_profile_id,
+            build_client=False,
+        )
     except (
         OSError,
         ProfileAlreadyExistsError,
         ProfileNotFoundError,
         ProfileOwnershipError,
+        ModelProfileNotFoundError,
         ValueError,
     ) as exc:
         if args.command == "exec" and getattr(args, "json_output", False):
-            output_func(json_text({"ok": False, "status": "configuration_error", "error": str(exc)}))
+            output_func(
+                json_text(
+                    {"ok": False, "status": "configuration_error", "error": str(exc)}
+                )
+            )
         else:
             error_func(terminal.error(f"configuration error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
@@ -475,17 +670,24 @@ def main(
 
     if args.command == "exec" or args.once is not None:
         if args.resume or args.continue_session:
-            error_func(terminal.error("configuration error: --resume and --continue are interactive-only"))
+            error_func(
+                terminal.error(
+                    "configuration error: --resume and --continue are interactive-only"
+                )
+            )
             return EXIT_CONFIGURATION_ERROR
         message = " ".join(args.message) if args.command == "exec" else str(args.once)
         json_output = bool(getattr(args, "json_output", False))
         return run_exec_command(
             message,
-            agent_factory=lambda: create_cli_agent(
-                config,
+            agent_factory=lambda: create_selected_cli_agent(
+                base_config,
+                resolved_profile.config,
+                profile,
+                model_service,
                 llm_client_factory,
-                profile=profile,
-            ),
+                requested_profile_id=requested_model_profile_id,
+            )[0],
             json_output=json_output,
             output_func=output_func,
             error_func=error_func,
@@ -496,12 +698,16 @@ def main(
     except (SessionNotFoundError, AmbiguousSessionError) as exc:
         error_func(terminal.error(f"session error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
+    selection_state = {"override": requested_model_profile_id}
     try:
-        agent = create_cli_agent(
-            config,
+        agent, config, _model_runtime = create_selected_cli_agent(
+            base_config,
+            resolved_profile.config,
+            profile,
+            model_service,
             llm_client_factory,
             conversation_id=conversation_id,
-            profile=profile,
+            requested_profile_id=selection_state["override"],
         )
         agent.permission_callback = _make_cli_permission_callback(
             terminal,
@@ -515,16 +721,59 @@ def main(
         error_func(terminal.error(f"configuration error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
 
+    def select_interactive_model(
+        model_profile_id: str,
+        active_conversation_id: str,
+    ) -> tuple[Agent, Config, str]:
+        try:
+            SQLiteSessionStore(config.store_path).get_conversation(
+                active_conversation_id
+            )
+        except SessionNotFoundError:
+            resumable_conversation_id = None
+        else:
+            resumable_conversation_id = active_conversation_id
+        next_agent, next_config, next_runtime = create_selected_cli_agent(
+            base_config,
+            resolved_profile.config,
+            profile,
+            model_service,
+            llm_client_factory,
+            requested_profile_id=model_profile_id,
+            conversation_id=resumable_conversation_id,
+        )
+        try:
+            model_service.use_for_agent(
+                profile,
+                model_profile_id,
+                channel="cli",
+            )
+        except Exception:
+            next_agent.close()
+            raise
+        selection_state["override"] = None
+        return (
+            next_agent,
+            next_config,
+            next_runtime.selection.selected_profile_id,
+        )
+
     return run_chat_loop(
         agent,
         config=config,
         terminal=terminal,
-        agent_factory=lambda conversation_id: create_cli_agent(
-            config,
+        agent_factory=lambda conversation_id: create_selected_cli_agent(
+            base_config,
+            resolved_profile.config,
+            profile,
+            model_service,
             llm_client_factory,
+            requested_profile_id=selection_state["override"],
             conversation_id=conversation_id,
-            profile=profile,
-        ),
+        )[0],
+        model_selector=select_interactive_model,
+        model_profile_id=_model_runtime.selection.requested_profile_id,
+        active_model_profile_id=_model_runtime.selection.selected_profile_id,
         input_func=input_func,
         output_func=output_func,
         error_func=error_func,
@@ -555,7 +804,9 @@ def _make_cli_permission_callback(
 ) -> Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision]:
     """Create the CLI permission approval callback."""
 
-    def approve(request: PermissionRequest, record: PermissionDecisionRecord) -> PermissionDecision:
+    def approve(
+        request: PermissionRequest, record: PermissionDecisionRecord
+    ) -> PermissionDecision:
         if before_prompt is not None:
             before_prompt()
         output_func(terminal.permission_request(request, record))

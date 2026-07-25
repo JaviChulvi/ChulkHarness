@@ -14,7 +14,11 @@ from chulk.core import Agent, AgentState, TurnState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
-from chulk.execution import ExecutionBackend, ExecutionContextLifecycle, HostExecutionBackend
+from chulk.execution import (
+    ExecutionBackend,
+    ExecutionContextLifecycle,
+    HostExecutionBackend,
+)
 from chulk.llm import (
     LLMClient,
     LLMModelCapabilities,
@@ -31,9 +35,25 @@ from chulk.llm.capabilities import (
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
-from chulk.sessions import ConversationSummaryRecord, SQLiteSessionStore, SessionRecorder
-from chulk.skills import SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef, SkillRegistry
-from chulk.tools import ShellExecutionPolicy, Tool, ToolExecutionContext, ToolRegistry, create_default_tool_registry
+from chulk.sessions import (
+    ConversationSummaryRecord,
+    SQLiteSessionStore,
+    SessionRecorder,
+)
+from chulk.skills import (
+    SkillAllowlistRef,
+    SkillDirectoryRef,
+    SkillPinRef,
+    SkillRef,
+    SkillRegistry,
+)
+from chulk.tools import (
+    ShellExecutionPolicy,
+    Tool,
+    ToolExecutionContext,
+    ToolRegistry,
+    create_default_tool_registry,
+)
 from chulk.tools.permissions import (
     PermissionDecision,
     PermissionDecisionRecord,
@@ -109,6 +129,7 @@ def create_agent(
     memory_namespace: str | None = None,
     profile_id: str | None = None,
     allowed_skill_names: Iterable[str] | None = None,
+    runtime_metadata: dict | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -120,7 +141,9 @@ def create_agent(
     effective_conversation_metadata = dict(conversation_metadata or {})
     metadata_profile_id = effective_conversation_metadata.get("profile_id")
     if metadata_profile_id is not None and metadata_profile_id != effective_profile_id:
-        raise ValueError("conversation metadata profile_id does not match the runtime profile")
+        raise ValueError(
+            "conversation metadata profile_id does not match the runtime profile"
+        )
     effective_conversation_metadata["profile_id"] = effective_profile_id
     memory_store = SQLiteMemoryStore(
         config.store_path,
@@ -146,7 +169,14 @@ def create_agent(
     if allowed_skill_names is not None:
         allowed = tuple(allowed_skill_names)
         skill_registry.restrict_to(
-            [*allowed, *(name for name in skill_resolution.pinned_skill_names if name in allowed)]
+            [
+                *allowed,
+                *(
+                    name
+                    for name in skill_resolution.pinned_skill_names
+                    if name in allowed
+                ),
+            ]
         )
         skill_resolution = SkillSpecResolution(
             pinned_skill_names=[
@@ -169,8 +199,12 @@ def create_agent(
         )
         conversation_memory.replace(
             recent_messages,
-            conversation_summary=latest_summary.content if latest_summary is not None else None,
-            summary_message_count=latest_summary.source_message_count if latest_summary is not None else 0,
+            conversation_summary=latest_summary.content
+            if latest_summary is not None
+            else None,
+            summary_message_count=latest_summary.source_message_count
+            if latest_summary is not None
+            else 0,
         )
         state.messages = conversation_memory.recent()
         state.conversation_summary = conversation_memory.conversation_summary
@@ -187,14 +221,22 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+    selection_result = getattr(client, "selection_result", None)
+    effective_runtime_metadata = dict(runtime_metadata or {})
+    if selection_result is not None and hasattr(selection_result, "to_dict"):
+        effective_runtime_metadata["model_selection"] = selection_result.to_dict()
     model_capabilities = _client_model_capabilities(client, config)
     context_budget = ContextBudget(
         max_prompt_tokens=model_capabilities.context_window_tokens,
         response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
         max_input_tokens=model_capabilities.max_input_tokens,
     )
-    configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
-    active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()
+    configured_mcp_servers = (
+        tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
+    )
+    active_mcp_servers = (
+        configured_mcp_servers if selected_capabilities.external_services else ()
+    )
     backend_is_owned = execution_backend is None
     selected_execution_backend = execution_backend or HostExecutionBackend(
         config.project_root,
@@ -224,7 +266,9 @@ def create_agent(
             {
                 "config_path": str(config.mcp_config_path),
                 "servers": [
-                    server.to_dict() if hasattr(server, "to_dict") else {"server": str(server)}
+                    server.to_dict()
+                    if hasattr(server, "to_dict")
+                    else {"server": str(server)}
                     for server in active_mcp_servers
                 ],
                 "provider_path": _mcp_provider_path(
@@ -278,7 +322,10 @@ def create_agent(
             mcp_servers=active_mcp_servers,
             mcp_bridge_tool_names=mcp_bridge_tool_names,
             owned_resources=owned_resources,
-            default_tool_context=ToolExecutionContext(deps=deps) if deps is not None else None,
+            default_tool_context=ToolExecutionContext(deps=deps)
+            if deps is not None
+            else None,
+            runtime_metadata=effective_runtime_metadata,
             tool_context_lifecycle=execution_lifecycle,
             profile_id=effective_profile_id,
         )
@@ -305,7 +352,9 @@ def _summary_source_ordinal(summary: ConversationSummaryRecord | None) -> int:
     return summary.source_message_count
 
 
-def _create_agent_state(session_store: SQLiteSessionStore, conversation_id: str | None) -> AgentState:
+def _create_agent_state(
+    session_store: SQLiteSessionStore, conversation_id: str | None
+) -> AgentState:
     """Create fresh state or rebuild state for an existing conversation."""
     if conversation_id is None:
         return AgentState()
@@ -404,7 +453,9 @@ def _reconcile_terminal_turn_message(
     elif kind == "plan_rejected":
         turn.reject_plan(content)
     elif kind == "failed":
-        plan_status = turn.active_plan.status() if turn.active_plan is not None else None
+        plan_status = (
+            turn.active_plan.status() if turn.active_plan is not None else None
+        )
         if conversation_status == "cancelled":
             turn.cancel(content)
         elif conversation_status == "blocked" or plan_status == "blocked":
@@ -455,7 +506,8 @@ def _block_uncertain_hosted_mcp_request(
     raw_request_index = latest.get("request_index")
     request_index = (
         raw_request_index
-        if isinstance(raw_request_index, int) and not isinstance(raw_request_index, bool)
+        if isinstance(raw_request_index, int)
+        and not isinstance(raw_request_index, bool)
         else 0
     )
     reason = (
@@ -549,7 +601,9 @@ def _default_llm_client_factory(config: Config) -> LLMClient:
     )
 
 
-def _client_model_capabilities(client: LLMClient, config: Config) -> LLMModelCapabilities:
+def _client_model_capabilities(
+    client: LLMClient, config: Config
+) -> LLMModelCapabilities:
     capabilities = getattr(client, "model_capabilities", None)
     if isinstance(capabilities, LLMModelCapabilities):
         return capabilities
@@ -683,7 +737,9 @@ def resolve_mcp_route(
             config.llm_provider,
             *(provider.provider for provider in config.llm_fallback_providers),
         ]
-        native_support = [_supports_native_tool_calling(provider) for provider in provider_names]
+        native_support = [
+            _supports_native_tool_calling(provider) for provider in provider_names
+        ]
         hosted_support = [_supports_hosted_mcp(provider) for provider in provider_names]
         native_protocol = all(native_support)
         has_hosted = any(hosted_support)
@@ -715,7 +771,9 @@ def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
     raise TypeError(f"Unsupported tool spec: {spec!r}")
 
 
-def _resolve_skill_specs(registry: SkillRegistry, skill_specs: object | Iterable[object] | None) -> SkillSpecResolution:
+def _resolve_skill_specs(
+    registry: SkillRegistry, skill_specs: object | Iterable[object] | None
+) -> SkillSpecResolution:
     specs = _coerce_skill_specs(skill_specs)
     if specs is None:
         return SkillSpecResolution(pinned_skill_names=[], warnings=[])
@@ -774,13 +832,19 @@ def _resolve_skill_specs(registry: SkillRegistry, skill_specs: object | Iterable
     if has_allowlist:
         registry.restrict_to([*allowlisted_names, *pinned_skill_names])
 
-    return SkillSpecResolution(pinned_skill_names=pinned_skill_names, warnings=warning_payloads)
+    return SkillSpecResolution(
+        pinned_skill_names=pinned_skill_names, warnings=warning_payloads
+    )
 
 
-def _coerce_skill_specs(skill_specs: object | Iterable[object] | None) -> list[object] | None:
+def _coerce_skill_specs(
+    skill_specs: object | Iterable[object] | None,
+) -> list[object] | None:
     if skill_specs is None:
         return None
-    if isinstance(skill_specs, (str, SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef)):
+    if isinstance(
+        skill_specs, (str, SkillAllowlistRef, SkillDirectoryRef, SkillPinRef, SkillRef)
+    ):
         return [skill_specs]
     try:
         return list(cast(Iterable[object], skill_specs))
@@ -806,8 +870,13 @@ def _resolve_existing_skill_names(
     return resolved_names
 
 
-def _append_missing_skill_warning(kind: str, requested_name: str, warnings_list: list[dict[str, str]]) -> None:
-    if any(payload["kind"] == kind and payload["name"] == requested_name for payload in warnings_list):
+def _append_missing_skill_warning(
+    kind: str, requested_name: str, warnings_list: list[dict[str, str]]
+) -> None:
+    if any(
+        payload["kind"] == kind and payload["name"] == requested_name
+        for payload in warnings_list
+    ):
         return
     warnings_list.append(
         {

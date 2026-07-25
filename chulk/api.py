@@ -1,7 +1,13 @@
 """Stable public programmable API for Chulk."""
 
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
-from chulk.capabilities import Capabilities, FileAccess, MemoryMode, ToolOutputPolicy, ToolRetryPolicy
+from chulk.capabilities import (
+    Capabilities,
+    FileAccess,
+    MemoryMode,
+    ToolOutputPolicy,
+    ToolRetryPolicy,
+)
 from chulk._sdk.facade import (
     Agent,
     AgentHandle,
@@ -108,6 +114,24 @@ from chulk.gateway import (
     TextPart,
     TrustLevel,
 )
+from chulk.model_profiles import (
+    DiagnosticCategory,
+    EndpointRef,
+    ModelCapabilityRequirements,
+    ModelDiagnostic,
+    ModelProfile,
+    ModelProfileAlreadyExistsError,
+    ModelProfileNotFoundError,
+    ModelProfileService,
+    ModelProfileStore,
+    ModelProfileValidator,
+    ModelSelectionResult,
+    ModelSelectionSkip,
+    ProviderHealth,
+    ProviderHealthStatus,
+    ResolvedModelCandidate,
+    ResolvedModelRuntime,
+)
 from chulk.profiles import (
     AgentProfile,
     AuxiliaryModelProfiles,
@@ -146,7 +170,12 @@ from chulk.results import (
     ToolAttempt,
     Usage,
 )
-from chulk.tools import ShellExecutionDecision, ShellExecutionPolicy, ShellExecutionRequest, ToolContext
+from chulk.tools import (
+    ShellExecutionDecision,
+    ShellExecutionPolicy,
+    ShellExecutionRequest,
+    ToolContext,
+)
 
 
 __all__ = [
@@ -187,6 +216,7 @@ __all__ = [
     "DeliveryReceipt",
     "DeliveryState",
     "DeliveryTarget",
+    "DiagnosticCategory",
     "ErrorDetails",
     "EVENT_SCHEMA_VERSION",
     "SUPPORTED_EVENT_SCHEMA_VERSIONS",
@@ -199,6 +229,7 @@ __all__ = [
     "ExecutionWorkspace",
     "ExecutionBackendFactory",
     "EnvironmentPolicy",
+    "EndpointRef",
     "DockerPolicy",
     "DockerExecutionBackend",
     "DockerUnavailableError",
@@ -221,8 +252,18 @@ __all__ = [
     "MemoryProposalStatus",
     "NetworkPolicy",
     "ModelDeltaPayload",
+    "ModelCapabilityRequirements",
+    "ModelDiagnostic",
+    "ModelProfile",
+    "ModelProfileAlreadyExistsError",
+    "ModelProfileNotFoundError",
+    "ModelProfileService",
+    "ModelProfileStore",
+    "ModelProfileValidator",
     "ModelRequestPayload",
     "ModelResponsePayload",
+    "ModelSelectionResult",
+    "ModelSelectionSkip",
     "Observation",
     "OutboundEnvelope",
     "PermissionPayload",
@@ -251,8 +292,12 @@ __all__ = [
     "ProfileNotFoundError",
     "ProfileOwnershipError",
     "ProfileRuntimeFactory",
+    "ProviderHealth",
+    "ProviderHealthStatus",
     "ResourcePolicy",
     "ResolvedProfileRuntime",
+    "ResolvedModelCandidate",
+    "ResolvedModelRuntime",
     "RunResult",
     "ProviderError",
     "ResourcesLoadedPayload",

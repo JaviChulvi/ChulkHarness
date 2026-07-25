@@ -20,6 +20,7 @@ class TraceEvent:
     SESSION_STARTED = "session_started"
     SESSION_FINISHED = "session_finished"
     TURN_STARTED = "turn_started"
+    MODEL_PROFILE_SELECTED = "model_profile_selected"
     USER_MESSAGE = "user_message"
     TURN_CONTEXT_SELECTED = "turn_context_selected"
     MEMORY_EXTRACTION_COMPLETED = "memory_extraction_completed"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, cast
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
@@ -20,7 +21,12 @@ from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
 from chulk.llm.capabilities import client_requires_mcp_bridge
 from chulk.llm.lifecycle import aclose_resources, close_resources
-from chulk.llm.usage import aggregate_cost, aggregate_usage, cost_from_dict, usage_from_dict
+from chulk.llm.usage import (
+    aggregate_cost,
+    aggregate_usage,
+    cost_from_dict,
+    usage_from_dict,
+)
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory import (
@@ -69,7 +75,10 @@ class Agent:
         max_tool_stderr_chars: int = 4000,
         max_reflection_attempts: int = 0,
         permission_policy: ToolPermissionPolicy | None = None,
-        permission_callback: Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool] | None = None,
+        permission_callback: Callable[
+            [PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool
+        ]
+        | None = None,
         context_budget: ContextBudget | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         event_sink: Callable[[AgentEvent], None] | None = None,
@@ -80,6 +89,7 @@ class Agent:
         mcp_bridge_tool_names: list[str] | None = None,
         owned_resources: list[object] | tuple[object, ...] | None = None,
         default_tool_context: ToolExecutionContext | None = None,
+        runtime_metadata: dict | None = None,
         tool_context_lifecycle: ToolContextLifecycle | None = None,
         profile_id: str = "default",
     ) -> None:
@@ -106,7 +116,9 @@ class Agent:
         self.memory = memory or ConversationMemory()
         self.memory_store = memory_store
         self.memory_policy = memory_policy or (
-            MemoryPolicy(memory_store, "automatic") if memory_store is not None else None
+            MemoryPolicy(memory_store, "automatic")
+            if memory_store is not None
+            else None
         )
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry or ToolRegistry()
@@ -134,6 +146,7 @@ class Agent:
         self._closed = False
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self.default_tool_context = default_tool_context
+        self.runtime_metadata = deepcopy(runtime_metadata or {})
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
@@ -228,7 +241,9 @@ class Agent:
         self.event_callback = None
         self.event_sink = None
         if failures:
-            raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
+            raise RuntimeError(
+                f"Failed to close {len(failures)} owned agent resource(s)"
+            ) from failures[0]
 
     async def aclose(self) -> None:
         """Finalize owned closeable resources exactly once from an async host."""
@@ -257,7 +272,9 @@ class Agent:
         self.event_callback = None
         self.event_sink = None
         if failures:
-            raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
+            raise RuntimeError(
+                f"Failed to close {len(failures)} owned agent resource(s)"
+            ) from failures[0]
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -425,15 +442,24 @@ class Agent:
             )
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
-        execution_context = _coerce_tool_execution_context(tool_context) or self.default_tool_context
+        execution_context = (
+            _coerce_tool_execution_context(tool_context) or self.default_tool_context
+        )
         turn = TurnState(
             user_message=clean_message,
-            available_tool_names=[tool.name for tool in self.tool_registry.list_tools()],
+            available_tool_names=[
+                tool.name for tool in self.tool_registry.list_tools()
+            ],
             context_sections=turn_context_sections,
             prompt_profile=prompt_profile,
             locale=locale,
-            extension_metadata=extension_metadata or {},
-            tool_context_metadata=execution_context.metadata if execution_context else {},
+            extension_metadata={
+                **deepcopy(extension_metadata or {}),
+                **deepcopy(self.runtime_metadata),
+            },
+            tool_context_metadata=execution_context.metadata
+            if execution_context
+            else {},
         )
         if execution_context is None:
             execution_context = ToolExecutionContext()
@@ -446,19 +472,32 @@ class Agent:
             deps=execution_context.deps,
             execution_session=execution_context.execution_session,
         )
-        if self.tool_context_lifecycle is not None and execution_context.execution_session is None:
+        if (
+            self.tool_context_lifecycle is not None
+            and execution_context.execution_session is None
+        ):
             execution_context = self.tool_context_lifecycle.open(execution_context)
         self.state.current_turn_id = turn.turn_id
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
         self._trace(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+        model_selection = turn.extension_metadata.get("model_selection")
+        if isinstance(model_selection, dict):
+            self._trace(
+                TraceEvent.MODEL_PROFILE_SELECTED,
+                {"turn_id": turn.turn_id, **model_selection},
+            )
         if turn_context_sections or prompt_profile or locale:
             self._trace(
                 TraceEvent.TURN_CONTEXT_SELECTED,
                 {
                     "turn_id": turn.turn_id,
-                    "context_section_ids": [section.id for section in turn_context_sections],
-                    "context_sections": [section.to_dict() for section in turn_context_sections],
+                    "context_section_ids": [
+                        section.id for section in turn_context_sections
+                    ],
+                    "context_sections": [
+                        section.to_dict() for section in turn_context_sections
+                    ],
                     "prompt_profile": prompt_profile,
                     "locale": locale,
                 },
@@ -471,7 +510,9 @@ class Agent:
         turn.loaded_memory_ids = list(self.state.loaded_memory_ids)
         turn.loaded_skill_names = list(self.state.loaded_skill_names)
         self.memory.add_user_message(clean_message)
-        self._trace(TraceEvent.USER_MESSAGE, {"turn_id": turn.turn_id, "content": clean_message})
+        self._trace(
+            TraceEvent.USER_MESSAGE, {"turn_id": turn.turn_id, "content": clean_message}
+        )
 
         self._tool_contexts[turn.turn_id] = execution_context
         return turn
@@ -593,7 +634,9 @@ class Agent:
                     "turn": turn.to_dict(),
                 },
             )
-            self._trace(TraceEvent.TURN_FINISHED, self._turn_effects.state_snapshot(turn))
+            self._trace(
+                TraceEvent.TURN_FINISHED, self._turn_effects.state_snapshot(turn)
+            )
             return message
         finally:
             self._release_tool_context(turn)
@@ -616,7 +659,9 @@ class Agent:
         self._refresh_action_runtime()
         return run_action_loop(self._action_runtime, turn, require_plan=require_plan)
 
-    async def _run_action_loop_async(self, turn: TurnState, *, require_plan: bool) -> str:
+    async def _run_action_loop_async(
+        self, turn: TurnState, *, require_plan: bool
+    ) -> str:
         """Run model/tool iterations, awaiting async tool calls."""
         self._refresh_action_runtime()
         return await run_action_loop_async(
@@ -697,7 +742,9 @@ class Agent:
                     self._profile_memories.append(memory)
                 else:
                     self._relevant_memories.append(memory)
-        elif self.memory_policy is not None and not self.memory_policy.retrieval_enabled:
+        elif (
+            self.memory_policy is not None and not self.memory_policy.retrieval_enabled
+        ):
             self.state.loaded_memory_ids = []
             turn.loaded_memory_ids = []
 
@@ -764,7 +811,11 @@ class Agent:
         self._relevant_memories = []
         self.state.loaded_memory_ids = []
 
-        if self.memory_store is None or self.memory_policy is None or not self.memory_policy.retrieval_enabled:
+        if (
+            self.memory_store is None
+            or self.memory_policy is None
+            or not self.memory_policy.retrieval_enabled
+        ):
             return
 
         self._trace(
@@ -824,9 +875,15 @@ class Agent:
         )
         self._selected_skills = [
             *pinned_selections,
-            *(selection for selection in auto_selections if selection.skill.name not in pinned_names),
+            *(
+                selection
+                for selection in auto_selections
+                if selection.skill.name not in pinned_names
+            ),
         ][: self.max_skills_per_turn]
-        self.state.loaded_skill_names = [selection.skill.name for selection in self._selected_skills]
+        self.state.loaded_skill_names = [
+            selection.skill.name for selection in self._selected_skills
+        ]
         self._trace(
             TraceEvent.SKILL_SELECTION_COMPLETED,
             {
@@ -922,7 +979,9 @@ class Agent:
         if attempt_payloads:
             report["fallback_attempts"] = attempt_payloads
         turn.model_usage_reports.append(report)
-        turn.model_usage_totals = _aggregate_model_usage_reports(turn.model_usage_reports)
+        turn.model_usage_totals = _aggregate_model_usage_reports(
+            turn.model_usage_reports
+        )
         self.state.last_usage_report = turn.model_usage_totals
         return usage_payload, cost_payload
 
@@ -935,7 +994,9 @@ class Agent:
         if self.event_sink is not None:
             self.event_sink(AgentEvent(event_type, payload))
 
-    def _redact_text(self, event_type: str, text: str, metadata: dict) -> tuple[str, dict]:
+    def _redact_text(
+        self, event_type: str, text: str, metadata: dict
+    ) -> tuple[str, dict]:
         if self.redaction_callback is None:
             return text, {"redacted": False}
         try:
@@ -966,16 +1027,24 @@ class Agent:
         def redact_value(value: object, path: str) -> object:
             nonlocal redacted_any, error
             if isinstance(value, str):
-                redacted, metadata = self._redact_text(event_type, value, {"path": path})
+                redacted, metadata = self._redact_text(
+                    event_type, value, {"path": path}
+                )
                 redacted_any = redacted_any or bool(metadata.get("redacted"))
                 if metadata.get("redaction_error"):
                     error = str(metadata["redaction_error"])
                     redacted_any = redacted_any or bool(metadata.get("fail_closed"))
                 return redacted
             if isinstance(value, dict):
-                return {key: redact_value(item, f"{path}.{key}") for key, item in value.items()}
+                return {
+                    key: redact_value(item, f"{path}.{key}")
+                    for key, item in value.items()
+                }
             if isinstance(value, list):
-                return [redact_value(item, f"{path}[{index}]") for index, item in enumerate(value)]
+                return [
+                    redact_value(item, f"{path}[{index}]")
+                    for index, item in enumerate(value)
+                ]
             return value
 
         redacted_payload = redact_value(payload, "payload")
@@ -1006,10 +1075,15 @@ class Agent:
             },
             deps=default_context.deps if default_context is not None else None,
             execution_session=(
-                default_context.execution_session if default_context is not None else None
+                default_context.execution_session
+                if default_context is not None
+                else None
             ),
         )
-        if self.tool_context_lifecycle is not None and context.execution_session is None:
+        if (
+            self.tool_context_lifecycle is not None
+            and context.execution_session is None
+        ):
             context = self.tool_context_lifecycle.open(context)
         self._tool_contexts[turn.turn_id] = context
         return context
@@ -1068,10 +1142,14 @@ def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
             failed_attempt_usages.append(usage_from_dict(attempt.get("usage")))
             failed_attempt_costs.append(cost_from_dict(attempt.get("cost")))
 
-    usage = aggregate_usage([*request_usages, *failed_attempt_usages], source="turn_total")
+    usage = aggregate_usage(
+        [*request_usages, *failed_attempt_usages], source="turn_total"
+    )
     cost = aggregate_cost([*request_costs, *failed_attempt_costs])
     return {
-        "request_count": len([report for report in reports if isinstance(report, dict)]),
+        "request_count": len(
+            [report for report in reports if isinstance(report, dict)]
+        ),
         "usage": usage.to_dict() if usage is not None else None,
         "cost": cost.to_dict() if cost is not None else None,
     }
@@ -1096,12 +1174,20 @@ def _coerce_turn_context_sections(
                 continue
             section_id = value.get("id") or value.get("source_id") or f"context-{index}"
             raw_metadata = value.get("metadata")
-            metadata = cast(dict[str, Any], raw_metadata) if isinstance(raw_metadata, dict) else {}
+            metadata = (
+                cast(dict[str, Any], raw_metadata)
+                if isinstance(raw_metadata, dict)
+                else {}
+            )
             sections.append(
                 TurnContextSection(
                     id=str(section_id),
-                    title=value.get("title") if isinstance(value.get("title"), str) else None,
-                    source=value.get("source") if isinstance(value.get("source"), str) else None,
+                    title=value.get("title")
+                    if isinstance(value.get("title"), str)
+                    else None,
+                    source=value.get("source")
+                    if isinstance(value.get("source"), str)
+                    else None,
                     content=content,
                     metadata=metadata,
                 )
@@ -1109,7 +1195,9 @@ def _coerce_turn_context_sections(
     return sections
 
 
-def _coerce_tool_execution_context(value: ToolExecutionContext | dict | None) -> ToolExecutionContext | None:
+def _coerce_tool_execution_context(
+    value: ToolExecutionContext | dict | None,
+) -> ToolExecutionContext | None:
     if value is None:
         return None
     if isinstance(value, ToolExecutionContext):

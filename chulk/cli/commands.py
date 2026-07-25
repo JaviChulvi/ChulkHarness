@@ -10,7 +10,12 @@ from chulk.cli.progress import ProgressSettings
 from chulk.cli.terminal import TerminalUI
 from chulk.config import Config
 from chulk.core import Agent
-from chulk.sessions import AmbiguousSessionError, SessionNotFoundError, SQLiteSessionStore
+from chulk.llm import LLMError
+from chulk.sessions import (
+    AmbiguousSessionError,
+    SessionNotFoundError,
+    SQLiteSessionStore,
+)
 
 
 CommandHandler = Callable[[str, "CLICommandContext"], None]
@@ -45,6 +50,10 @@ class CLICommandContext:
     session_store: SQLiteSessionStore | None = None
     agent_factory: Callable[[str], Agent] | None = None
     switch_agent: Callable[[Agent], None] | None = None
+    model_profile_id: str | None = None
+    active_model_profile_id: str | None = None
+    model_selector: Callable[[str, str], tuple[Agent, Config, str]] | None = None
+    switch_runtime: Callable[[Agent, Config], None] | None = None
 
 
 def _help(_arguments: str, context: CLICommandContext) -> None:
@@ -53,7 +62,9 @@ def _help(_arguments: str, context: CLICommandContext) -> None:
 
 def _status(_arguments: str, context: CLICommandContext) -> None:
     if context.config is None:
-        context.output_func(context.terminal.warning("status unavailable: no config object"))
+        context.output_func(
+            context.terminal.warning("status unavailable: no config object")
+        )
         return
     context.output_func(context.terminal.status(context.config, context.agent))
 
@@ -68,32 +79,46 @@ def _tools(_arguments: str, context: CLICommandContext) -> None:
 
 def _mcp(_arguments: str, context: CLICommandContext) -> None:
     if context.config is None:
-        context.output_func(context.terminal.warning("mcp unavailable: no config object"))
+        context.output_func(
+            context.terminal.warning("mcp unavailable: no config object")
+        )
         return
     context.output_func(context.terminal.mcp(context.config, context.agent))
 
 
 def _sessions(_arguments: str, context: CLICommandContext) -> None:
     if context.session_store is None:
-        context.output_func(context.terminal.warning("sessions unavailable: no session store"))
+        context.output_func(
+            context.terminal.warning("sessions unavailable: no session store")
+        )
         return
-    context.output_func(context.terminal.sessions(context.session_store.list_conversations()))
+    context.output_func(
+        context.terminal.sessions(context.session_store.list_conversations())
+    )
 
 
 def _history(_arguments: str, context: CLICommandContext) -> None:
     if context.session_store is None:
-        context.output_func(context.terminal.warning("history unavailable: no session store"))
+        context.output_func(
+            context.terminal.warning("history unavailable: no session store")
+        )
         return
-    messages = context.session_store.list_messages(context.agent.state.conversation_id, limit=40)
+    messages = context.session_store.list_messages(
+        context.agent.state.conversation_id, limit=40
+    )
     context.output_func(context.terminal.history(messages))
 
 
 def _resume(arguments: str, context: CLICommandContext) -> None:
     if not arguments:
-        context.output_func(context.terminal.warning("usage: /resume <conversation_id>"))
+        context.output_func(
+            context.terminal.warning("usage: /resume <conversation_id>")
+        )
         return
     if context.agent_factory is None or context.switch_agent is None:
-        context.output_func(context.terminal.warning("resume unavailable: no agent factory"))
+        context.output_func(
+            context.terminal.warning("resume unavailable: no agent factory")
+        )
         return
     try:
         next_agent = context.agent_factory(arguments)
@@ -101,11 +126,50 @@ def _resume(arguments: str, context: CLICommandContext) -> None:
         context.output_func(context.terminal.warning(str(exc)))
         return
     context.switch_agent(next_agent)
-    context.output_func(context.terminal.warning(f"resumed session {next_agent.state.conversation_id[:8]}"))
+    context.output_func(
+        context.terminal.warning(
+            f"resumed session {next_agent.state.conversation_id[:8]}"
+        )
+    )
 
 
 def _trace(_arguments: str, context: CLICommandContext) -> None:
     context.output_func(context.terminal.trace(context.agent))
+
+
+def _model(arguments: str, context: CLICommandContext) -> None:
+    if not arguments:
+        requested = context.model_profile_id or "unknown"
+        active = context.active_model_profile_id or requested
+        suffix = f" (active fallback: {active})" if active != requested else ""
+        context.output_func(
+            context.terminal.warning(f"model profile {requested}{suffix}")
+        )
+        return
+    if context.model_selector is None or context.switch_runtime is None:
+        context.output_func(
+            context.terminal.warning("model switching unavailable in this host")
+        )
+        return
+    try:
+        next_agent, next_config, active_id = context.model_selector(
+            arguments,
+            context.agent.state.conversation_id,
+        )
+    except (LLMError, LookupError, OSError, ValueError) as exc:
+        context.output_func(context.terminal.warning(str(exc)))
+        return
+    context.switch_runtime(next_agent, next_config)
+    context.model_profile_id = arguments.strip().lower()
+    context.active_model_profile_id = active_id
+    suffix = (
+        f" (active fallback: {active_id})"
+        if active_id != context.model_profile_id
+        else ""
+    )
+    context.output_func(
+        context.terminal.warning(f"model profile {context.model_profile_id}{suffix}")
+    )
 
 
 def _plan(arguments: str, context: CLICommandContext) -> None:
@@ -129,12 +193,16 @@ def _reject(_arguments: str, context: CLICommandContext) -> None:
 def _display(arguments: str, context: CLICommandContext) -> None:
     mode = arguments.strip().lower()
     if not mode:
-        context.output_func(context.terminal.warning(f"display mode {context.progress_settings.mode}"))
+        context.output_func(
+            context.terminal.warning(f"display mode {context.progress_settings.mode}")
+        )
         return
     try:
         context.progress_settings.set_mode(mode)
     except ValueError:
-        context.output_func(context.terminal.warning("usage: /display compact|verbose|quiet"))
+        context.output_func(
+            context.terminal.warning("usage: /display compact|verbose|quiet")
+        )
         return
     context.output_func(context.terminal.warning(f"display mode {mode}"))
 
@@ -151,7 +219,14 @@ def _respond(context: CLICommandContext, response: str) -> None:
 
 
 CLI_COMMANDS: tuple[CLICommand, ...] = (
-    CLICommand("/help", "/help", "show this command list", "General", _help, aliases=("help", "?")),
+    CLICommand(
+        "/help",
+        "/help",
+        "show this command list",
+        "General",
+        _help,
+        aliases=("help", "?"),
+    ),
     CLICommand(
         "/exit",
         "/exit",
@@ -160,17 +235,34 @@ CLI_COMMANDS: tuple[CLICommand, ...] = (
         None,
         aliases=("/quit", "/q", "exit", "quit"),
     ),
-    CLICommand("/plan", "/plan [request]", "show or propose an approval plan", "Run", _plan),
+    CLICommand(
+        "/plan", "/plan [request]", "show or propose an approval plan", "Run", _plan
+    ),
     CLICommand("/approve", "/approve", "approve the pending plan", "Run", _approve),
     CLICommand("/reject", "/reject", "cancel the active plan", "Run", _reject),
     CLICommand("/status", "/status", "show runtime status", "Inspect", _status),
-    CLICommand("/context", "/context", "show the latest prompt context", "Inspect", _context),
+    CLICommand(
+        "/context", "/context", "show the latest prompt context", "Inspect", _context
+    ),
     CLICommand("/tools", "/tools", "list registered tools", "Inspect", _tools),
     CLICommand("/mcp", "/mcp", "show configured MCP servers", "Inspect", _mcp),
     CLICommand("/trace", "/trace", "show the current trace file", "Inspect", _trace),
-    CLICommand("/sessions", "/sessions", "list recent persisted sessions", "Sessions", _sessions),
-    CLICommand("/resume", "/resume <id>", "resume a persisted session", "Sessions", _resume),
-    CLICommand("/history", "/history", "show recent persisted messages", "Sessions", _history),
+    CLICommand(
+        "/model", "/model [profile]", "show or switch model profile", "Run", _model
+    ),
+    CLICommand(
+        "/sessions",
+        "/sessions",
+        "list recent persisted sessions",
+        "Sessions",
+        _sessions,
+    ),
+    CLICommand(
+        "/resume", "/resume <id>", "resume a persisted session", "Sessions", _resume
+    ),
+    CLICommand(
+        "/history", "/history", "show recent persisted messages", "Sessions", _history
+    ),
     CLICommand(
         "/display",
         "/display compact|verbose|quiet",
@@ -215,9 +307,17 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
 
     if raw_command.startswith("/"):
         canonical_names = [command_spec.name for command_spec in CLI_COMMANDS]
-        suggestion = get_close_matches(normalized_name, canonical_names, n=1, cutoff=0.5)
-        suffix = f" Did you mean {suggestion[0]}?" if suggestion else " Type /help for commands."
-        context.output_func(context.terminal.warning(f"Unknown command: {command_name}.{suffix}"))
+        suggestion = get_close_matches(
+            normalized_name, canonical_names, n=1, cutoff=0.5
+        )
+        suffix = (
+            f" Did you mean {suggestion[0]}?"
+            if suggestion
+            else " Type /help for commands."
+        )
+        context.output_func(
+            context.terminal.warning(f"Unknown command: {command_name}.{suffix}")
+        )
         return True
     return False
 
