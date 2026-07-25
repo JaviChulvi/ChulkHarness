@@ -38,6 +38,10 @@ UNCERTAIN_EXECUTION_MESSAGE = (
 MAX_ENVELOPE_BYTES = 256_000
 
 
+class GatewayBackpressureError(RuntimeError):
+    """Raised when the bounded durable inbox cannot accept more work."""
+
+
 @dataclass(frozen=True, slots=True)
 class GatewayAdapterStatus:
     adapter: str
@@ -247,9 +251,12 @@ class SQLiteGatewayLedger:
         *,
         profile_id: str,
         conversation_key: str | None = None,
+        max_pending: int | None = None,
     ) -> IngestResult:
         """Durably accept an envelope before its transport acknowledgement."""
         profile_id = _required(profile_id, "profile_id")
+        if max_pending is not None and max_pending <= 0:
+            raise ValueError("max_pending must be greater than zero")
         key = _required(
             conversation_key or conversation_key_for(envelope),
             "conversation_key",
@@ -272,6 +279,19 @@ class SQLiteGatewayLedger:
             ).fetchone()
             if existing is not None:
                 return IngestResult(_row_to_inbox(existing), False)
+            if max_pending is not None:
+                pending = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) FROM gateway_inbox
+                        WHERE state IN ('queued', 'processing')
+                        """
+                    ).fetchone()[0]
+                )
+                if pending >= max_pending:
+                    raise GatewayBackpressureError(
+                        "gateway inbox has reached its configured pending limit"
+                    )
             conn.execute(
                 """
                 INSERT INTO gateway_inbox (
@@ -535,6 +555,7 @@ class SQLiteGatewayLedger:
                 (_encode(observed), limit),
             ).fetchall()
             for row in rows:
+                _insert_uncertain_outbox(conn, row, observed)
                 conn.execute(
                     """
                     UPDATE gateway_inbox
@@ -549,6 +570,42 @@ class SQLiteGatewayLedger:
                 if current is not None:
                     recovered.append(_row_to_inbox(current))
         return tuple(recovered)
+
+    def quarantine_execution(
+        self,
+        inbox_id: str,
+        execution_token: str,
+        *,
+        error: str,
+    ) -> bool:
+        """Terminally quarantine an execution whose side effects are unknown."""
+        if not execution_token:
+            raise ValueError("execution_token is required")
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _inbox_row(conn, inbox_id)
+            if (
+                row is None
+                or row["state"] != "processing"
+                or row["execution_token"] != execution_token
+            ):
+                return False
+            _insert_uncertain_outbox(conn, row, _utc_now())
+            cursor = conn.execute(
+                """
+                UPDATE gateway_inbox
+                SET state = 'uncertain', execution_token = NULL,
+                    execution_lease_until = NULL, last_error = ?, updated_at = ?
+                WHERE id = ? AND state = 'processing' AND execution_token = ?
+                """,
+                (
+                    error[:500],
+                    _encode(_utc_now()),
+                    inbox_id,
+                    execution_token,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def request_cancellation(self, inbox_id: str) -> bool:
         """Cancel queued work or signal the owner of an active execution."""
@@ -981,6 +1038,42 @@ def _receipt_to_dict(receipt: DeliveryReceipt) -> dict[str, Any]:
     }
 
 
+def _insert_uncertain_outbox(
+    conn: sqlite3.Connection,
+    inbox_row: sqlite3.Row,
+    observed: datetime,
+) -> None:
+    envelope = _inbound_from_dict(json.loads(str(inbox_row["envelope_json"])))
+    outbound = OutboundEnvelope(
+        profile_id=str(inbox_row["profile_id"]),
+        conversation_id=str(inbox_row["conversation_key"]),
+        target=DeliveryTarget(
+            envelope.identity.adapter,
+            envelope.identity.account_id,
+            envelope.destination_id,
+            thread_id=envelope.thread_id,
+        ),
+        text=UNCERTAIN_EXECUTION_MESSAGE,
+        reply_to_event_id=envelope.event_id,
+    )
+    conn.execute(
+        """
+        INSERT INTO gateway_outbox (
+            id, inbox_id, profile_id, sequence, envelope_json,
+            state, created_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, 'pending', ?, ?)
+        """,
+        (
+            outbound.envelope_id,
+            inbox_row["id"],
+            inbox_row["profile_id"],
+            _bounded_json(_outbound_to_dict(outbound)),
+            _encode(observed),
+            _encode(observed),
+        ),
+    )
+
+
 def _adapter_row(
     conn: sqlite3.Connection,
     adapter: str,
@@ -1080,6 +1173,7 @@ def _optional_datetime(value: object) -> datetime | None:
 
 __all__ = [
     "ExecutionClaim",
+    "GatewayBackpressureError",
     "GatewayAdapterStatus",
     "InboxRecord",
     "IngestResult",

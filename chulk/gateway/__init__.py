@@ -3,6 +3,7 @@
 from chulk.gateway.ledger import (
     ExecutionClaim,
     GatewayAdapterStatus,
+    GatewayBackpressureError,
     InboxRecord,
     IngestResult,
     OutboxRecord,
@@ -33,6 +34,12 @@ from chulk.gateway.routing import (
     PairingChallenge,
     SQLiteGatewayRouter,
 )
+from chulk.gateway.runtime import (
+    EnvelopeExecutor,
+    GatewayLimits,
+    GatewayRuntime,
+    UNROUTED_PROFILE_ID,
+)
 
 
 __all__ = [
@@ -43,9 +50,13 @@ __all__ = [
     "DeliveryReceipt",
     "DeliveryState",
     "DeliveryTarget",
+    "EnvelopeExecutor",
     "ExecutionClaim",
     "GatewayAdapterStatus",
+    "GatewayBackpressureError",
+    "GatewayLimits",
     "GatewayRoute",
+    "GatewayRuntime",
     "InboundEnvelope",
     "InboundPart",
     "InboxRecord",
@@ -61,6 +72,7 @@ __all__ = [
     "SQLiteGatewayRouter",
     "TextPart",
     "TrustLevel",
+    "UNROUTED_PROFILE_ID",
     "UNCERTAIN_EXECUTION_MESSAGE",
     "conversation_key_for",
 ]

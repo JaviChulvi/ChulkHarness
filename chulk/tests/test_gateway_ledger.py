@@ -143,6 +143,9 @@ def test_expired_execution_is_quarantined_and_never_reclaimed(tmp_path) -> None:
     assert [item.id for item in recovered] == [record.id]
     assert recovered[0].state == "uncertain"
     assert recovered[0].last_error == "execution lease expired"
+    notice = ledger.claim_delivery(now=NOW + timedelta(seconds=11))
+    assert notice is not None
+    assert "uncertain execution checkpoint" in (notice.envelope.text or "")
     assert (
         ledger.claim_execution(
             global_limit=1,
