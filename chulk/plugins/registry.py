@@ -276,7 +276,12 @@ class LocalPluginRegistry:
             raise PluginLoadError(
                 f"plugin {plugin_name!r} is not enabled"
             )
-        selected_category = PluginCategory(category)
+        try:
+            selected_category = PluginCategory(category)
+        except ValueError as exc:
+            raise PluginLoadError(
+                f"unsupported plugin category: {category!r}"
+            ) from exc
         selected = next(
             (
                 candidate

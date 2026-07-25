@@ -198,6 +198,33 @@ def test_lock_rejects_unknown_fields_profile_mismatch_and_symlinks(
         plugins.list()
 
 
+def test_lock_rejects_coerced_values_and_noncanonical_source_paths(
+    tmp_path,
+):
+    package = write_plugin(tmp_path)
+    plugins = registry(tmp_path)
+    plugins.register_local(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+    )
+    payload = json.loads(plugins.lock.path.read_text(encoding="utf-8"))
+    payload["plugins"]["sample-plugin"]["version"] = 123
+    plugins.lock.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PluginLockError, match="string fields"):
+        plugins.list()
+
+    payload["plugins"]["sample-plugin"]["version"] = "1.2.3"
+    payload["plugins"]["sample-plugin"]["source_path"] = str(
+        package / ".." / package.name
+    )
+    plugins.lock.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PluginLockError, match="canonical"):
+        plugins.list()
+
+
 def test_loader_requires_reviewed_and_runtime_capabilities(tmp_path):
     package = write_plugin(tmp_path)
     plugins = registry(tmp_path)
@@ -226,6 +253,23 @@ def test_loader_requires_reviewed_and_runtime_capabilities(tmp_path):
     assert callable(loaded.value)
     assert loaded.value().__class__ is object
     assert not (package / "sample_plugin" / "__pycache__").exists()
+
+
+def test_loader_normalizes_unsupported_category_errors(tmp_path):
+    package = write_plugin(tmp_path)
+    plugins = registry(tmp_path)
+    plugins.register_local(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+    )
+
+    with pytest.raises(PluginLoadError, match="unsupported plugin category"):
+        plugins.load_entry_point(
+            "sample-plugin",
+            "not-a-category",
+            "sample",
+        )
 
 
 def test_loader_refuses_module_namespace_owned_outside_package(tmp_path):

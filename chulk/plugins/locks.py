@@ -189,25 +189,44 @@ def _entry_from_dict(value: dict[str, Any]) -> PluginLockEntry:
         list,
     ):
         raise PluginLockError("plugin lock review fields are invalid")
+    string_fields = (
+        "name",
+        "version",
+        "digest",
+        "source_kind",
+        "source_path",
+        "status",
+        "installed_at",
+    )
+    if any(not isinstance(value[field], str) for field in string_fields):
+        raise PluginLockError("plugin lock entry string fields are invalid")
+    review_string_fields = ("approved_by", "approved_at")
+    if any(
+        not isinstance(raw_review[field], str)
+        for field in review_string_fields
+    ):
+        raise PluginLockError("plugin lock review string fields are invalid")
+    if any(not isinstance(item, str) for item in capabilities):
+        raise PluginLockError(
+            "plugin lock granted capabilities must be strings"
+        )
     try:
         manifest = plugin_manifest_from_mapping(raw_manifest)
         entry = PluginLockEntry(
-            name=str(value["name"]),
-            version=str(value["version"]),
-            digest=str(value["digest"]),
-            source_kind=PluginSourceKind(str(value["source_kind"])),
-            source_path=Path(str(value["source_path"])),
-            status=PluginRegistrationStatus(str(value["status"])),
+            name=value["name"],
+            version=value["version"],
+            digest=value["digest"],
+            source_kind=PluginSourceKind(value["source_kind"]),
+            source_path=Path(value["source_path"]),
+            status=PluginRegistrationStatus(value["status"]),
             manifest=manifest,
             review=PluginReview(
-                approved_by=str(raw_review["approved_by"]),
-                approved_at=str(raw_review["approved_at"]),
+                approved_by=raw_review["approved_by"],
+                approved_at=raw_review["approved_at"],
                 acknowledged_host_authority=acknowledged,
-                granted_capabilities=tuple(
-                    str(item) for item in capabilities
-                ),
+                granted_capabilities=tuple(capabilities),
             ),
-            installed_at=str(value["installed_at"]),
+            installed_at=value["installed_at"],
         )
     except (PluginManifestError, ValueError) as exc:
         raise PluginLockError(f"invalid plugin lock entry: {exc}") from exc
@@ -224,14 +243,23 @@ def _validate_entry(entry: PluginLockEntry) -> None:
         raise PluginLockError("plugin lock digest is invalid")
     if entry.source_kind is not PluginSourceKind.LOCAL_DIRECTORY:
         raise PluginLockError("unsupported plugin source kind")
-    if not entry.source_path.is_absolute() or "\x00" in str(
-        entry.source_path
+    source_text = str(entry.source_path)
+    if (
+        not entry.source_path.is_absolute()
+        or "\x00" in source_text
+        or entry.source_path.resolve(strict=False) != entry.source_path
     ):
         raise PluginLockError(
-            "local plugin source path must be absolute"
+            "local plugin source path must be canonical and absolute"
         )
-    if not entry.review.approved_by.strip():
-        raise PluginLockError("plugin approval identity cannot be empty")
+    approved_by = entry.review.approved_by
+    if (
+        not approved_by.strip()
+        or approved_by != approved_by.strip()
+        or "\x00" in approved_by
+        or len(approved_by) > 200
+    ):
+        raise PluginLockError("plugin approval identity is invalid")
     if not entry.review.acknowledged_host_authority:
         raise PluginLockError(
             "plugin review must acknowledge host-process authority"

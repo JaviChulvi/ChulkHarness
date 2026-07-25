@@ -15,7 +15,6 @@ from yaml.constructor import ConstructorError
 from yaml.events import AliasEvent
 from yaml.nodes import MappingNode, Node
 
-from chulk.profiles import CredentialRef
 from chulk.plugins.models import (
     FilesystemAccess,
     PLUGIN_MANIFEST_FILENAME,
@@ -64,6 +63,8 @@ _DOMAIN_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 )
 _DEPENDENCY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SECRET_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$")
 _MAX_MANIFEST_BYTES = 256_000
 
 
@@ -269,9 +270,7 @@ def _manifest_from_mapping(values: dict[str, Any]) -> PluginManifest:
     secret_refs = tuple(
         sorted(
             {
-                CredentialRef.parse(
-                    _required_text(item, "secret_refs item", max_chars=256)
-                ).uri
+                _secret_ref(item)
                 for item in _sequence(
                     data.pop("secret_refs", ()),
                     "secret_refs",
@@ -543,6 +542,32 @@ def _domain(value: object) -> str:
             f"network domain must be a hostname without scheme or port: {domain}"
         )
     return domain
+
+
+def _secret_ref(value: object) -> str:
+    raw = _required_text(value, "secret_refs item", max_chars=256)
+    scheme, separator, name = raw.partition(":")
+    normalized_scheme = scheme.lower()
+    if not separator or not name:
+        raise PluginManifestError(
+            "secret references must use env:, keyring:, or host:"
+        )
+    if normalized_scheme in {"env", "environment"}:
+        if not _ENVIRONMENT_NAME_PATTERN.fullmatch(name):
+            raise PluginManifestError(
+                "environment secret references must name an environment "
+                "variable"
+            )
+        return f"env:{name}"
+    if normalized_scheme not in {"keyring", "host"}:
+        raise PluginManifestError(
+            "secret references must use env:, keyring:, or host:"
+        )
+    if not _SECRET_NAME_PATTERN.fullmatch(name):
+        raise PluginManifestError(
+            "secret reference name contains unsupported characters"
+        )
+    return f"{normalized_scheme}:{name}"
 
 
 def _resource_path(
