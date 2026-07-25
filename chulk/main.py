@@ -744,6 +744,42 @@ def main(
                 output_func=output_func,
                 error_func=error_func,
             )
+        if args.command == "goal":
+            from chulk.cli.goals import run_goal_command
+            from chulk.goals import GoalService, GoalStore
+
+            return run_goal_command(
+                args.goal_command,
+                service=GoalService(
+                    GoalStore(
+                        config.store_path,
+                        profile_id=profile.id,
+                    )
+                ),
+                session_store=SQLiteSessionStore(config.store_path),
+                goal_id=getattr(args, "goal_id", None),
+                conversation_id=getattr(args, "conversation_id", None),
+                turn_id=getattr(args, "turn_id", None),
+                step_id=getattr(args, "step_id", None),
+                expected_revision=getattr(args, "revision", None),
+                actor=getattr(args, "actor", "cli"),
+                instruction=(
+                    " ".join(args.instruction)
+                    if getattr(args, "instruction", None)
+                    else None
+                ),
+                reason=getattr(args, "reason", None),
+                status=getattr(args, "status", None),
+                limit=getattr(args, "limit", 100),
+                max_model_calls=getattr(args, "max_model_calls", None),
+                max_tool_calls=getattr(args, "max_tool_calls", None),
+                max_tokens=getattr(args, "max_tokens", None),
+                max_cost=getattr(args, "max_cost", None),
+                deadline=getattr(args, "deadline", None),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "session":
             return run_session_command(
                 args.session_command,

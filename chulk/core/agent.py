@@ -197,6 +197,7 @@ class Agent:
             permission_callback=self.permission_callback,
             trace=self._trace,
             get_context=self._tool_context_for_turn,
+            usage_accounting=self.usage_accounting,
         )
         self._plan_execution = PlanExecution(
             state=self.state,
@@ -733,6 +734,7 @@ class Agent:
         tools.registry = self.tool_registry
         tools.permission_policy = self.permission_policy
         tools.permission_callback = self.permission_callback
+        tools.usage_accounting = self.usage_accounting
 
         self._plan_execution.state = self.state
         self._plan_execution.memory = self.memory

@@ -143,6 +143,54 @@ def test_cost_budget_stops_before_the_provider_request(tmp_path: Path) -> None:
     assert SQLiteUsageStore(config.store_path).list_entries() == ()
 
 
+def test_tool_budget_stops_before_the_next_tool_attempt_and_records_goal_usage(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    client = OpenAIScriptedClient(
+        [
+            {
+                "type": "tool_call",
+                "tool_name": "calculator",
+                "arguments": {"expression": "1 + 1"},
+            },
+            {
+                "type": "tool_call",
+                "tool_name": "calculator",
+                "arguments": {"expression": "2 + 2"},
+            },
+            {"type": "final_answer", "content": "must not run"},
+        ]
+    )
+    agent = create_agent(
+        config,
+        llm_client=client,
+        run_budget=RunBudget(
+            scope="goal",
+            max_tool_calls=1,
+        ),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-1",
+        ),
+    )
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        agent.run_turn("calculate twice")
+
+    assert exc_info.value.dimension == "tool_calls"
+    assert client.remaining == 1
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    tool_entries = [item for item in entries if item.resource_kind.value == "tool"]
+    assert len(tool_entries) == 1
+    assert tool_entries[0].tool_or_service == "calculator"
+    assert tool_entries[0].dimensions.goal_id == "goal-1"
+    assert tool_entries[0].units["tool_calls"] == 1
+    assert agent.state.turns[-1].extension_metadata["budget_exhausted"][
+        "resource_kind"
+    ] == "tool"
+
+
 def test_budget_exhaustion_is_a_typed_public_error_and_event(
     tmp_path: Path,
 ) -> None:

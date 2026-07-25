@@ -60,6 +60,7 @@ class ModelUsageAccounting:
         self.max_output_tokens = max_output_tokens
         self.trace_path = str(trace_path) if trace_path is not None else None
         self._reservations: dict[tuple[str, int], BudgetReservation] = {}
+        self._tool_reservations: dict[tuple[str, int, int], BudgetReservation] = {}
         self.reconcile_persisted_model_requests()
         self.store.release_expired()
 
@@ -287,6 +288,101 @@ class ModelUsageAccounting:
     ) -> BudgetReservation | None:
         """Release a request that failed before normalized accounting was available."""
         reservation = self._reservations.pop((turn_id, request_index), None)
+        if reservation is None:
+            return None
+        return self.store.release(reservation.id)
+
+    def reserve_tool_call(
+        self,
+        *,
+        turn_id: str,
+        tool_call_index: int,
+        attempt: int,
+        tool_name: str,
+    ) -> BudgetReservation:
+        """Reserve one concrete tool attempt before permission or execution."""
+        key = (turn_id, tool_call_index, attempt)
+        existing = self._tool_reservations.get(key)
+        if existing is not None:
+            return existing
+        source_event_id = _tool_event_id(
+            self.conversation_id,
+            turn_id,
+            tool_call_index,
+            attempt,
+        )
+        reservation = self.store.reserve(
+            idempotency_key=source_event_id,
+            source_event_id=source_event_id,
+            resource_kind=ResourceKind.TOOL,
+            dimensions=self._dimensions(turn_id),
+            budget=self.budget,
+            tool_calls=1,
+            cost=ExactCost(Decimal(0), pricing_known=True),
+        )
+        self._tool_reservations[key] = reservation
+        return reservation
+
+    def commit_tool_call(
+        self,
+        *,
+        turn_id: str,
+        tool_call_index: int,
+        attempt: int,
+        tool_name: str,
+        success: bool,
+        failure_kind: str | None,
+    ) -> tuple[UsageEntry, ...]:
+        """Commit one tool attempt against its pre-execution reservation."""
+        key = (turn_id, tool_call_index, attempt)
+        reservation = self._tool_reservations.get(key)
+        if reservation is None:
+            reservation = self.reserve_tool_call(
+                turn_id=turn_id,
+                tool_call_index=tool_call_index,
+                attempt=attempt,
+                tool_name=tool_name,
+            )
+        now = self.store.clock()
+        if now.tzinfo is None:
+            raise ValueError("usage store clock must return a timezone-aware datetime")
+        now = now.astimezone(timezone.utc)
+        entry = UsageEntry(
+            id=str(uuid4()),
+            resource_kind=ResourceKind.TOOL,
+            source_event_id=f"{reservation.source_event_id}:result",
+            dimensions=reservation.dimensions,
+            occurred_at=now,
+            billing_period=now.strftime("%Y-%m"),
+            purpose="agent_tool",
+            units={"tool_calls": Decimal(1)},
+            cost=ExactCost(Decimal(0), pricing_known=True),
+            tool_or_service=tool_name,
+            trace_path=self.trace_path,
+            metadata={
+                "request_event_id": reservation.source_event_id,
+                "tool_call_index": tool_call_index,
+                "attempt": attempt,
+                "success": success,
+                "failure_kind": failure_kind,
+            },
+        )
+        committed = self.store.commit(reservation.id, (entry,))
+        self._tool_reservations.pop(key, None)
+        return committed
+
+    def release_tool_call(
+        self,
+        *,
+        turn_id: str,
+        tool_call_index: int,
+        attempt: int,
+    ) -> BudgetReservation | None:
+        """Release an attempt that failed before a result could be observed."""
+        reservation = self._tool_reservations.pop(
+            (turn_id, tool_call_index, attempt),
+            None,
+        )
         if reservation is None:
             return None
         return self.store.release(reservation.id)
@@ -533,6 +629,18 @@ def _request_event_id(
     request_index: int,
 ) -> str:
     return f"model:{conversation_id}:{turn_id}:{request_index}"
+
+
+def _tool_event_id(
+    conversation_id: str,
+    turn_id: str,
+    tool_call_index: int,
+    attempt: int,
+) -> str:
+    return (
+        f"tool:{conversation_id}:{turn_id}:{tool_call_index}:"
+        f"attempt:{attempt}"
+    )
 
 
 def _optional_text(value: object) -> str | None:
