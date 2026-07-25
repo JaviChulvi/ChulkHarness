@@ -97,6 +97,7 @@ class Config:
     max_tool_stderr_chars: int = DEFAULT_MAX_TOOL_STDERR_CHARS
     max_reflection_attempts: int = DEFAULT_MAX_REFLECTION_ATTEMPTS
     permission_profile: str = DEFAULT_PERMISSION_PROFILE
+    profile_id: str = "default"
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
