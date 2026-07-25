@@ -72,9 +72,19 @@ def _add_trace_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_trace_limits(inspect_parser)
     replay_parser = trace_subparsers.add_parser(
         "replay",
-        help="Reconstruct recorded turns without executing them.",
+        help="Reconstruct a trace or execute a deterministic replay fixture.",
     )
-    replay_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
+    replay_source = replay_parser.add_mutually_exclusive_group(required=True)
+    replay_source.add_argument(
+        "path",
+        nargs="?",
+        help="Path to a Chulk JSONL trace for read-only reconstruction.",
+    )
+    replay_source.add_argument(
+        "--execute-fixture",
+        metavar="PATH",
+        help="Execute a versioned replay fixture through the offline action loop.",
+    )
     replay_parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
     _add_trace_limits(replay_parser)
     export_parser = trace_subparsers.add_parser("export", help="Export a trace report.")

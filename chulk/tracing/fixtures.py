@@ -42,9 +42,11 @@ _GENERATED_ID_KEYS = frozenset(
     {
         "artifact_id",
         "conversation_id",
+        "current_turn_id",
         "goal_id",
         "job_id",
         "permission_id",
+        "pending_plan_turn_id",
         "plan_step_id",
         "proposal_id",
         "request_id",
@@ -600,6 +602,8 @@ class _ReplayNormalizer:
         if key is not None and _is_duration_key(key) and value is not None:
             return "<duration>"
         if key in _GENERATED_ID_KEYS and isinstance(value, str) and value:
+            if value.startswith(f"<{key}:") and value.endswith(">"):
+                return value
             return self._normalize_id(key, value)
         if key == "depends_on" and isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
