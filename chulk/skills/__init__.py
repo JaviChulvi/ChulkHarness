@@ -13,7 +13,15 @@ from chulk.skills.manifest import (
     resolve_skill_resource,
     skill_package_digest,
 )
-from chulk.skills.registry import Skill, SkillRegistry, SkillSelection
+from chulk.skills.registry import (
+    Skill,
+    SkillRegistry,
+    SkillRouteDecision,
+    SkillReranker,
+    SkillRoutingResult,
+    SkillSelection,
+    explicit_skill_names,
+)
 
 
 def bundled_skills_dir() -> Path:
@@ -96,6 +104,9 @@ __all__ = [
     "SkillPinRef",
     "SkillRef",
     "SkillRegistry",
+    "SkillRouteDecision",
+    "SkillReranker",
+    "SkillRoutingResult",
     "SkillSelection",
     "SkillManifest",
     "SkillManifestError",
@@ -103,6 +114,7 @@ __all__ = [
     "LEGACY_SKILL_VERSION",
     "SKILL_MANIFEST_SCHEMA_VERSION",
     "bundled_skills_dir",
+    "explicit_skill_names",
     "files",
     "from_dir",
     "memory",
