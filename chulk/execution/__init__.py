@@ -3,9 +3,11 @@
 from chulk.execution.base import ExecutionBackend, ExecutionSession
 from chulk.execution.host import ExecutionContextLifecycle, HostExecutionBackend, HostExecutionSession
 from chulk.execution.models import (
+    ChangeApplicationResult,
     ChangeDisposition,
     ChangeRecord,
     ChangeSet,
+    ChangeSetApproval,
     CommandExecutionRequest,
     ContainmentStatus,
     ExecutionPolicy,
@@ -22,11 +24,28 @@ from chulk.execution.models import (
     WorkspaceMode,
     WorkspacePersistence,
 )
+from chulk.execution.policy import (
+    EnvironmentPolicy,
+    GitWorktreePolicy,
+    ResourcePolicy,
+    SecretPolicy,
+    TransferPolicy,
+    UnsafePathAction,
+    WorkspaceMaterializationPolicy,
+)
+from chulk.execution.temporary import (
+    GitWorktreeBackend,
+    TemporaryWorkspaceBackend,
+    TemporaryWorkspaceSession,
+    WorkspacePolicyError,
+)
 
 __all__ = [
+    "ChangeApplicationResult",
     "ChangeDisposition",
     "ChangeRecord",
     "ChangeSet",
+    "ChangeSetApproval",
     "CommandExecutionRequest",
     "ContainmentStatus",
     "ExecutionBackend",
@@ -36,15 +55,26 @@ __all__ = [
     "ExecutionSession",
     "ExecutionSessionRequest",
     "ExecutionWorkspace",
+    "EnvironmentPolicy",
     "FileListRequest",
     "FileReadRequest",
     "FileSearchRequest",
     "FileWriteRequest",
+    "GitWorktreeBackend",
+    "GitWorktreePolicy",
     "HostExecutionBackend",
     "HostExecutionSession",
     "NetworkPolicy",
     "PatchApplyRequest",
     "ProcessHandle",
+    "ResourcePolicy",
+    "SecretPolicy",
+    "TemporaryWorkspaceBackend",
+    "TemporaryWorkspaceSession",
+    "TransferPolicy",
+    "UnsafePathAction",
+    "WorkspaceMaterializationPolicy",
     "WorkspaceMode",
+    "WorkspacePolicyError",
     "WorkspacePersistence",
 ]

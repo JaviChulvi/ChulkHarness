@@ -14,6 +14,7 @@ class WorkspaceMode(str, Enum):
 
     HOST = "host"
     TEMPORARY = "temporary"
+    GIT_WORKTREE = "git_worktree"
     CONTAINER = "container"
 
 
@@ -157,6 +158,10 @@ class ChangeRecord:
     status: str
     sha256_before: str | None = None
     sha256_after: str | None = None
+    mode_before: int | None = None
+    mode_after: int | None = None
+    content_after: str | None = None
+    content_after_base64: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +169,41 @@ class ChangeSet:
     """Immutable collection of changes produced by an execution session."""
 
     changes: tuple[ChangeRecord, ...] = ()
+    change_set_id: str = ""
+    workspace_id: str = ""
+    backend_name: str = ""
+    patch: str = ""
+    patch_truncated: bool = False
+    total_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class ChangeSetApproval:
+    """Explicit host approval required before applying one change set."""
+
+    change_set_id: str
+    approved_by: str
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.change_set_id.strip():
+            raise ValueError("change_set_id cannot be empty")
+        if not self.approved_by.strip():
+            raise ValueError("approved_by cannot be empty")
+
+
+@dataclass(frozen=True)
+class ChangeApplicationResult:
+    """Outcome of a conflict-checked transactional host application."""
+
+    success: bool
+    change_set_id: str
+    approved_by: str
+    reason: str | None = None
+    applied_paths: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+    rollback_errors: tuple[str, ...] = ()
+    error: str | None = None
 
 
 @dataclass(frozen=True)
