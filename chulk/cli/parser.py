@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_usage_parser(subparsers)
     _add_session_parser(subparsers)
     _add_gateway_parser(subparsers)
+    _add_server_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -233,6 +234,31 @@ def _add_gateway_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_gateway_identity(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--adapter", default="telegram")
     parser.add_argument("--account", default="primary")
+
+
+def _add_server_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "server",
+        help="Run or administer the authenticated local control server.",
+    )
+    commands = parser.add_subparsers(dest="server_command", required=True)
+    start = commands.add_parser("start", help="Run the local control server.")
+    start.add_argument("--host", default="127.0.0.1")
+    start.add_argument("--port", type=int, default=8765)
+    start.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Explicitly permit a non-loopback bind.",
+    )
+    status = commands.add_parser("status", help="Show durable server status.")
+    status.add_argument("--json", action="store_true", dest="json_output")
+    stop = commands.add_parser("stop", help="Request the running server to stop.")
+    stop.add_argument("--json", action="store_true", dest="json_output")
+    rotate = commands.add_parser(
+        "rotate-token",
+        help="Rotate the owner-local control credential.",
+    )
+    rotate.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_plugins_parser(

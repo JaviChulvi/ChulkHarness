@@ -666,6 +666,127 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_public_control_plane(conn: sqlite3.Connection) -> None:
+    """Create the profile-owned public event and permission ledgers."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS public_events (
+            event_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            turn_id TEXT,
+            sequence INTEGER NOT NULL,
+            event_name TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (conversation_id, sequence),
+            CHECK (sequence >= 1),
+            CHECK (schema_version >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_public_events_conversation
+        ON public_events(conversation_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_public_events_profile_created
+        ON public_events(profile_id, created_at, event_id);
+
+        CREATE TABLE IF NOT EXISTS permission_requests (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            turn_id TEXT,
+            tool_name TEXT NOT NULL,
+            permission_level TEXT NOT NULL,
+            policy_name TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            argument_preview_json TEXT NOT NULL,
+            argument_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decision TEXT,
+            decision_reason TEXT,
+            decision_key TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            decided_at TEXT,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                status IN (
+                    'pending', 'allowed', 'denied', 'expired', 'uncertain'
+                )
+            ),
+            CHECK (decision IS NULL OR decision IN ('allow', 'deny'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_permission_requests_conversation
+        ON permission_requests(conversation_id, status, created_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_permission_decision_key
+        ON permission_requests(profile_id, decision_key)
+        WHERE decision_key IS NOT NULL;
+        """
+    )
+
+
+def _migrate_to_conversation_dispatch(conn: sqlite3.Connection) -> None:
+    """Persist API and gateway submissions before shared execution."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_commands (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            message TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (conversation_id, idempotency_key),
+            CHECK (mode IN ('run', 'plan')),
+            CHECK (
+                status IN (
+                    'queued', 'running', 'completed', 'failed',
+                    'cancelled', 'uncertain'
+                )
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversation_commands_queue
+        ON conversation_commands(profile_id, conversation_id, status, created_at, id);
+        """
+    )
+
+
+def _migrate_to_control_decisions(conn: sqlite3.Connection) -> None:
+    """Persist idempotent plan decisions across host restarts."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS control_decisions (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (conversation_id, target_type, target_id),
+            UNIQUE (profile_id, idempotency_key),
+            CHECK (target_type = 'plan'),
+            CHECK (action IN ('approve', 'reject')),
+            CHECK (status IN ('pending', 'completed', 'failed', 'uncertain'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_decisions_conversation
+        ON control_decisions(profile_id, conversation_id, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -717,6 +838,9 @@ SQLITE_MIGRATIONS = (
     ),
     SQLiteMigration(10, "profile-session-search", _migrate_to_session_search),
     SQLiteMigration(11, "skill-lifecycle-and-learning", _migrate_to_skill_lifecycle),
+    SQLiteMigration(12, "public-control-plane", _migrate_to_public_control_plane),
+    SQLiteMigration(13, "conversation-dispatch", _migrate_to_conversation_dispatch),
+    SQLiteMigration(14, "idempotent-control-decisions", _migrate_to_control_decisions),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

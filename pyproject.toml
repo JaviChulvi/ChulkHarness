@@ -38,6 +38,7 @@ Security = "https://github.com/JaviChulvi/ChulkHarness/blob/main/SECURITY.md"
 [project.optional-dependencies]
 dev = [
   "build>=1.2",
+  "httpx>=0.28,<1",
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
   "pytest-cov>=6.0",
@@ -45,6 +46,8 @@ dev = [
   "mypy>=1.11",
   "setuptools>=77",
   "types-PyYAML>=6.0.12",
+  "starlette>=0.46,<1",
+  "uvicorn>=0.34,<1",
 ]
 openai = [
   "openai>=1.109.0",
@@ -62,6 +65,10 @@ providers = [
 ]
 mcp = [
   "mcp>=1.27,<2",
+]
+server = [
+  "starlette>=0.46,<1",
+  "uvicorn>=0.34,<1",
 ]
 
 [project.scripts]
