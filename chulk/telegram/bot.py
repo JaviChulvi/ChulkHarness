@@ -13,6 +13,7 @@ from chulk import AsyncAgent, Capabilities, FileAccess, MemoryMode, Tools
 from chulk.config import Config
 from chulk.core.context import TurnContextSection
 from chulk.gateway import (
+    ChannelCommandSpec,
     DeliveryTarget,
     GatewayLimits,
     GatewayRuntime,
@@ -22,6 +23,8 @@ from chulk.gateway import (
     SQLiteGatewayRouter,
     TextPart,
     adopt_legacy_telegram_state,
+    parse_channel_command,
+    shared_command_help,
 )
 from chulk.llm.lifecycle import aclose_resources
 from chulk.profiles import ProfileRuntimeFactory
@@ -457,7 +460,9 @@ class TelegramAgentBot:
     ) -> str:
         runtime_config = self._config_for_profile(profile_id)
         schedule_store = self._schedule_store_for(profile_id)
-        command, arguments = _parse_command(text)
+        parsed = parse_channel_command(text)
+        command = f"/{parsed.name}" if parsed is not None else None
+        arguments = parsed.arguments if parsed is not None else ""
         if command in {"/start", "/help"}:
             return _help_text()
         if command == "/new":
@@ -472,6 +477,60 @@ class TelegramAgentBot:
                 f"Provider: {runtime_config.llm_provider}\n"
                 f"Model: {runtime_config.model}\n"
                 f"Conversation: {agent.conversation_id[:8]}"
+            )
+        if command == "/stop":
+            stopped = self._agents.pop((profile_id, chat_id), None)
+            if stopped is None:
+                return "No active conversation work to stop."
+            await stopped.close()
+            return f"Stopped conversation {stopped.conversation_id[:8]}."
+        if command == "/model":
+            if arguments:
+                return "Model switching is not available in this channel."
+            return (
+                f"Model profile: {runtime_config.profile_id}\n"
+                f"Provider: {runtime_config.llm_provider}\n"
+                f"Model: {runtime_config.model}"
+            )
+        if command == "/skills":
+            from chulk.skills import SkillRegistry
+
+            registry = SkillRegistry(
+                runtime_config.skills_dir,
+                skills_dirs=runtime_config.skills_dirs,
+                max_skills=runtime_config.max_skills_per_turn,
+                max_content_chars=runtime_config.max_skill_content_chars,
+            )
+            registry.load_metadata()
+            names = [skill.name for skill in registry.list_skills()]
+            return (
+                "Available skills: " + ", ".join(names)
+                if names
+                else "No skills are available."
+            )
+        if command == "/memory":
+            profile = (
+                self._profile_runtime_factory.resolve(profile_id).profile
+                if self._profile_runtime_factory is not None
+                else None
+            )
+            namespace = (
+                profile.memory_namespace
+                if profile is not None and profile.memory_namespace
+                else f"telegram:chat:{chat_id}"
+            )
+            return f"Memory namespace: {namespace}\nAccess: read-only"
+        if command == "/agents":
+            return "No delegated agents are active in this conversation."
+        if command == "/jobs":
+            if schedule_store is None:
+                return "Scheduling is disabled for this channel."
+            return format_jobs(
+                schedule_store.list(
+                    adapter="telegram",
+                    destination_id=str(chat_id),
+                ),
+                timezone_name=self.telegram_config.timezone,
             )
         if command == "/plan":
             if not arguments:
@@ -763,14 +822,6 @@ class TelegramAgentBot:
                 return
 
 
-def _parse_command(text: str) -> tuple[str | None, str]:
-    if not text.startswith("/"):
-        return None, ""
-    raw_command, _, arguments = text.partition(" ")
-    command = raw_command.split("@", 1)[0].lower()
-    return command, arguments.strip()
-
-
 def _telegram_update_from_envelope(envelope: InboundEnvelope) -> TelegramUpdate:
     text = next(
         (part.text for part in envelope.parts if isinstance(part, TextPart)),
@@ -800,16 +851,18 @@ def _telegram_update_from_envelope(envelope: InboundEnvelope) -> TelegramUpdate:
 
 
 def _help_text() -> str:
-    return (
-        "Send any text to talk with the Chulk agent.\n\n"
-        "/new — start a new conversation\n"
-        "/status — show provider, model, and conversation\n"
-        "/plan <request> — propose an approval plan\n"
-        "/approve — approve the pending plan\n"
-        "/reject — reject the pending plan\n"
-        "/reminders — list active scheduled tasks\n"
-        "/cancel <task-id> — cancel a scheduled task\n"
-        "/help — show this help"
+    return shared_command_help(
+        additional=(
+            ChannelCommandSpec("plan", "Propose an approval plan", "/plan <request>"),
+            ChannelCommandSpec("approve", "Approve the pending plan", "/approve"),
+            ChannelCommandSpec("reject", "Reject the pending plan", "/reject"),
+            ChannelCommandSpec("reminders", "List scheduled tasks", "/reminders"),
+            ChannelCommandSpec(
+                "cancel",
+                "Cancel a scheduled task",
+                "/cancel <task-id>",
+            ),
+        )
     )
 
 

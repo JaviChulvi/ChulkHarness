@@ -9,12 +9,14 @@ from pathlib import PurePath
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from chulk.gateway.commands import SHARED_CHANNEL_COMMANDS
+
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
-TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("new", "Start a new conversation"),
-    ("status", "Show provider, model, and conversation"),
+TELEGRAM_COMMANDS: tuple[tuple[str, str], ...] = tuple(
+    (item.name, item.description) for item in SHARED_CHANNEL_COMMANDS
+) + (
     ("plan", "Prepare an approval plan"),
     ("approve", "Approve the pending plan"),
     ("reject", "Reject the pending plan"),
