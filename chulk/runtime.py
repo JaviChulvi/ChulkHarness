@@ -107,6 +107,8 @@ def create_agent(
     require_shell_containment: bool = False,
     execution_backend: ExecutionBackend | None = None,
     memory_namespace: str | None = None,
+    profile_id: str | None = None,
+    allowed_skill_names: Iterable[str] | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -114,6 +116,12 @@ def create_agent(
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
+    effective_profile_id = profile_id or config.profile_id
+    effective_conversation_metadata = dict(conversation_metadata or {})
+    metadata_profile_id = effective_conversation_metadata.get("profile_id")
+    if metadata_profile_id is not None and metadata_profile_id != effective_profile_id:
+        raise ValueError("conversation metadata profile_id does not match the runtime profile")
+    effective_conversation_metadata["profile_id"] = effective_profile_id
     memory_store = SQLiteMemoryStore(
         config.store_path,
         namespace=memory_namespace,
@@ -135,6 +143,17 @@ def create_agent(
     )
     skill_registry.load_metadata()
     skill_resolution = _resolve_skill_specs(skill_registry, skill_specs)
+    if allowed_skill_names is not None:
+        allowed = tuple(allowed_skill_names)
+        skill_registry.restrict_to(
+            [*allowed, *(name for name in skill_resolution.pinned_skill_names if name in allowed)]
+        )
+        skill_resolution = SkillSpecResolution(
+            pinned_skill_names=[
+                name for name in skill_resolution.pinned_skill_names if name in allowed
+            ],
+            warnings=skill_resolution.warnings,
+        )
     for warning_payload in skill_resolution.warnings:
         warnings.warn(warning_payload["message"], UserWarning, stacklevel=2)
         trace_logger.log("skill_config_warning", warning_payload)
@@ -162,7 +181,7 @@ def create_agent(
         model=config.model,
         trace_path=trace_logger.path,
         lazy=conversation_id is None and not conversation_metadata,
-        metadata=conversation_metadata,
+        metadata=effective_conversation_metadata,
     )
     client_is_owned = llm_client is None
     client = llm_client if llm_client is not None else llm_client_factory(config)
@@ -261,6 +280,7 @@ def create_agent(
             owned_resources=owned_resources,
             default_tool_context=ToolExecutionContext(deps=deps) if deps is not None else None,
             tool_context_lifecycle=execution_lifecycle,
+            profile_id=effective_profile_id,
         )
     except Exception:
         for resource in reversed(owned_resources):

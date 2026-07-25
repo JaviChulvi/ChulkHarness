@@ -81,6 +81,7 @@ class Agent:
         owned_resources: list[object] | tuple[object, ...] | None = None,
         default_tool_context: ToolExecutionContext | None = None,
         tool_context_lifecycle: ToolContextLifecycle | None = None,
+        profile_id: str = "default",
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -99,6 +100,7 @@ class Agent:
         if max_reflection_attempts < 0:
             raise ValueError("max_reflection_attempts cannot be negative")
         self.context_budget = context_budget or ContextBudget()
+        self.profile_id = profile_id
         self.llm_client = llm_client
         self.state = state or AgentState()
         self.memory = memory or ConversationMemory()

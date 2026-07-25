@@ -62,7 +62,14 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
     if event_type == TraceEvent.TURN_STARTED:
         turn_value = payload.get("turn")
         turn = turn_value if isinstance(turn_value, dict) else {}
-        return _event(EventName.RUN_STARTED, conversation_id, turn_id, RunStartedPayload(str(turn.get("user_message") or "")), extensions)
+        return _event(
+            EventName.RUN_STARTED,
+            conversation_id,
+            turn_id,
+            RunStartedPayload(str(turn.get("user_message") or "")),
+            extensions,
+            profile_id=runtime.profile_id,
+        )
     if event_type == TraceEvent.MODEL_REQUEST_STARTED:
         return _event(
             EventName.MODEL_REQUEST_STARTED,
@@ -70,11 +77,19 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             turn_id,
             ModelRequestPayload(payload.get("request_index"), payload.get("purpose")),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type == TraceEvent.MODEL_STREAM_DELTA:
         text = payload.get("text")
         if isinstance(text, str) and text:
-            return _event(EventName.MODEL_DELTA, conversation_id, turn_id, ModelDeltaPayload(text), extensions)
+            return _event(
+                EventName.MODEL_DELTA,
+                conversation_id,
+                turn_id,
+                ModelDeltaPayload(text),
+                extensions,
+                profile_id=runtime.profile_id,
+            )
         return None
     if event_type == TraceEvent.MODEL_RESPONSE:
         return _event(
@@ -88,6 +103,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 cost=cost_snapshot(payload.get("cost")),
             ),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type in {TraceEvent.TOOL_CALL_STARTED, TraceEvent.TOOL_CALL_COMPLETED, TraceEvent.TOOL_CALL_FAILED}:
         name = {
@@ -106,6 +122,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 error=payload.get("error"),
             ),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type in {TraceEvent.TOOL_PERMISSION_REQUESTED, TraceEvent.MCP_APPROVAL_REQUESTED}:
         request_value = payload.get("request")
@@ -120,6 +137,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 policy_name=request.get("policy_name"),
             ),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type in {TraceEvent.TOOL_PERMISSION_DECIDED, TraceEvent.MCP_APPROVAL_DECIDED}:
         decision_value = payload.get("decision")
@@ -135,6 +153,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 policy_name=decision.get("policy_name"),
             ),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type == TraceEvent.MEMORY_SEARCH_COMPLETED:
         return _event(
@@ -143,6 +162,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             turn_id,
             ResourcesLoadedPayload(tuple(str(item) for item in payload.get("loaded_memory_ids") or ())),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type == TraceEvent.SKILL_SELECTION_COMPLETED:
         return _event(
@@ -151,13 +171,21 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             turn_id,
             ResourcesLoadedPayload(tuple(str(item) for item in payload.get("loaded_skill_names") or ())),
             extensions,
+            profile_id=runtime.profile_id,
         )
     if event_type in {TraceEvent.PLAN_CREATED, TraceEvent.PLAN_APPROVED}:
         name = EventName.PLAN_CREATED if event_type == TraceEvent.PLAN_CREATED else EventName.PLAN_APPROVED
         plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
         snapshot = plan_snapshot(plan)
         if snapshot is not None:
-            return _event(name, conversation_id, turn_id, PlanPayload(snapshot), extensions)
+            return _event(
+                name,
+                conversation_id,
+                turn_id,
+                PlanPayload(snapshot),
+                extensions,
+                profile_id=runtime.profile_id,
+            )
         return None
     if event_type == TraceEvent.TURN_FINISHED:
         result = run_result_from_runtime(runtime)
@@ -169,6 +197,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 turn_id,
                 RunFailedPayload({"category": "run", "message": message, "result": result.to_dict()}),
                 extensions,
+                profile_id=runtime.profile_id,
             )
         return _event(
             EventName.RUN_COMPLETED,
@@ -176,11 +205,12 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             turn_id,
             RunCompletedPayload(result),
             extensions,
+            profile_id=runtime.profile_id,
         )
     return None
 
 
-def terminal_event(result: Any) -> AgentEvent:
+def terminal_event(result: Any, *, profile_id: str | None = None) -> AgentEvent:
     """Create the exact in-band terminal event for a generator run result."""
     payload: RunFailedPayload | RunCompletedPayload
     if getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
@@ -191,12 +221,32 @@ def terminal_event(result: Any) -> AgentEvent:
     else:
         payload = RunCompletedPayload(result)
         name = EventName.RUN_COMPLETED
-    return _event(name, result.conversation_id, result.turn_id, payload, {"source": "run_events"})
+    return _event(
+        name,
+        result.conversation_id,
+        result.turn_id,
+        payload,
+        {"source": "run_events"},
+        profile_id=profile_id,
+    )
 
 
-def failure_event(error: Any, *, conversation_id: str, turn_id: str | None) -> AgentEvent:
+def failure_event(
+    error: Any,
+    *,
+    conversation_id: str,
+    turn_id: str | None,
+    profile_id: str | None = None,
+) -> AgentEvent:
     payload = error.to_dict() if hasattr(error, "to_dict") else {"category": "run", "message": str(error)}
-    return _event(EventName.RUN_FAILED, conversation_id, turn_id, RunFailedPayload(payload), {"source": "run_events"})
+    return _event(
+        EventName.RUN_FAILED,
+        conversation_id,
+        turn_id,
+        RunFailedPayload(payload),
+        {"source": "run_events"},
+        profile_id=profile_id,
+    )
 
 
 def _event(
@@ -205,11 +255,14 @@ def _event(
     turn_id: str | None,
     payload: Any,
     extensions: dict[str, Any],
+    *,
+    profile_id: str | None = None,
 ) -> AgentEvent:
     return AgentEvent(
         name=name.value,
         conversation_id=conversation_id,
         turn_id=turn_id,
+        profile_id=profile_id,
         payload=payload,
         extensions=extensions,
     )

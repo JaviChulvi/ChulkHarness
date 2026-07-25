@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--once", metavar="MESSAGE", help="Compatibility alias for 'chulk exec MESSAGE'.")
     parser.add_argument(
+        "--profile",
+        metavar="ID",
+        help="Use one agent profile for this CLI invocation.",
+    )
+    parser.add_argument(
         "--color",
         choices=("auto", "always", "never"),
         default="auto",
@@ -37,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_exec_parser(subparsers)
     _add_doctor_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_profile_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -45,6 +51,40 @@ def _add_exec_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("exec", help="Run one non-interactive agent request.")
     parser.add_argument("message", nargs="+", help="Message to send to the agent.")
     parser.add_argument("--json", action="store_true", dest="json_output", help="Emit structured JSON.")
+    parser.add_argument(
+        "--profile",
+        metavar="ID",
+        default=argparse.SUPPRESS,
+        help="Use one agent profile for this request.",
+    )
+
+
+def _add_profile_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("profile", help="Create, select, or inspect agent profiles.")
+    profile_subparsers = parser.add_subparsers(dest="profile_command", required=True)
+
+    create = profile_subparsers.add_parser("create", help="Create an isolated agent profile.")
+    create.add_argument("profile_id")
+    create.add_argument("--project-root", default=".")
+    create.add_argument("--permission-profile")
+    create.add_argument("--model-profile", default="default")
+    create.add_argument("--execution-backend", default="host")
+    create.add_argument("--skill", action="append", dest="allowed_skills")
+    create.add_argument("--mcp-server", action="append", dest="allowed_mcp_servers")
+    create.add_argument("--credential-env", action="append", default=[])
+    create.add_argument("--system-prompt")
+    create.add_argument("--json", action="store_true", dest="json_output")
+
+    list_parser = profile_subparsers.add_parser("list", help="List configured profiles.")
+    list_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    use = profile_subparsers.add_parser("use", help="Select the local CLI default profile.")
+    use.add_argument("profile_id")
+    use.add_argument("--json", action="store_true", dest="json_output")
+
+    inspect = profile_subparsers.add_parser("inspect", help="Inspect one profile without secrets.")
+    inspect.add_argument("profile_id")
+    inspect.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_doctor_parser(subparsers: argparse._SubParsersAction) -> None:

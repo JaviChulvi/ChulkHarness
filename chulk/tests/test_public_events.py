@@ -69,7 +69,8 @@ def test_event_envelope_and_catalog_are_stable(tmp_path):
         "model.delta",
         "run.completed",
     ]
-    assert all(event.schema_version == EVENT_SCHEMA_VERSION == 1 for event in events)
+    assert all(event.schema_version == EVENT_SCHEMA_VERSION == 2 for event in events)
+    assert all(event.profile_id == "default" for event in events)
     assert all(event.conversation_id == facade.conversation_id for event in events)
     assert all(event.turn_id == events[0].turn_id for event in events)
     assert all(event.timestamp.endswith("+00:00") for event in events)
@@ -80,11 +81,48 @@ def test_event_envelope_and_catalog_are_stable(tmp_path):
         "schema_version",
         "conversation_id",
         "turn_id",
+        "profile_id",
         "payload",
         "extensions",
     } for event in events)
     assert isinstance(events[-1].payload, RunCompletedPayload)
     assert events[-1].payload.result.content == "done"
+
+
+def test_event_reader_maps_schema_v1_to_the_implicit_default_profile():
+    event = AgentEvent.from_dict(
+        {
+            "name": "run.started",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "schema_version": 1,
+            "conversation_id": "conversation",
+            "turn_id": "turn",
+            "payload": {"message": "hello"},
+            "extensions": {},
+        }
+    )
+
+    assert event.schema_version == 1
+    assert event.profile_id == "default"
+    assert event.to_dict()["payload"] == {"message": "hello"}
+
+
+def test_event_reader_preserves_schema_v2_profile_ownership():
+    event = AgentEvent.from_dict(
+        {
+            "name": "run.started",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "schema_version": 2,
+            "profile_id": "work",
+            "conversation_id": "conversation",
+            "turn_id": "turn",
+            "payload": {"message": "hello"},
+            "extensions": {},
+        }
+    )
+
+    assert event.profile_id == "work"
+    assert event.to_dict()["profile_id"] == "work"
 
 
 def test_projection_excludes_unknown_internal_events(tmp_path):
