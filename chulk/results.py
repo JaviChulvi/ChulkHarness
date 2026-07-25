@@ -339,6 +339,106 @@ class MemoryProposal:
         return plain_data(self)
 
 
+@dataclass(frozen=True)
+class LearningProposal:
+    id: str
+    profile_id: str
+    kind: str
+    target_name: str | None
+    rationale: str
+    evidence_turn_ids: tuple[str, ...]
+    source_trace: str | None
+    content: str | None
+    diff: str | None
+    required_capabilities: tuple[str, ...]
+    confidence: float
+    verification_steps: tuple[str, ...]
+    reviewer_model: str | None
+    cost: str | None
+    status: str
+    created_at: str
+    reviewed_at: str | None = None
+    reviewed_by: str | None = None
+    applied_revision_id: str | None = None
+    accepted_memory_id: str | None = None
+    error: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "evidence_turn_ids",
+            tuple(self.evidence_turn_ids),
+        )
+        object.__setattr__(
+            self,
+            "required_capabilities",
+            tuple(self.required_capabilities),
+        )
+        object.__setattr__(
+            self,
+            "verification_steps",
+            tuple(self.verification_steps),
+        )
+        object.__setattr__(self, "metadata", freeze_mapping(self.metadata))
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
+@dataclass(frozen=True)
+class GovernedSkill:
+    profile_id: str
+    scope: str
+    name: str
+    version: str
+    digest: str
+    source: str
+    trust: str
+    status: str
+    active_revision_id: str
+    view_count: int
+    use_count: int
+    success_count: int
+    patch_count: int
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
+@dataclass(frozen=True)
+class GovernedSkillRevision:
+    id: str
+    profile_id: str
+    scope: str
+    name: str
+    version: str
+    digest: str
+    source: str
+    trust: str
+    created_at: str
+    proposal_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
+@dataclass(frozen=True)
+class LearningReview:
+    skipped: bool
+    rationale: str
+    proposals: tuple[LearningProposal, ...] = ()
+    review_run_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "proposals", tuple(self.proposals))
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
 EnumT = TypeVar("EnumT", bound=StrEnum)
 
 
@@ -383,6 +483,10 @@ __all__ = [
     "ContextReport",
     "ContextSection",
     "Cost",
+    "GovernedSkill",
+    "GovernedSkillRevision",
+    "LearningProposal",
+    "LearningReview",
     "MemoryProposal",
     "MemoryProposalStatus",
     "Observation",

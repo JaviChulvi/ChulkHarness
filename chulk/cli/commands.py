@@ -5,13 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import get_close_matches
+from typing import cast
+from uuid import uuid4
 
 from chulk.cli.progress import ProgressSettings
 from chulk.cli.terminal import TerminalUI
 from chulk.config import Config
 from chulk.core import Agent
 from chulk.llm import LLMError
-from chulk.skills import explicit_skill_names
+from chulk.skills import SkillScope, SkillUsageKind, explicit_skill_names
 from chulk.sessions import (
     AmbiguousSessionError,
     SessionNotFoundError,
@@ -208,6 +210,193 @@ def _display(arguments: str, context: CLICommandContext) -> None:
     context.output_func(context.terminal.warning(f"display mode {mode}"))
 
 
+def _learning(arguments: str, context: CLICommandContext) -> None:
+    service = context.agent.learning_proposals
+    if service is None:
+        context.output_func(
+            context.terminal.warning("learning proposals are unavailable")
+        )
+        return
+    action, _, proposal_id = arguments.strip().partition(" ")
+    action = action or "pending"
+    try:
+        if action == "pending":
+            proposals = service.list()
+            lines = [
+                (
+                    f"{item.id} {item.kind.value} {item.status.value}"
+                    + (
+                        f" target={item.target_name}"
+                        if item.target_name is not None
+                        else ""
+                    )
+                )
+                for item in proposals
+            ]
+            context.output_func("\n".join(lines) if lines else "No pending proposals.")
+            return
+        if action == "review":
+            outcome = context.agent.review_learning(
+                turn_id=proposal_id or None,
+            )
+            if outcome.proposal_ids:
+                context.output_func(
+                    "\n".join(
+                        f"created learning proposal {item}"
+                        for item in outcome.proposal_ids
+                    )
+                )
+            else:
+                context.output_func(
+                    f"No proposal created: {outcome.rationale}"
+                )
+            return
+        if action == "approve" and proposal_id:
+            proposal = service.approve(
+                proposal_id,
+                approved_by="cli-host",
+            )
+        elif action == "reject" and proposal_id:
+            proposal = service.reject(
+                proposal_id,
+                rejected_by="cli-host",
+            )
+        else:
+            raise ValueError(
+                "usage: /learning review [turn]|pending|approve <id>|"
+                "reject <id>"
+            )
+    except (KeyError, OSError, RuntimeError, ValueError) as exc:
+        context.output_func(context.terminal.warning(str(exc)))
+        return
+    context.output_func(
+        context.terminal.warning(
+            f"{proposal.kind.value} proposal {proposal.id} "
+            f"is {proposal.status.value}"
+        )
+    )
+
+
+def _skills(arguments: str, context: CLICommandContext) -> None:
+    store = context.agent.skill_lifecycle_store
+    lifecycle = context.agent.skill_lifecycle
+    proposals = context.agent.learning_proposals
+    if store is None or lifecycle is None or proposals is None:
+        context.output_func(
+            context.terminal.warning("skill lifecycle is unavailable")
+        )
+        return
+    action, _, remainder = arguments.strip().partition(" ")
+    action = action or "list"
+    try:
+        if action == "list":
+            event_id = f"cli-view:{uuid4()}"
+            records = tuple(
+                store.record_usage(
+                    name=item.name,
+                    scope=item.scope,
+                    version=item.version,
+                    digest=item.digest,
+                    kind=SkillUsageKind.VIEW,
+                    source_event_id=event_id,
+                )
+                for item in store.list_skills()
+            )
+            lines = [
+                (
+                    f"{item.scope}:{item.name} {item.version} "
+                    f"{item.status.value} uses={item.use_count} "
+                    f"successes={item.success_count}"
+                )
+                for item in records
+            ]
+            context.output_func("\n".join(lines) if lines else "No governed skills.")
+            return
+        if action == "pending":
+            items = [
+                item
+                for item in proposals.list()
+                if item.kind.value.startswith("skill_")
+            ]
+            lines = [
+                f"{item.id} {item.kind.value} target={item.target_name}"
+                for item in items
+            ]
+            context.output_func(
+                "\n".join(lines) if lines else "No pending skill proposals."
+            )
+            return
+        if action == "diff" and remainder:
+            proposal = proposals.get(remainder)
+            if not proposal.kind.value.startswith("skill_"):
+                raise ValueError("proposal is not a skill change")
+            context.output_func(proposal.diff or "No diff recorded.")
+            return
+        if action == "history" and remainder:
+            name, _, scope = remainder.partition(" ")
+            selected_scope = scope.strip() or "project"
+            revisions = store.list_revisions(
+                name,
+                scope=selected_scope,
+            )
+            lines = [
+                (
+                    f"{item.id} {item.scope}:{item.name} "
+                    f"{item.version} {item.digest}"
+                )
+                for item in revisions
+            ]
+            context.output_func(
+                "\n".join(lines) if lines else "No skill revisions."
+            )
+            return
+        if action == "approve" and remainder:
+            proposal = proposals.approve(
+                remainder,
+                approved_by="cli-host",
+            )
+            context.output_func(
+                context.terminal.warning(
+                    f"skill proposal {proposal.id} is {proposal.status.value}"
+                )
+            )
+            return
+        if action == "reject" and remainder:
+            proposal = proposals.reject(
+                remainder,
+                rejected_by="cli-host",
+            )
+            context.output_func(
+                context.terminal.warning(
+                    f"skill proposal {proposal.id} is {proposal.status.value}"
+                )
+            )
+            return
+        if action == "rollback" and remainder:
+            revision_id, _, scope = remainder.partition(" ")
+            selected_scope = scope.strip() or "project"
+            if selected_scope not in {"project", "profile"}:
+                raise ValueError("scope must be project or profile")
+            record = lifecycle.rollback(
+                revision_id,
+                scope=cast(SkillScope, selected_scope),
+                approved_by="cli-host",
+            )
+            context.output_func(
+                context.terminal.warning(
+                    f"restored {record.scope}:{record.name} {record.version}"
+                )
+            )
+            return
+        raise ValueError(
+            "usage: /skills list|pending|diff <id>|approve <id>|"
+            "reject <id>|history <name> [scope]|"
+            "rollback <revision> [project|profile]"
+        )
+    except (KeyError, OSError, RuntimeError, ValueError) as exc:
+        context.output_func(context.terminal.warning(str(exc)))
+
+
 def _clear(_arguments: str, context: CLICommandContext) -> None:
     context.output_func(context.terminal.clear())
 
@@ -248,6 +437,20 @@ CLI_COMMANDS: tuple[CLICommand, ...] = (
     CLICommand("/tools", "/tools", "list registered tools", "Inspect", _tools),
     CLICommand("/mcp", "/mcp", "show configured MCP servers", "Inspect", _mcp),
     CLICommand("/trace", "/trace", "show the current trace file", "Inspect", _trace),
+    CLICommand(
+        "/learning",
+        "/learning review [turn]|pending|approve <id>|reject <id>",
+        "review durable learning proposals",
+        "Learning",
+        _learning,
+    ),
+    CLICommand(
+        "/skills",
+        "/skills list|pending|diff|approve|reject|history|rollback",
+        "inspect and manage governed skills",
+        "Learning",
+        _skills,
+    ),
     CLICommand(
         "/model", "/model [profile]", "show or switch model profile", "Run", _model
     ),

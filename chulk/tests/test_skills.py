@@ -117,6 +117,20 @@ def test_skill_registry_loads_multiple_directories_with_project_override(tmp_pat
     assert registry.load_content("files").startswith("# Files Skill\n\nProject-specific")
 
 
+def test_bundled_skills_keep_a_distinct_origin():
+    registry = SkillRegistry(
+        bundled_skills_dir(),
+        skills_dirs=(bundled_skills_dir(),),
+    )
+    registry.load_metadata()
+
+    skill = registry.get_skill("files")
+    assert skill is not None
+    assert skill.manifest is not None
+    assert skill.manifest.source == "bundled"
+    assert skill.manifest.trust == "bundled"
+
+
 def test_skill_registry_missing_skill_file_raises(tmp_path):
     missing_path = tmp_path / "missing" / "SKILL.md"
     registry = SkillRegistry(tmp_path / "skills")

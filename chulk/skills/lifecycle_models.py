@@ -117,6 +117,21 @@ class SkillRevisionRecord:
     created_at: str
     proposal_id: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "profile_id": self.profile_id,
+            "scope": self.scope,
+            "name": self.name,
+            "version": self.version,
+            "digest": self.digest,
+            "source": self.source,
+            "trust": self.trust,
+            "manifest": dict(self.manifest),
+            "created_at": self.created_at,
+            "proposal_id": self.proposal_id,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class SkillLifecycleRecord:

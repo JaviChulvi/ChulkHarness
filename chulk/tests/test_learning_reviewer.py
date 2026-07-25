@@ -361,6 +361,68 @@ def test_daily_proposal_quota_is_reserved_before_another_model_call(tmp_path):
     assert len(client.call_log) == 1
 
 
+def test_automatic_review_is_separate_opt_in_and_keeps_external_pending(
+    tmp_path,
+):
+    memory, store, _lifecycle, proposals, _skills = services(
+        tmp_path / "safe",
+        automatic_approval_enabled=True,
+    )
+    safe_response = {
+        "decision": "propose",
+        "rationale": "Explicit preference.",
+        "proposals": [
+            {
+                "kind": "memory_create",
+                "rationale": "Safe durable preference.",
+                "content": "User prefers concise answers.",
+                "confidence": 1.0,
+                "verification_steps": [],
+            }
+        ],
+    }
+    coordinator = LearningReviewCoordinator(
+        reviewer=RestrictedLearningReviewer(
+            ScriptedLLMClient([safe_response])
+        ),
+        proposal_service=proposals,
+        lifecycle_store=store,
+        automatic_approval=True,
+    )
+
+    safe = coordinator.review(context())
+
+    assert proposals.get(safe.proposal_ids[0]).status is LearningProposalStatus.APPROVED
+    assert len(memory.list_memories()) == 1
+
+    memory, store, _lifecycle, proposals, _skills = services(
+        tmp_path / "external",
+        automatic_approval_enabled=True,
+    )
+    external_response = {
+        **safe_response,
+        "proposals": [
+            {
+                **safe_response["proposals"][0],
+                "metadata": {"external_source": True},
+            }
+        ],
+    }
+    coordinator = LearningReviewCoordinator(
+        reviewer=RestrictedLearningReviewer(
+            ScriptedLLMClient([external_response])
+        ),
+        proposal_service=proposals,
+        lifecycle_store=store,
+        automatic_approval=True,
+    )
+
+    external = coordinator.review(context())
+
+    assert proposals.get(external.proposal_ids[0]).status is LearningProposalStatus.PENDING
+    assert memory.list_memories() == []
+
+
 def test_invalid_reviewer_output_is_failed_without_a_proposal(tmp_path):
     _memory, store, _lifecycle, proposals, _skills = services(tmp_path)
     client = ScriptedLLMClient(["not-json"])

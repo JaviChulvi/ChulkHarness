@@ -11,6 +11,7 @@ from chulk.events import (
     AgentEvent,
     BudgetPayload,
     EventName,
+    LearningProposalChangedPayload,
     ModelDeltaPayload,
     ModelRequestPayload,
     ModelResponsePayload,
@@ -103,6 +104,37 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 content=payload.get("content") if isinstance(payload.get("content"), str) else None,
                 usage=usage_snapshot(payload.get("usage")),
                 cost=cost_snapshot(payload.get("cost")),
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+        )
+    if event_type == TraceEvent.LEARNING_PROPOSAL_CHANGED:
+        return _event(
+            EventName.LEARNING_PROPOSAL_CHANGED,
+            conversation_id,
+            turn_id,
+            LearningProposalChangedPayload(
+                proposal_id=str(payload.get("proposal_id") or ""),
+                kind=str(payload.get("kind") or "unknown"),
+                status=str(payload.get("status") or "unknown"),
+                action=str(payload.get("action") or "changed"),
+                target_name=(
+                    payload.get("target_name")
+                    if isinstance(payload.get("target_name"), str)
+                    else None
+                ),
+                extensions={
+                    key: value
+                    for key, value in payload.items()
+                    if key
+                    not in {
+                        "proposal_id",
+                        "kind",
+                        "status",
+                        "action",
+                        "target_name",
+                    }
+                },
             ),
             extensions,
             profile_id=runtime.profile_id,

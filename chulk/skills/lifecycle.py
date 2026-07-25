@@ -86,27 +86,90 @@ class SkillLifecycleManager:
         """Snapshot all validated packages currently owned by one scope."""
         root = self._skills_dir(scope)
         if not root.exists():
+            self._verify_scope_inventory(scope=scope, found_names=set())
             return ()
+        owned_root = root.resolve(strict=True)
+        lock = self._lock(scope)
+        initial_lock_entries = lock.read()
+        found_names: set[str] = set()
         records: list[SkillLifecycleRecord] = []
         for path in sorted(root.glob("*/SKILL.md")):
+            if path.is_symlink() or path.parent.is_symlink():
+                raise SkillApprovalError(
+                    f"skill package cannot be a symlink: {path.parent}"
+                )
+            try:
+                path.resolve(strict=True).relative_to(owned_root)
+            except ValueError as exc:
+                raise SkillApprovalError(
+                    f"skill package escapes its owned directory: {path}"
+                ) from exc
             package = load_skill_package(path)
+            if package.root.name != package.manifest.name:
+                raise SkillApprovalError(
+                    "skill manifest name must match its package directory"
+                )
+            _ensure_package_content_safe(package)
+            found_names.add(package.manifest.name)
+            lock_entry = initial_lock_entries.get(package.manifest.name)
             try:
                 current = self.store.get_skill(
                     package.manifest.name,
                     scope=scope,
                 )
-                status = current.status
             except KeyError:
-                status = SkillLifecycleStatus.ACTIVE
-            revision = self.store.save_revision(
-                manifest=package.manifest,
-                digest=package.digest,
-                package_files=_snapshot_package(package.root),
-                scope=scope,
-                status=status,
-            )
-            record = self.store.get_skill(package.manifest.name, scope=scope)
-            self._lock(scope).update(
+                if lock_entry is not None or self._has_pending_change(
+                    package.manifest.name,
+                    scope=scope,
+                ):
+                    raise SkillConflictError(
+                        f"uncommitted lifecycle state for skill "
+                        f"{package.manifest.name!r}"
+                    )
+                revision = self.store.save_revision(
+                    manifest=package.manifest,
+                    digest=package.digest,
+                    package_files=_snapshot_package(package.root),
+                    scope=scope,
+                    status=SkillLifecycleStatus.ACTIVE,
+                )
+                record = self.store.get_skill(
+                    package.manifest.name,
+                    scope=scope,
+                )
+            else:
+                if lock_entry is None:
+                    raise SkillConflictError(
+                        f"skill lock for {package.manifest.name!r} is missing"
+                    )
+                if current.status in {
+                    SkillLifecycleStatus.ARCHIVED,
+                    SkillLifecycleStatus.STALE,
+                }:
+                    raise SkillConflictError(
+                        f"governed skill {package.manifest.name!r} "
+                        f"is {current.status.value}"
+                    )
+                if current.digest != package.digest:
+                    raise SkillConflictError(
+                        f"governed skill {package.manifest.name!r} changed "
+                        "outside the approval lifecycle"
+                    )
+                revision = self.store.get_revision(
+                    current.active_revision_id
+                )
+                record = current
+                if not _lock_entry_matches(
+                    lock_entry,
+                    package=package,
+                    revision_id=current.active_revision_id,
+                    status=current.status,
+                ):
+                    raise SkillConflictError(
+                        f"skill lock for {package.manifest.name!r} "
+                        "does not match governed state"
+                    )
+            lock.update(
                 SkillLockEntry.from_package(
                     package,
                     revision_id=revision.id,
@@ -115,7 +178,63 @@ class SkillLifecycleManager:
                 )
             )
             records.append(record)
+        self._verify_scope_inventory(scope=scope, found_names=found_names)
         return tuple(records)
+
+    def _has_pending_change(
+        self,
+        name: str,
+        *,
+        scope: SkillScope,
+    ) -> bool:
+        return any(
+            proposal.target_name == name
+            and proposal.kind.value.startswith("skill_")
+            and str(proposal.metadata.get("scope", "project")) == scope
+            for proposal in self.store.list_proposals(limit=1_000)
+        )
+
+    def _verify_scope_inventory(
+        self,
+        *,
+        scope: SkillScope,
+        found_names: set[str],
+    ) -> None:
+        lock_entries = self._lock(scope).read()
+        records = {
+            record.name: record
+            for record in self.store.list_skills(scope=scope)
+        }
+        for name in sorted(set(lock_entries) | set(records)):
+            entry = lock_entries.get(name)
+            record = records.get(name)
+            if entry is None:
+                raise SkillConflictError(
+                    f"skill lock for governed skill {name!r} is missing"
+                )
+            if record is None:
+                raise SkillConflictError(
+                    f"skill lock for {name!r} has no governed state"
+                )
+            if (
+                entry.version != record.version
+                or entry.digest != record.digest
+                or entry.source != record.source
+                or entry.trust != record.trust
+                or entry.revision_id != record.active_revision_id
+                or entry.status is not record.status
+            ):
+                raise SkillConflictError(
+                    f"skill lock for {name!r} does not match governed state"
+                )
+            may_be_absent = record.status in {
+                SkillLifecycleStatus.ARCHIVED,
+                SkillLifecycleStatus.STALE,
+            }
+            if name not in found_names and not may_be_absent:
+                raise SkillConflictError(
+                    f"governed skill package {name!r} is missing"
+                )
 
     def approve(
         self,
@@ -217,7 +336,30 @@ class SkillLifecycleManager:
             lock = self._lock(scope)
             root = self._skills_dir(scope)
             for name, entry in lock.read().items():
+                try:
+                    record = self.store.get_skill(name, scope=scope)
+                except KeyError:
+                    failures.append(f"{scope}:{name}:missing_governed_state")
+                    continue
+                if record.digest != entry.digest:
+                    failures.append(f"{scope}:{name}:database_digest_mismatch")
+                    continue
+                if record.active_revision_id != entry.revision_id:
+                    failures.append(f"{scope}:{name}:revision_mismatch")
+                    continue
+                if record.status is not entry.status:
+                    failures.append(f"{scope}:{name}:status_mismatch")
+                    continue
                 target = root / name / "SKILL.md"
+                if (
+                    record.status
+                    in {
+                        SkillLifecycleStatus.ARCHIVED,
+                        SkillLifecycleStatus.STALE,
+                    }
+                    and not target.exists()
+                ):
+                    continue
                 try:
                     package = load_skill_package(
                         target,
@@ -228,6 +370,14 @@ class SkillLifecycleManager:
                     continue
                 if package.manifest.version != entry.version:
                     failures.append(f"{scope}:{name}:version_mismatch")
+                    continue
+                if not _lock_entry_matches(
+                    entry,
+                    package=package,
+                    revision_id=record.active_revision_id,
+                    status=record.status,
+                ):
+                    failures.append(f"{scope}:{name}:lock_metadata_mismatch")
         return tuple(sorted(failures))
 
     def _approve_content_change(
@@ -427,6 +577,28 @@ def proposal_diff(
             fromfile=f"{name}/SKILL.md:before",
             tofile=f"{name}/SKILL.md:after",
         )
+    )
+
+
+def _lock_entry_matches(
+    entry: SkillLockEntry,
+    *,
+    package: SkillPackage,
+    revision_id: str,
+    status: SkillLifecycleStatus,
+) -> bool:
+    manifest = package.manifest
+    return (
+        entry.name == manifest.name
+        and entry.version == manifest.version
+        and entry.digest == package.digest
+        and entry.source == manifest.source
+        and entry.trust == manifest.trust
+        and entry.status is status
+        and entry.revision_id == revision_id
+        and entry.required_tools == manifest.required_tools
+        and entry.required_capabilities == manifest.required_capabilities
+        and entry.review_state == "approved"
     )
 
 

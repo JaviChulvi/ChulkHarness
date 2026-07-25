@@ -497,6 +497,16 @@ class SQLiteSkillLifecycleStore:
                 or proposal.target_name != name
             ):
                 raise ValueError("proposal does not authorize this skill archive")
+            current = conn.execute(
+                """
+                SELECT active_revision_id
+                FROM skill_packages
+                WHERE profile_id = ? AND scope = ? AND name = ?
+                """,
+                (self.profile_id, _scope(scope), name),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"governed skill {name!r} does not exist")
             cursor = conn.execute(
                 """
                 UPDATE skill_packages
@@ -511,7 +521,7 @@ class SQLiteSkillLifecycleStore:
                 """
                 UPDATE learning_proposals
                 SET status = 'approved', reviewed_at = ?, reviewed_by = ?,
-                    error = NULL
+                    applied_revision_id = ?, error = NULL
                 WHERE id = ? AND profile_id = ? AND status = 'pending'
                 """,
                 (
@@ -521,6 +531,7 @@ class SQLiteSkillLifecycleStore:
                         "reviewed_by",
                         max_chars=256,
                     ),
+                    str(current["active_revision_id"]),
                     proposal_id,
                     self.profile_id,
                 ),
@@ -688,9 +699,24 @@ class SQLiteSkillLifecycleStore:
             if current is None:
                 raise KeyError(f"governed skill {name!r} does not exist")
             if current["version"] != version or current["digest"] != digest:
-                raise ValueError(
-                    "skill usage must identify the current version and digest"
-                )
+                revision = conn.execute(
+                    """
+                    SELECT 1 FROM skill_package_revisions
+                    WHERE profile_id = ? AND scope = ? AND name = ?
+                        AND version = ? AND digest = ?
+                    """,
+                    (
+                        self.profile_id,
+                        _scope(scope),
+                        name,
+                        version,
+                        digest,
+                    ),
+                ).fetchone()
+                if revision is None:
+                    raise ValueError(
+                        "skill usage must identify a governed revision"
+                    )
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO skill_usage_events (
@@ -901,7 +927,18 @@ def _save_revision_in_connection(
             status = excluded.status,
             active_revision_id = excluded.active_revision_id,
             patch_count = skill_packages.patch_count + ?,
-            updated_at = excluded.updated_at
+            updated_at = CASE
+                WHEN skill_packages.version = excluded.version
+                    AND skill_packages.digest = excluded.digest
+                    AND skill_packages.source = excluded.source
+                    AND skill_packages.trust = excluded.trust
+                    AND skill_packages.status = excluded.status
+                    AND skill_packages.active_revision_id
+                        = excluded.active_revision_id
+                    AND ? = 0
+                THEN skill_packages.updated_at
+                ELSE excluded.updated_at
+            END
         """,
         (
             profile_id,
@@ -916,6 +953,7 @@ def _save_revision_in_connection(
             int(increment_patch),
             now,
             now,
+            int(increment_patch),
             int(increment_patch),
         ),
     )

@@ -7,7 +7,8 @@ from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
 from contextlib import suppress
 from pathlib import Path
 import threading
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TypeVar, cast
+from uuid import uuid4
 
 from chulk.capabilities import Capabilities, MemoryMode
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config, ensure_chat_kwargs
@@ -17,6 +18,9 @@ from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher, fai
 from chulk._sdk.results import (
     PlanResult,
     RunResult,
+    governed_skill_snapshot,
+    governed_skill_revision_snapshot,
+    learning_proposal_snapshot,
     memory_proposal_snapshot,
     plan_result_from_runtime,
     run_result_from_runtime,
@@ -28,7 +32,21 @@ from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.mcp import MCPServerConfig
-from chulk.results import MemoryProposal, RunStatus
+from chulk.results import (
+    GovernedSkill,
+    GovernedSkillRevision,
+    LearningProposal,
+    LearningReview,
+    MemoryProposal,
+    RunStatus,
+)
+from chulk.skills import (
+    LearningProposalStatus,
+    LearningReviewPolicy,
+    LearningReviewQuota,
+    SkillScope,
+    SkillUsageKind,
+)
 from chulk.runtime import create_agent as create_runtime_agent
 from chulk.sessions import (
     SessionSearchPage,
@@ -489,6 +507,9 @@ class Agent:
         execution_backend: ExecutionBackend | None = None,
         run_budget: RunBudget | None = None,
         usage_dimensions: UsageDimensions | None = None,
+        learning_review_policy: LearningReviewPolicy | None = None,
+        learning_review_quota: LearningReviewQuota | None = None,
+        automatic_learning_approval: bool = False,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -514,6 +535,9 @@ class Agent:
                 execution_backend=execution_backend,
                 run_budget=run_budget,
                 usage_dimensions=usage_dimensions,
+                learning_review_policy=learning_review_policy,
+                learning_review_quota=learning_review_quota,
+                automatic_learning_approval=automatic_learning_approval,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -597,6 +621,196 @@ class Agent:
             return tuple(memory_proposal_snapshot(item) for item in policy.list_pending())
 
         return self._invoke("list_memory_proposals", operation)
+
+    def list_learning_proposals(
+        self,
+        *,
+        status: str | None = "pending",
+        limit: int = 100,
+    ) -> tuple[LearningProposal, ...]:
+        """Return the unified memory and skill review queue."""
+        def operation() -> tuple[LearningProposal, ...]:
+            service = self.runtime.learning_proposals
+            if service is None:
+                return ()
+            normalized = (
+                None if status is None else LearningProposalStatus(status)
+            )
+            return tuple(
+                learning_proposal_snapshot(item)
+                for item in service.list(status=normalized, limit=limit)
+            )
+
+        return self._invoke("list_learning_proposals", operation)
+
+    def get_learning_proposal(
+        self,
+        proposal_id: str,
+    ) -> LearningProposal:
+        """Return one proposal from the unified review queue."""
+        def operation() -> LearningProposal:
+            service = self.runtime.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            return learning_proposal_snapshot(service.get(proposal_id))
+
+        return self._invoke("get_learning_proposal", operation)
+
+    def approve_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        approved_by: str = "sdk-host",
+    ) -> LearningProposal:
+        """Apply one explicitly approved learning proposal."""
+        def operation() -> LearningProposal:
+            service = self.runtime.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            return learning_proposal_snapshot(
+                service.approve(
+                    proposal_id,
+                    approved_by=approved_by,
+                )
+            )
+
+        return self._invoke("approve_learning_proposal", operation)
+
+    def review_learning(
+        self,
+        *,
+        trigger: str = "manual",
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReview:
+        """Run the restricted reviewer against one finished turn."""
+        def operation() -> LearningReview:
+            outcome = self.runtime.review_learning(
+                trigger=trigger,
+                turn_id=turn_id,
+                host_confirmed_success=host_confirmed_success,
+            )
+            service = self.runtime.learning_proposals
+            assert service is not None
+            return LearningReview(
+                skipped=outcome.skipped,
+                rationale=outcome.rationale,
+                proposals=tuple(
+                    learning_proposal_snapshot(service.get(proposal_id))
+                    for proposal_id in outcome.proposal_ids
+                ),
+                review_run_id=outcome.review_run_id,
+            )
+
+        return self._invoke("review_learning", operation, serialized=True)
+
+    def reject_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        rejected_by: str = "sdk-host",
+    ) -> LearningProposal:
+        """Reject one learning proposal without applying it."""
+        def operation() -> LearningProposal:
+            service = self.runtime.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            return learning_proposal_snapshot(
+                service.reject(
+                    proposal_id,
+                    rejected_by=rejected_by,
+                )
+            )
+
+        return self._invoke("reject_learning_proposal", operation)
+
+    def list_governed_skills(
+        self,
+        *,
+        scope: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        """List governed skills and record an explicit host view."""
+        def operation() -> tuple[GovernedSkill, ...]:
+            store = self.runtime.skill_lifecycle_store
+            if store is None:
+                return ()
+            event_id = f"sdk-view:{uuid4()}"
+            records = store.list_skills(scope=scope)
+            viewed = tuple(
+                store.record_usage(
+                    name=record.name,
+                    scope=record.scope,
+                    version=record.version,
+                    digest=record.digest,
+                    kind=SkillUsageKind.VIEW,
+                    source_event_id=event_id,
+                )
+                for record in records
+            )
+            return tuple(governed_skill_snapshot(item) for item in viewed)
+
+        return self._invoke("list_governed_skills", operation)
+
+    def rollback_skill(
+        self,
+        revision_id: str,
+        *,
+        scope: str = "project",
+        approved_by: str = "sdk-host",
+    ) -> GovernedSkill:
+        """Restore one immutable skill revision through the host boundary."""
+        def operation() -> GovernedSkill:
+            lifecycle = self.runtime.skill_lifecycle
+            if lifecycle is None:
+                raise RuntimeError("skill lifecycle is not configured")
+            if scope not in {"project", "profile"}:
+                raise ValueError("scope must be project or profile")
+            return governed_skill_snapshot(
+                lifecycle.rollback(
+                    revision_id,
+                    scope=cast(SkillScope, scope),
+                    approved_by=approved_by,
+                )
+            )
+
+        return self._invoke("rollback_skill", operation)
+
+    def list_skill_revisions(
+        self,
+        name: str,
+        *,
+        scope: str = "project",
+        limit: int = 100,
+    ) -> tuple[GovernedSkillRevision, ...]:
+        """List immutable revision identities available for rollback."""
+        def operation() -> tuple[GovernedSkillRevision, ...]:
+            store = self.runtime.skill_lifecycle_store
+            if store is None:
+                return ()
+            return tuple(
+                governed_skill_revision_snapshot(item)
+                for item in store.list_revisions(
+                    name,
+                    scope=scope,
+                    limit=limit,
+                )
+            )
+
+        return self._invoke("list_skill_revisions", operation)
+
+    def confirm_skill_success(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        """Record host-confirmed success for skills used by a completed run."""
+        return self._invoke(
+            "confirm_skill_success",
+            lambda: tuple(
+                governed_skill_snapshot(item)
+                for item in self.runtime.confirm_skill_success(turn_id=turn_id)
+            ),
+        )
 
     @property
     def usage_ledger(self) -> UsageLedger:
@@ -869,6 +1083,113 @@ class AsyncAgent:
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
 
+    async def list_learning_proposals(
+        self,
+        *,
+        status: str | None = "pending",
+        limit: int = 100,
+    ) -> tuple[LearningProposal, ...]:
+        return await asyncio.to_thread(
+            self._agent.list_learning_proposals,
+            status=status,
+            limit=limit,
+        )
+
+    async def get_learning_proposal(
+        self,
+        proposal_id: str,
+    ) -> LearningProposal:
+        return await asyncio.to_thread(
+            self._agent.get_learning_proposal,
+            proposal_id,
+        )
+
+    async def approve_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        approved_by: str = "sdk-host",
+    ) -> LearningProposal:
+        return await asyncio.to_thread(
+            self._agent.approve_learning_proposal,
+            proposal_id,
+            approved_by=approved_by,
+        )
+
+    async def review_learning(
+        self,
+        *,
+        trigger: str = "manual",
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReview:
+        return await asyncio.to_thread(
+            self._agent.review_learning,
+            trigger=trigger,
+            turn_id=turn_id,
+            host_confirmed_success=host_confirmed_success,
+        )
+
+    async def reject_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        rejected_by: str = "sdk-host",
+    ) -> LearningProposal:
+        return await asyncio.to_thread(
+            self._agent.reject_learning_proposal,
+            proposal_id,
+            rejected_by=rejected_by,
+        )
+
+    async def list_governed_skills(
+        self,
+        *,
+        scope: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        return await asyncio.to_thread(
+            self._agent.list_governed_skills,
+            scope=scope,
+        )
+
+    async def rollback_skill(
+        self,
+        revision_id: str,
+        *,
+        scope: str = "project",
+        approved_by: str = "sdk-host",
+    ) -> GovernedSkill:
+        return await asyncio.to_thread(
+            self._agent.rollback_skill,
+            revision_id,
+            scope=scope,
+            approved_by=approved_by,
+        )
+
+    async def list_skill_revisions(
+        self,
+        name: str,
+        *,
+        scope: str = "project",
+        limit: int = 100,
+    ) -> tuple[GovernedSkillRevision, ...]:
+        return await asyncio.to_thread(
+            self._agent.list_skill_revisions,
+            name,
+            scope=scope,
+            limit=limit,
+        )
+
+    async def confirm_skill_success(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        return await asyncio.to_thread(
+            self._agent.confirm_skill_success,
+            turn_id=turn_id,
+        )
+
     @property
     def usage_ledger(self) -> UsageLedger:
         return self._agent.usage_ledger
@@ -1066,6 +1387,9 @@ def _build_handle(
     execution_backend: ExecutionBackend | None = None,
     run_budget: RunBudget | None = None,
     usage_dimensions: UsageDimensions | None = None,
+    learning_review_policy: LearningReviewPolicy | None = None,
+    learning_review_quota: LearningReviewQuota | None = None,
+    automatic_learning_approval: bool = False,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -1091,6 +1415,9 @@ def _build_handle(
         execution_backend=execution_backend,
         run_budget=run_budget,
         usage_dimensions=usage_dimensions,
+        learning_review_policy=learning_review_policy,
+        learning_review_quota=learning_review_quota,
+        automatic_learning_approval=automatic_learning_approval,
     )
     return AgentHandle(runtime, on_event=on_event)
 

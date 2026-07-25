@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+from collections.abc import Callable
 from typing import Any
 
 from chulk.memory.models import MemoryProposalRecord
@@ -53,19 +54,17 @@ class LearningProposalService:
         lifecycle_store: SQLiteSkillLifecycleStore,
         lifecycle_manager: SkillLifecycleManager,
         automatic_approval_enabled: bool = False,
+        event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.memory_store = memory_store
         self.lifecycle_store = lifecycle_store
         self.lifecycle_manager = lifecycle_manager
         self.automatic_approval_enabled = automatic_approval_enabled
+        self.event_callback = event_callback
         if memory_store.db_path.resolve() != lifecycle_store.db_path.resolve():
             raise ValueError(
                 "unified proposals require memory and lifecycle state "
                 "in the same SQLite database"
-            )
-        if memory_store.namespace != lifecycle_store.profile_id:
-            raise ValueError(
-                "memory namespace and lifecycle profile must match"
             )
 
     def create(
@@ -103,7 +102,7 @@ class LearningProposalService:
         """Persist a validated reviewer batch in one transaction."""
         for draft in drafts:
             _ensure_draft_safe(draft)
-        return self.lifecycle_store.create_proposals(
+        records = self.lifecycle_store.create_proposals(
             tuple(
                 {
                     "kind": draft.kind,
@@ -129,6 +128,9 @@ class LearningProposalService:
             review_token_count=review_token_count,
             review_cost_amount=review_cost_amount,
         )
+        for record in records:
+            self._emit(record, action="created")
+        return records
 
     def list(
         self,
@@ -182,9 +184,11 @@ class LearningProposalService:
                     _legacy_record(legacy),
                     granted_capabilities=granted_capabilities,
                 )
-            return _legacy_record(
+            approved = _legacy_record(
                 self.memory_store.approve_memory_proposal(proposal_id)
             )
+            self._emit(approved, action="approved")
+            return approved
 
         proposal = self.lifecycle_store.get_proposal(proposal_id)
         if proposal.status is not LearningProposalStatus.PENDING:
@@ -195,11 +199,17 @@ class LearningProposalService:
                 granted_capabilities=granted_capabilities,
             )
         if proposal.kind.value.startswith("skill_"):
-            return self.lifecycle_manager.approve(
+            approved = self.lifecycle_manager.approve(
                 proposal_id,
                 approved_by=approved_by,
             )
-        return self._approve_memory(proposal, approved_by=approved_by)
+        else:
+            approved = self._approve_memory(
+                proposal,
+                approved_by=approved_by,
+            )
+        self._emit(approved, action="approved")
+        return approved
 
     def reject(
         self,
@@ -211,19 +221,46 @@ class LearningProposalService:
             raise ValueError("rejected_by cannot be empty")
         legacy = self.memory_store.get_memory_proposal(proposal_id)
         if legacy is not None:
-            return _legacy_record(
+            rejected = _legacy_record(
                 self.memory_store.reject_memory_proposal(proposal_id)
             )
+            self._emit(rejected, action="rejected")
+            return rejected
         proposal = self.lifecycle_store.get_proposal(proposal_id)
         if proposal.kind.value.startswith("skill_"):
-            return self.lifecycle_manager.reject(
+            rejected = self.lifecycle_manager.reject(
                 proposal_id,
                 rejected_by=rejected_by,
             )
-        return self.lifecycle_store.transition_proposal(
-            proposal_id,
-            status=LearningProposalStatus.REJECTED,
-            reviewed_by=rejected_by,
+        else:
+            rejected = self.lifecycle_store.transition_proposal(
+                proposal_id,
+                status=LearningProposalStatus.REJECTED,
+                reviewed_by=rejected_by,
+            )
+        self._emit(rejected, action="rejected")
+        return rejected
+
+    def _emit(
+        self,
+        proposal: LearningProposalRecord,
+        *,
+        action: str,
+    ) -> None:
+        if self.event_callback is None:
+            return
+        self.event_callback(
+            "learning_proposal_changed",
+            {
+                "proposal_id": proposal.id,
+                "kind": proposal.kind.value,
+                "status": proposal.status.value,
+                "action": action,
+                "target_name": proposal.target_name,
+                "reviewed_by": proposal.reviewed_by,
+                "accepted_memory_id": proposal.accepted_memory_id,
+                "applied_revision_id": proposal.applied_revision_id,
+            },
         )
 
     def _approve_memory(
@@ -244,7 +281,8 @@ class LearningProposalService:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT kind, target_name, content, metadata_json, status
+                SELECT kind, target_name, content, metadata_json, confidence,
+                    status
                 FROM learning_proposals
                 WHERE id = ? AND profile_id = ?
                 """,
@@ -261,6 +299,7 @@ class LearningProposalService:
                 or row["target_name"] != proposal.target_name
                 or row["content"] != proposal.content
                 or json.loads(str(row["metadata_json"])) != proposal.metadata
+                or float(row["confidence"]) != proposal.confidence
             ):
                 raise RuntimeError(
                     "learning proposal changed before approval"

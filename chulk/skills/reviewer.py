@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from chulk.skills.lifecycle_models import LearningProposalKind
 from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
 from chulk.skills.proposals import (
+    AutomaticLearningBlocked,
     LearningProposalDraft,
     LearningProposalService,
 )
@@ -20,20 +21,13 @@ if TYPE_CHECKING:
     from chulk.llm.usage import LLMCost, LLMUsage
 
 
-class ReviewerResponse(Protocol):
-    content: str
-    usage: LLMUsage | None
-    cost: LLMCost | None
-    model: str | None
-
-
 class ReviewerLLM(Protocol):
     def complete_response(
         self,
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
-    ) -> ReviewerResponse: ...
+    ) -> Any: ...
 
 
 class LearningReviewError(RuntimeError):
@@ -193,12 +187,16 @@ class LearningReviewCoordinator:
         lifecycle_store: SQLiteSkillLifecycleStore,
         policy: LearningReviewPolicy | None = None,
         quota: LearningReviewQuota | None = None,
+        automatic_approval: bool = False,
+        granted_capabilities: tuple[str, ...] = (),
     ) -> None:
         self.reviewer = reviewer
         self.proposal_service = proposal_service
         self.lifecycle_store = lifecycle_store
         self.policy = policy or LearningReviewPolicy()
         self.quota = quota or LearningReviewQuota()
+        self.automatic_approval = automatic_approval
+        self.granted_capabilities = tuple(granted_capabilities)
 
     def review(self, context: LearningReviewContext) -> LearningReviewOutcome:
         if not self.policy.should_review(context):
@@ -308,6 +306,17 @@ class LearningReviewCoordinator:
                 review_cost_amount=actual_cost,
             )
             proposal_ids = tuple(record.id for record in records)
+            if self.automatic_approval:
+                for record in records:
+                    try:
+                        self.proposal_service.approve(
+                            record.id,
+                            approved_by="automatic-learning-review",
+                            automatic=True,
+                            granted_capabilities=self.granted_capabilities,
+                        )
+                    except AutomaticLearningBlocked:
+                        continue
             return LearningReviewOutcome(
                 skipped=False,
                 rationale=result.rationale,

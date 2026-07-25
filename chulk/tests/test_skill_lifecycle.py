@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import shutil
+import sqlite3
 import stat
 
 import pytest
@@ -12,6 +15,7 @@ from chulk.skills import (
     LearningProposalKind,
     LearningProposalStatus,
     SQLiteSkillLifecycleStore,
+    SkillApprovalError,
     SkillConflictError,
     SkillLifecycleManager,
     SkillLifecycleStatus,
@@ -117,6 +121,19 @@ def test_project_and_profile_can_govern_the_same_skill_name(tmp_path):
     assert store.get_skill("review", scope="profile") == profile_record
     assert lifecycle.project_lock.get("review").version == "1.0.0"
     assert lifecycle.profile_lock.get("review").version == "2.0.0"
+
+
+def test_registering_unchanged_skills_keeps_lock_content_stable(tmp_path):
+    store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    write_skill(project_skills, skill_content())
+
+    first = lifecycle.register_existing(scope="project")[0]
+    first_lock = lifecycle.project_lock.path.read_bytes()
+    second = lifecycle.register_existing(scope="project")[0]
+
+    assert second.updated_at == first.updated_at
+    assert lifecycle.project_lock.path.read_bytes() == first_lock
+    assert len(store.list_revisions("review")) == 1
 
 
 def test_host_approval_creates_validated_skill_and_updates_lock(tmp_path):
@@ -256,11 +273,13 @@ def test_archive_and_rollback_restore_exact_package_snapshot(tmp_path):
     approved = lifecycle.approve(proposal.id, approved_by="operator")
 
     assert approved.status is LearningProposalStatus.APPROVED
+    assert approved.applied_revision_id == current.active_revision_id
     assert not path.parent.exists()
     assert (
         lifecycle.project_lock.get("review").status
         is SkillLifecycleStatus.ARCHIVED
     )
+    assert lifecycle.verify_locks() == ()
     restored = lifecycle.rollback(
         current.active_revision_id,
         scope="project",
@@ -323,3 +342,161 @@ def test_lock_rejects_symlink_target(tmp_path):
 
     with pytest.raises(ValueError, match="regular file"):
         lock.read()
+
+
+def test_registration_rejects_symlinked_skill_package(tmp_path):
+    _store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    outside = tmp_path / "outside"
+    write_skill(outside, skill_content())
+    project_skills.mkdir(parents=True)
+    try:
+        (project_skills / "review").symlink_to(
+            outside / "review",
+            target_is_directory=True,
+        )
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(SkillApprovalError, match="cannot be a symlink"):
+        lifecycle.register_existing(scope="project")
+
+
+def test_registration_rejects_unreviewed_package_change(tmp_path):
+    store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    path = write_skill(project_skills, skill_content())
+    original = lifecycle.register_existing(scope="project")[0]
+    path.write_text(skill_content(version="1.0.1"), encoding="utf-8")
+
+    with pytest.raises(SkillConflictError, match="outside the approval"):
+        lifecycle.register_existing(scope="project")
+
+    assert store.get_skill("review").digest == original.digest
+    assert lifecycle.project_lock.get("review").digest == original.digest
+
+
+def test_registration_rejects_partial_pending_create(tmp_path):
+    store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    content = skill_content()
+    store.create_proposal(
+        kind="skill_create",
+        target_name="review",
+        rationale="Pending host review.",
+        content=content,
+        metadata={"scope": "project"},
+    )
+    write_skill(project_skills, content)
+
+    with pytest.raises(SkillConflictError, match="uncommitted lifecycle state"):
+        lifecycle.register_existing(scope="project")
+
+    with pytest.raises(KeyError):
+        store.get_skill("review")
+    assert lifecycle.project_lock.get("review") is None
+
+
+def test_registration_rejects_missing_active_package(tmp_path):
+    _store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    path = write_skill(project_skills, skill_content())
+    lifecycle.register_existing(scope="project")
+    shutil.rmtree(path.parent)
+
+    with pytest.raises(SkillConflictError, match="package 'review' is missing"):
+        lifecycle.register_existing(scope="project")
+
+
+def test_registration_rejects_package_directory_name_mismatch(tmp_path):
+    _store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    write_skill(project_skills, skill_content(name="review"), name="other")
+
+    with pytest.raises(SkillApprovalError, match="package directory"):
+        lifecycle.register_existing(scope="project")
+
+
+def test_registration_rejects_reappearing_archived_package(tmp_path):
+    store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    content = skill_content()
+    path = write_skill(project_skills, content)
+    lifecycle.register_existing(scope="project")
+    current = store.get_skill("review")
+    proposal = store.create_proposal(
+        kind="skill_archive",
+        target_name="review",
+        rationale="No longer needed.",
+        diff=proposal_diff(before=content, after=None, name="review"),
+        metadata={"scope": "project", "base_digest": current.digest},
+    )
+    lifecycle.approve(proposal.id, approved_by="operator")
+    write_skill(project_skills, content)
+
+    with pytest.raises(SkillConflictError, match="is archived"):
+        lifecycle.register_existing(scope="project")
+
+    assert path.exists()
+    assert store.get_skill("review").status is SkillLifecycleStatus.ARCHIVED
+
+
+def test_verify_locks_reports_database_mismatch(tmp_path):
+    store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    write_skill(project_skills, skill_content())
+    lifecycle.register_existing(scope="project")
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE skill_packages
+            SET digest = ?
+            WHERE profile_id = ? AND scope = ? AND name = ?
+            """,
+            (f"sha256:{'f' * 64}", "default", "project", "review"),
+        )
+
+    assert lifecycle.verify_locks() == (
+        "project:review:database_digest_mismatch",
+    )
+
+
+def test_registration_rejects_tampered_lock_metadata(tmp_path):
+    _store, lifecycle, project_skills, _profile_skills = manager(tmp_path)
+    write_skill(project_skills, skill_content())
+    lifecycle.register_existing(scope="project")
+    lock_path = lifecycle.project_lock.path
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    payload["skills"]["review"]["required_capabilities"] = ["shell"]
+    lock_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SkillConflictError, match="governed state"):
+        lifecycle.register_existing(scope="project")
+
+    assert lifecycle.verify_locks() == (
+        "project:review:lock_metadata_mismatch",
+    )
+
+
+def test_lock_rejects_path_traversal_entry(tmp_path):
+    path = tmp_path / "skills.lock"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scope": "project",
+                "skills": {
+                    "../escape": {
+                        "name": "../escape",
+                        "version": "1.0.0",
+                        "digest": f"sha256:{'a' * 64}",
+                        "source": "project",
+                        "trust": "reviewed",
+                        "status": "active",
+                        "revision_id": "revision",
+                        "required_tools": [],
+                        "required_capabilities": [],
+                        "installed_at": "2026-01-01T00:00:00+00:00",
+                        "review_state": "approved",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid skill name"):
+        SkillLockFile(path, scope="project", private=False).read()

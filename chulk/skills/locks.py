@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 from typing import Any
@@ -16,6 +17,23 @@ from chulk.skills.manifest import SkillPackage
 
 
 SKILL_LOCK_SCHEMA_VERSION = 1
+_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
+_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ENTRY_FIELDS = frozenset(
+    {
+        "name",
+        "version",
+        "digest",
+        "source",
+        "trust",
+        "status",
+        "revision_id",
+        "required_tools",
+        "required_capabilities",
+        "installed_at",
+        "review_state",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +92,12 @@ class SkillLockEntry:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SkillLockEntry:
-        return cls(
+        unknown = set(value) - _ENTRY_FIELDS
+        if unknown:
+            raise ValueError(
+                f"unsupported skill lock fields: {', '.join(sorted(unknown))}"
+            )
+        entry = cls(
             name=str(value["name"]),
             version=str(value["version"]),
             digest=str(value["digest"]),
@@ -91,6 +114,8 @@ class SkillLockEntry:
             installed_at=str(value["installed_at"]),
             review_state=str(value.get("review_state", "approved")),
         )
+        _validate_entry(entry)
+        return entry
 
 
 class SkillLockFile:
@@ -108,9 +133,13 @@ class SkillLockFile:
             return {}
         if self.path.is_symlink() or not self.path.is_file():
             raise ValueError(f"skill lock is not a regular file: {self.path}")
+        if self.path.stat().st_size > 1_000_000:
+            raise ValueError("skill lock cannot exceed 1000000 bytes")
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("skill lock must contain a JSON object")
+        if set(payload) != {"schema_version", "scope", "skills"}:
+            raise ValueError("skill lock contains unsupported top-level fields")
         if payload.get("schema_version") != SKILL_LOCK_SCHEMA_VERSION:
             raise ValueError("unsupported skill lock schema version")
         if payload.get("scope") != self.scope:
@@ -118,11 +147,15 @@ class SkillLockFile:
         skills = payload.get("skills")
         if not isinstance(skills, dict):
             raise ValueError("skill lock skills must be an object")
-        return {
-            str(name): SkillLockEntry.from_dict(value)
-            for name, value in skills.items()
-            if isinstance(value, dict)
-        }
+        entries: dict[str, SkillLockEntry] = {}
+        for raw_name, value in skills.items():
+            if not isinstance(raw_name, str) or not isinstance(value, dict):
+                raise ValueError("skill lock entries must be named objects")
+            entry = SkillLockEntry.from_dict(value)
+            if raw_name != entry.name:
+                raise ValueError("skill lock entry key does not match its name")
+            entries[raw_name] = entry
+        return entries
 
     def get(self, name: str) -> SkillLockEntry | None:
         return self.read().get(name)
@@ -138,6 +171,10 @@ class SkillLockFile:
         self.write(entries)
 
     def write(self, entries: dict[str, SkillLockEntry]) -> None:
+        for name, entry in entries.items():
+            _validate_entry(entry)
+            if name != entry.name:
+                raise ValueError("skill lock entry key does not match its name")
         payload = {
             "schema_version": SKILL_LOCK_SCHEMA_VERSION,
             "scope": self.scope,
@@ -216,6 +253,27 @@ class SkillLockFile:
             if descriptor >= 0:
                 os.close(descriptor)
             temporary.unlink(missing_ok=True)
+
+
+def _validate_entry(entry: SkillLockEntry) -> None:
+    if _SKILL_NAME_PATTERN.fullmatch(entry.name) is None:
+        raise ValueError("skill lock contains an invalid skill name")
+    if not entry.version.strip():
+        raise ValueError("skill lock version cannot be empty")
+    if _DIGEST_PATTERN.fullmatch(entry.digest) is None:
+        raise ValueError("skill lock digest must be a full sha256 digest")
+    for label, value in (
+        ("source", entry.source),
+        ("trust", entry.trust),
+        ("revision_id", entry.revision_id),
+        ("installed_at", entry.installed_at),
+        ("review_state", entry.review_state),
+    ):
+        if not value.strip():
+            raise ValueError(f"skill lock {label} cannot be empty")
+    for value in (*entry.required_tools, *entry.required_capabilities):
+        if not value.strip() or len(value) > 128:
+            raise ValueError("skill lock requirements must be bounded strings")
 
 
 __all__ = [

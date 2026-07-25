@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 import sys
@@ -640,6 +640,17 @@ class SkillRegistry:
 def _skill_from_markdown(path: Path) -> Skill:
     package = load_skill_package(path)
     manifest = package.manifest
+    bundled_root = Path(__file__).resolve().parent / "bundled"
+    try:
+        package.root.relative_to(bundled_root)
+    except ValueError:
+        pass
+    else:
+        manifest = replace(
+            manifest,
+            source="bundled",
+            trust="bundled",
+        )
     text = package.manifest_path.read_text(encoding="utf-8")
     _front_matter, body = split_skill_front_matter(text)
     name = _normalize_skill_name(manifest.name)

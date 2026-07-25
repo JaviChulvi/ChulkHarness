@@ -196,7 +196,7 @@ def test_skill_usage_is_idempotent_and_success_requires_host_confirmation(tmp_pa
     )
     assert successful.success_count == 1
 
-    with pytest.raises(ValueError, match="current version and digest"):
+    with pytest.raises(ValueError, match="governed revision"):
         store.record_usage(
             name="review",
             version="0.9.0",
@@ -222,10 +222,19 @@ def test_skill_status_and_revision_activation_support_rollback(tmp_path):
         package_files={"SKILL.md": b"# Changed\n"},
         increment_patch=True,
     )
+    confirmed = store.record_usage(
+        name="review",
+        version="1.0.0",
+        digest="sha256:first",
+        kind=SkillUsageKind.SUCCESS,
+        source_event_id="turn-before-update",
+        host_confirmed=True,
+    )
 
     archived = store.set_skill_status("review", SkillLifecycleStatus.ARCHIVED)
     restored = store.activate_revision(first.id)
 
+    assert confirmed.success_count == 1
     assert archived.status is SkillLifecycleStatus.ARCHIVED
     assert restored.status is SkillLifecycleStatus.ACTIVE
     assert restored.version == "1.0.0"

@@ -105,7 +105,13 @@ class TerminalUI:
                 usage = str(getattr(command, "usage"))
                 description = str(getattr(command, "description"))
                 if self.width < 60 or len(usage) > column_width:
-                    lines.append(f"  {self.accent(usage)}")
+                    lines.extend(
+                        f"  {self.accent(line)}"
+                        for line in _wrap_text(
+                            usage,
+                            max(20, self.width - 2),
+                        )
+                    )
                     lines.extend(f"    {line}" for line in _wrap_text(description, max(20, self.width - 4)))
                     continue
                 padded_usage = usage.ljust(column_width)
