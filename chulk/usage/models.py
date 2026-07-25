@@ -9,6 +9,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from chulk.errors import ChulkError, ErrorDetails
+
 
 class ResourceKind(StrEnum):
     """Metered resource families supported by the shared ledger."""
@@ -328,7 +330,7 @@ class BudgetReservation:
         }
 
 
-class BudgetExceededError(RuntimeError):
+class BudgetExceededError(ChulkError):
     """Raised before work starts when a shared budget has no remaining allowance."""
 
     def __init__(
@@ -349,8 +351,21 @@ class BudgetExceededError(RuntimeError):
         self.requested = requested
         super().__init__(
             f"{scope.value} budget exhausted for {dimension}: limit {limit}, "
-            f"committed {committed}, reserved {reserved}, requested {requested}"
+            f"committed {committed}, reserved {reserved}, requested {requested}",
+            details=ErrorDetails(
+                failure_kind="budget_exhausted",
+                extensions={
+                    "scope": scope.value,
+                    "dimension": dimension,
+                    "limit": limit,
+                    "committed": committed,
+                    "reserved": reserved,
+                    "requested": requested,
+                },
+            ),
         )
+
+    category = "budget_exhausted"
 
 
 __all__ = [

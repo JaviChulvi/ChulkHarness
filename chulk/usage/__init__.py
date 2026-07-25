@@ -13,6 +13,7 @@ from chulk.usage.models import (
     UsageEntry,
 )
 from chulk.usage.store import DEFAULT_RESERVATION_TTL, SQLiteUsageStore
+from chulk.usage.service import ModelMeter, ModelUsageAccounting
 
 __all__ = [
     "DEFAULT_RESERVATION_TTL",
@@ -20,6 +21,8 @@ __all__ = [
     "BudgetReservation",
     "BudgetScope",
     "ExactCost",
+    "ModelMeter",
+    "ModelUsageAccounting",
     "ReservationState",
     "ResourceKind",
     "RunBudget",

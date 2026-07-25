@@ -36,6 +36,7 @@ from chulk.tracing.artifacts import (
     ArtifactReadMode,
     DEFAULT_ARTIFACT_READ_BYTES,
 )
+from chulk.usage import RunBudget, UsageDimensions
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
@@ -474,6 +475,8 @@ class Agent:
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
         execution_backend: ExecutionBackend | None = None,
+        run_budget: RunBudget | None = None,
+        usage_dimensions: UsageDimensions | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -497,6 +500,8 @@ class Agent:
                 shell_execution_policy=shell_execution_policy,
                 require_shell_containment=require_shell_containment,
                 execution_backend=execution_backend,
+                run_budget=run_budget,
+                usage_dimensions=usage_dimensions,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -910,6 +915,8 @@ def _build_handle(
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
     execution_backend: ExecutionBackend | None = None,
+    run_budget: RunBudget | None = None,
+    usage_dimensions: UsageDimensions | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -933,6 +940,8 @@ def _build_handle(
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
         execution_backend=execution_backend,
+        run_budget=run_budget,
+        usage_dimensions=usage_dimensions,
     )
     return AgentHandle(runtime, on_event=on_event)
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from chulk._sdk.results import cost_snapshot, plan_snapshot, run_result_from_runtime, usage_snapshot
 from chulk.core import Agent as CoreAgent, TraceEvent
 from chulk.events import (
     AgentEvent,
+    BudgetPayload,
     EventName,
     ModelDeltaPayload,
     ModelRequestPayload,
@@ -105,6 +107,52 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             extensions,
             profile_id=runtime.profile_id,
         )
+    if event_type in {
+        TraceEvent.BUDGET_RESERVED,
+        TraceEvent.BUDGET_COMMITTED,
+        TraceEvent.BUDGET_RELEASED,
+        TraceEvent.BUDGET_EXHAUSTED,
+    }:
+        name = {
+            TraceEvent.BUDGET_RESERVED: EventName.BUDGET_RESERVED,
+            TraceEvent.BUDGET_COMMITTED: EventName.BUDGET_COMMITTED,
+            TraceEvent.BUDGET_RELEASED: EventName.BUDGET_RELEASED,
+            TraceEvent.BUDGET_EXHAUSTED: EventName.BUDGET_EXHAUSTED,
+        }[event_type]
+        return _event(
+            name,
+            conversation_id,
+            turn_id,
+            BudgetPayload(
+                resource_kind=str(payload.get("resource_kind") or "unknown"),
+                scope=payload.get("scope")
+                if isinstance(payload.get("scope"), str)
+                else None,
+                reservation_id=payload.get("reservation_id")
+                if isinstance(payload.get("reservation_id"), str)
+                else None,
+                dimension=payload.get("dimension")
+                if isinstance(payload.get("dimension"), str)
+                else None,
+                message=payload.get("message")
+                if isinstance(payload.get("message"), str)
+                else None,
+                extensions={
+                    key: value
+                    for key, value in payload.items()
+                    if key
+                    not in {
+                        "resource_kind",
+                        "scope",
+                        "reservation_id",
+                        "dimension",
+                        "message",
+                    }
+                },
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+        )
     if event_type in {TraceEvent.TOOL_CALL_STARTED, TraceEvent.TOOL_CALL_COMPLETED, TraceEvent.TOOL_CALL_FAILED}:
         name = {
             TraceEvent.TOOL_CALL_STARTED: EventName.TOOL_CALL_STARTED,
@@ -195,7 +243,7 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 EventName.RUN_FAILED,
                 conversation_id,
                 turn_id,
-                RunFailedPayload({"category": "run", "message": message, "result": result.to_dict()}),
+                RunFailedPayload(_run_failure_payload(result, message)),
                 extensions,
                 profile_id=runtime.profile_id,
             )
@@ -216,7 +264,7 @@ def terminal_event(result: Any, *, profile_id: str | None = None) -> AgentEvent:
     if getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
         errors = getattr(result, "errors", ())
         message = errors[-1] if errors else getattr(result, "content", "The run failed.")
-        payload = RunFailedPayload({"category": "run", "message": message, "result": result.to_dict()})
+        payload = RunFailedPayload(_run_failure_payload(result, message))
         name = EventName.RUN_FAILED
     else:
         payload = RunCompletedPayload(result)
@@ -276,6 +324,27 @@ def _turn_id(runtime: CoreAgent, payload: dict[str, Any]) -> str | None:
     if isinstance(turn, dict) and isinstance(turn.get("turn_id"), str):
         return turn["turn_id"]
     return runtime.state.current_turn_id
+
+
+def _run_failure_payload(result: Any, message: str) -> dict[str, Any]:
+    extension_metadata = getattr(result, "extension_metadata", {})
+    budget = (
+        extension_metadata.get("budget_exhausted")
+        if isinstance(extension_metadata, Mapping)
+        else None
+    )
+    if isinstance(budget, Mapping):
+        return {
+            "category": "budget_exhausted",
+            "message": message,
+            "details": budget,
+            "result": result.to_dict(),
+        }
+    return {
+        "category": "run",
+        "message": message,
+        "result": result.to_dict(),
+    }
 
 
 __all__ = [

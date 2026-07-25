@@ -23,6 +23,10 @@ class EventName(str, Enum):
     MODEL_REQUEST_STARTED = "model.request.started"
     MODEL_DELTA = "model.delta"
     MODEL_RESPONSE_COMPLETED = "model.response.completed"
+    BUDGET_RESERVED = "budget.reserved"
+    BUDGET_COMMITTED = "budget.committed"
+    BUDGET_RELEASED = "budget.released"
+    BUDGET_EXHAUSTED = "budget.exhausted"
     TOOL_CALL_STARTED = "tool.call.started"
     TOOL_CALL_COMPLETED = "tool.call.completed"
     TOOL_CALL_FAILED = "tool.call.failed"
@@ -68,6 +72,15 @@ class ModelResponsePayload(ExtensiblePayload):
     content: str | None = None
     usage: Usage | None = None
     cost: Cost | None = None
+
+
+@dataclass(frozen=True)
+class BudgetPayload(ExtensiblePayload):
+    resource_kind: str
+    scope: str | None = None
+    reservation_id: str | None = None
+    dimension: str | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +139,7 @@ EventPayload: TypeAlias = (
     | ModelRequestPayload
     | ModelDeltaPayload
     | ModelResponsePayload
+    | BudgetPayload
     | ToolCallPayload
     | PermissionPayload
     | ResourcesLoadedPayload
@@ -206,6 +220,7 @@ __all__ = [
     "EVENT_SCHEMA_VERSION",
     "SUPPORTED_EVENT_SCHEMA_VERSIONS",
     "AgentEvent",
+    "BudgetPayload",
     "EventName",
     "EventPayload",
     "ModelDeltaPayload",

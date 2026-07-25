@@ -76,6 +76,7 @@ from chulk.tools.permissions import (
     PermissionDecisionRecord,
     PermissionRequest,
 )
+from chulk.usage import ExactCost, RunBudget, UsageDimensions
 
 
 def format_config(config: Config) -> str:
@@ -159,6 +160,8 @@ def create_cli_agent(
     conversation_id: str | None = None,
     profile: AgentProfile | None = None,
     runtime_metadata: dict | None = None,
+    run_budget: RunBudget | None = None,
+    usage_channel: str = "cli",
 ) -> Agent:
     """Create the default CLI coding-agent runtime."""
     preset = software_engineer()
@@ -192,6 +195,11 @@ def create_cli_agent(
             allowed_skill_names=allowed_skill_names,
             mcp_servers=mcp_servers,
             runtime_metadata=runtime_metadata,
+            run_budget=run_budget,
+            usage_dimensions=UsageDimensions(
+                profile_id=profile.id if profile is not None else config.profile_id,
+                channel=usage_channel,
+            ),
         )
     return create_agent(
         config,
@@ -205,6 +213,11 @@ def create_cli_agent(
         allowed_skill_names=allowed_skill_names,
         mcp_servers=mcp_servers,
         runtime_metadata=runtime_metadata,
+        run_budget=run_budget,
+        usage_dimensions=UsageDimensions(
+            profile_id=profile.id if profile is not None else config.profile_id,
+            channel=usage_channel,
+        ),
     )
 
 
@@ -280,8 +293,26 @@ def create_selected_cli_agent(
         conversation_id=conversation_id,
         profile=profile,
         runtime_metadata={"model_selection": runtime.selection.to_dict()},
+        run_budget=_model_run_budget(service, runtime),
+        usage_channel=channel,
     )
     return agent, selected_config, runtime
+
+
+def _model_run_budget(
+    service: ModelProfileService,
+    runtime: ResolvedModelRuntime,
+) -> RunBudget | None:
+    profile = service.store.get(runtime.selection.requested_profile_id)
+    if profile.max_cost_per_turn is None:
+        return None
+    return RunBudget(
+        max_cost=ExactCost(
+            profile.max_cost_per_turn,
+            currency="USD",
+            pricing_known=True,
+        )
+    )
 
 
 def create_cli_llm(config: Config) -> FallbackChain:

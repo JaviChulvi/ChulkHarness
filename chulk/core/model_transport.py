@@ -20,7 +20,13 @@ from chulk.core.reflection import (
 )
 from chulk.core.state import AgentState, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
-from chulk.llm import LLMActionError, LLMActionResult, LLMClient, LLMError
+from chulk.llm import (
+    LLMActionError,
+    LLMActionResult,
+    LLMClient,
+    LLMError,
+    LLMResponse,
+)
 from chulk.llm.base import call_async_with_supported_kwargs, call_with_supported_kwargs
 from chulk.llm.capabilities import (
     client_supports_hosted_mcp_tools,
@@ -41,6 +47,8 @@ MAX_UNPARSED_MODEL_OUTPUT_CHARS = 2000
 
 TraceCallback = Callable[[str, dict | None], None]
 AccountingCallback = Callable[..., tuple[dict | None, dict | None]]
+ReservationCallback = Callable[..., dict | None]
+ReleaseCallback = Callable[..., dict | None]
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,8 @@ class ModelTransport:
     get_selected_skills: Callable[[], list[SkillSelection]]
     trace: TraceCallback
     record_accounting: AccountingCallback
+    reserve_accounting: ReservationCallback
+    release_accounting: ReleaseCallback
     resolve_mcp_approval: Callable[[dict, TurnState], bool]
     mcp_servers: tuple[MCPServerConfig, ...]
     max_skill_content_chars: int
@@ -73,6 +83,7 @@ class ModelTransport:
     max_json_repair_attempts: int
     max_reflection_attempts: int
     trace_max_prompt_chars: int
+    max_output_tokens: int | None
 
     def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
         """Build the model input and context report."""
@@ -183,34 +194,48 @@ class ModelTransport:
             prompt,
             hosted_mcp_enabled=hosted_mcp_enabled,
         )
+        request_kwargs: dict[str, object] = {
+            "max_repair_attempts": self.max_json_repair_attempts,
+            "action_schema": self._action_schema(
+                turn,
+                require_plan=require_plan,
+            ),
+            "tools": (
+                self._action_tools(require_plan=require_plan)
+                if native_action_protocol
+                else None
+            ),
+            "planning_tools": (
+                self._planning_tool_availability(turn, require_plan=require_plan)
+                if native_action_protocol
+                else None
+            ),
+            "hosted_mcp_servers": (
+                self.mcp_servers if hosted_mcp_enabled else None
+            ),
+            "mcp_approval_callback": (
+                (lambda request: self.resolve_mcp_approval(request, turn))
+                if hosted_mcp_enabled
+                else None
+            ),
+        }
+        if self.max_output_tokens is not None:
+            request_kwargs["max_output_tokens"] = self.max_output_tokens
         try:
             result = call_with_supported_kwargs(
                 self.llm_client.complete_action,
                 messages,
-                max_repair_attempts=self.max_json_repair_attempts,
-                action_schema=self._action_schema(
-                    turn,
-                    require_plan=require_plan,
-                ),
-                tools=(
-                    self._action_tools(require_plan=require_plan)
-                    if native_action_protocol
-                    else None
-                ),
-                planning_tools=(
-                    self._planning_tool_availability(turn, require_plan=require_plan)
-                    if native_action_protocol
-                    else None
-                ),
-                hosted_mcp_servers=(self.mcp_servers if hosted_mcp_enabled else None),
-                mcp_approval_callback=(
-                    (lambda request: self.resolve_mcp_approval(request, turn))
-                    if hosted_mcp_enabled
-                    else None
-                ),
+                **request_kwargs,
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=turn.model_request_count,
+                reason="model_transport_failed",
+            )
+            raise
         return self._record_action_result(turn, result)
 
     async def request_action_async(
@@ -230,43 +255,62 @@ class ModelTransport:
             prompt,
             hosted_mcp_enabled=hosted_mcp_enabled,
         )
+        request_kwargs: dict[str, object] = {
+            "max_repair_attempts": self.max_json_repair_attempts,
+            "action_schema": self._action_schema(
+                turn,
+                require_plan=require_plan,
+            ),
+            "tools": (
+                self._action_tools(require_plan=require_plan)
+                if native_action_protocol
+                else None
+            ),
+            "planning_tools": (
+                self._planning_tool_availability(turn, require_plan=require_plan)
+                if native_action_protocol
+                else None
+            ),
+            "hosted_mcp_servers": (
+                self.mcp_servers if hosted_mcp_enabled else None
+            ),
+            "mcp_approval_callback": (
+                (lambda request: self.resolve_mcp_approval(request, turn))
+                if hosted_mcp_enabled
+                else None
+            ),
+        }
+        if self.max_output_tokens is not None:
+            request_kwargs["max_output_tokens"] = self.max_output_tokens
         try:
             result = await call_async_with_supported_kwargs(
                 self.llm_client.acomplete_action,
                 messages,
-                max_repair_attempts=self.max_json_repair_attempts,
-                action_schema=self._action_schema(
-                    turn,
-                    require_plan=require_plan,
-                ),
-                tools=(
-                    self._action_tools(require_plan=require_plan)
-                    if native_action_protocol
-                    else None
-                ),
-                planning_tools=(
-                    self._planning_tool_availability(turn, require_plan=require_plan)
-                    if native_action_protocol
-                    else None
-                ),
-                hosted_mcp_servers=(self.mcp_servers if hosted_mcp_enabled else None),
-                mcp_approval_callback=(
-                    (lambda request: self.resolve_mcp_approval(request, turn))
-                    if hosted_mcp_enabled
-                    else None
-                ),
+                **request_kwargs,
             )
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=turn.model_request_count,
+                reason="model_transport_failed",
+            )
+            raise
         return self._record_action_result(turn, result)
 
     def reflect(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
         """Review a proposed answer through the sync text transport."""
         attempt, messages, request_index = self._start_reflection(proposed_answer, turn)
         try:
-            response = self.llm_client.complete_response(messages)
+            response = self._complete_response(messages)
             raw_response = response.content
         except LLMError as exc:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="reflection_transport_failed",
+            )
             return self._fail_open_reflection(
                 turn,
                 proposed_answer,
@@ -275,6 +319,13 @@ class ModelTransport:
                 raw_response=None,
                 request_index=request_index,
             )
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="reflection_transport_failed",
+            )
+            raise
         self._record_reflection_response(
             turn,
             request_index=request_index,
@@ -296,9 +347,14 @@ class ModelTransport:
         """Review a proposed answer through the async text transport."""
         attempt, messages, request_index = self._start_reflection(proposed_answer, turn)
         try:
-            response = await self.llm_client.acomplete_response(messages)
+            response = await self._complete_response_async(messages)
             raw_response = response.content
         except LLMError as exc:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="reflection_transport_failed",
+            )
             return self._fail_open_reflection(
                 turn,
                 proposed_answer,
@@ -307,6 +363,13 @@ class ModelTransport:
                 raw_response=None,
                 request_index=request_index,
             )
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="reflection_transport_failed",
+            )
+            raise
         self._record_reflection_response(
             turn,
             request_index=request_index,
@@ -360,9 +423,16 @@ class ModelTransport:
     ) -> tuple[str, bool, str | None]:
         summary_messages, request_index = self._start_summary(messages, turn)
         try:
-            response = self.llm_client.complete_response(summary_messages)
+            response = self._complete_response(summary_messages)
         except LLMError as exc:
             return self._summary_failure(messages, turn, request_index, exc)
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="context_summary_transport_failed",
+            )
+            raise
         return self._finish_summary(messages, turn, request_index, response)
 
     async def _summarize_async(
@@ -372,9 +442,16 @@ class ModelTransport:
     ) -> tuple[str, bool, str | None]:
         summary_messages, request_index = self._start_summary(messages, turn)
         try:
-            response = await self.llm_client.acomplete_response(summary_messages)
+            response = await self._complete_response_async(summary_messages)
         except LLMError as exc:
             return self._summary_failure(messages, turn, request_index, exc)
+        except BaseException:
+            self.release_accounting(
+                turn,
+                request_index=request_index,
+                reason="context_summary_transport_failed",
+            )
+            raise
         return self._finish_summary(messages, turn, request_index, response)
 
     def _start_summary(
@@ -388,6 +465,12 @@ class ModelTransport:
         )
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        self.reserve_accounting(
+            turn,
+            request_index=request_index,
+            messages=summary_messages,
+            purpose="context_summary",
+        )
         payload = format_model_request_trace(
             summary_messages,
             max_prompt_chars=self.trace_max_prompt_chars,
@@ -414,6 +497,11 @@ class ModelTransport:
         request_index: int,
         exc: LLMError,
     ) -> tuple[str, bool, str]:
+        self.release_accounting(
+            turn,
+            request_index=request_index,
+            reason="context_summary_transport_failed",
+        )
         self.trace(
             TraceEvent.MODEL_RESPONSE,
             {
@@ -474,6 +562,13 @@ class ModelTransport:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         turn.model_request_count += 1
+        self.reserve_accounting(
+            turn,
+            request_index=turn.model_request_count,
+            messages=messages,
+            purpose="agent_action",
+            repair_attempts=self.max_json_repair_attempts,
+        )
         payload = format_model_request_trace(
             messages,
             max_prompt_chars=self.trace_max_prompt_chars,
@@ -597,6 +692,12 @@ class ModelTransport:
         messages = build_reflection_messages(turn, proposed_answer)
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        self.reserve_accounting(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose="reflection",
+        )
         context_report = {
             "purpose": "reflection",
             "reflection_attempt": attempt,
@@ -779,6 +880,36 @@ class ModelTransport:
 
     def _native_tool_calling_enabled(self) -> bool:
         return client_supports_native_tool_calling(self.llm_client)
+
+    def _complete_response(
+        self,
+        messages: list[dict[str, str]],
+    ) -> LLMResponse:
+        kwargs = (
+            {"max_output_tokens": self.max_output_tokens}
+            if self.max_output_tokens is not None
+            else {}
+        )
+        return call_with_supported_kwargs(
+            self.llm_client.complete_response,
+            messages,
+            **kwargs,
+        )
+
+    async def _complete_response_async(
+        self,
+        messages: list[dict[str, str]],
+    ) -> LLMResponse:
+        kwargs = (
+            {"max_output_tokens": self.max_output_tokens}
+            if self.max_output_tokens is not None
+            else {}
+        )
+        return await call_async_with_supported_kwargs(
+            self.llm_client.acomplete_response,
+            messages,
+            **kwargs,
+        )
 
     def _hosted_mcp_enabled(self) -> bool:
         return client_supports_hosted_mcp_tools(self.llm_client)

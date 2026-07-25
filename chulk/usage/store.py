@@ -147,6 +147,14 @@ class SQLiteUsageStore:
                         "usage entry resource kind does not match reservation"
                     )
                 _insert_entry(conn, entry)
+            stored_entries = tuple(
+                _stored_entry(
+                    conn,
+                    resource_kind=entry.resource_kind,
+                    source_event_id=entry.source_event_id,
+                )
+                for entry in values
+            )
             conn.execute(
                 """
                 UPDATE usage_reservations
@@ -156,11 +164,14 @@ class SQLiteUsageStore:
                 (
                     ReservationState.COMMITTED.value,
                     now.isoformat(),
-                    json.dumps([entry.id for entry in values], sort_keys=True),
+                    json.dumps(
+                        [entry.id for entry in stored_entries],
+                        sort_keys=True,
+                    ),
                     reservation_id,
                 ),
             )
-        return values
+        return stored_entries
 
     def ingest(self, entry: UsageEntry) -> UsageEntry:
         """Insert one immutable entry without a reservation, idempotently."""
@@ -222,6 +233,29 @@ class SQLiteUsageStore:
             ).fetchall()
         return tuple(_row_to_entry(row) for row in rows)
 
+    def list_reservations(
+        self,
+        *,
+        state: ReservationState | None = None,
+        limit: int = 100,
+    ) -> tuple[BudgetReservation, ...]:
+        clean_limit = max(1, min(limit, 10_000))
+        where = "WHERE state = ?" if state is not None else ""
+        parameters: tuple[object, ...] = (
+            (state.value, clean_limit) if state is not None else (clean_limit,)
+        )
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM usage_reservations
+                {where}
+                ORDER BY created_at, id
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return tuple(_row_to_reservation(row) for row in rows)
+
     def release_expired(self) -> int:
         """Release expired active reservations and return the affected count."""
         now = self.clock()
@@ -279,6 +313,24 @@ def _insert_entry(conn: sqlite3.Connection, entry: UsageEntry) -> None:
             json.dumps(dict(entry.metadata), sort_keys=True),
         ),
     )
+
+
+def _stored_entry(
+    conn: sqlite3.Connection,
+    *,
+    resource_kind: ResourceKind,
+    source_event_id: str,
+) -> UsageEntry:
+    row = conn.execute(
+        """
+        SELECT * FROM usage_ledger
+        WHERE resource_kind = ? AND source_event_id = ?
+        """,
+        (resource_kind.value, source_event_id),
+    ).fetchone()
+    if row is None:  # pragma: no cover - guarded by the preceding insert
+        raise RuntimeError("usage ledger insert did not produce a durable row")
+    return _row_to_entry(row)
 
 
 def _insert_reservation(
