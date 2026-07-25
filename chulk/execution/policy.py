@@ -74,6 +74,65 @@ class ResourcePolicy:
 
 
 @dataclass(frozen=True)
+class ProcessPolicy:
+    """Bounds for backend-owned long-running processes."""
+
+    max_processes_per_owner: int = 8
+    max_runtime_seconds: int = 300
+    max_log_bytes: int = 1_000_000
+    default_log_read_bytes: int = 8_000
+    max_log_read_bytes: int = 64_000
+    max_write_bytes: int = 64_000
+    termination_grace_seconds: int = 2
+
+    def __post_init__(self) -> None:
+        for name, value in vars(self).items():
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.default_log_read_bytes > self.max_log_read_bytes:
+            raise ValueError(
+                "default_log_read_bytes cannot exceed max_log_read_bytes"
+            )
+
+
+@dataclass(frozen=True)
+class DockerPolicy:
+    """Host-selected Docker image, resource limits, and CLI transport."""
+
+    image: str
+    binary: str = "docker"
+    user: str | None = None
+    cpus: float = 1.0
+    memory_bytes: int = 512 * 1024 * 1024
+    pids_limit: int = 128
+    tmpfs_bytes: int = 64 * 1024 * 1024
+    stop_timeout_seconds: int = 2
+    availability_timeout_seconds: int = 5
+
+    def __post_init__(self) -> None:
+        if not self.image.strip():
+            raise ValueError("image cannot be empty")
+        if not self.binary.strip():
+            raise ValueError("binary cannot be empty")
+        if isinstance(self.cpus, bool) or not isinstance(self.cpus, (int, float)):
+            raise ValueError("cpus must be a positive number")
+        if self.cpus <= 0:
+            raise ValueError("cpus must be a positive number")
+        for name in (
+            "memory_bytes",
+            "pids_limit",
+            "tmpfs_bytes",
+            "stop_timeout_seconds",
+            "availability_timeout_seconds",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.user is not None and not self.user.strip():
+            raise ValueError("user cannot be empty")
+
+
+@dataclass(frozen=True)
 class TransferPolicy:
     """Bounds reserved for backend uploads and downloads."""
 

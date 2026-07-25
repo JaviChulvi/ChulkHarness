@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -60,6 +60,7 @@ class ShellExecutionDecision:
     shell: bool = True
     environment: Mapping[str, str] | None = None
     containment_applied: bool = False
+    termination_callback: Callable[[str], None] | None = None
     denial_reason: str | None = None
     fatal: bool = False
 
@@ -72,6 +73,7 @@ class ShellExecutionDecision:
         shell: bool,
         environment: Mapping[str, str] | None = None,
         containment_applied: bool = False,
+        termination_callback: Callable[[str], None] | None = None,
     ) -> ShellExecutionDecision:
         """Allow execution through a host-selected command transport."""
         normalized = command if isinstance(command, str) else tuple(command)
@@ -81,6 +83,7 @@ class ShellExecutionDecision:
             shell=shell,
             environment=environment,
             containment_applied=containment_applied,
+            termination_callback=termination_callback,
         )
 
     @classmethod
@@ -331,7 +334,7 @@ def run_shell_command(
             break
 
     if termination_reason is not None:
-        termination_method = _kill_process_tree(process)
+        termination_method = _terminate_execution(process, decision)
     _wait_for_terminated_process(process)
     for reader in readers:
         reader.join(timeout=SHELL_CLEANUP_GRACE_SECONDS)
@@ -340,7 +343,7 @@ def run_shell_command(
         # Fast commands may exit between the reader detecting overflow and the
         # polling loop observing it. Still record the required kill attempt.
         termination_reason = "output_limit_exceeded"
-        termination_method = _kill_process_tree(process)
+        termination_method = _terminate_execution(process, decision)
 
     stdout = stdout_capture.preview_text()
     stderr = stderr_capture.preview_text()
@@ -564,6 +567,11 @@ def _validate_execution_decision(decision: ShellExecutionDecision) -> str | None
         not isinstance(key, str) or not isinstance(value, str) for key, value in decision.environment.items()
     ):
         return "environment keys and values must be strings"
+    if (
+        decision.termination_callback is not None
+        and not callable(decision.termination_callback)
+    ):
+        return "termination_callback must be callable"
     return None
 
 
@@ -671,6 +679,21 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> str:
         return "process_kill_fallback"
     except ProcessLookupError:
         return "already_exited"
+
+
+def _terminate_execution(
+    process: subprocess.Popen[bytes],
+    decision: ShellExecutionDecision,
+) -> str:
+    methods: list[str] = []
+    if decision.termination_callback is not None:
+        try:
+            decision.termination_callback("KILL")
+            methods.append("backend_kill")
+        except Exception as exc:
+            methods.append(f"backend_kill_failed:{type(exc).__name__}")
+    methods.append(_kill_process_tree(process))
+    return ",".join(methods)
 
 
 def _wait_for_terminated_process(process: subprocess.Popen[bytes]) -> None:

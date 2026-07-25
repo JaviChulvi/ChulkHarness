@@ -1,6 +1,7 @@
 """Stable execution backend interfaces and the direct host implementation."""
 
 from chulk.execution.base import ExecutionBackend, ExecutionSession
+from chulk.execution.docker import DockerExecutionBackend, DockerUnavailableError
 from chulk.execution.host import ExecutionContextLifecycle, HostExecutionBackend, HostExecutionSession
 from chulk.execution.models import (
     ChangeApplicationResult,
@@ -21,12 +22,23 @@ from chulk.execution.models import (
     NetworkPolicy,
     PatchApplyRequest,
     ProcessHandle,
+    ProcessLogChunk,
+    ProcessLogEntry,
+    ProcessLogsRequest,
+    ProcessPollRequest,
+    ProcessSnapshot,
+    ProcessStartRequest,
+    ProcessState,
+    ProcessTerminateRequest,
+    ProcessWriteRequest,
     WorkspaceMode,
     WorkspacePersistence,
 )
 from chulk.execution.policy import (
     EnvironmentPolicy,
+    DockerPolicy,
     GitWorktreePolicy,
+    ProcessPolicy,
     ResourcePolicy,
     SecretPolicy,
     TransferPolicy,
@@ -56,6 +68,9 @@ __all__ = [
     "ExecutionSessionRequest",
     "ExecutionWorkspace",
     "EnvironmentPolicy",
+    "DockerPolicy",
+    "DockerExecutionBackend",
+    "DockerUnavailableError",
     "FileListRequest",
     "FileReadRequest",
     "FileSearchRequest",
@@ -67,6 +82,16 @@ __all__ = [
     "NetworkPolicy",
     "PatchApplyRequest",
     "ProcessHandle",
+    "ProcessLogChunk",
+    "ProcessLogEntry",
+    "ProcessLogsRequest",
+    "ProcessPolicy",
+    "ProcessPollRequest",
+    "ProcessSnapshot",
+    "ProcessStartRequest",
+    "ProcessState",
+    "ProcessTerminateRequest",
+    "ProcessWriteRequest",
     "ResourcePolicy",
     "SecretPolicy",
     "TemporaryWorkspaceBackend",

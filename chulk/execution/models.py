@@ -47,6 +47,15 @@ class ChangeDisposition(str, Enum):
     DISCARD = "discard"
 
 
+class ProcessState(str, Enum):
+    """Lifecycle state for a backend-owned managed process."""
+
+    RUNNING = "running"
+    EXITED = "exited"
+    TERMINATED = "terminated"
+    TIMED_OUT = "timed_out"
+
+
 @dataclass(frozen=True)
 class ExecutionPolicy:
     """Host-selected policy applied to one execution session."""
@@ -212,6 +221,70 @@ class ProcessHandle:
 
     process_id: str
     backend_name: str
+    workspace_id: str
+
+
+@dataclass(frozen=True)
+class ProcessStartRequest:
+    """Start a managed command with bounded lifetime and optional stdin."""
+
+    command: str
+    timeout_seconds: int | None = None
+    interactive: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessPollRequest:
+    handle: ProcessHandle
+
+
+@dataclass(frozen=True)
+class ProcessLogsRequest:
+    handle: ProcessHandle
+    cursor: int = 0
+    max_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class ProcessWriteRequest:
+    handle: ProcessHandle
+    data: str = ""
+    close_stdin: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessTerminateRequest:
+    handle: ProcessHandle
+    grace_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class ProcessLogEntry:
+    """One ordered stdout or stderr fragment."""
+
+    stream: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ProcessLogChunk:
+    """Cursor-based bounded process output."""
+
+    cursor: int
+    next_cursor: int
+    entries: tuple[ProcessLogEntry, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class ProcessSnapshot:
+    """Current state of one managed process."""
+
+    handle: ProcessHandle
+    state: ProcessState
+    exit_code: int | None = None
+    duration_seconds: float = 0.0
+    termination_reason: str | None = None
 
 
 @dataclass(frozen=True)
