@@ -202,7 +202,7 @@ def test_memory_namespace_migration_preserves_v6_rows_and_rebuilds_fts(tmp_path)
         fts_rows = conn.execute(
             "SELECT memory_id, namespace FROM memories_fts"
         ).fetchall()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
 
     backups = list(tmp_path.glob("legacy-memory-v6.sqlite.backup-v6-*.sqlite"))
     assert len(backups) == 1

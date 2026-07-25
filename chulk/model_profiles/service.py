@@ -283,6 +283,11 @@ class ModelProfileService:
                 provider=profile.provider,
                 model=profile.model,
                 model_profile_id=profile.id,
+                credential_ref=(
+                    profile.credential_ref.uri
+                    if profile.credential_ref is not None
+                    else None
+                ),
                 model_capabilities=model_capabilities,
                 client_factory=create_request_client,
             )

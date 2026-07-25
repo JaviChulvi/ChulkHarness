@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import warnings
 from typing import Protocol, cast
@@ -62,6 +62,12 @@ from chulk.tools.permissions import (
 )
 from chulk.tracing import JSONLTraceLogger
 from chulk.tracing.artifacts import TraceArtifactStore
+from chulk.usage import (
+    ModelUsageAccounting,
+    RunBudget,
+    SQLiteUsageStore,
+    UsageDimensions,
+)
 
 
 class LLMClientFactory(Protocol):
@@ -130,6 +136,8 @@ def create_agent(
     profile_id: str | None = None,
     allowed_skill_names: Iterable[str] | None = None,
     runtime_metadata: dict | None = None,
+    run_budget: RunBudget | None = None,
+    usage_dimensions: UsageDimensions | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -231,6 +239,39 @@ def create_agent(
         response_reserve_tokens=model_capabilities.default_response_reserve_tokens,
         max_input_tokens=model_capabilities.max_input_tokens,
     )
+    base_usage_dimensions = usage_dimensions or UsageDimensions(
+        profile_id=effective_profile_id,
+        channel=(
+            str(effective_conversation_metadata["channel"])
+            if isinstance(effective_conversation_metadata.get("channel"), str)
+            else None
+        ),
+    )
+    if base_usage_dimensions.profile_id != effective_profile_id:
+        raise ValueError(
+            "usage dimensions profile_id does not match the runtime profile"
+        )
+    if (
+        base_usage_dimensions.conversation_id is not None
+        and base_usage_dimensions.conversation_id != state.conversation_id
+    ):
+        raise ValueError(
+            "usage dimensions conversation_id does not match the runtime conversation"
+        )
+    usage_accounting = ModelUsageAccounting(
+        SQLiteUsageStore(config.store_path),
+        client=client,
+        dimensions=replace(
+            base_usage_dimensions,
+            conversation_id=state.conversation_id,
+        ),
+        budget=run_budget or RunBudget(),
+        max_output_tokens=(
+            model_capabilities.max_output_tokens
+            or model_capabilities.default_response_reserve_tokens
+        ),
+        trace_path=trace_logger.path,
+    )
     configured_mcp_servers = (
         tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
     )
@@ -313,6 +354,10 @@ def create_agent(
             permission_policy=permission_policy_for_profile(config.permission_profile),
             permission_callback=permission_callback,
             context_budget=context_budget,
+            max_model_output_tokens=(
+                model_capabilities.max_output_tokens
+                or model_capabilities.default_response_reserve_tokens
+            ),
             event_callback=session_recorder.callback,
             event_sink=event_sink,
             redaction_callback=redaction_callback,
@@ -328,6 +373,7 @@ def create_agent(
             runtime_metadata=effective_runtime_metadata,
             tool_context_lifecycle=execution_lifecycle,
             profile_id=effective_profile_id,
+            usage_accounting=usage_accounting,
         )
     except Exception:
         for resource in reversed(owned_resources):

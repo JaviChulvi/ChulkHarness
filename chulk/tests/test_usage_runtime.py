@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from chulk.config import load_config
+from chulk import Agent as PublicAgent
+from chulk import AgentConfig, BudgetPayload, RunFailedPayload
+from chulk.llm import FallbackChain, LLMActionError, LLMClient, LLMError
+from chulk.llm.pricing import estimate_cost
+from chulk.llm.usage import LLMUsage
+from chulk.runtime import create_agent
+from chulk.testing import ScriptedLLMClient
+from chulk.usage import (
+    BudgetExceededError,
+    ExactCost,
+    ReservationState,
+    RunBudget,
+    SQLiteUsageStore,
+    UsageDimensions,
+    UsageGroupBy,
+)
+
+
+class OpenAIScriptedClient(ScriptedLLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+
+class FailingOpenAIClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+
+    def complete(self, messages, *, max_output_tokens=None):
+        del messages, max_output_tokens
+        raise LLMError(
+            "provider unavailable",
+            provider=self.provider,
+            model=self.model,
+            code="server_error",
+            retryable=False,
+            fallback_eligible=True,
+        )
+
+
+class AccountedFailureClient(LLMClient):
+    provider = "openai"
+    model = "gpt-4.1-mini"
+    model_profile_id = "primary"
+
+    def complete_action(self, messages, **kwargs):
+        del messages, kwargs
+        usage = LLMUsage(
+            input_tokens=100,
+            output_tokens=10,
+            total_tokens=110,
+            cache_miss_input_tokens=100,
+        )
+        raise LLMActionError(
+            "invalid provider action",
+            provider=self.provider,
+            model=self.model,
+            code="action_shape_error",
+            fallback_eligible=True,
+            usage=usage,
+            cost=estimate_cost(self.provider, self.model, usage),
+        )
+
+    def complete(self, messages, *, max_output_tokens=None):
+        raise AssertionError("complete_action should be used")
+
+
+def _config(tmp_path: Path):
+    return load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "openai",
+            "CHULK_MODEL": "gpt-4.1-mini",
+        }
+    )
+
+
+def test_runtime_ingests_each_model_request_into_the_durable_ledger(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    client = OpenAIScriptedClient([{"type": "final_answer", "content": "done"}])
+    agent = create_agent(
+        config,
+        llm_client=client,
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            channel="sdk",
+        ),
+    )
+
+    assert agent.run_turn("hello") == "done"
+
+    store = SQLiteUsageStore(config.store_path)
+    entries = store.list_entries()
+    reservations = store.list_reservations()
+    assert len(entries) == 1
+    assert entries[0].provider == "openai"
+    assert entries[0].model == "gpt-4.1-mini"
+    assert entries[0].dimensions.channel == "sdk"
+    assert entries[0].dimensions.conversation_id == agent.state.conversation_id
+    assert entries[0].dimensions.turn_id == agent.state.turns[-1].turn_id
+    assert entries[0].units["model_calls"] == 1
+    assert entries[0].units["total_tokens"] > 0
+    assert entries[0].cost.pricing_known
+    assert entries[0].cost.amount is not None
+    assert len(reservations) == 1
+    assert reservations[0].state is ReservationState.COMMITTED
+
+
+def test_cost_budget_stops_before_the_provider_request(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    client = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "must not run"}]
+    )
+    agent = create_agent(
+        config,
+        llm_client=client,
+        run_budget=RunBudget(
+            max_cost=ExactCost(
+                Decimal("0.000001"),
+                pricing_known=True,
+            )
+        ),
+    )
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        agent.run_turn("hello")
+
+    assert exc_info.value.dimension == "cost"
+    assert client.remaining == 1
+    turn = agent.state.turns[-1]
+    assert turn.status == "failed"
+    assert turn.model_request_count == 1
+    assert turn.extension_metadata["budget_exhausted"]["dimension"] == "cost"
+    assert SQLiteUsageStore(config.store_path).list_entries() == ()
+
+
+def test_budget_exhaustion_is_a_typed_public_error_and_event(
+    tmp_path: Path,
+) -> None:
+    client = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "must not run"}]
+    )
+    budget = RunBudget(
+        max_cost=ExactCost(Decimal("0.000001"), pricing_known=True)
+    )
+    facade = PublicAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=client,
+        tools=[],
+        skills=[],
+        run_budget=budget,
+    )
+
+    events = list(facade.run_events("hello"))
+
+    exhausted = next(
+        event for event in events if event.name == "budget.exhausted"
+    )
+    assert isinstance(exhausted.payload, BudgetPayload)
+    assert exhausted.payload.dimension == "cost"
+    assert exhausted.payload.scope == "turn"
+    assert events[-1].name == "run.failed"
+    assert isinstance(events[-1].payload, RunFailedPayload)
+    assert events[-1].payload.error["category"] == "budget_exhausted"
+    assert client.remaining == 1
+
+
+def test_sdk_exposes_profile_owned_usage_queries(tmp_path: Path) -> None:
+    facade = PublicAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "done"}]
+        ),
+        tools=[],
+        skills=[],
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            channel="sdk",
+        ),
+    )
+
+    assert facade.run("hello") == "done"
+    page = facade.query_usage(channel="sdk")
+    groups = facade.group_usage(UsageGroupBy.MODEL)
+
+    assert len(page.entries) == 1
+    assert page.entries[0].dimensions.profile_id == "default"
+    assert page.entries[0].dimensions.channel == "sdk"
+    assert groups[0].key == "openai:gpt-4.1-mini"
+
+
+def test_transport_failure_releases_the_request_allowance(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    agent = create_agent(config, llm_client=FailingOpenAIClient())
+
+    with pytest.raises(LLMError, match="provider unavailable"):
+        agent.run_turn("hello")
+
+    reservations = SQLiteUsageStore(config.store_path).list_reservations()
+    assert len(reservations) == 1
+    assert reservations[0].state is ReservationState.RELEASED
+
+
+def test_checkpoint_reconciles_an_interrupted_ledger_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    original_commit = SQLiteUsageStore.commit
+
+    def interrupt_commit(self, reservation_id, entries):
+        del self, reservation_id, entries
+        raise RuntimeError("simulated crash before ledger commit")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_commit)
+    first = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "checkpointed"}]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        first.run_turn("hello")
+
+    conversation_id = first.state.conversation_id
+    reservations = SQLiteUsageStore(config.store_path).list_reservations()
+    assert len(reservations) == 1
+    assert reservations[0].state is ReservationState.ACTIVE
+    assert SQLiteUsageStore(config.store_path).list_entries() == ()
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
+    resumed = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=conversation_id,
+    )
+
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    reservations = SQLiteUsageStore(config.store_path).list_reservations()
+    assert len(entries) == 1
+    assert entries[0].metadata["recovered"] is True
+    assert entries[0].units["model_calls"] == 1
+    assert entries[0].units["total_tokens"] > 0
+    assert reservations[0].state is ReservationState.COMMITTED
+
+    reopened = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=conversation_id,
+    )
+    assert len(SQLiteUsageStore(config.store_path).list_entries()) == 1
+
+    reopened.close()
+    resumed.close()
+    first.close()
+
+
+def test_fallback_attempts_are_attributed_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    success = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "fallback worked"}]
+    )
+    success.provider = "openai"
+    success.model = "gpt-4.1"
+    success.model_profile_id = "secondary"
+    chain = FallbackChain(
+        providers=[AccountedFailureClient(), success],
+    )
+    agent = create_agent(config, llm_client=chain)
+
+    assert agent.run_turn("hello") == "fallback worked"
+
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    assert len(entries) == 2
+    assert [entry.model_profile_id for entry in entries] == [
+        "primary",
+        "secondary",
+    ]
+    assert [entry.metadata["success"] for entry in entries] == [False, True]
+    assert sum(entry.units["model_calls"] for entry in entries) == 2
+    assert sum(entry.units["total_tokens"] for entry in entries) > 0
+    assert all(":attempt:" in entry.source_event_id for entry in entries)
+
+
+def test_checkpoint_recovers_each_fallback_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    success = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "checkpointed fallback"}]
+    )
+    success.provider = "openai"
+    success.model = "gpt-4.1"
+    success.model_profile_id = "secondary"
+    original_commit = SQLiteUsageStore.commit
+
+    def interrupt_commit(self, reservation_id, entries):
+        del self, reservation_id, entries
+        raise RuntimeError("simulated fallback accounting crash")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_commit)
+    first = create_agent(
+        config,
+        llm_client=FallbackChain(
+            providers=[AccountedFailureClient(), success],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="fallback accounting crash"):
+        first.run_turn("hello")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
+    resumed = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=first.state.conversation_id,
+    )
+
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    assert [entry.model_profile_id for entry in entries] == [
+        "primary",
+        "secondary",
+    ]
+    assert all(entry.metadata["recovered"] is True for entry in entries)
+    assert sum(entry.units["model_calls"] for entry in entries) == 2
+    assert all(":attempt:" in entry.source_event_id for entry in entries)
+
+    resumed.close()
+    first.close()

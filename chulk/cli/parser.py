@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_init_parser(subparsers)
     _add_profile_parser(subparsers)
     _add_model_parser(subparsers)
+    _add_usage_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -182,6 +183,73 @@ def _add_profile_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     inspect.add_argument("profile_id")
     inspect.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_usage_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "usage",
+        help="Query or export profile-owned usage and exact costs.",
+    )
+    usage_subparsers = parser.add_subparsers(dest="usage_command", required=True)
+
+    today = usage_subparsers.add_parser("today", help="Show today's usage.")
+    _add_usage_query_options(today, dates=False)
+
+    range_parser = usage_subparsers.add_parser(
+        "range",
+        help="Show usage in an inclusive ISO date range.",
+    )
+    _add_usage_query_options(range_parser, dates=True)
+    range_parser.add_argument("--cursor")
+
+    group = usage_subparsers.add_parser(
+        "group",
+        help="Group usage totals over an optional range.",
+    )
+    _add_usage_query_options(group, dates=True, dates_required=False)
+    group.add_argument(
+        "--by",
+        required=True,
+        choices=(
+            "resource_kind",
+            "model",
+            "tool_service",
+            "profile",
+            "channel",
+            "goal",
+            "job",
+            "child_task",
+        ),
+    )
+    group.set_defaults(limit=10_000)
+
+    export = usage_subparsers.add_parser(
+        "export",
+        help="Write a bounded credential-free usage export.",
+    )
+    _add_usage_query_options(export, dates=True, dates_required=False)
+    export.add_argument("--format", choices=("csv", "json"), default="json")
+    export.add_argument("--output", required=True)
+    export.add_argument("--max-entries", type=int, default=10_000)
+    export.add_argument("--force", action="store_true")
+
+
+def _add_usage_query_options(
+    parser: argparse.ArgumentParser,
+    *,
+    dates: bool,
+    dates_required: bool = True,
+) -> None:
+    if dates:
+        parser.add_argument("--from", dest="start", required=dates_required)
+        parser.add_argument("--to", dest="end", required=dates_required)
+    parser.add_argument(
+        "--resource-kind",
+        choices=("model", "tool", "media", "external_service"),
+    )
+    parser.add_argument("--channel")
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_doctor_parser(subparsers: argparse._SubParsersAction) -> None:

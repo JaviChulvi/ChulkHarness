@@ -393,6 +393,106 @@ def _migrate_to_memory_namespaces(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_usage_ledger(conn: sqlite3.Connection) -> None:
+    """Create the immutable metering ledger and crash-recoverable reservations."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_ledger (
+            id TEXT PRIMARY KEY,
+            resource_kind TEXT NOT NULL,
+            source_event_id TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            tool_or_service TEXT,
+            credential_ref TEXT,
+            model_profile_id TEXT,
+            profile_id TEXT NOT NULL,
+            channel TEXT,
+            conversation_id TEXT,
+            turn_id TEXT,
+            goal_id TEXT,
+            job_id TEXT,
+            child_task_id TEXT,
+            purpose TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            billing_period TEXT NOT NULL,
+            units_json TEXT NOT NULL DEFAULT '{}',
+            model_calls INTEGER NOT NULL DEFAULT 0,
+            tool_calls INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_amount TEXT,
+            currency TEXT NOT NULL,
+            pricing_known INTEGER NOT NULL DEFAULT 0,
+            cost_estimated INTEGER NOT NULL DEFAULT 0,
+            cost_reported INTEGER NOT NULL DEFAULT 0,
+            usage_estimated INTEGER NOT NULL DEFAULT 0,
+            trace_path TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE (resource_kind, source_event_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_ledger_time
+        ON usage_ledger(profile_id, occurred_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_ledger_dimensions
+        ON usage_ledger(
+            profile_id, conversation_id, turn_id, goal_id, job_id, child_task_id
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_reservations (
+            id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            source_event_id TEXT NOT NULL,
+            resource_kind TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            channel TEXT,
+            conversation_id TEXT,
+            turn_id TEXT,
+            goal_id TEXT,
+            job_id TEXT,
+            child_task_id TEXT,
+            budget_scope TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            reserved_model_calls INTEGER NOT NULL DEFAULT 0,
+            reserved_tool_calls INTEGER NOT NULL DEFAULT 0,
+            reserved_tokens INTEGER NOT NULL DEFAULT 0,
+            reserved_cost_amount TEXT,
+            currency TEXT NOT NULL,
+            pricing_known INTEGER NOT NULL DEFAULT 0,
+            unknown_cost INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            ledger_entry_ids_json TEXT NOT NULL DEFAULT '[]'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_reservations_active_scope
+        ON usage_reservations(
+            state, profile_id, conversation_id, turn_id, goal_id, job_id,
+            child_task_id, expires_at
+        )
+        """
+    )
+
+
+def _migrate_to_usage_recovery_checkpoints(conn: sqlite3.Connection) -> None:
+    """Attach a private accounting checkpoint to persisted model requests."""
+    _ensure_column(conn, "conversation_model_requests", "accounting_json", "TEXT")
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -436,6 +536,12 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(5, "claim-owned-scheduled-jobs", _migrate_to_claim_owned_scheduled_jobs),
     SQLiteMigration(6, "adapter-update-ledger", _migrate_to_adapter_update_ledger),
     SQLiteMigration(7, "memory-namespaces", _migrate_to_memory_namespaces),
+    SQLiteMigration(8, "usage-ledger-and-reservations", _migrate_to_usage_ledger),
+    SQLiteMigration(
+        9,
+        "usage-recovery-checkpoints",
+        _migrate_to_usage_recovery_checkpoints,
+    ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

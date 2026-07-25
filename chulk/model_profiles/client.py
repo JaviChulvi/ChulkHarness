@@ -35,12 +35,14 @@ class RefreshingLLMClient(LLMClient):
         provider: str,
         model: str,
         model_profile_id: str,
+        credential_ref: str | None,
         model_capabilities: LLMModelCapabilities,
         client_factory: Callable[[], RequestClientLease],
     ) -> None:
         self.provider = provider
         self.model = model
         self.model_profile_id = model_profile_id
+        self.credential_ref = credential_ref
         self.model_capabilities = model_capabilities
         self._client_factory = client_factory
 

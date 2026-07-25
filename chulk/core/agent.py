@@ -48,6 +48,7 @@ from chulk.tools.permissions import (
 from chulk.tools.registry import ToolContextLifecycle, ToolExecutionContext
 from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
+from chulk.usage import BudgetExceededError, ModelUsageAccounting
 
 
 class Agent:
@@ -80,6 +81,7 @@ class Agent:
         ]
         | None = None,
         context_budget: ContextBudget | None = None,
+        max_model_output_tokens: int | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         event_sink: Callable[[AgentEvent], None] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -92,6 +94,7 @@ class Agent:
         runtime_metadata: dict | None = None,
         tool_context_lifecycle: ToolContextLifecycle | None = None,
         profile_id: str = "default",
+        usage_accounting: ModelUsageAccounting | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -110,6 +113,12 @@ class Agent:
         if max_reflection_attempts < 0:
             raise ValueError("max_reflection_attempts cannot be negative")
         self.context_budget = context_budget or ContextBudget()
+        self.max_model_output_tokens = max_model_output_tokens
+        if (
+            self.max_model_output_tokens is not None
+            and self.max_model_output_tokens < 1
+        ):
+            raise ValueError("max_model_output_tokens must be greater than zero")
         self.profile_id = profile_id
         self.llm_client = llm_client
         self.state = state or AgentState()
@@ -147,6 +156,7 @@ class Agent:
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self.default_tool_context = default_tool_context
         self.runtime_metadata = deepcopy(runtime_metadata or {})
+        self.usage_accounting = usage_accounting
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
@@ -195,6 +205,8 @@ class Agent:
             get_selected_skills=lambda: self._selected_skills,
             trace=self._trace,
             record_accounting=self._record_model_accounting,
+            reserve_accounting=self._reserve_model_accounting,
+            release_accounting=self._release_model_accounting,
             resolve_mcp_approval=self._tool_executor.resolve_hosted_mcp_approval,
             mcp_servers=self.mcp_servers,
             max_skill_content_chars=self.max_skill_content_chars,
@@ -202,6 +214,7 @@ class Agent:
             max_json_repair_attempts=self.max_json_repair_attempts,
             max_reflection_attempts=self.max_reflection_attempts,
             trace_max_prompt_chars=self.trace_max_prompt_chars,
+            max_output_tokens=self.max_model_output_tokens,
         )
         self._action_runtime = ActionLoopRuntime(
             model=self._model_transport,
@@ -966,6 +979,27 @@ class Agent:
         usage_payload = usage.to_dict() if usage is not None else None
         cost_payload = cost.to_dict() if cost is not None else None
         attempt_payloads = _fallback_attempt_payloads(fallback_attempts)
+        if self.usage_accounting is not None:
+            entries = self.usage_accounting.commit_model_request(
+                turn_id=turn.turn_id,
+                request_index=request_index,
+                purpose=purpose,
+                usage=usage,
+                cost=cost,
+                fallback_attempts=fallback_attempts,
+            )
+            self._trace(
+                TraceEvent.BUDGET_COMMITTED,
+                {
+                    "turn_id": turn.turn_id,
+                    "request_index": request_index,
+                    "resource_kind": "model",
+                    "entry_ids": [entry.id for entry in entries],
+                    "source_event_ids": [
+                        entry.source_event_id for entry in entries
+                    ],
+                },
+            )
         if usage_payload is None and cost_payload is None and not attempt_payloads:
             return None, None
 
@@ -984,6 +1018,84 @@ class Agent:
         )
         self.state.last_usage_report = turn.model_usage_totals
         return usage_payload, cost_payload
+
+    def _reserve_model_accounting(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        messages: list[dict[str, str]],
+        purpose: str,
+        repair_attempts: int = 0,
+    ) -> dict | None:
+        if self.usage_accounting is None:
+            return None
+        try:
+            reservation = self.usage_accounting.reserve_model_request(
+                turn_id=turn.turn_id,
+                request_index=request_index,
+                messages=messages,
+                purpose=purpose,
+                repair_attempts=repair_attempts,
+            )
+        except BudgetExceededError as exc:
+            payload = {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "resource_kind": "model",
+                "scope": exc.scope.value,
+                "dimension": exc.dimension,
+                "limit": exc.limit,
+                "committed": exc.committed,
+                "reserved": exc.reserved,
+                "requested": exc.requested,
+                "message": str(exc),
+            }
+            turn.extension_metadata["budget_exhausted"] = payload
+            self._trace(TraceEvent.BUDGET_EXHAUSTED, payload)
+            raise
+        payload = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "resource_kind": "model",
+            "reservation_id": reservation.id,
+            "scope": reservation.budget.scope.value,
+            "reserved_model_calls": reservation.reserved_model_calls,
+            "reserved_tokens": reservation.reserved_tokens,
+            "reserved_cost": reservation.reserved_cost.to_dict(),
+            "expires_at": (
+                reservation.expires_at.isoformat()
+                if reservation.expires_at is not None
+                else None
+            ),
+        }
+        self._trace(TraceEvent.BUDGET_RESERVED, payload)
+        return payload
+
+    def _release_model_accounting(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        reason: str,
+    ) -> dict | None:
+        if self.usage_accounting is None:
+            return None
+        reservation = self.usage_accounting.release_model_request(
+            turn_id=turn.turn_id,
+            request_index=request_index,
+        )
+        if reservation is None:
+            return None
+        payload = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "resource_kind": "model",
+            "reservation_id": reservation.id,
+            "reason": reason,
+        }
+        self._trace(TraceEvent.BUDGET_RELEASED, payload)
+        return payload
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
         payload = self._redact_event_payload(event_type, payload or {})

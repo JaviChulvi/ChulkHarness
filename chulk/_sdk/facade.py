@@ -36,6 +36,14 @@ from chulk.tracing.artifacts import (
     ArtifactReadMode,
     DEFAULT_ARTIFACT_READ_BYTES,
 )
+from chulk.usage import (
+    RunBudget,
+    UsageAggregate,
+    UsageDimensions,
+    UsageGroupBy,
+    UsageLedger,
+    UsagePage,
+)
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
@@ -474,6 +482,8 @@ class Agent:
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
         execution_backend: ExecutionBackend | None = None,
+        run_budget: RunBudget | None = None,
+        usage_dimensions: UsageDimensions | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -497,6 +507,8 @@ class Agent:
                 shell_execution_policy=shell_execution_policy,
                 require_shell_containment=require_shell_containment,
                 execution_backend=execution_backend,
+                run_budget=run_budget,
+                usage_dimensions=usage_dimensions,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -580,6 +592,35 @@ class Agent:
             return tuple(memory_proposal_snapshot(item) for item in policy.list_pending())
 
         return self._invoke("list_memory_proposals", operation)
+
+    @property
+    def usage_ledger(self) -> UsageLedger:
+        """Return a query facade bound to this runtime's profile database."""
+        accounting = self.runtime.usage_accounting
+        if accounting is None:  # pragma: no cover - runtime assembly always supplies it
+            raise RuntimeError("Usage accounting is not configured")
+        return UsageLedger(
+            accounting.store.db_path,
+            profile_id=self.runtime.profile_id,
+        )
+
+    def query_usage(self, **kwargs: Any) -> UsagePage:
+        """Query profile-owned durable usage without prompt or credential data."""
+        return self._invoke(
+            "query_usage",
+            lambda: self.usage_ledger.query(**kwargs),
+        )
+
+    def group_usage(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        """Return exact grouped totals from the profile-owned usage ledger."""
+        return self._invoke(
+            "group_usage",
+            lambda: self.usage_ledger.group(group_by, **kwargs),
+        )
 
     def read_artifact(
         self,
@@ -773,6 +814,24 @@ class AsyncAgent:
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
 
+    @property
+    def usage_ledger(self) -> UsageLedger:
+        return self._agent.usage_ledger
+
+    async def query_usage(self, **kwargs: Any) -> UsagePage:
+        return await asyncio.to_thread(self._agent.query_usage, **kwargs)
+
+    async def group_usage(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        return await asyncio.to_thread(
+            self._agent.group_usage,
+            group_by,
+            **kwargs,
+        )
+
     async def read_artifact(
         self,
         artifact_id: str,
@@ -910,6 +969,8 @@ def _build_handle(
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
     execution_backend: ExecutionBackend | None = None,
+    run_budget: RunBudget | None = None,
+    usage_dimensions: UsageDimensions | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -933,6 +994,8 @@ def _build_handle(
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
         execution_backend=execution_backend,
+        run_budget=run_budget,
+        usage_dimensions=usage_dimensions,
     )
     return AgentHandle(runtime, on_event=on_event)
 

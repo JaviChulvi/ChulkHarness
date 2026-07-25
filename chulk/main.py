@@ -31,9 +31,11 @@ from chulk.cli.entrypoints import (
 )
 from chulk.cli.profiles import run_profile_command
 from chulk.cli.models import run_model_command
+from chulk.cli.usage import run_usage_command
 from chulk.cli.parser import build_parser
 from chulk.config import Config, LLMFallbackProviderConfig, load_cli_config
 from chulk.core import Agent
+from chulk.errors import ChulkError
 from chulk.llm import (
     AnthropicProvider,
     BedrockProvider,
@@ -76,6 +78,8 @@ from chulk.tools.permissions import (
     PermissionDecisionRecord,
     PermissionRequest,
 )
+from chulk.usage import ExactCost, RunBudget, UsageDimensions
+from chulk.usage import UsageLedger
 
 
 def format_config(config: Config) -> str:
@@ -159,6 +163,8 @@ def create_cli_agent(
     conversation_id: str | None = None,
     profile: AgentProfile | None = None,
     runtime_metadata: dict | None = None,
+    run_budget: RunBudget | None = None,
+    usage_channel: str = "cli",
 ) -> Agent:
     """Create the default CLI coding-agent runtime."""
     preset = software_engineer()
@@ -192,6 +198,11 @@ def create_cli_agent(
             allowed_skill_names=allowed_skill_names,
             mcp_servers=mcp_servers,
             runtime_metadata=runtime_metadata,
+            run_budget=run_budget,
+            usage_dimensions=UsageDimensions(
+                profile_id=profile.id if profile is not None else config.profile_id,
+                channel=usage_channel,
+            ),
         )
     return create_agent(
         config,
@@ -205,6 +216,11 @@ def create_cli_agent(
         allowed_skill_names=allowed_skill_names,
         mcp_servers=mcp_servers,
         runtime_metadata=runtime_metadata,
+        run_budget=run_budget,
+        usage_dimensions=UsageDimensions(
+            profile_id=profile.id if profile is not None else config.profile_id,
+            channel=usage_channel,
+        ),
     )
 
 
@@ -280,8 +296,26 @@ def create_selected_cli_agent(
         conversation_id=conversation_id,
         profile=profile,
         runtime_metadata={"model_selection": runtime.selection.to_dict()},
+        run_budget=_model_run_budget(service, runtime),
+        usage_channel=channel,
     )
     return agent, selected_config, runtime
+
+
+def _model_run_budget(
+    service: ModelProfileService,
+    runtime: ResolvedModelRuntime,
+) -> RunBudget | None:
+    profile = service.store.get(runtime.selection.requested_profile_id)
+    if profile.max_cost_per_turn is None:
+        return None
+    return RunBudget(
+        max_cost=ExactCost(
+            profile.max_cost_per_turn,
+            currency="USD",
+            pricing_known=True,
+        )
+    )
 
 
 def create_cli_llm(config: Config) -> FallbackChain:
@@ -455,6 +489,9 @@ def run_chat_loop(
         except LLMError as exc:
             error_func(terminal.error(f"error: {exc}"))
             return 1
+        except ChulkError as exc:
+            error_func(terminal.error(f"error: {exc}"))
+            return 1
         except Exception as exc:
             error_func(terminal.error(f"error: unexpected failure: {exc}"))
             return 1
@@ -482,6 +519,9 @@ def run_chat_loop(
         try:
             assistant_response = command_context.agent.run_turn(user_message)
         except LLMError as exc:
+            error_func(terminal.error(f"error: {exc}"))
+            return 1
+        except ChulkError as exc:
             error_func(terminal.error(f"error: {exc}"))
             return 1
         except Exception as exc:
@@ -594,6 +634,28 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        if args.command == "usage":
+            return run_usage_command(
+                args.usage_command,
+                ledger=UsageLedger(
+                    config.store_path,
+                    profile_id=profile.id,
+                ),
+                start=getattr(args, "start", None),
+                end=getattr(args, "end", None),
+                group_by=getattr(args, "by", None),
+                resource_kind=getattr(args, "resource_kind", None),
+                channel=getattr(args, "channel", None),
+                limit=getattr(args, "limit", 100),
+                cursor=getattr(args, "cursor", None),
+                output_path=getattr(args, "output", None),
+                export_format=getattr(args, "format", "json"),
+                max_entries=getattr(args, "max_entries", 10_000),
+                force=bool(getattr(args, "force", False)),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         model_service = ModelProfileService(
             ModelProfileStore(
                 base_config.runtime_dir / "control.sqlite",

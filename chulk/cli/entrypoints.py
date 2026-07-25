@@ -20,6 +20,7 @@ from chulk.cli.maintenance import (
     run_doctor,
 )
 from chulk.core import Agent
+from chulk.errors import ChulkError
 from chulk.llm import LLMConfigurationError, LLMError
 from chulk.tools.permissions import PermissionDecision
 from chulk.tracing.execution import execute_replay_fixture
@@ -64,6 +65,15 @@ def run_exec_command(
     except LLMError as exc:
         return _emit_error(
             "runtime_error",
+            exc,
+            json_output=json_output,
+            output_func=output_func,
+            error_func=error_func,
+            exit_code=EXIT_RUNTIME_ERROR,
+        )
+    except ChulkError as exc:
+        return _emit_error(
+            exc.category,
             exc,
             json_output=json_output,
             output_func=output_func,
@@ -269,7 +279,14 @@ def _emit_error(
     unexpected: bool = False,
 ) -> int:
     if json_output:
-        output_func(json_text({"ok": False, "status": status, "error": str(error)}))
+        payload: dict[str, object] = {
+            "ok": False,
+            "status": status,
+            "error": str(error),
+        }
+        if isinstance(error, ChulkError):
+            payload["error_details"] = error.to_dict()
+        output_func(json_text(payload))
     else:
         prefix = "error: unexpected failure" if unexpected else status.replace("_", " ")
         error_func(f"{prefix}: {error}")
