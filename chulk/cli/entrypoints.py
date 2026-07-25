@@ -89,7 +89,10 @@ def run_exec_command(
         "content": response,
         "conversation_id": agent.state.conversation_id,
         "profile_id": agent.profile_id,
-        "trace_path": str(agent.trace_logger.path) if agent.trace_logger is not None else None,
+        "model_selection": turn.extension_metadata.get("model_selection"),
+        "trace_path": str(agent.trace_logger.path)
+        if agent.trace_logger is not None
+        else None,
         "usage": turn.model_usage_totals or None,
         "tool_calls": [
             {
@@ -119,7 +122,9 @@ def run_exec_command(
 
 def run_doctor_command(*, json_output: bool, output_func: Callable[[str], None]) -> int:
     report = run_doctor()
-    output_func(json_text(report.to_dict()) if json_output else format_doctor_report(report))
+    output_func(
+        json_text(report.to_dict()) if json_output else format_doctor_report(report)
+    )
     return EXIT_OK if report.ok else EXIT_CONFIGURATION_ERROR
 
 
@@ -191,9 +196,7 @@ def run_trace_command(
             )
             report = execute_replay_fixture(fixture).to_dict()
             output_func(
-                json_text(report)
-                if json_output
-                else format_fixture_replay(report)
+                json_text(report) if json_output else format_fixture_replay(report)
             )
             return EXIT_OK if report["ok"] else EXIT_RUNTIME_ERROR
         if path is None:
@@ -205,7 +208,9 @@ def run_trace_command(
                 max_events=max_events,
                 unbounded=unbounded,
             )
-            output_func(json_text(summary) if json_output else format_trace_summary(summary))
+            output_func(
+                json_text(summary) if json_output else format_trace_summary(summary)
+            )
             return EXIT_OK
         if command == "replay":
             replay = replay_trace(
@@ -214,7 +219,9 @@ def run_trace_command(
                 max_events=max_events,
                 unbounded=unbounded,
             )
-            output_func(json_text(replay) if json_output else format_trace_replay(replay))
+            output_func(
+                json_text(replay) if json_output else format_trace_replay(replay)
+            )
             return EXIT_OK
         if command != "export":
             raise ValueError(f"Unknown trace command: {command}")
@@ -232,7 +239,9 @@ def run_trace_command(
             "format": "html",
             "output_path": str(destination),
         }
-        output_func(json_text(payload) if json_output else f"Trace exported to {destination}")
+        output_func(
+            json_text(payload) if json_output else f"Trace exported to {destination}"
+        )
         return EXIT_OK
     except (TraceFormatError, FileExistsError, OSError, ValueError) as exc:
         return _emit_error(
