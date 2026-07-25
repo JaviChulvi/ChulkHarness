@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_plugins_parser(subparsers)
     _add_usage_parser(subparsers)
     _add_goal_parser(subparsers)
+    _add_child_parser(subparsers)
     _add_session_parser(subparsers)
     _add_gateway_parser(subparsers)
     _add_server_parser(subparsers)
@@ -469,6 +470,72 @@ def _add_goal_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Retry a blocked, failed, or uncertain step.",
     )
     _add_goal_step_mutation_options(retry_step)
+
+
+def _add_child_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "child",
+        help="Inspect and control durable child tasks.",
+    )
+    commands = parser.add_subparsers(dest="child_command", required=True)
+
+    list_parser = commands.add_parser(
+        "list",
+        help="List profile-owned child tasks.",
+    )
+    list_parser.add_argument(
+        "--status",
+        choices=(
+            "pending",
+            "ready",
+            "running",
+            "waiting",
+            "completed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "budget_exhausted",
+            "unknown",
+        ),
+    )
+    list_parser.add_argument("--goal")
+    list_parser.add_argument("--parent")
+    list_parser.add_argument("--limit", type=int, default=100)
+    list_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    inspect = commands.add_parser("inspect", help="Inspect one child task.")
+    inspect.add_argument("task_id")
+    inspect.add_argument("--json", action="store_true", dest="json_output")
+
+    for name, help_text in (
+        ("cancel", "Cancel a child task and its descendants."),
+        ("retry", "Explicitly retry a failed or unknown child task."),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("task_id")
+        command.add_argument("--revision", type=int, required=True)
+        command.add_argument("--actor", default="cli")
+        command.add_argument("--json", action="store_true", dest="json_output")
+        if name == "cancel":
+            command.add_argument("--reason")
+
+    recover = commands.add_parser(
+        "recover",
+        help="Mark expired in-flight child attempts unknown.",
+    )
+    recover.add_argument("--actor", default="cli-recovery")
+    recover.add_argument("--json", action="store_true", dest="json_output")
+
+    deliveries = commands.add_parser(
+        "deliveries",
+        help="List durable parent-completion deliveries.",
+    )
+    deliveries.add_argument(
+        "--status",
+        choices=("pending", "claimed", "delivered", "failed", "unknown"),
+    )
+    deliveries.add_argument("--limit", type=int, default=100)
+    deliveries.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_goal_mutation_options(parser: argparse.ArgumentParser) -> None:

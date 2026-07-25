@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -45,6 +45,7 @@ class ModelUsageAccounting:
         client: LLMClient,
         dimensions: UsageDimensions,
         budget: RunBudget,
+        additional_budgets: Iterable[RunBudget] = (),
         max_output_tokens: int,
         trace_path: Path | str | None = None,
         boundary_callback: Callable[[], object] | None = None,
@@ -58,12 +59,25 @@ class ModelUsageAccounting:
         self.dimensions = dimensions
         self.conversation_id = dimensions.conversation_id
         self.budget = budget
+        self.additional_budgets = tuple(additional_budgets)
+        scopes = [budget.scope, *(item.scope for item in self.additional_budgets)]
+        if len(scopes) != len(set(scopes)):
+            raise ValueError("usage accounting budgets must use distinct scopes")
         self.max_output_tokens = max_output_tokens
         self.trace_path = str(trace_path) if trace_path is not None else None
         self.boundary_callback = boundary_callback
         self._reservations: dict[tuple[str, int], BudgetReservation] = {}
+        self._constraint_reservations: dict[
+            tuple[str, int],
+            tuple[BudgetReservation, ...],
+        ] = {}
         self._tool_reservations: dict[tuple[str, int, int], BudgetReservation] = {}
+        self._tool_constraint_reservations: dict[
+            tuple[str, int, int],
+            tuple[BudgetReservation, ...],
+        ] = {}
         self.reconcile_persisted_model_requests()
+        self.store.reconcile_committed_constraints()
         self.store.release_expired()
 
     def reserve_model_request(
@@ -111,7 +125,20 @@ class ModelUsageAccounting:
             tokens=reserved_tokens,
             cost=reserved_cost,
         )
+        try:
+            constraints = self._reserve_constraints(
+                source_event_id=source_event_id,
+                resource_kind=ResourceKind.MODEL,
+                dimensions=self._dimensions(turn_id),
+                model_calls=len(meters) * attempt_multiplier,
+                tokens=reserved_tokens,
+                cost=reserved_cost,
+            )
+        except Exception:
+            self.store.release(reservation.id)
+            raise
         self._reservations[key] = reservation
+        self._constraint_reservations[key] = constraints
         return reservation
 
     def commit_model_request(
@@ -162,7 +189,10 @@ class ModelUsageAccounting:
             trace_path=self.trace_path,
         )
         committed = self.store.commit(reservation.id, entries)
-        self._reservations.pop((turn_id, request_index), None)
+        key = (turn_id, request_index)
+        for constraint in self._constraint_reservations.pop(key, ()):
+            self.store.commit(constraint.id, entries)
+        self._reservations.pop(key, None)
         return committed
 
     def reconcile_persisted_model_requests(self) -> tuple[UsageEntry, ...]:
@@ -193,6 +223,10 @@ class ModelUsageAccounting:
                     recovered=True,
                 )
                 recovered.extend(self.store.commit(reservation.id, entries))
+                for constraint in self.store.active_constraint_reservations(
+                    reservation.source_event_id
+                ):
+                    self.store.commit(constraint.id, entries)
         return tuple(recovered)
 
     def _response_entries(
@@ -291,9 +325,12 @@ class ModelUsageAccounting:
         request_index: int,
     ) -> BudgetReservation | None:
         """Release a request that failed before normalized accounting was available."""
-        reservation = self._reservations.pop((turn_id, request_index), None)
+        key = (turn_id, request_index)
+        reservation = self._reservations.pop(key, None)
         if reservation is None:
             return None
+        for constraint in self._constraint_reservations.pop(key, ()):
+            self.store.release(constraint.id)
         return self.store.release(reservation.id)
 
     def reserve_tool_call(
@@ -326,7 +363,19 @@ class ModelUsageAccounting:
             tool_calls=1,
             cost=ExactCost(Decimal(0), pricing_known=True),
         )
+        try:
+            constraints = self._reserve_constraints(
+                source_event_id=source_event_id,
+                resource_kind=ResourceKind.TOOL,
+                dimensions=self._dimensions(turn_id),
+                tool_calls=1,
+                cost=ExactCost(Decimal(0), pricing_known=True),
+            )
+        except Exception:
+            self.store.release(reservation.id)
+            raise
         self._tool_reservations[key] = reservation
+        self._tool_constraint_reservations[key] = constraints
         return reservation
 
     def commit_tool_call(
@@ -374,6 +423,8 @@ class ModelUsageAccounting:
             },
         )
         committed = self.store.commit(reservation.id, (entry,))
+        for constraint in self._tool_constraint_reservations.pop(key, ()):
+            self.store.commit(constraint.id, (entry,))
         self._tool_reservations.pop(key, None)
         return committed
 
@@ -385,13 +436,48 @@ class ModelUsageAccounting:
         attempt: int,
     ) -> BudgetReservation | None:
         """Release an attempt that failed before a result could be observed."""
-        reservation = self._tool_reservations.pop(
-            (turn_id, tool_call_index, attempt),
-            None,
-        )
+        key = (turn_id, tool_call_index, attempt)
+        reservation = self._tool_reservations.pop(key, None)
         if reservation is None:
             return None
+        for constraint in self._tool_constraint_reservations.pop(key, ()):
+            self.store.release(constraint.id)
         return self.store.release(reservation.id)
+
+    def _reserve_constraints(
+        self,
+        *,
+        source_event_id: str,
+        resource_kind: ResourceKind,
+        dimensions: UsageDimensions,
+        model_calls: int = 0,
+        tool_calls: int = 0,
+        tokens: int = 0,
+        cost: ExactCost,
+    ) -> tuple[BudgetReservation, ...]:
+        reservations: list[BudgetReservation] = []
+        try:
+            for budget in self.additional_budgets:
+                reservations.append(
+                    self.store.reserve(
+                        idempotency_key=(
+                            f"{source_event_id}:constraint:{budget.scope.value}"
+                        ),
+                        source_event_id=source_event_id,
+                        resource_kind=resource_kind,
+                        dimensions=dimensions,
+                        budget=budget,
+                        model_calls=model_calls,
+                        tool_calls=tool_calls,
+                        tokens=tokens,
+                        cost=cost,
+                    )
+                )
+        except Exception:
+            for reservation in reservations:
+                self.store.release(reservation.id)
+            raise
+        return tuple(reservations)
 
     def _reservation(self, turn_id: str, request_index: int) -> BudgetReservation:
         key = (turn_id, request_index)

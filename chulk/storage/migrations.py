@@ -862,6 +862,166 @@ def _migrate_to_durable_goals(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_child_task_graph(conn: sqlite3.Connection) -> None:
+    """Create profile-owned child tasks, attempts, events, and delivery outbox."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS child_tasks (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            goal_id TEXT,
+            goal_step_id TEXT,
+            parent_task_id TEXT,
+            root_task_id TEXT,
+            depth INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            cancellation_requested INTEGER NOT NULL DEFAULT 0,
+            claim_token TEXT,
+            worker_id TEXT,
+            attempt_id TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            CHECK (depth >= 1),
+            CHECK (revision >= 0),
+            CHECK (cancellation_requested IN (0, 1)),
+            CHECK (
+                status IN (
+                    'pending', 'ready', 'running', 'waiting', 'completed',
+                    'failed', 'blocked', 'cancelled', 'budget_exhausted',
+                    'unknown'
+                )
+            ),
+            CHECK (
+                (
+                    claim_token IS NULL AND worker_id IS NULL
+                    AND attempt_id IS NULL AND lease_until IS NULL
+                )
+                OR
+                (
+                    claim_token IS NOT NULL AND worker_id IS NOT NULL
+                    AND attempt_id IS NOT NULL AND lease_until IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_task_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (root_task_id) REFERENCES child_tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_child_tasks_ready
+        ON child_tasks(profile_id, status, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_child_tasks_goal
+        ON child_tasks(profile_id, goal_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_child_tasks_parent
+        ON child_tasks(profile_id, parent_task_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_child_tasks_lease
+        ON child_tasks(profile_id, status, lease_until, id);
+
+        CREATE TABLE IF NOT EXISTS child_task_creation_keys (
+            profile_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            task_id TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (profile_id, idempotency_key),
+            FOREIGN KEY (task_id) REFERENCES child_tasks(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS child_task_dependencies (
+            task_id TEXT NOT NULL,
+            dependency_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            PRIMARY KEY (task_id, dependency_id),
+            FOREIGN KEY (task_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (dependency_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            CHECK (task_id <> dependency_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_child_task_dependencies_reverse
+        ON child_task_dependencies(profile_id, dependency_id, task_id);
+
+        CREATE TABLE IF NOT EXISTS child_task_attempts (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            worker_id TEXT NOT NULL,
+            claim_token TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            lease_until TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE (task_id, attempt_number),
+            FOREIGN KEY (task_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            CHECK (attempt_number >= 1),
+            CHECK (
+                status IN (
+                    'running', 'completed', 'failed', 'cancelled',
+                    'budget_exhausted', 'unknown'
+                )
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_child_task_attempts_task
+        ON child_task_attempts(profile_id, task_id, attempt_number);
+
+        CREATE TABLE IF NOT EXISTS child_task_events (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE (task_id, revision),
+            FOREIGN KEY (task_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            CHECK (revision >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_child_task_events_task
+        ON child_task_events(profile_id, task_id, revision);
+
+        CREATE TABLE IF NOT EXISTS child_completion_outbox (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            task_revision INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            claim_token TEXT,
+            worker_id TEXT,
+            lease_until TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            delivered_at TEXT,
+            UNIQUE (task_id, task_revision),
+            UNIQUE (profile_id, idempotency_key),
+            FOREIGN KEY (task_id) REFERENCES child_tasks(id) ON DELETE CASCADE,
+            CHECK (attempts >= 0),
+            CHECK (
+                status IN ('pending', 'claimed', 'delivered', 'failed', 'unknown')
+            ),
+            CHECK (
+                (
+                    claim_token IS NULL AND worker_id IS NULL
+                    AND lease_until IS NULL
+                )
+                OR
+                (
+                    claim_token IS NOT NULL AND worker_id IS NOT NULL
+                    AND lease_until IS NOT NULL
+                )
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_child_completion_delivery
+        ON child_completion_outbox(profile_id, status, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -917,6 +1077,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(13, "conversation-dispatch", _migrate_to_conversation_dispatch),
     SQLiteMigration(14, "idempotent-control-decisions", _migrate_to_control_decisions),
     SQLiteMigration(15, "durable-goals", _migrate_to_durable_goals),
+    SQLiteMigration(16, "child-task-graph", _migrate_to_child_task_graph),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

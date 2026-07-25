@@ -42,6 +42,9 @@ class EventName(str, Enum):
     GOAL_STEERED = "goal.steered"
     GOAL_EVIDENCE_RECORDED = "goal.evidence.recorded"
     GOAL_CANCELLATION_REQUESTED = "goal.cancellation.requested"
+    CHILD_TASK_CREATED = "child_task.created"
+    CHILD_TASK_STATE_CHANGED = "child_task.state.changed"
+    CHILD_TASK_DELIVERY_CHANGED = "child_task.delivery.changed"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
 
@@ -134,6 +137,17 @@ class GoalChangedPayload(ExtensiblePayload):
 
 
 @dataclass(frozen=True)
+class ChildTaskChangedPayload(ExtensiblePayload):
+    task_id: str
+    status: str
+    revision: int
+    action: str
+    parent_task_id: str | None = None
+    attempt_id: str | None = None
+    delivery_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RunCompletedPayload(ExtensiblePayload):
     result: RunResult
 
@@ -170,6 +184,7 @@ EventPayload: TypeAlias = (
     | LearningProposalChangedPayload
     | PlanPayload
     | GoalChangedPayload
+    | ChildTaskChangedPayload
     | RunCompletedPayload
     | RunFailedPayload
     | SerializedEventPayload
@@ -247,6 +262,7 @@ __all__ = [
     "SUPPORTED_EVENT_SCHEMA_VERSIONS",
     "AgentEvent",
     "BudgetPayload",
+    "ChildTaskChangedPayload",
     "EventName",
     "EventPayload",
     "GoalChangedPayload",
