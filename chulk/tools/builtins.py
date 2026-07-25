@@ -87,7 +87,7 @@ def create_default_tool_registry(
             registry.register(compact_memories_tool(memory_store))
             registry.register(import_memories_tool(memory_store, project_root))
             registry.register(export_memories_tool(memory_store, project_root))
-    if session_search_service is not None:
+    if session_search_service is not None and selected.utilities:
         registry.register(session_search_tool(session_search_service))
         registry.register(session_read_tool(session_search_service))
     return registry

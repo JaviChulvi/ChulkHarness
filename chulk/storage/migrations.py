@@ -514,7 +514,7 @@ def _migrate_to_session_search(conn: sqlite3.Connection) -> None:
             """
         )
     except sqlite3.OperationalError:
-        # FTS5 is optional. SQLiteSessionStore activates the bounded LIKE
+        # FTS5 is optional. SQLiteSessionStore activates the bounded scan
         # fallback and can rebuild the index when FTS later becomes available.
         return
 

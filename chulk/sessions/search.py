@@ -74,7 +74,7 @@ class SessionSearchService:
         offset = _decode_search_cursor(cursor, shape=shape) if cursor else 0
         candidates = self._search_candidates(
             terms,
-            limit=min(10_000, max(100, (offset + clean_limit + 1) * 5)),
+            limit=10_000,
         )
         eligible = [
             row

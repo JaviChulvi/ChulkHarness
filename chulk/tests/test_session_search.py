@@ -399,6 +399,20 @@ def test_public_sdk_exposes_profile_bound_session_search_and_trusted_read(
     assert hit.conversation_id == "prior"
     assert [message.ordinal for message in safe.messages] == [1]
     assert [message.ordinal for message in trusted.messages] == [1, 2]
+    assert agent.trace_path is not None
+    trace_events = [
+        json.loads(line)
+        for line in agent.trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    search_event = next(
+        event for event in trace_events if event["type"] == "session_search"
+    )
+    serialized_event = json.dumps(search_event)
+    assert search_event["payload"]["message_ids"] == [hit.message_id]
+    assert "query_hash" in search_event["payload"]
+    assert "sdk searchable evidence" not in serialized_event
+    assert "sdk sensitive evidence" not in serialized_event
+    agent.close()
 
 
 @pytest.mark.asyncio

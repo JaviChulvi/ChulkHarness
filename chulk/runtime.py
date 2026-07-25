@@ -175,6 +175,13 @@ def create_agent(
         state.conversation_id,
         defer_until_event=TraceEvent.TURN_STARTED if conversation_id is None else None,
     )
+    def audit_session_read(
+        event_type: str,
+        payload: dict,
+    ) -> None:
+        trace_logger.activate()
+        trace_logger.log(event_type, payload)
+
     session_search_service = SessionSearchService(
         session_store,
         profile_id=effective_profile_id,
@@ -182,7 +189,7 @@ def create_agent(
             redaction_callback,
             fail_closed=redaction_fail_closed,
         ),
-        audit_callback=trace_logger.log,
+        audit_callback=audit_session_read,
     )
     skill_registry.load_metadata()
     skill_resolution = _resolve_skill_specs(skill_registry, skill_specs)
