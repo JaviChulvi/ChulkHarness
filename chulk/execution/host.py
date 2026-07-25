@@ -95,10 +95,18 @@ class HostExecutionSession:
         *,
         workspace: ExecutionWorkspace,
         policy: ExecutionPolicy,
+        project_root: Path | None = None,
+        shell_execution_policy: ShellExecutionPolicy | None = None,
     ) -> None:
         self._backend = backend
         self.workspace = workspace
         self.policy = policy
+        self.project_root = (project_root or backend.project_root).resolve()
+        self.shell_execution_policy = (
+            shell_execution_policy
+            if shell_execution_policy is not None
+            else backend.shell_execution_policy
+        )
         self._closed = False
 
     @property
@@ -111,7 +119,7 @@ class HostExecutionSession:
         self._ensure_open()
         result = read_file(
             request.to_arguments(),
-            self._backend.project_root,
+            self.project_root,
             read_policy=FileReadPolicy(
                 allow_sensitive_paths=self._backend.allow_sensitive_reads
             ),
@@ -123,7 +131,7 @@ class HostExecutionSession:
 
         self._ensure_open()
         return self._normalize(
-            write_file(request.to_arguments(), self._backend.project_root),
+            write_file(request.to_arguments(), self.project_root),
             include_changes=True,
         )
 
@@ -132,7 +140,7 @@ class HostExecutionSession:
 
         self._ensure_open()
         return self._normalize(
-            apply_patch(request.to_arguments(), self._backend.project_root),
+            apply_patch(request.to_arguments(), self.project_root),
             include_changes=True,
         )
 
@@ -143,7 +151,7 @@ class HostExecutionSession:
         return self._normalize(
             list_files(
                 request.to_arguments(),
-                self._backend.project_root,
+                self.project_root,
                 read_policy=FileReadPolicy(
                     allow_sensitive_paths=self._backend.allow_sensitive_reads
                 ),
@@ -157,7 +165,7 @@ class HostExecutionSession:
         return self._normalize(
             search_files(
                 request.to_arguments(),
-                self._backend.project_root,
+                self.project_root,
                 read_policy=FileReadPolicy(
                     allow_sensitive_paths=self._backend.allow_sensitive_reads
                 ),
@@ -170,11 +178,11 @@ class HostExecutionSession:
         self._ensure_open()
         result = run_shell_command(
             request.to_arguments(),
-            self._backend.project_root,
+            self.project_root,
             self._backend.shell_timeout_seconds,
             stdout_limit_bytes=self._backend.max_stdout_bytes,
             stderr_limit_bytes=self._backend.max_stderr_bytes,
-            execution_policy=self._backend.shell_execution_policy,
+            execution_policy=self.shell_execution_policy,
             require_containment=self._backend.require_shell_containment,
         )
         return self._normalize(result)
@@ -297,6 +305,8 @@ def _change_set_from_metadata(metadata: dict[str, Any]) -> ChangeSet | None:
             status=str(item["status"]),
             sha256_before=_optional_text(item.get("sha256_before")),
             sha256_after=_optional_text(item.get("sha256_after")),
+            mode_before=_optional_int(item.get("mode_before")),
+            mode_after=_optional_int(item.get("mode_after")),
         )
         for item in raw_changes
         if isinstance(item, dict) and "path" in item and "status" in item
@@ -306,3 +316,7 @@ def _change_set_from_metadata(metadata: dict[str, Any]) -> ChangeSet | None:
 
 def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
