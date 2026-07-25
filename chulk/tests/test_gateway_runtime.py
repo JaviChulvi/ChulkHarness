@@ -26,13 +26,18 @@ from chulk.gateway import (
 )
 
 
-def _envelope(event_id: str, *, destination: str = "chat-9") -> InboundEnvelope:
+def _envelope(
+    event_id: str,
+    *,
+    destination: str = "chat-9",
+    text: str | None = None,
+) -> InboundEnvelope:
     return InboundEnvelope(
         event_id=event_id,
         idempotency_key=f"fake:primary:{event_id}",
         identity=ChannelIdentity("fake", "primary", "user-7"),
         destination_id=destination,
-        parts=(TextPart(f"message {event_id}"),),
+        parts=(TextPart(text or f"message {event_id}"),),
         scope=ChannelScope.DIRECT,
         authentication=AuthenticationState.AUTHENTICATED,
         trust=TrustLevel.TRUSTED,
@@ -275,3 +280,51 @@ async def test_active_cancellation_reaches_executor_and_terminal_state(tmp_path)
     record = ledger.get_inbox(inbox_id)
     assert record is not None
     assert record.state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_command_cancels_earlier_conversation_work_before_fifo(
+    tmp_path,
+) -> None:
+    started = asyncio.Event()
+
+    async def execute(
+        _profile_id: str,
+        envelope: InboundEnvelope,
+    ) -> tuple[OutboundEnvelope, ...]:
+        if envelope.parts == (TextPart("/stop"),):
+            return (
+                OutboundEnvelope(
+                    profile_id="work",
+                    conversation_id="conversation",
+                    target=DeliveryTarget(
+                        "fake",
+                        "primary",
+                        envelope.destination_id,
+                    ),
+                    text="stopped",
+                ),
+            )
+        started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    runtime, ledger, adapter = _runtime(tmp_path, execute)
+    await runtime.accept(adapter, _envelope("1"))
+    processing = asyncio.create_task(runtime.process_available())
+    await started.wait()
+    active_id = next(iter(runtime._active_executions))
+
+    await runtime.accept(adapter, _envelope("2", text="/stop"))
+    await processing
+
+    active = ledger.get_inbox(active_id)
+    stop = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key="fake:primary:2",
+    )
+    assert active is not None and active.state == "cancelled"
+    assert stop is not None and stop.state == "queued"
+    assert await runtime.run_once() == (1, 1)
+    assert adapter.delivered == ["stopped"]

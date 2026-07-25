@@ -130,13 +130,16 @@ class GatewayPairingRequest:
     @classmethod
     def from_dict(cls, value: object) -> GatewayPairingRequest:
         body = _object(value)
+        adapter = _required_text(body.get("adapter"), "adapter", max_chars=64)
+        if adapter not in {"telegram", "discord"}:
+            raise ValueError("adapter must be telegram or discord")
         ttl = body.get("ttl_seconds", 600)
         if isinstance(ttl, bool) or not isinstance(ttl, int):
             raise ValueError("ttl_seconds must be an integer")
         if ttl < 60 or ttl > 3_600:
             raise ValueError("ttl_seconds must be between 60 and 3600")
         return cls(
-            adapter=_required_text(body.get("adapter"), "adapter", max_chars=64),
+            adapter=adapter,
             account_id=_required_text(
                 body.get("account_id"),
                 "account_id",

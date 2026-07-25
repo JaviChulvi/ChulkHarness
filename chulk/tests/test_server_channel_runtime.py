@@ -20,6 +20,7 @@ from chulk.profiles import ProfileRuntimeFactory
 from chulk.runtime import create_agent
 from chulk.server.channel_runtime import ChannelConversationExecutor
 from chulk.server.dispatcher import ConversationDispatcher
+from chulk.sessions import SQLiteSessionStore
 
 
 class ChannelLLM(LLMClient):
@@ -37,12 +38,15 @@ def _envelope(
     *,
     event_id: str,
     conversation_id: str | None = None,
+    adapter: str = "discord",
+    account_id: str = "primary",
+    destination_id: str = "channel-9",
 ) -> InboundEnvelope:
     return InboundEnvelope(
         event_id=event_id,
         idempotency_key=f"discord:primary:{event_id}",
-        identity=ChannelIdentity("discord", "primary", "user-7"),
-        destination_id="channel-9",
+        identity=ChannelIdentity(adapter, account_id, "user-7"),
+        destination_id=destination_id,
         parts=(TextPart(text),),
         scope=ChannelScope.DIRECT,
         authentication=AuthenticationState.AUTHENTICATED,
@@ -119,4 +123,53 @@ async def test_requested_missing_conversation_returns_typed_failure(tmp_path) ->
 
     assert result.extensions["error"] == "conversation_not_found"
     assert result.conversation_id == "missing"
+    await dispatcher.close()
+
+
+@pytest.mark.asyncio
+async def test_websocket_client_identity_resumes_across_new_socket_accounts(
+    tmp_path,
+) -> None:
+    execute, dispatcher = _executor(tmp_path)
+
+    created = (
+        await execute(
+            "default",
+            _envelope(
+                "/new",
+                event_id="1",
+                adapter="websocket",
+                account_id="socket-one",
+                destination_id="stable-client",
+            ),
+        )
+    )[0]
+    resumed = (
+        await execute(
+            "default",
+            _envelope(
+                "/status",
+                event_id="2",
+                adapter="websocket",
+                account_id="socket-two",
+                destination_id="stable-client",
+            ),
+        )
+    )[0]
+
+    assert resumed.conversation_id == created.conversation_id
+    await dispatcher.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_command_does_not_create_an_empty_conversation(
+    tmp_path,
+) -> None:
+    execute, dispatcher = _executor(tmp_path)
+
+    result = (await execute("default", _envelope("/skills", event_id="1")))[0]
+    resolved = dispatcher.runtime_factory.resolve("default")
+
+    assert result.conversation_id == "none"
+    assert SQLiteSessionStore(resolved.config.store_path).list_conversations() == []
     await dispatcher.close()

@@ -487,8 +487,15 @@ class TelegramAgentBot:
         if command == "/model":
             if arguments:
                 return "Model switching is not available in this channel."
+            model_profile_id = (
+                self._profile_runtime_factory.resolve(
+                    profile_id
+                ).profile.model_profile_id
+                if self._profile_runtime_factory is not None
+                else "default"
+            )
             return (
-                f"Model profile: {runtime_config.profile_id}\n"
+                f"Model profile: {model_profile_id}\n"
                 f"Provider: {runtime_config.llm_provider}\n"
                 f"Model: {runtime_config.model}"
             )
@@ -519,7 +526,12 @@ class TelegramAgentBot:
                 if profile is not None and profile.memory_namespace
                 else f"telegram:chat:{chat_id}"
             )
-            return f"Memory namespace: {namespace}\nAccess: read-only"
+            access = (
+                "read-only"
+                if self.telegram_config.long_term_memory_enabled
+                else "off"
+            )
+            return f"Memory namespace: {namespace}\nAccess: {access}"
         if command == "/agents":
             return "No delegated agents are active in this conversation."
         if command == "/jobs":

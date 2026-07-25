@@ -121,15 +121,34 @@ def test_main_dispatches_discord_gateway_without_starting_telegram(
 
     calls: list[tuple[object, object]] = []
 
-    def run_discord(config, *, control_db_path, profile_runtime_factory):
+    def run_discord(
+        config,
+        *,
+        control_db_path,
+        profile_runtime_factory,
+        account_id,
+    ):
         calls.append((control_db_path, profile_runtime_factory))
         assert config.project_root == tmp_path.resolve()
+        assert account_id == "team-bot"
         return 0
 
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setattr(discord_main, "run_discord_gateway", run_discord)
 
-    assert main(["gateway", "start", "--adapter", "discord"]) == 0
+    assert (
+        main(
+            [
+                "gateway",
+                "start",
+                "--adapter",
+                "discord",
+                "--account",
+                "team-bot",
+            ]
+        )
+        == 0
+    )
     assert calls
     assert calls[0][0] == (tmp_path / ".chulk" / "control.sqlite").resolve()
 

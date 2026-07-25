@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,11 @@ async def run_discord_runtime(
     runtime_factory = profile_runtime_factory or ProfileRuntimeFactory(config)
     dispatcher = ConversationDispatcher(runtime_factory)
     adapter = DiscordChannelAdapter(
-        transport or DiscordPyTransport(discord_config.bot_token),
+        transport
+        or DiscordPyTransport(
+            discord_config.bot_token,
+            max_pending=discord_config.max_pending,
+        ),
         account_id=discord_config.account_id,
     )
     conversation_executor = ChannelConversationExecutor(dispatcher)
@@ -90,9 +95,12 @@ def run_discord_gateway(
     *,
     control_db_path: Path | str | None = None,
     profile_runtime_factory: ProfileRuntimeFactory | None = None,
+    account_id: str | None = None,
 ) -> int:
     try:
         discord_config = load_discord_config(env_file=config.project_root / ".env")
+        if account_id is not None:
+            discord_config = replace(discord_config, account_id=account_id)
         asyncio.run(
             run_discord_runtime(
                 config,

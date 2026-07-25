@@ -31,11 +31,15 @@ class DiscordMessage:
 class DiscordPyTransport:
     """Expose the small client surface consumed by the channel adapter."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, max_pending: int = 1_000) -> None:
+        if max_pending < 1:
+            raise ValueError("max_pending must be positive")
         self._token = token
         self._client: Any = None
         self._runner: asyncio.Task[None] | None = None
-        self._messages: asyncio.Queue[DiscordMessage] = asyncio.Queue(maxsize=1_000)
+        self._messages: asyncio.Queue[DiscordMessage] = asyncio.Queue(
+            maxsize=max_pending
+        )
 
     async def receive(self) -> AsyncIterator[DiscordMessage]:
         client = self._build_client()

@@ -657,6 +657,7 @@ def main(
 
             control_path = base_config.runtime_dir / "control.sqlite"
             adapter_name = getattr(args, "adapter", "telegram")
+            account_id = getattr(args, "account", "primary")
 
             def start_gateway() -> int:
                 if adapter_name == "discord":
@@ -666,6 +667,7 @@ def main(
                         config,
                         control_db_path=control_path,
                         profile_runtime_factory=profile_factory,
+                        account_id=account_id,
                     )
                 return run_telegram_gateway(
                     config,
@@ -680,7 +682,7 @@ def main(
                 profile_store=profile_factory.profile_store,
                 start_func=start_gateway,
                 adapter=adapter_name,
-                account_id=getattr(args, "account", "primary"),
+                account_id=account_id,
                 route_command=getattr(args, "route_command", None),
                 route_id=getattr(args, "route_id", None),
                 profile_id=getattr(args, "profile", None),

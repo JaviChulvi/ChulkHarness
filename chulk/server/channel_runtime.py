@@ -147,7 +147,7 @@ class ChannelConversationExecutor:
             profile_id,
             envelope,
             requested_id=requested_id,
-            create=name not in {"status", "model", "skills", "memory", "agents"},
+            create=False,
         )
         resolved = self.dispatcher.runtime_factory.resolve(profile_id)
         profile = resolved.profile
@@ -265,7 +265,7 @@ class ChannelConversationExecutor:
             await self.dispatcher.get_conversation(profile_id, requested_id)
             return requested_id
         resolved = self.dispatcher.runtime_factory.resolve(profile_id)
-        key = conversation_key_for(envelope)
+        key = _channel_conversation_key(envelope)
         existing = SQLiteSessionStore(
             resolved.config.store_path
         ).find_conversation_by_metadata(CHANNEL_CONVERSATION_METADATA_KEY, key)
@@ -283,7 +283,7 @@ class ChannelConversationExecutor:
     def _metadata(envelope: InboundEnvelope) -> dict[str, Any]:
         return {
             "channel": envelope.identity.adapter,
-            CHANNEL_CONVERSATION_METADATA_KEY: conversation_key_for(envelope),
+            CHANNEL_CONVERSATION_METADATA_KEY: _channel_conversation_key(envelope),
         }
 
     @staticmethod
@@ -310,6 +310,18 @@ class ChannelConversationExecutor:
                 "error": result.error,
             },
         )
+
+
+def _channel_conversation_key(envelope: InboundEnvelope) -> str:
+    if envelope.identity.adapter == "websocket":
+        return "\x1f".join(
+            (
+                envelope.identity.adapter,
+                envelope.destination_id,
+                envelope.thread_id or "",
+            )
+        )
+    return conversation_key_for(envelope)
 
 
 __all__ = [

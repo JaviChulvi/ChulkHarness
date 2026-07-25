@@ -196,6 +196,19 @@ def test_authenticated_webchat_session_creates_pairing_and_lists_routes(
                 "ttl_seconds": 10,
             },
         ).status_code == 400
+        assert client.post(
+            "/v1/gateway/pairings",
+            headers={
+                **_auth(tokens),
+                "Origin": origin,
+                "X-Chulk-CSRF": csrf,
+            },
+            json={
+                "adapter": "unknown",
+                "account_id": "primary",
+                "profile_id": "default",
+            },
+        ).status_code == 400
 
 
 def test_http_api_creates_conversation_and_queues_idempotent_message(tmp_path) -> None:

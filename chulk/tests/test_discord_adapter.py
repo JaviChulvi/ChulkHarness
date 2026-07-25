@@ -217,7 +217,6 @@ def test_discord_adapter_does_not_import_core_or_provider_modules() -> None:
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(package.glob("*.py"))
-        if path.name != "main.py"
     )
 
     assert "chulk.core" not in source
