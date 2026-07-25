@@ -35,11 +35,11 @@ _IGNORED_DIRECTORIES = frozenset(
         ".svn",
         ".tox",
         ".venv",
-        "__pycache__",
         "venv",
     }
 )
 _IGNORED_FILES = frozenset({".DS_Store"})
+_BYTECODE_SUFFIXES = (".pyc", ".pyo")
 _MAX_PACKAGE_FILES = 10_000
 _MAX_PACKAGE_BYTES = 100_000_000
 _MAX_FILE_BYTES = 20_000_000
@@ -123,23 +123,33 @@ def _package_files(root: Path) -> tuple[tuple[Path, ...], int]:
         retained_directories: list[str] = []
         for name in sorted(directory_names):
             child = current / name
-            if name in _IGNORED_DIRECTORIES:
-                continue
             if child.is_symlink():
                 raise PluginInspectionError(
                     f"plugin package cannot contain symlinks: "
                     f"{child.relative_to(root)}"
                 )
+            if name == "__pycache__":
+                raise PluginInspectionError(
+                    "plugin package cannot contain Python bytecode caches: "
+                    f"{child.relative_to(root)}"
+                )
+            if name in _IGNORED_DIRECTORIES:
+                continue
             retained_directories.append(name)
         directory_names[:] = retained_directories
         for name in sorted(filenames):
-            if name in _IGNORED_FILES or name.endswith((".pyc", ".pyo")):
+            if name in _IGNORED_FILES:
                 continue
             path = current / name
             mode = path.lstat().st_mode
             if stat.S_ISLNK(mode):
                 raise PluginInspectionError(
                     f"plugin package cannot contain symlinks: "
+                    f"{path.relative_to(root)}"
+                )
+            if name.endswith(_BYTECODE_SUFFIXES):
+                raise PluginInspectionError(
+                    "plugin package cannot contain Python bytecode: "
                     f"{path.relative_to(root)}"
                 )
             if not stat.S_ISREG(mode):

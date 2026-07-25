@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import stat
 import sys
+import threading
+import time
 
 import pytest
 
+import chulk.plugins.registry as registry_module
 from chulk.plugins import (
     LocalPluginRegistry,
     PluginCategory,
@@ -168,6 +172,31 @@ def test_startup_verification_fails_closed_after_package_tamper(tmp_path):
         plugins.verify_startup()
 
 
+def test_startup_verification_rejects_added_python_bytecode(tmp_path):
+    package = write_plugin(tmp_path)
+    plugins = registry(tmp_path)
+    plugins.register_local(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+    )
+    bytecode = (
+        package
+        / "sample_plugin"
+        / "__pycache__"
+        / "tools.cpython-312.pyc"
+    )
+    bytecode.parent.mkdir()
+    bytecode.write_bytes(b"unreviewed executable bytes")
+
+    report = plugins.audit()
+
+    assert report.ok is False
+    assert report.findings[0].code == "package_invalid"
+    with pytest.raises(PluginVerificationError, match="bytecode"):
+        plugins.verify_startup()
+
+
 def test_lock_rejects_unknown_fields_profile_mismatch_and_symlinks(
     tmp_path,
 ):
@@ -322,6 +351,98 @@ def test_loader_wraps_plugin_import_failures(tmp_path):
         )
 
     assert "sample_plugin" not in sys.modules
+
+
+def test_loader_discards_modules_when_entry_point_is_not_callable(
+    tmp_path,
+):
+    package = write_plugin(
+        tmp_path,
+        manifest=plugin_manifest().replace(
+            "sample_plugin.tools:create_tool",
+            "sample_plugin.tools:value",
+        ),
+    )
+    (package / "sample_plugin" / "tools.py").write_text(
+        "value = 42\n",
+        encoding="utf-8",
+    )
+    plugins = registry(tmp_path)
+    plugins.register_local(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+        granted_capabilities=("files:read",),
+    )
+
+    with pytest.raises(PluginLoadError, match="callable factories"):
+        plugins.load_entry_point(
+            "sample-plugin",
+            "tool",
+            "sample",
+            available_capabilities=("files:read",),
+        )
+
+    assert "sample_plugin" not in sys.modules
+    assert "sample_plugin.tools" not in sys.modules
+
+
+def test_loader_serializes_process_global_import_state(
+    tmp_path,
+    monkeypatch,
+):
+    package = write_plugin(tmp_path)
+    plugins = registry(tmp_path)
+    plugins.register_local(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+        granted_capabilities=("files:read",),
+    )
+    original_import = registry_module.importlib.import_module
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+
+    def controlled_import(module_name):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+        return original_import(module_name)
+
+    monkeypatch.setattr(
+        registry_module.importlib,
+        "import_module",
+        controlled_import,
+    )
+
+    def load(*, started=None):
+        if started is not None:
+            started.set()
+        return plugins.load_entry_point(
+            "sample-plugin",
+            "tool",
+            "sample",
+            available_capabilities=("files:read",),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(load)
+        assert first_entered.wait(timeout=2)
+        second = pool.submit(load, started=second_started)
+        assert second_started.wait(timeout=2)
+        time.sleep(0.05)
+        with calls_lock:
+            assert calls == 1
+        release_first.set()
+        assert callable(first.result(timeout=2).value)
+        assert callable(second.result(timeout=2).value)
 
 
 def test_registration_rejects_missing_plugin_dependencies(tmp_path):

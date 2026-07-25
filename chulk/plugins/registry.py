@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import importlib
 from pathlib import Path
 import sys
+import threading
 from types import ModuleType
 
 from packaging.specifiers import SpecifierSet
@@ -42,6 +43,9 @@ class PluginVerificationError(RuntimeError):
 
 class PluginLoadError(RuntimeError):
     """A trusted plugin entry point could not be imported safely."""
+
+
+_IMPORT_LOCK = threading.RLock()
 
 
 class LocalPluginRegistry:
@@ -309,10 +313,6 @@ class LocalPluginRegistry:
                 "entry point requires capabilities that were not reviewed"
             )
         value = _import_target(entry, selected)
-        if not callable(value):
-            raise PluginLoadError(
-                "plugin entry points must resolve to callable factories"
-            )
         return LoadedPluginEntryPoint(
             plugin_name=entry.name,
             entry_point=selected,
@@ -412,6 +412,14 @@ def _import_target(
     lock_entry: PluginLockEntry,
     entry_point: PluginEntryPoint,
 ) -> object:
+    with _IMPORT_LOCK:
+        return _import_target_locked(lock_entry, entry_point)
+
+
+def _import_target_locked(
+    lock_entry: PluginLockEntry,
+    entry_point: PluginEntryPoint,
+) -> object:
     module_name, _, attribute_path = entry_point.target.partition(":")
     top_level = module_name.partition(".")[0]
     conflicting = next(
@@ -448,6 +456,10 @@ def _import_target(
         value: object = module
         for attribute in attribute_path.split("."):
             value = getattr(value, attribute)
+        if not callable(value):
+            raise PluginLoadError(
+                "plugin entry points must resolve to callable factories"
+            )
         return value
     except PluginLoadError:
         _discard_failed_plugin_modules(

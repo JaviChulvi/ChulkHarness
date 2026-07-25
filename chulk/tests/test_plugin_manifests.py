@@ -209,6 +209,28 @@ def test_inspection_rejects_symlinks_and_path_escape(tmp_path):
         inspect_plugin_directory(package)
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "match"),
+    [
+        ("sample_plugin/__pycache__/tools.cpython-312.pyc", "bytecode caches"),
+        ("sample_plugin/tools.pyc", "Python bytecode"),
+        ("sample_plugin/tools.pyo", "Python bytecode"),
+    ],
+)
+def test_inspection_rejects_unreviewed_python_bytecode(
+    tmp_path,
+    relative_path,
+    match,
+):
+    package = write_plugin(tmp_path)
+    bytecode = package / relative_path
+    bytecode.parent.mkdir(parents=True, exist_ok=True)
+    bytecode.write_bytes(b"unreviewed executable bytes")
+
+    with pytest.raises(PluginInspectionError, match=match):
+        inspect_plugin_directory(package)
+
+
 def test_inspection_reports_incompatible_runtime_without_importing(tmp_path):
     manifest = plugin_manifest().replace(
         'requires_chulk: ">=0.1,<1"',
