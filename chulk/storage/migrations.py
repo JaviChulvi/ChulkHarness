@@ -666,6 +666,64 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_public_control_plane(conn: sqlite3.Connection) -> None:
+    """Create the profile-owned public event and permission ledgers."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS public_events (
+            event_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            turn_id TEXT,
+            sequence INTEGER NOT NULL,
+            event_name TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (conversation_id, sequence),
+            CHECK (sequence >= 1),
+            CHECK (schema_version >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_public_events_conversation
+        ON public_events(conversation_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_public_events_profile_created
+        ON public_events(profile_id, created_at, event_id);
+
+        CREATE TABLE IF NOT EXISTS permission_requests (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            turn_id TEXT,
+            tool_name TEXT NOT NULL,
+            permission_level TEXT NOT NULL,
+            policy_name TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            argument_preview_json TEXT NOT NULL,
+            argument_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decision TEXT,
+            decision_reason TEXT,
+            decision_key TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            decided_at TEXT,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                status IN (
+                    'pending', 'allowed', 'denied', 'expired', 'uncertain'
+                )
+            ),
+            CHECK (decision IS NULL OR decision IN ('allow', 'deny'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_permission_requests_conversation
+        ON permission_requests(conversation_id, status, created_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_permission_decision_key
+        ON permission_requests(profile_id, decision_key)
+        WHERE decision_key IS NOT NULL;
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -717,6 +775,7 @@ SQLITE_MIGRATIONS = (
     ),
     SQLiteMigration(10, "profile-session-search", _migrate_to_session_search),
     SQLiteMigration(11, "skill-lifecycle-and-learning", _migrate_to_skill_lifecycle),
+    SQLiteMigration(12, "public-control-plane", _migrate_to_public_control_plane),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 
