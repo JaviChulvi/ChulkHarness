@@ -63,13 +63,17 @@ class OpenAIProvider:
     provider: str = "openai"
 
     def bind_config(self, config: "Config") -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(api_key=self.api_key or None)
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(api_key=self.api_key or None)
         return create_llm_client(
             provider=self.provider,
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -85,7 +89,9 @@ class DeepSeekProvider:
     provider: str = "deepseek"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -94,7 +100,9 @@ class DeepSeekProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -111,7 +119,9 @@ class LocalProvider:
     provider: str = "local"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -125,7 +135,9 @@ class LocalProvider:
                 else config.local_context_window_tokens
             ),
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -141,7 +153,9 @@ class OpenAICompatibleProvider:
     provider: str = "openai-compatible"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -150,7 +164,9 @@ class OpenAICompatibleProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -166,7 +182,9 @@ class OpenRouterProvider:
     provider: str = "openrouter"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -175,7 +193,9 @@ class OpenRouterProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -191,7 +211,9 @@ class AnthropicProvider:
     provider: str = "anthropic"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -200,7 +222,9 @@ class AnthropicProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -216,7 +240,9 @@ class BedrockProvider:
     provider: str = "bedrock"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -225,7 +251,9 @@ class BedrockProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -241,7 +269,9 @@ class GeminiProvider:
     provider: str = "gemini"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(self.provider, config).with_overrides(
+        connection = provider_connection_from_config(
+            self.provider, config
+        ).with_overrides(
             api_key=self.api_key or None,
             base_url=self.base_url or None,
         )
@@ -250,7 +280,9 @@ class GeminiProvider:
             model=self.model,
             connection=connection,
             timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries if self.max_retries is not None else config.llm_max_retries,
+            max_retries=self.max_retries
+            if self.max_retries is not None
+            else config.llm_max_retries,
         )
 
 
@@ -268,6 +300,7 @@ class ProviderAttempt:
     error_code: str | None = None
     retryable: bool | None = None
     fallback_eligible: bool | None = None
+    model_profile_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -279,6 +312,7 @@ class ProviderAttempt:
             "error_code": self.error_code,
             "retryable": self.retryable,
             "fallback_eligible": self.fallback_eligible,
+            "model_profile_id": self.model_profile_id,
             "usage": self.usage.to_dict() if self.usage is not None else None,
             "cost": self.cost.to_dict() if self.cost is not None else None,
         }
@@ -292,8 +326,22 @@ class FallbackChain(LLMClient):
     strategy: FallbackStrategy = "first_success"
     attempts: list[ProviderAttempt] = field(default_factory=list)
     last_attempts: list[ProviderAttempt] = field(default_factory=list)
-    last_success_provider: LLMClient | None = field(default=None, init=False, repr=False)
-    _action_attempts: list[ProviderAttempt] | None = field(default=None, init=False, repr=False)
+    last_success_provider: LLMClient | None = field(
+        default=None, init=False, repr=False
+    )
+    attempt_callback: Callable[[ProviderAttempt], None] | None = field(
+        default=None,
+        repr=False,
+    )
+    provider_available: Callable[[LLMClient], bool] | None = field(
+        default=None,
+        repr=False,
+    )
+    fallback_error_codes: frozenset[str] = field(default_factory=frozenset)
+    selection_result: object | None = field(default=None, repr=False)
+    _action_attempts: list[ProviderAttempt] | None = field(
+        default=None, init=False, repr=False
+    )
     model_capabilities: LLMModelCapabilities | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -301,9 +349,15 @@ class FallbackChain(LLMClient):
         if not self.providers:
             raise ValueError("FallbackChain requires at least one provider")
         if self.strategy != "first_success":
-            raise NotImplementedError(f"FallbackChain strategy is not implemented yet: {self.strategy}")
-        records = [getattr(provider, "model_capabilities", None) for provider in self.providers]
-        typed_records = [record for record in records if isinstance(record, LLMModelCapabilities)]
+            raise NotImplementedError(
+                f"FallbackChain strategy is not implemented yet: {self.strategy}"
+            )
+        records = [
+            getattr(provider, "model_capabilities", None) for provider in self.providers
+        ]
+        typed_records = [
+            record for record in records if isinstance(record, LLMModelCapabilities)
+        ]
         if records and len(typed_records) == len(records):
             self.model_capabilities = conservative_model_capabilities(typed_records)
 
@@ -316,14 +370,25 @@ class FallbackChain(LLMClient):
                 bound.append(provider.bind_config(config))
             else:
                 raise TypeError(f"Unsupported fallback provider: {provider!r}")
-        return FallbackChain(providers=list(bound), strategy=self.strategy)
+        chain = FallbackChain(
+            providers=list(bound),
+            strategy=self.strategy,
+            attempt_callback=self.attempt_callback,
+            provider_available=self.provider_available,
+            fallback_error_codes=self.fallback_error_codes,
+            selection_result=self.selection_result,
+        )
+        chain.model_profile_id = self.model_profile_id
+        return chain
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         close_resources(
-            provider for provider in reversed(self.providers) if isinstance(provider, LLMClient)
+            provider
+            for provider in reversed(self.providers)
+            if isinstance(provider, LLMClient)
         )
 
     async def aclose(self) -> None:
@@ -331,11 +396,17 @@ class FallbackChain(LLMClient):
             return
         self._closed = True
         await aclose_resources(
-            provider for provider in reversed(self.providers) if isinstance(provider, LLMClient)
+            provider
+            for provider in reversed(self.providers)
+            if isinstance(provider, LLMClient)
         )
 
-    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        return self.complete_response(messages, max_output_tokens=max_output_tokens).content
+    def complete(
+        self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None
+    ) -> str:
+        return self.complete_response(
+            messages, max_output_tokens=max_output_tokens
+        ).content
 
     def complete_response(
         self,
@@ -344,7 +415,9 @@ class FallbackChain(LLMClient):
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         return self._try_provider_responses(
-            lambda provider: _complete_response(provider, messages, max_output_tokens=max_output_tokens)
+            lambda provider: _complete_response(
+                provider, messages, max_output_tokens=max_output_tokens
+            )
         )
 
     async def acomplete_response(
@@ -429,8 +502,12 @@ class FallbackChain(LLMClient):
     ) -> Iterator[LLMStreamChunk]:
         yield from self._stream_providers(messages, max_output_tokens=max_output_tokens)
 
-    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-        return self._complete_action_response_once(messages, max_output_tokens=max_output_tokens).content
+    def _complete_action_once(
+        self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None
+    ) -> str:
+        return self._complete_action_response_once(
+            messages, max_output_tokens=max_output_tokens
+        ).content
 
     def _complete_action_response_once(
         self,
@@ -451,8 +528,12 @@ class FallbackChain(LLMClient):
                 action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
-                hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
-                mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
+                hosted_mcp_servers=hosted_mcp_servers
+                if _supports_hosted_mcp(provider)
+                else None,
+                mcp_approval_callback=mcp_approval_callback
+                if _supports_hosted_mcp(provider)
+                else None,
             )
         )
 
@@ -475,8 +556,12 @@ class FallbackChain(LLMClient):
                 action_schema=action_schema,
                 tools=tools,
                 planning_tools=planning_tools,
-                hosted_mcp_servers=hosted_mcp_servers if _supports_hosted_mcp(provider) else None,
-                mcp_approval_callback=mcp_approval_callback if _supports_hosted_mcp(provider) else None,
+                hosted_mcp_servers=hosted_mcp_servers
+                if _supports_hosted_mcp(provider)
+                else None,
+                mcp_approval_callback=mcp_approval_callback
+                if _supports_hosted_mcp(provider)
+                else None,
             )
         )
 
@@ -492,6 +577,21 @@ class FallbackChain(LLMClient):
                 raise TypeError("FallbackChain must be bound before use")
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
+            if not self._provider_is_available(provider):
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    0.0,
+                    error="provider skipped by circuit breaker",
+                    error_code="circuit_open",
+                    retryable=False,
+                    fallback_eligible=True,
+                    model_profile_id=getattr(provider, "model_profile_id", None),
+                )
+                self._record_attempt(attempt, notify=False)
+                errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
+                continue
             try:
                 response = call(provider)
             except Exception as exc:
@@ -509,12 +609,10 @@ class FallbackChain(LLMClient):
                     fallback_eligible=fallback_eligible,
                     usage=getattr(exc, "usage", None),
                     cost=getattr(exc, "cost", None),
+                    model_profile_id=getattr(provider, "model_profile_id", None),
                 )
-                self.last_attempts.append(attempt)
-                self.attempts.append(attempt)
-                if self._action_attempts is not None:
-                    self._action_attempts.append(attempt)
-                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                self._record_attempt(attempt)
+                if not self._should_fallback(exc):
                     raise
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
@@ -526,11 +624,9 @@ class FallbackChain(LLMClient):
                 latency,
                 usage=getattr(response, "usage", None),
                 cost=getattr(response, "cost", None),
+                model_profile_id=getattr(provider, "model_profile_id", None),
             )
-            self.last_attempts.append(attempt)
-            self.attempts.append(attempt)
-            if self._action_attempts is not None:
-                self._action_attempts.append(attempt)
+            self._record_attempt(attempt)
             self.last_success_provider = provider
             return response
         detail = "; ".join(errors) if errors else "no providers were available"
@@ -552,6 +648,21 @@ class FallbackChain(LLMClient):
                 raise TypeError("FallbackChain must be bound before use")
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
+            if not self._provider_is_available(provider):
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    0.0,
+                    error="provider skipped by circuit breaker",
+                    error_code="circuit_open",
+                    retryable=False,
+                    fallback_eligible=True,
+                    model_profile_id=getattr(provider, "model_profile_id", None),
+                )
+                self._record_attempt(attempt, notify=False)
+                errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
+                continue
             try:
                 response = await call(provider)
             except Exception as exc:
@@ -569,12 +680,10 @@ class FallbackChain(LLMClient):
                     fallback_eligible=fallback_eligible,
                     usage=getattr(exc, "usage", None),
                     cost=getattr(exc, "cost", None),
+                    model_profile_id=getattr(provider, "model_profile_id", None),
                 )
-                self.last_attempts.append(attempt)
-                self.attempts.append(attempt)
-                if self._action_attempts is not None:
-                    self._action_attempts.append(attempt)
-                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                self._record_attempt(attempt)
+                if not self._should_fallback(exc):
                     raise
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
@@ -586,11 +695,9 @@ class FallbackChain(LLMClient):
                 latency,
                 usage=getattr(response, "usage", None),
                 cost=getattr(response, "cost", None),
+                model_profile_id=getattr(provider, "model_profile_id", None),
             )
-            self.last_attempts.append(attempt)
-            self.attempts.append(attempt)
-            if self._action_attempts is not None:
-                self._action_attempts.append(attempt)
+            self._record_attempt(attempt)
             self.last_success_provider = provider
             return response
         detail = "; ".join(errors) if errors else "no providers were available"
@@ -614,11 +721,28 @@ class FallbackChain(LLMClient):
                 raise TypeError("FallbackChain must be bound before use")
             started_at = time.monotonic()
             provider_name, model = _provider_identity(provider)
+            if not self._provider_is_available(provider):
+                attempt = ProviderAttempt(
+                    provider_name,
+                    model,
+                    False,
+                    0.0,
+                    error="provider skipped by circuit breaker",
+                    error_code="circuit_open",
+                    retryable=False,
+                    fallback_eligible=True,
+                    model_profile_id=getattr(provider, "model_profile_id", None),
+                )
+                self._record_attempt(attempt, notify=False)
+                errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
+                continue
             emitted_chunk = False
             usage: LLMUsage | None = None
             cost: LLMCost | None = None
             try:
-                for chunk in _stream_complete(provider, messages, max_output_tokens=max_output_tokens):
+                for chunk in _stream_complete(
+                    provider, messages, max_output_tokens=max_output_tokens
+                ):
                     if chunk.usage is not None:
                         usage = chunk.usage
                     if chunk.cost is not None:
@@ -640,27 +764,38 @@ class FallbackChain(LLMClient):
                     fallback_eligible=fallback_eligible,
                     usage=getattr(exc, "usage", None),
                     cost=getattr(exc, "cost", None),
+                    model_profile_id=getattr(provider, "model_profile_id", None),
                 )
-                self.last_attempts.append(attempt)
-                self.attempts.append(attempt)
+                self._record_attempt(attempt)
                 if emitted_chunk:
                     source_error = exc if isinstance(exc, LLMError) else None
                     raise LLMError(
                         f"{provider_name}/{model or 'unknown'} stream failed after yielding a chunk: {error}",
                         provider=provider_name,
                         model=model,
-                        code=source_error.code if source_error is not None else "unknown",
-                        retryable=source_error.retryable if source_error is not None else False,
+                        code=source_error.code
+                        if source_error is not None
+                        else "unknown",
+                        retryable=source_error.retryable
+                        if source_error is not None
+                        else False,
                         fallback_eligible=False,
                     ) from exc
-                if not isinstance(exc, LLMError) or not exc.fallback_eligible:
+                if not self._should_fallback(exc):
                     raise
                 errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
                 continue
             latency = time.monotonic() - started_at
-            attempt = ProviderAttempt(provider_name, model, True, latency, usage=usage, cost=cost)
-            self.last_attempts.append(attempt)
-            self.attempts.append(attempt)
+            attempt = ProviderAttempt(
+                provider_name,
+                model,
+                True,
+                latency,
+                usage=usage,
+                cost=cost,
+                model_profile_id=getattr(provider, "model_profile_id", None),
+            )
+            self._record_attempt(attempt)
             self.last_success_provider = provider
             return
         detail = "; ".join(errors) if errors else "no providers were available"
@@ -670,9 +805,44 @@ class FallbackChain(LLMClient):
             retryable=any(attempt.retryable is True for attempt in self.last_attempts),
         )
 
+    def _provider_is_available(self, provider: LLMClient) -> bool:
+        return self.provider_available is None or self.provider_available(provider)
 
-def _complete_response(provider: LLMClient, messages: list[dict[str, str]], *, max_output_tokens: int | None) -> LLMResponse:
-    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+    def _should_fallback(self, exc: Exception) -> bool:
+        return isinstance(exc, LLMError) and (
+            exc.fallback_eligible or exc.code in self.fallback_error_codes
+        )
+
+    def _record_attempt(
+        self,
+        attempt: ProviderAttempt,
+        *,
+        notify: bool = True,
+    ) -> None:
+        self.last_attempts.append(attempt)
+        self.attempts.append(attempt)
+        if self._action_attempts is not None:
+            self._action_attempts.append(attempt)
+        if notify and self.attempt_callback is not None:
+            try:
+                self.attempt_callback(attempt)
+            except Exception:
+                # Provider success/failure must not be masked by observational
+                # health bookkeeping.
+                pass
+
+
+def _complete_response(
+    provider: LLMClient,
+    messages: list[dict[str, str]],
+    *,
+    max_output_tokens: int | None,
+) -> LLMResponse:
+    kwargs = (
+        {"max_output_tokens": max_output_tokens}
+        if max_output_tokens is not None
+        else {}
+    )
     return call_with_supported_kwargs(provider.complete_response, messages, **kwargs)
 
 
@@ -682,8 +852,14 @@ async def _acomplete_response(
     *,
     max_output_tokens: int | None,
 ) -> LLMResponse:
-    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
-    return await call_async_with_supported_kwargs(provider.acomplete_response, messages, **kwargs)
+    kwargs = (
+        {"max_output_tokens": max_output_tokens}
+        if max_output_tokens is not None
+        else {}
+    )
+    return await call_async_with_supported_kwargs(
+        provider.acomplete_response, messages, **kwargs
+    )
 
 
 def _stream_complete(
@@ -692,7 +868,11 @@ def _stream_complete(
     *,
     max_output_tokens: int | None,
 ) -> Iterator[LLMStreamChunk]:
-    kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+    kwargs = (
+        {"max_output_tokens": max_output_tokens}
+        if max_output_tokens is not None
+        else {}
+    )
     yield from call_with_supported_kwargs(provider.stream_complete, messages, **kwargs)
 
 
@@ -701,9 +881,10 @@ def _uses_custom_sync_action(provider: LLMClient) -> bool:
 
 
 def _uses_custom_async_action(provider: LLMClient) -> bool:
-    return (
-        type(provider).acomplete_action is not LLMClient.acomplete_action
-        or _uses_custom_sync_action(provider)
+    return type(
+        provider
+    ).acomplete_action is not LLMClient.acomplete_action or _uses_custom_sync_action(
+        provider
     )
 
 
@@ -794,7 +975,9 @@ def _complete_action_response_once(
     }
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
-    return call_with_supported_kwargs(provider._complete_action_response_once, messages, **kwargs)
+    return call_with_supported_kwargs(
+        provider._complete_action_response_once, messages, **kwargs
+    )
 
 
 async def _acomplete_action_response_once(
@@ -919,12 +1102,18 @@ def _supports_hosted_mcp(provider: object) -> bool:
 
 
 def _provider_identity(provider: object) -> tuple[str, str | None]:
-    provider_name = getattr(provider, "provider", None) or getattr(provider, "name", None) or type(provider).__name__
+    provider_name = (
+        getattr(provider, "provider", None)
+        or getattr(provider, "name", None)
+        or type(provider).__name__
+    )
     model = getattr(provider, "model", None)
     return str(provider_name), str(model) if model is not None else None
 
 
-def _provider_error_metadata(exc: Exception) -> tuple[str | None, bool | None, bool | None]:
+def _provider_error_metadata(
+    exc: Exception,
+) -> tuple[str | None, bool | None, bool | None]:
     if not isinstance(exc, LLMError):
         return None, None, None
     return exc.code, exc.retryable, exc.fallback_eligible

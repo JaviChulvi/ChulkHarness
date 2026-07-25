@@ -77,8 +77,64 @@ def _create_control_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_model_profile_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE model_profiles (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            credential_ref TEXT,
+            endpoint_ref TEXT,
+            fallback_profile_ids_json TEXT NOT NULL DEFAULT '[]',
+            required_capabilities_json TEXT NOT NULL DEFAULT '{}',
+            context_window_tokens INTEGER,
+            response_reserve_tokens INTEGER,
+            max_output_tokens INTEGER,
+            max_cost_per_turn TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE agent_model_selections (
+            agent_profile_id TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT '',
+            model_profile_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (agent_profile_id, channel)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE provider_health (
+            health_key TEXT PRIMARY KEY,
+            model_profile_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            credential_ref TEXT,
+            endpoint_ref TEXT,
+            state TEXT NOT NULL,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            cooldown_until TEXT,
+            last_error_category TEXT,
+            last_error_at TEXT,
+            last_success_at TEXT,
+            successful_requests INTEGER NOT NULL DEFAULT 0,
+            failed_requests INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_provider_health_profile ON provider_health(model_profile_id)"
+    )
+
+
 CONTROL_MIGRATIONS = (
     SQLiteMigration(1, "agent profile control database", _create_control_schema),
+    SQLiteMigration(2, "model profiles and provider health", _add_model_profile_schema),
 )
 
 
@@ -108,7 +164,9 @@ class SQLiteProfileStore:
 
     def create(self, profile: AgentProfile) -> StoredAgentProfile:
         if profile.id == DEFAULT_PROFILE_ID:
-            raise ProfileAlreadyExistsError("the implicit default profile cannot be replaced")
+            raise ProfileAlreadyExistsError(
+                "the implicit default profile cannot be replaced"
+            )
         if profile.implicit:
             raise ValueError("explicit profiles cannot be marked implicit")
         self._validate_owned_paths(profile)
@@ -145,7 +203,10 @@ class SQLiteProfileStore:
                         _optional_json(profile.allowed_skills),
                         _optional_json(profile.allowed_mcp_servers),
                         json.dumps(
-                            [reference.to_dict() for reference in profile.credential_refs],
+                            [
+                                reference.to_dict()
+                                for reference in profile.credential_refs
+                            ],
                             sort_keys=True,
                         ),
                         json.dumps(profile.auxiliary_models.to_dict(), sort_keys=True),
@@ -156,8 +217,12 @@ class SQLiteProfileStore:
         except sqlite3.IntegrityError as exc:
             message = str(exc).lower()
             if "agent_profiles.id" in message:
-                raise ProfileAlreadyExistsError(f"profile {profile.id!r} already exists") from exc
-            raise ProfileOwnershipError("profile persistent paths must be uniquely owned") from exc
+                raise ProfileAlreadyExistsError(
+                    f"profile {profile.id!r} already exists"
+                ) from exc
+            raise ProfileOwnershipError(
+                "profile persistent paths must be uniquely owned"
+            ) from exc
         return StoredAgentProfile(profile=profile, created_at=created_at)
 
     def create_profile(
@@ -179,7 +244,9 @@ class SQLiteProfileStore:
         root = Path(project_root).expanduser().resolve()
         if not root.is_dir():
             raise ValueError("profile project_root must be an existing directory")
-        runtime_dir = (self.base_config.runtime_dir / "profiles" / normalized_id).resolve()
+        runtime_dir = (
+            self.base_config.runtime_dir / "profiles" / normalized_id
+        ).resolve()
         return self.create(
             AgentProfile(
                 id=normalized_id,
@@ -188,7 +255,8 @@ class SQLiteProfileStore:
                 store_path=runtime_dir / "store.sqlite",
                 traces_dir=runtime_dir / "traces",
                 memory_namespace=f"profile:{normalized_id}",
-                permission_profile=permission_profile or self.base_config.permission_profile,
+                permission_profile=permission_profile
+                or self.base_config.permission_profile,
                 model_profile_id=model_profile_id,
                 execution_backend_id=execution_backend_id,
                 allowed_skills=allowed_skills,
@@ -271,7 +339,9 @@ class SQLiteProfileStore:
         default = self.default_profile
         default_paths = {default.runtime_dir, default.store_path, default.traces_dir}
         if profile.id != DEFAULT_PROFILE_ID and owned & default_paths:
-            raise ProfileOwnershipError("explicit profiles cannot reuse default-profile paths")
+            raise ProfileOwnershipError(
+                "explicit profiles cannot reuse default-profile paths"
+            )
         if profile.id != DEFAULT_PROFILE_ID:
             profiles_root = (self.base_config.runtime_dir / "profiles").resolve()
             expected_runtime_dir = profiles_root / profile.id
@@ -304,7 +374,9 @@ def _row_to_profile(row: sqlite3.Row) -> AgentProfile:
         execution_backend_id=str(row["execution_backend_id"]),
         allowed_skills=_optional_tuple(row["allowed_skills_json"]),
         allowed_mcp_servers=_optional_tuple(row["allowed_mcp_servers_json"]),
-        credential_refs=tuple(CredentialRef.from_dict(value) for value in credential_values),
+        credential_refs=tuple(
+            CredentialRef.from_dict(value) for value in credential_values
+        ),
         auxiliary_models=AuxiliaryModelProfiles.from_dict(auxiliary_values),
         system_prompt=row["system_prompt"],
     )
@@ -318,7 +390,9 @@ def _optional_tuple(value: object) -> tuple[str, ...] | None:
     if value is None:
         return None
     parsed = json.loads(str(value))
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) for item in parsed
+    ):
         raise ValueError("stored profile allowlist is invalid")
     return tuple(parsed)
 

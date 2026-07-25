@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
+from chulk.tools.permissions import (
+    DEFAULT_PERMISSION_PROFILE,
+    normalize_permission_profile,
+)
 
 
 DEFAULT_PROFILE_ID = "default"
@@ -33,19 +36,46 @@ class CredentialRef:
             raise ValueError("credential reference name cannot be empty")
         if self.source == "environment":
             if _ENVIRONMENT_NAME_PATTERN.fullmatch(name) is None:
-                raise ValueError("environment credential references must be environment variable names")
+                raise ValueError(
+                    "environment credential references must be environment variable names"
+                )
         elif self.source not in {"keyring", "host"}:
             raise ValueError("credential source must be environment, keyring, or host")
         elif _REFERENCE_PATTERN.fullmatch(name) is None:
-            raise ValueError("credential reference name contains unsupported characters")
+            raise ValueError(
+                "credential reference name contains unsupported characters"
+            )
         object.__setattr__(self, "name", name)
 
     def to_dict(self) -> dict[str, str]:
         return {"name": self.name, "source": self.source}
 
+    @property
+    def uri(self) -> str:
+        scheme = "env" if self.source == "environment" else self.source
+        return f"{scheme}:{self.name}"
+
+    @classmethod
+    def parse(cls, value: str) -> CredentialRef:
+        scheme, separator, name = value.strip().partition(":")
+        if not separator or not name:
+            raise ValueError("credential references must use env:, keyring:, or host:")
+        source = {
+            "env": "environment",
+            "environment": "environment",
+            "keyring": "keyring",
+            "host": "host",
+        }.get(scheme.lower())
+        if source is None:
+            raise ValueError("credential references must use env:, keyring:, or host:")
+        return cls(name=name, source=source)  # type: ignore[arg-type]
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> CredentialRef:
-        return cls(name=str(value["name"]), source=str(value.get("source", "environment")))  # type: ignore[arg-type]
+        return cls(
+            name=str(value["name"]),
+            source=cast(CredentialSource, str(value.get("source", "environment"))),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +93,9 @@ class AuxiliaryModelProfiles:
         for field_name in self.__dataclass_fields__:
             value = getattr(self, field_name)
             if value is not None:
-                object.__setattr__(self, field_name, _validate_reference(value, field_name))
+                object.__setattr__(
+                    self, field_name, _validate_reference(value, field_name)
+                )
 
     def to_dict(self) -> dict[str, str | None]:
         return {
@@ -104,7 +136,9 @@ class AgentProfile:
     allowed_skills: tuple[str, ...] | None = None
     allowed_mcp_servers: tuple[str, ...] | None = None
     credential_refs: tuple[CredentialRef, ...] = ()
-    auxiliary_models: AuxiliaryModelProfiles = field(default_factory=AuxiliaryModelProfiles)
+    auxiliary_models: AuxiliaryModelProfiles = field(
+        default_factory=AuxiliaryModelProfiles
+    )
     system_prompt: str | None = None
     implicit: bool = False
 
@@ -123,7 +157,9 @@ class AgentProfile:
             if len(namespace) > 256:
                 raise ValueError("memory_namespace cannot exceed 256 characters")
             object.__setattr__(self, "memory_namespace", namespace)
-        model_profile_id = _validate_reference(self.model_profile_id, "model_profile_id")
+        model_profile_id = _validate_reference(
+            self.model_profile_id, "model_profile_id"
+        )
         execution_backend_id = _validate_reference(
             self.execution_backend_id,
             "execution_backend_id",
@@ -150,7 +186,9 @@ class AgentProfile:
         )
         object.__setattr__(self, "model_profile_id", model_profile_id)
         object.__setattr__(self, "execution_backend_id", execution_backend_id)
-        object.__setattr__(self, "allowed_skills", _normalize_allowlist(self.allowed_skills, "skill"))
+        object.__setattr__(
+            self, "allowed_skills", _normalize_allowlist(self.allowed_skills, "skill")
+        )
         object.__setattr__(
             self,
             "allowed_mcp_servers",
@@ -172,11 +210,17 @@ class AgentProfile:
             "permission_profile": self.permission_profile,
             "model_profile_id": self.model_profile_id,
             "execution_backend_id": self.execution_backend_id,
-            "allowed_skills": list(self.allowed_skills) if self.allowed_skills is not None else None,
+            "allowed_skills": list(self.allowed_skills)
+            if self.allowed_skills is not None
+            else None,
             "allowed_mcp_servers": (
-                list(self.allowed_mcp_servers) if self.allowed_mcp_servers is not None else None
+                list(self.allowed_mcp_servers)
+                if self.allowed_mcp_servers is not None
+                else None
             ),
-            "credential_refs": [reference.to_dict() for reference in self.credential_refs],
+            "credential_refs": [
+                reference.to_dict() for reference in self.credential_refs
+            ],
             "auxiliary_models": self.auxiliary_models.to_dict(),
             "system_prompt": self.system_prompt,
             "implicit": self.implicit,
@@ -214,7 +258,9 @@ def _normalize_allowlist(
 ) -> tuple[str, ...] | None:
     if values is None:
         return None
-    normalized = tuple(dict.fromkeys(_validate_reference(value, label) for value in values))
+    normalized = tuple(
+        dict.fromkeys(_validate_reference(value, label) for value in values)
+    )
     return tuple(sorted(normalized))
 
 

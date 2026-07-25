@@ -13,7 +13,14 @@ from chulk.core.actions import ActionParseError, AgentAction, parse_model_respon
 from chulk.core.prompts import format_action_protocol_for_prompt
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.tools import PlanningToolAvailability
-from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage, aggregate_cost, aggregate_usage, estimate_usage
+from chulk.llm.usage import (
+    LLMCost,
+    LLMResponse,
+    LLMUsage,
+    aggregate_cost,
+    aggregate_usage,
+    estimate_usage,
+)
 
 if TYPE_CHECKING:
     from chulk.llm.capabilities import LLMModelCapabilities
@@ -22,8 +29,10 @@ if TYPE_CHECKING:
 LLMErrorCode = Literal[
     "action_shape_error",
     "authentication_error",
+    "billing_error",
     "configuration_error",
     "connection_error",
+    "circuit_open",
     "fallback_exhausted",
     "invalid_request",
     "invalid_response",
@@ -71,7 +80,9 @@ class LLMError(RuntimeError):
         """Compatibility-friendly explicit name for the provider error code."""
         return self.code
 
-    def add_context(self, *, provider: str | None = None, model: str | None = None) -> "LLMError":
+    def add_context(
+        self, *, provider: str | None = None, model: str | None = None
+    ) -> "LLMError":
         """Fill missing provider identity without discarding existing metadata."""
         if self.provider is None:
             self.provider = provider
@@ -164,6 +175,7 @@ class LLMClient:
     """Small provider-agnostic LLM client interface."""
 
     model_capabilities: LLMModelCapabilities | None = None
+    model_profile_id: str | None = None
 
     def close(self) -> None:
         """Close factory-owned transport resources."""
@@ -172,7 +184,9 @@ class LLMClient:
         """Close factory-owned transport resources from an async host."""
         self.close()
 
-    def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+    def complete(
+        self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None
+    ) -> str:
         """Return a normal text response."""
         raise NotImplementedError
 
@@ -183,7 +197,9 @@ class LLMClient:
         max_output_tokens: int | None = None,
     ) -> str:
         """Return text without blocking the event loop."""
-        return (await self.acomplete_response(messages, max_output_tokens=max_output_tokens)).content
+        return (
+            await self.acomplete_response(messages, max_output_tokens=max_output_tokens)
+        ).content
 
     def complete_response(
         self,
@@ -192,7 +208,11 @@ class LLMClient:
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         """Return text plus normalized usage metadata."""
-        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        kwargs = (
+            {"max_output_tokens": max_output_tokens}
+            if max_output_tokens is not None
+            else {}
+        )
         content = call_with_supported_kwargs(self.complete, messages, **kwargs)
         return self._response_with_estimated_usage(messages, content)
 
@@ -208,7 +228,11 @@ class LLMClient:
         async transport. Sync-only injected clients run in asyncio's bounded
         default executor so they do not block the caller's event loop.
         """
-        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        kwargs = (
+            {"max_output_tokens": max_output_tokens}
+            if max_output_tokens is not None
+            else {}
+        )
         return await asyncio.to_thread(
             call_with_supported_kwargs,
             self.complete_response,
@@ -432,7 +456,9 @@ class LLMClient:
             model=_model_name(self),
         )
 
-    def _complete_action_once(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
+    def _complete_action_once(
+        self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None
+    ) -> str:
         """Return one raw action response attempt."""
         return self.complete(messages)
 
@@ -448,8 +474,14 @@ class LLMClient:
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMResponse:
         """Return one raw action response attempt plus metadata."""
-        kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}
-        content = call_with_supported_kwargs(self._complete_action_once, messages, **kwargs)
+        kwargs = (
+            {"max_output_tokens": max_output_tokens}
+            if max_output_tokens is not None
+            else {}
+        )
+        content = call_with_supported_kwargs(
+            self._complete_action_once, messages, **kwargs
+        )
         return self._response_with_estimated_usage(messages, content)
 
     async def _acomplete_action_response_once(
@@ -480,7 +512,9 @@ class LLMClient:
             **kwargs,
         )
 
-    def _response_with_estimated_usage(self, messages: list[dict[str, str]], content: str) -> LLMResponse:
+    def _response_with_estimated_usage(
+        self, messages: list[dict[str, str]], content: str
+    ) -> LLMResponse:
         provider = _provider_name(self)
         model = _model_name(self)
         usage = estimate_usage(messages, content)
@@ -572,44 +606,86 @@ def provider_error_from_exception(
     )
 
 
-def classify_provider_exception(exc: Exception, *, action_transport: bool = False) -> LLMErrorClassification:
+def classify_provider_exception(
+    exc: Exception, *, action_transport: bool = False
+) -> LLMErrorClassification:
     """Classify OpenAI-style SDK failures without requiring the SDK at import time."""
     class_names = {item.__name__ for item in type(exc).__mro__}
     status_code = _exception_status_code(exc)
     provider_code = _exception_provider_code(exc)
     message = str(exc).lower()
 
-    if "AuthenticationError" in class_names or status_code == 401 or provider_code in {
-        "authentication_error",
-        "invalid_api_key",
-    }:
-        return LLMErrorClassification("authentication_error", retryable=False, fallback_eligible=False)
+    if (
+        "AuthenticationError" in class_names
+        or status_code == 401
+        or provider_code
+        in {
+            "authentication_error",
+            "invalid_api_key",
+        }
+    ):
+        return LLMErrorClassification(
+            "authentication_error", retryable=False, fallback_eligible=False
+        )
     if "PermissionDeniedError" in class_names or status_code == 403:
-        return LLMErrorClassification("permission_denied", retryable=False, fallback_eligible=False)
+        return LLMErrorClassification(
+            "permission_denied", retryable=False, fallback_eligible=False
+        )
+    if status_code == 402 or provider_code in {
+        "billing_error",
+        "billing_hard_limit_reached",
+        "insufficient_quota",
+    }:
+        return LLMErrorClassification(
+            "billing_error", retryable=False, fallback_eligible=False
+        )
     if "RateLimitError" in class_names or status_code == 429:
-        return LLMErrorClassification("rate_limit", retryable=True, fallback_eligible=True)
-    if _has_timeout_class(class_names) or isinstance(exc, TimeoutError) or status_code == 408:
+        return LLMErrorClassification(
+            "rate_limit", retryable=True, fallback_eligible=True
+        )
+    if (
+        _has_timeout_class(class_names)
+        or isinstance(exc, TimeoutError)
+        or status_code == 408
+    ):
         return LLMErrorClassification("timeout", retryable=True, fallback_eligible=True)
     if _has_connection_class(class_names) or isinstance(exc, ConnectionError):
-        return LLMErrorClassification("connection_error", retryable=True, fallback_eligible=True)
-    if "InternalServerError" in class_names or (status_code is not None and status_code >= 500):
-        return LLMErrorClassification("server_error", retryable=True, fallback_eligible=True)
-    if "NotFoundError" in class_names or _is_model_error(provider_code, message, status_code):
-        return LLMErrorClassification("model_not_found", retryable=False, fallback_eligible=False)
+        return LLMErrorClassification(
+            "connection_error", retryable=True, fallback_eligible=True
+        )
+    if "InternalServerError" in class_names or (
+        status_code is not None and status_code >= 500
+    ):
+        return LLMErrorClassification(
+            "server_error", retryable=True, fallback_eligible=True
+        )
+    if "NotFoundError" in class_names or _is_model_error(
+        provider_code, message, status_code
+    ):
+        return LLMErrorClassification(
+            "model_not_found", retryable=False, fallback_eligible=False
+        )
     if action_transport and _is_unsupported_action_transport(provider_code, message):
-        return LLMErrorClassification("unsupported_feature", retryable=False, fallback_eligible=True)
+        return LLMErrorClassification(
+            "unsupported_feature", retryable=False, fallback_eligible=True
+        )
     if (
         "BadRequestError" in class_names
         or "UnprocessableEntityError" in class_names
         or status_code in {400, 404, 409, 422}
     ):
-        return LLMErrorClassification("invalid_request", retryable=False, fallback_eligible=False)
+        return LLMErrorClassification(
+            "invalid_request", retryable=False, fallback_eligible=False
+        )
     return LLMErrorClassification("unknown", retryable=False, fallback_eligible=False)
 
 
 def is_action_transport_fallback_error(exc: Exception) -> bool:
     """Return whether native tool calling may safely retry via Chulk action JSON."""
-    return isinstance(exc, LLMError) and exc.code in {"action_shape_error", "unsupported_feature"}
+    return isinstance(exc, LLMError) and exc.code in {
+        "action_shape_error",
+        "unsupported_feature",
+    }
 
 
 def _exception_status_code(exc: Exception) -> int | None:
@@ -635,13 +711,25 @@ def _exception_provider_code(exc: Exception) -> str | None:
     return None
 
 
-def _is_model_error(provider_code: str | None, message: str, status_code: int | None) -> bool:
+def _is_model_error(
+    provider_code: str | None, message: str, status_code: int | None
+) -> bool:
     if provider_code in {"model_not_found", "invalid_model", "unknown_model"}:
         return True
     if status_code == 404:
         return True
-    model_markers = ("model not found", "model_not_found", "unknown model", "does not exist")
-    return any(marker in message for marker in model_markers) and status_code in {None, 400, 404, 422}
+    model_markers = (
+        "model not found",
+        "model_not_found",
+        "unknown model",
+        "does not exist",
+    )
+    return any(marker in message for marker in model_markers) and status_code in {
+        None,
+        400,
+        404,
+        422,
+    }
 
 
 def _is_unsupported_action_transport(provider_code: str | None, message: str) -> bool:
@@ -670,7 +758,9 @@ def _has_timeout_class(class_names: set[str]) -> bool:
         "TimeoutException",
         "WriteTimeout",
     }
-    return bool(class_names & known_names) or any(name.endswith("TimeoutError") for name in class_names)
+    return bool(class_names & known_names) or any(
+        name.endswith("TimeoutError") for name in class_names
+    )
 
 
 def _has_connection_class(class_names: set[str]) -> bool:
@@ -682,7 +772,9 @@ def _has_connection_class(class_names: set[str]) -> bool:
         "ProxyError",
         "RemoteProtocolError",
     }
-    return bool(class_names & known_names) or any(name.endswith("ConnectionError") for name in class_names)
+    return bool(class_names & known_names) or any(
+        name.endswith("ConnectionError") for name in class_names
+    )
 
 
 def _format_json_repair_prompt(
@@ -733,7 +825,9 @@ def _repair_action_protocol(
     )
 
 
-def call_with_supported_kwargs(call: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+def call_with_supported_kwargs(
+    call: Callable[..., Any], /, *args: Any, **kwargs: Any
+) -> Any:
     """Call a compatibility hook once, omitting only unsupported keyword arguments.
 
     Older injected clients may implement the original, smaller Chulk method
@@ -758,7 +852,9 @@ async def call_async_with_supported_kwargs(
     return await result
 
 
-def _supported_kwargs(call: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+def _supported_kwargs(
+    call: Callable[..., Any], kwargs: dict[str, Any]
+) -> dict[str, Any]:
     if not kwargs:
         return {}
     try:
@@ -770,6 +866,7 @@ def _supported_kwargs(call: Callable[..., Any], kwargs: dict[str, Any]) -> dict[
     accepted = {
         parameter.name
         for parameter in parameters
-        if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+        if parameter.kind
+        in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
     }
     return {name: value for name, value in kwargs.items() if name in accepted}
