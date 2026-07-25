@@ -180,6 +180,23 @@ def load_plugin_manifest(path: Path | str) -> PluginManifest:
                 f"duplicate normalized plugin manifest key: {clean_key}"
             )
         normalized[clean_key] = value
+    return plugin_manifest_from_mapping(normalized)
+
+
+def plugin_manifest_from_mapping(
+    value: Mapping[str, Any],
+) -> PluginManifest:
+    """Validate a manifest mapping from YAML or a reviewed lock snapshot."""
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise PluginManifestError("plugin manifest keys must be strings")
+        clean_key = key.strip().lower().replace("-", "_")
+        if clean_key in normalized:
+            raise PluginManifestError(
+                f"duplicate normalized plugin manifest key: {clean_key}"
+            )
+        normalized[clean_key] = item
     unknown = sorted(set(normalized) - _MANIFEST_FIELDS)
     if unknown:
         raise PluginManifestError(
@@ -577,5 +594,6 @@ def _sequence(value: object, field_name: str) -> tuple[object, ...]:
 __all__ = [
     "PluginManifestError",
     "load_plugin_manifest",
+    "plugin_manifest_from_mapping",
     "resolve_plugin_resource",
 ]

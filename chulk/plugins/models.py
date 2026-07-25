@@ -134,6 +134,14 @@ class PluginManifest:
     schema_version: int = PLUGIN_MANIFEST_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        entry_points: dict[str, dict[str, dict[str, Any]]] = {}
+        for item in self.entry_points:
+            entry_points.setdefault(item.category.value, {})[item.name] = {
+                "target": item.target,
+                "required_capabilities": list(
+                    item.required_capabilities
+                ),
+            }
         return {
             "schema_version": self.schema_version,
             "name": self.name,
@@ -143,15 +151,25 @@ class PluginManifest:
             "trust": self.trust.value,
             "requires_chulk": self.requires_chulk,
             "requires_python": self.requires_python,
-            "entry_points": [item.to_dict() for item in self.entry_points],
+            "entry_points": entry_points,
             "capabilities": list(self.capabilities),
             "secret_refs": list(self.secret_refs),
             "network_domains": list(self.network_domains),
             "filesystem": [item.to_dict() for item in self.filesystem],
-            "dependencies": [item.to_dict() for item in self.dependencies],
-            "python_dependencies": [
-                item.to_dict() for item in self.python_dependencies
-            ],
+            "dependencies": {
+                item.name: {
+                    "version": item.version_spec,
+                    "optional": item.optional,
+                }
+                for item in self.dependencies
+            },
+            "python_dependencies": {
+                item.name: {
+                    "version": item.version_spec,
+                    "optional": item.optional,
+                }
+                for item in self.python_dependencies
+            },
             "migrations": list(self.migrations),
         }
 
