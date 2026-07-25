@@ -3,7 +3,7 @@
 import asyncio
 from decimal import Decimal
 import json
-from chulk.core import Agent, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
+from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
 from chulk.llm import (
@@ -1130,6 +1130,51 @@ description: {description}
     assert selected["loaded_resources"] == ["SKILL.md"]
     assert decisions["review"]["status"] == "selected"
     assert decisions["other"]["reason"] == "no_keyword_match"
+
+
+def test_pending_plan_does_not_restore_skill_after_capability_is_removed(tmp_path):
+    skill_dir = tmp_path / "skills" / "network"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """\
+---
+schema_version: 1
+name: network
+version: 1.0.0
+description: Network workflow.
+required_capabilities: [network]
+---
+# Network
+""",
+        encoding="utf-8",
+    )
+    skill_registry = SkillRegistry(tmp_path / "skills")
+    skill_registry.load_metadata()
+    skill_registry.configure_environment(capabilities=set())
+    plan = Plan(
+        summary="Use the previous context.",
+        steps=[PlanStep(id="1", title="Inspect", description="Inspect safely.")],
+    )
+    turn = TurnState(
+        user_message="plan this",
+        turn_id="turn-pending",
+        loaded_skill_names=["network"],
+    )
+    turn.wait_for_plan_approval(plan)
+    state = AgentState(
+        turns=[turn],
+        active_plan=plan,
+        pending_plan_turn_id=turn.turn_id,
+    )
+
+    agent = Agent(
+        RecordingLLMClient([]),
+        state=state,
+        skill_registry=skill_registry,
+    )
+
+    assert agent._selected_skills == []
+    assert skill_registry.get_skill("network").loaded_content is None
 
 
 def test_agent_traces_full_model_request_with_redaction(tmp_path):

@@ -309,20 +309,21 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
     if raw_command.startswith("/"):
         explicit_names = explicit_skill_names(raw_command)
         if explicit_names and context.agent.skill_registry is not None:
-            unavailable: list[tuple[str, str]] = []
-            for name in explicit_names:
-                skill = context.agent.skill_registry.get_skill(name)
-                if skill is None:
-                    break
-                visible, reason = context.agent.skill_registry.skill_visibility(skill)
-                if not visible:
-                    unavailable.append((name, reason))
-            else:
-                if unavailable:
-                    name, reason = unavailable[0]
+            if all(
+                context.agent.skill_registry.get_skill(name) is not None
+                for name in explicit_names
+            ):
+                routing = context.agent.skill_registry.route_skills(
+                    raw_command,
+                    pinned_names=context.agent.pinned_skill_names,
+                    limit=context.agent.max_skills_per_turn,
+                )
+                if routing.errors:
+                    error = routing.errors[0]
                     context.output_func(
                         context.terminal.warning(
-                            f"Skill /{name} is unavailable: {reason}."
+                            f"Skill /{error.skill_name} is unavailable: "
+                            f"{error.reason}."
                         )
                     )
                     return True

@@ -124,3 +124,40 @@ required_tools: [unavailable_tool]
     assert exit_code == 0
     assert "Skill /restricted is unavailable: missing_tools:unavailable_tool." in output
     assert client.requests == []
+
+
+def test_skill_bundle_with_missing_include_is_rejected_before_model(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    skill_root = tmp_path / ".chulk" / "skills" / "review"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        """\
+---
+schema_version: 1
+name: review
+version: 1.0.0
+description: Review workflow.
+includes: [missing]
+---
+# Review
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    client = RecordingLLMClient()
+    inputs = iter(["/review inspect this", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: client,
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Skill /missing is unavailable: unknown_skill." in output
+    assert client.requests == []

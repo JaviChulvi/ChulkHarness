@@ -727,7 +727,7 @@ class Agent:
 
         if self.skill_registry is not None:
             for name in turn.loaded_skill_names:
-                skill = self.skill_registry.get_skill(name)
+                skill = self.skill_registry.get_skill(name, visible_only=True)
                 if skill is None:
                     continue
                 self.skill_registry.load_content(skill.name)
