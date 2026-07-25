@@ -8,9 +8,26 @@ from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateActi
 def format_action_trace(action: FinalAnswerAction | PlanAction | PlanStepUpdateAction | ToolCallAction) -> dict:
     """Return a trace-safe payload for a parsed action."""
     if isinstance(action, FinalAnswerAction):
-        return {"type": action.type}
+        return {"type": action.type, "content": action.content}
     if isinstance(action, PlanAction):
-        return {"type": action.type, "plan": action.plan.to_dict()}
+        return {
+            "type": action.type,
+            "plan": {
+                "summary": action.plan.summary,
+                "steps": [
+                    {
+                        "id": step.id,
+                        "title": step.title,
+                        "description": step.description,
+                        "status": step.status,
+                        "depends_on": step.depends_on,
+                        "acceptance_criteria": step.acceptance_criteria,
+                        "retry_limit": step.retry_limit,
+                    }
+                    for step in action.plan.steps
+                ],
+            },
+        }
     if isinstance(action, PlanStepUpdateAction):
         return {
             "type": action.type,
