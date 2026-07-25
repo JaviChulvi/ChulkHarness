@@ -21,7 +21,11 @@ from typing import Any
 from uuid import uuid4
 
 from chulk.execution.base import ExecutionSession
-from chulk.execution.host import HostExecutionBackend, HostExecutionSession
+from chulk.execution.host import (
+    HostExecutionBackend,
+    HostExecutionSession,
+    has_child_task_scope,
+)
 from chulk.execution.models import (
     ChangeApplicationResult,
     ChangeDisposition,
@@ -37,18 +41,21 @@ from chulk.execution.models import (
     FileWriteRequest,
     NetworkPolicy,
     PatchApplyRequest,
+    ProcessStartRequest,
     WorkspaceMode,
     WorkspacePersistence,
 )
 from chulk.execution.policy import (
     EnvironmentPolicy,
     GitWorktreePolicy,
+    ProcessPolicy,
     ResourcePolicy,
     SecretPolicy,
     TransferPolicy,
     UnsafePathAction,
     WorkspaceMaterializationPolicy,
 )
+from chulk.execution.processes import owner_key
 from chulk.tools.files import FileReadPolicy, safe_read_error, safe_write_error
 from chulk.tools.registry import ToolFailureKind, ToolResult
 from chulk.tools.shell import (
@@ -122,6 +129,7 @@ class TemporaryWorkspaceBackend(HostExecutionBackend):
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = True,
         temporary_root: Path | None = None,
+        process_policy: ProcessPolicy | None = None,
     ) -> None:
         resources = resource_policy or ResourcePolicy()
         selected_network_policy = NetworkPolicy(network_policy)
@@ -138,6 +146,7 @@ class TemporaryWorkspaceBackend(HostExecutionBackend):
             max_stderr_bytes=resources.max_stderr_bytes,
             shell_execution_policy=shell_execution_policy,
             require_shell_containment=require_shell_containment,
+            process_policy=process_policy,
         )
         self.materialization_policy = (
             materialization_policy or WorkspaceMaterializationPolicy()
@@ -172,7 +181,7 @@ class TemporaryWorkspaceBackend(HostExecutionBackend):
             workspace_id=f"{self.name}-{suffix}-{uuid4().hex[:8]}",
             backend_name=self.name,
             mode=self._workspace_mode,
-            containment=ContainmentStatus.UNCONTAINED,
+            containment=self._workspace_containment,
         )
         policy = ExecutionPolicy(
             name=f"{self.name}-review",
@@ -196,14 +205,21 @@ class TemporaryWorkspaceBackend(HostExecutionBackend):
             environment=self.environment_policy,
             secrets=self.secret_policy,
         )
-        session = TemporaryWorkspaceSession(
-            self,
-            workspace=workspace,
-            policy=policy,
-            project_root=workspace_root,
-            shell_execution_policy=shell_policy,
-            base_snapshot=base_snapshot,
-        )
+        try:
+            session = self._create_session(
+                request=request,
+                workspace=workspace,
+                policy=policy,
+                workspace_root=workspace_root,
+                shell_policy=shell_policy,
+                base_snapshot=base_snapshot,
+            )
+        except BaseException:
+            self._cleanup_materialized_workspace(
+                workspace_root,
+                workspace.workspace_id,
+            )
+            raise
         self._sessions[workspace.workspace_id] = session
         return session
 
@@ -334,6 +350,36 @@ class TemporaryWorkspaceBackend(HostExecutionBackend):
     @property
     def _workspace_mode(self) -> WorkspaceMode:
         return WorkspaceMode.TEMPORARY
+
+    @property
+    def _workspace_containment(self) -> ContainmentStatus:
+        return ContainmentStatus.UNCONTAINED
+
+    def _create_session(
+        self,
+        *,
+        request: ExecutionSessionRequest,
+        workspace: ExecutionWorkspace,
+        policy: ExecutionPolicy,
+        workspace_root: Path,
+        shell_policy: ShellExecutionPolicy,
+        base_snapshot: dict[str, _FileSnapshot],
+    ) -> TemporaryWorkspaceSession:
+        return TemporaryWorkspaceSession(
+            self,
+            workspace=workspace,
+            policy=policy,
+            project_root=workspace_root,
+            shell_execution_policy=shell_policy,
+            base_snapshot=base_snapshot,
+            process_owner_key=owner_key(
+                conversation_id=request.conversation_id,
+                turn_id=request.turn_id,
+                metadata=request.metadata,
+                workspace_id=workspace.workspace_id,
+            ),
+            cleanup_process_owner_on_close=has_child_task_scope(request),
+        )
 
     def _materialize_workspace(self, suffix: str) -> Path:
         root = Path(
@@ -530,6 +576,8 @@ class TemporaryWorkspaceSession(HostExecutionSession):
         project_root: Path,
         shell_execution_policy: ShellExecutionPolicy,
         base_snapshot: dict[str, _FileSnapshot],
+        process_owner_key: str,
+        cleanup_process_owner_on_close: bool = False,
     ) -> None:
         super().__init__(
             backend,
@@ -537,6 +585,8 @@ class TemporaryWorkspaceSession(HostExecutionSession):
             policy=policy,
             project_root=project_root,
             shell_execution_policy=shell_execution_policy,
+            process_owner_key=process_owner_key,
+            cleanup_process_owner_on_close=cleanup_process_owner_on_close,
         )
         self._temporary_backend = backend
         self._base_snapshot = base_snapshot
@@ -569,6 +619,23 @@ class TemporaryWorkspaceSession(HostExecutionSession):
                 )
             )
         return self._with_change_set(super().run_command(request))
+
+    def start_process(self, request: ProcessStartRequest) -> ExecutionResult:
+        if self.policy.network is NetworkPolicy.DENY:
+            return self._normalize(
+                ToolResult(
+                    tool_name="process.start",
+                    success=False,
+                    observation=(
+                        "The temporary backend cannot enforce network denial for host "
+                        "processes; select a contained backend instead."
+                    ),
+                    error="network_policy_unsupported",
+                    failure_kind=ToolFailureKind.FATAL_SAFETY,
+                    metadata={"child_process_started": False},
+                )
+            )
+        return super().start_process(request)
 
     def _normalize(
         self,
@@ -631,6 +698,9 @@ class TemporaryWorkspaceSession(HostExecutionSession):
     def cleanup(self) -> None:
         if self._cleaned:
             return
+        self._temporary_backend.process_registry.cleanup_workspace(
+            self.workspace.workspace_id
+        )
         self._temporary_backend._cleanup_materialized_workspace(
             self.project_root,
             self.workspace.workspace_id,

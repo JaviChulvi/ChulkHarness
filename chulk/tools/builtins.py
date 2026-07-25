@@ -22,6 +22,7 @@ from chulk.tools.memory import (
     update_memory_tool,
 )
 from chulk.tools.permissions import ToolPermissionLevel
+from chulk.tools.processes import process_tools
 from chulk.tools.registry import Tool, ToolRegistry, ToolResult
 from chulk.tools.shell import (
     DEFAULT_SHELL_STDERR_LIMIT_BYTES,
@@ -59,6 +60,8 @@ def create_default_tool_registry(
                 require_containment=require_shell_containment,
             )
         )
+        for process_tool in process_tools():
+            registry.register(process_tool)
     if selected.files in {FileAccess.READ, FileAccess.WRITE}:
         registry.register(read_file_tool(project_root))
         registry.register(list_files_tool(project_root))

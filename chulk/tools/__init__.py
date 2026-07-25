@@ -36,6 +36,7 @@ from chulk.tools.permissions import (
     normalize_permission_profile,
     permission_policy_for_profile,
 )
+from chulk.tools.processes import process_tools
 from chulk.tools.public import (
     ToolContext,
     ToolRef,
@@ -49,6 +50,11 @@ from chulk.tools.public import (
     import_memories,
     list_files,
     list_memories,
+    process_logs,
+    process_poll,
+    process_start,
+    process_terminate,
+    process_write,
     read_file,
     read_trace_artifact,
     restore_memory,
@@ -127,6 +133,12 @@ __all__ = [
     "shell_tool",
     "normalize_permission_profile",
     "permission_policy_for_profile",
+    "process_logs",
+    "process_poll",
+    "process_start",
+    "process_terminate",
+    "process_write",
+    "process_tools",
     "summarize_memories",
     "summarize_memories_tool",
     "tool",

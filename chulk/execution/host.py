@@ -24,7 +24,18 @@ from chulk.execution.models import (
     FileWriteRequest,
     NetworkPolicy,
     PatchApplyRequest,
+    ProcessLogsRequest,
+    ProcessPollRequest,
+    ProcessStartRequest,
+    ProcessTerminateRequest,
+    ProcessWriteRequest,
     WorkspaceMode,
+)
+from chulk.execution.policy import ProcessPolicy
+from chulk.execution.processes import (
+    ManagedProcessRegistry,
+    owner_key,
+    prepare_host_process,
 )
 from chulk.tools.registry import ToolExecutionContext, ToolResult
 from chulk.tools.shell import (
@@ -49,6 +60,7 @@ class HostExecutionBackend:
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
         allow_sensitive_reads: bool = False,
+        process_policy: ProcessPolicy | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.shell_timeout_seconds = shell_timeout_seconds
@@ -57,6 +69,7 @@ class HostExecutionBackend:
         self.shell_execution_policy = shell_execution_policy
         self.require_shell_containment = require_shell_containment
         self.allow_sensitive_reads = allow_sensitive_reads
+        self.process_registry = ManagedProcessRegistry(process_policy)
         self._closed = False
 
     def open_session(self, request: ExecutionSessionRequest) -> ExecutionSession:
@@ -74,12 +87,26 @@ class HostExecutionBackend:
             network=NetworkPolicy.HOST_INHERITED,
             require_containment=self.require_shell_containment,
         )
-        return HostExecutionSession(self, workspace=workspace, policy=policy)
+        return HostExecutionSession(
+            self,
+            workspace=workspace,
+            policy=policy,
+            process_owner_key=owner_key(
+                conversation_id=request.conversation_id,
+                turn_id=request.turn_id,
+                metadata=request.metadata,
+                workspace_id=workspace.workspace_id,
+            ),
+            cleanup_process_owner_on_close=has_child_task_scope(request),
+        )
 
     async def open_session_async(self, request: ExecutionSessionRequest) -> ExecutionSession:
         return self.open_session(request)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self.process_registry.close()
         self._closed = True
 
     async def aclose(self) -> None:
@@ -97,6 +124,8 @@ class HostExecutionSession:
         policy: ExecutionPolicy,
         project_root: Path | None = None,
         shell_execution_policy: ShellExecutionPolicy | None = None,
+        process_owner_key: str | None = None,
+        cleanup_process_owner_on_close: bool = False,
     ) -> None:
         self._backend = backend
         self.workspace = workspace
@@ -107,6 +136,8 @@ class HostExecutionSession:
             if shell_execution_policy is not None
             else backend.shell_execution_policy
         )
+        self.process_owner_key = process_owner_key or f"workspace:{workspace.workspace_id}"
+        self.cleanup_process_owner_on_close = cleanup_process_owner_on_close
         self._closed = False
 
     @property
@@ -187,6 +218,49 @@ class HostExecutionSession:
         )
         return self._normalize(result)
 
+    def start_process(self, request: ProcessStartRequest) -> ExecutionResult:
+        self._ensure_open()
+        registry = self._backend.process_registry
+        result = registry.start(
+            owner_key=self.process_owner_key,
+            workspace_id=self.workspace.workspace_id,
+            backend_name=self.workspace.backend_name,
+            request=request,
+            prepare=lambda _process_id: prepare_host_process(
+                request=request,
+                cwd=self.project_root,
+                default_timeout_seconds=registry.policy.max_runtime_seconds,
+                output_limit_bytes=registry.policy.max_log_bytes,
+                execution_policy=self.shell_execution_policy,
+                require_containment=self._backend.require_shell_containment,
+            ),
+        )
+        return self._normalize(result)
+
+    def poll_process(self, request: ProcessPollRequest) -> ExecutionResult:
+        self._ensure_open()
+        return self._normalize(
+            self._backend.process_registry.poll(self.process_owner_key, request)
+        )
+
+    def read_process_logs(self, request: ProcessLogsRequest) -> ExecutionResult:
+        self._ensure_open()
+        return self._normalize(
+            self._backend.process_registry.logs(self.process_owner_key, request)
+        )
+
+    def write_process(self, request: ProcessWriteRequest) -> ExecutionResult:
+        self._ensure_open()
+        return self._normalize(
+            self._backend.process_registry.write(self.process_owner_key, request)
+        )
+
+    def terminate_process(self, request: ProcessTerminateRequest) -> ExecutionResult:
+        self._ensure_open()
+        return self._normalize(
+            self._backend.process_registry.terminate(self.process_owner_key, request)
+        )
+
     async def read_file_async(self, request: FileReadRequest) -> ExecutionResult:
         return await asyncio.to_thread(self.read_file, request)
 
@@ -205,7 +279,32 @@ class HostExecutionSession:
     async def run_command_async(self, request: CommandExecutionRequest) -> ExecutionResult:
         return await asyncio.to_thread(self.run_command, request)
 
+    async def start_process_async(self, request: ProcessStartRequest) -> ExecutionResult:
+        return await asyncio.to_thread(self.start_process, request)
+
+    async def poll_process_async(self, request: ProcessPollRequest) -> ExecutionResult:
+        return await asyncio.to_thread(self.poll_process, request)
+
+    async def read_process_logs_async(
+        self,
+        request: ProcessLogsRequest,
+    ) -> ExecutionResult:
+        return await asyncio.to_thread(self.read_process_logs, request)
+
+    async def write_process_async(self, request: ProcessWriteRequest) -> ExecutionResult:
+        return await asyncio.to_thread(self.write_process, request)
+
+    async def terminate_process_async(
+        self,
+        request: ProcessTerminateRequest,
+    ) -> ExecutionResult:
+        return await asyncio.to_thread(self.terminate_process, request)
+
     def close(self) -> None:
+        if self._closed:
+            return
+        if self.cleanup_process_owner_on_close:
+            self._backend.process_registry.cleanup_owner(self.process_owner_key)
         self._closed = True
 
     async def aclose(self) -> None:
@@ -288,6 +387,11 @@ class ExecutionContextLifecycle:
 def _metadata_text(metadata: dict[str, Any], key: str) -> str | None:
     value = metadata.get(key)
     return value if isinstance(value, str) else None
+
+
+def has_child_task_scope(request: ExecutionSessionRequest) -> bool:
+    child_id = request.metadata.get("child_task_id")
+    return isinstance(child_id, str) and bool(child_id.strip())
 
 
 def _change_set_from_metadata(metadata: dict[str, Any]) -> ChangeSet | None:

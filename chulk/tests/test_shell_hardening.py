@@ -208,6 +208,34 @@ def test_host_policy_can_supply_a_contained_non_shell_transport(tmp_path: Path) 
     }
 
 
+def test_host_policy_termination_callback_runs_before_transport_cleanup(
+    tmp_path: Path,
+) -> None:
+    signals: list[str] = []
+
+    class CallbackPolicy:
+        def prepare(self, request: ShellExecutionRequest) -> ShellExecutionDecision:
+            return ShellExecutionDecision.allow(
+                (sys.executable, "-c", "import time; time.sleep(5)"),
+                policy_name="callback-contained",
+                shell=False,
+                containment_applied=True,
+                termination_callback=signals.append,
+            )
+
+    result = run_shell_command(
+        {"command": "wrapped", "timeout_seconds": 1},
+        tmp_path,
+        default_timeout_seconds=1,
+        execution_policy=CallbackPolicy(),
+        require_containment=True,
+    )
+
+    assert result.error == "timeout"
+    assert signals == ["KILL"]
+    assert result.metadata["termination_method"].startswith("backend_kill,")
+
+
 def test_host_policy_can_deny_without_starting_child(tmp_path: Path) -> None:
     class DenyingPolicy:
         def prepare(self, request: ShellExecutionRequest) -> ShellExecutionDecision:

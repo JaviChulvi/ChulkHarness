@@ -15,6 +15,7 @@ from chulk.tools.artifacts import read_trace_artifact_tool
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
+from chulk.tools.processes import process_tools
 from chulk.tools.memory import (
     archive_memory_tool,
     compact_memories_tool,
@@ -146,6 +147,11 @@ def default_software_engineer(*, include_memory: bool = True) -> list[ToolRef]:
     refs = [
         calculator,
         run_cmd,
+        process_start,
+        process_poll,
+        process_logs,
+        process_write,
+        process_terminate,
         read_file,
         apply_patch,
         write_file,
@@ -200,6 +206,32 @@ run_cmd = ToolRef(
         execution_policy=context.shell_execution_policy,
         require_containment=context.require_shell_containment,
     ),
+)
+
+
+def _managed_process_tool(name: str) -> Tool:
+    return next(tool for tool in process_tools() if tool.name == name)
+
+
+process_start = ToolRef(
+    "process_start",
+    lambda _context: _managed_process_tool("process_start"),
+)
+process_poll = ToolRef(
+    "process_poll",
+    lambda _context: _managed_process_tool("process_poll"),
+)
+process_logs = ToolRef(
+    "process_logs",
+    lambda _context: _managed_process_tool("process_logs"),
+)
+process_write = ToolRef(
+    "process_write",
+    lambda _context: _managed_process_tool("process_write"),
+)
+process_terminate = ToolRef(
+    "process_terminate",
+    lambda _context: _managed_process_tool("process_terminate"),
 )
 read_file = ToolRef("read_file", lambda context: read_file_tool(context.project_root))
 apply_patch = ToolRef("apply_patch", lambda context: apply_patch_tool(context.project_root))
