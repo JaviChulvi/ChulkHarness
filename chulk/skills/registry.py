@@ -98,6 +98,9 @@ KEYWORD_STOPWORDS = {
     "when",
     "with",
 }
+_EXACT_SKILL_NAME_PATTERN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$"
+)
 
 
 @dataclass
@@ -710,15 +713,13 @@ def explicit_skill_names(user_request: str) -> tuple[str, ...]:
             break
         raw_names = token[1:].replace("+", ",").replace("/", ",").split(",")
         for raw_name in raw_names:
-            candidate = raw_name.removeprefix("/").strip()
+            candidate = raw_name.removeprefix("/").strip().lower()
             if not candidate:
                 continue
-            try:
-                normalized = _normalize_skill_name(candidate)
-            except ValueError:
+            if not _EXACT_SKILL_NAME_PATTERN.fullmatch(candidate):
                 continue
-            if normalized not in names:
-                names.append(normalized)
+            if candidate not in names:
+                names.append(candidate)
     return tuple(names)
 
 

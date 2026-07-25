@@ -321,6 +321,14 @@ def create_agent(
         require_shell_containment=require_shell_containment,
         artifact_store=trace_logger.artifact_store,
     )
+    available_tool_names = {tool.name for tool in tool_registry.list_tools()}
+    skill_capabilities = _skill_capability_names(selected_capabilities)
+    if available_tool_names:
+        skill_capabilities.add("tools")
+    skill_registry.configure_environment(
+        available_tools=available_tool_names,
+        capabilities=skill_capabilities,
+    )
     if active_mcp_servers:
         trace_logger.log(
             "mcp_config_loaded",
@@ -855,6 +863,29 @@ def _supports_hosted_mcp(provider: str) -> bool:
 
 def _supports_native_tool_calling(provider: str) -> bool:
     return provider_capabilities(provider).supports_native_tool_calling
+
+
+def _skill_capability_names(capabilities: Capabilities) -> set[str]:
+    """Flatten runtime capabilities into manifest-facing capability names."""
+    values = capabilities.to_dict()
+    names = {
+        name
+        for name in ("shell", "network", "external_services", "utilities")
+        if values[name] is True
+    }
+    file_access = str(values["files"])
+    if file_access in {"read", "write"}:
+        names.update({"files", "files:read"})
+    if file_access == "write":
+        names.add("files:write")
+    memory_mode = str(values["memory"])
+    if memory_mode != "off":
+        names.update({"memory", "memory:read"})
+    if memory_mode in {"manual", "automatic"}:
+        names.add("memory:write")
+    if memory_mode == "automatic":
+        names.add("memory:automatic")
+    return names
 
 
 def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:

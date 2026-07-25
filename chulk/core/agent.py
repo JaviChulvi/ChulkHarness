@@ -866,41 +866,20 @@ class Agent:
             TraceEvent.SKILL_SELECTION_STARTED,
             {"turn_id": self.state.current_turn_id, "query": user_message},
         )
-        pinned_selections: list[SkillSelection] = []
-        pinned_names: set[str] = set()
-        for name in self.pinned_skill_names:
-            skill = self.skill_registry.get_skill(name)
-            if skill is None:
-                continue
-            self.skill_registry.load_content(skill.name)
-            pinned_names.add(skill.name)
-            pinned_selections.append(
-                SkillSelection(
-                    skill=skill,
-                    score=10_000,
-                    matched_keywords=["pinned"],
-                )
-            )
-
-        auto_selections = self.skill_registry.load_selected_skills(
+        self._selected_skills = self.skill_registry.load_selected_skills(
             user_message,
+            pinned_names=self.pinned_skill_names,
             limit=self.max_skills_per_turn,
         )
-        self._selected_skills = [
-            *pinned_selections,
-            *(
-                selection
-                for selection in auto_selections
-                if selection.skill.name not in pinned_names
-            ),
-        ][: self.max_skills_per_turn]
         self.state.loaded_skill_names = [
             selection.skill.name for selection in self._selected_skills
         ]
+        routing_result = self.skill_registry.last_routing_result
         self._trace(
             TraceEvent.SKILL_SELECTION_COMPLETED,
             {
                 "turn_id": self.state.current_turn_id,
+                "explicit_skill_names": list(routing_result.explicit_skill_names),
                 "loaded_skill_names": self.state.loaded_skill_names,
                 "skills": [
                     {
@@ -908,8 +887,20 @@ class Agent:
                         "path": str(selection.skill.path),
                         "score": selection.score,
                         "matched_keywords": selection.matched_keywords,
+                        "reason": selection.reason,
+                        "stage": selection.stage,
+                        "version": (
+                            selection.skill.manifest.version
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
+                        "digest": selection.skill.digest,
+                        "loaded_resources": list(selection.skill.loaded_resources),
                     }
                     for selection in self._selected_skills
+                ],
+                "decisions": [
+                    decision.to_dict() for decision in routing_result.decisions
                 ],
             },
         )

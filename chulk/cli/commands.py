@@ -11,6 +11,7 @@ from chulk.cli.terminal import TerminalUI
 from chulk.config import Config
 from chulk.core import Agent
 from chulk.llm import LLMError
+from chulk.skills import explicit_skill_names
 from chulk.sessions import (
     AmbiguousSessionError,
     SessionNotFoundError,
@@ -306,6 +307,26 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
         return True
 
     if raw_command.startswith("/"):
+        explicit_names = explicit_skill_names(raw_command)
+        if explicit_names and context.agent.skill_registry is not None:
+            unavailable: list[tuple[str, str]] = []
+            for name in explicit_names:
+                skill = context.agent.skill_registry.get_skill(name)
+                if skill is None:
+                    break
+                visible, reason = context.agent.skill_registry.skill_visibility(skill)
+                if not visible:
+                    unavailable.append((name, reason))
+            else:
+                if unavailable:
+                    name, reason = unavailable[0]
+                    context.output_func(
+                        context.terminal.warning(
+                            f"Skill /{name} is unavailable: {reason}."
+                        )
+                    )
+                    return True
+                return False
         canonical_names = [command_spec.name for command_spec in CLI_COMMANDS]
         suggestion = get_close_matches(
             normalized_name, canonical_names, n=1, cutoff=0.5
