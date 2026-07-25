@@ -13,6 +13,16 @@ from chulk.skills.manifest import (
     resolve_skill_resource,
     skill_package_digest,
 )
+from chulk.skills.lifecycle_models import (
+    LearningProposalKind,
+    LearningProposalRecord,
+    LearningProposalStatus,
+    SkillLifecycleRecord,
+    SkillLifecycleStatus,
+    SkillRevisionRecord,
+    SkillUsageKind,
+)
+from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
 from chulk.skills.registry import (
     Skill,
     SkillRegistry,
@@ -112,7 +122,15 @@ __all__ = [
     "SkillManifestError",
     "SkillPackage",
     "LEGACY_SKILL_VERSION",
+    "LearningProposalKind",
+    "LearningProposalRecord",
+    "LearningProposalStatus",
     "SKILL_MANIFEST_SCHEMA_VERSION",
+    "SQLiteSkillLifecycleStore",
+    "SkillLifecycleRecord",
+    "SkillLifecycleStatus",
+    "SkillRevisionRecord",
+    "SkillUsageKind",
     "bundled_skills_dir",
     "explicit_skill_names",
     "files",
