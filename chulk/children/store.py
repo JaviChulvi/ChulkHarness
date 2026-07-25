@@ -210,6 +210,20 @@ class ChildTaskStore:
             ).fetchall()
         return tuple(_task_from_row(row) for row in rows)
 
+    def active_count(self) -> int:
+        with sqlite_connection(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM child_tasks
+                WHERE profile_id = ?
+                  AND status IN (
+                      'pending', 'ready', 'running', 'waiting', 'blocked'
+                  )
+                """,
+                (self.profile_id,),
+            ).fetchone()
+        return int(row["count"])
+
     def events(
         self,
         task_id: str,

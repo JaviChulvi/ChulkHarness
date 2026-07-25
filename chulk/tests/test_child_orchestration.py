@@ -30,6 +30,7 @@ from chulk.children import (
     TaskSupervisor,
 )
 from chulk.execution import WorkspaceMode
+from chulk.goals import GoalService, GoalStep, GoalStore
 from chulk.usage import (
     BudgetExceededError,
     BudgetScope,
@@ -223,7 +224,9 @@ def test_delegation_rejects_escalation_transcripts_and_invalid_schema(tmp_path) 
 
 
 def test_delegation_builds_fresh_lineage_and_deterministic_idempotency(tmp_path) -> None:
+    observed: list[str] = []
     service = _service(tmp_path)
+    service.event_callback = lambda kind, _task: observed.append(kind)
     authority = _authority()
     parent = service.delegate(
         DelegationRequest(
@@ -259,10 +262,47 @@ def test_delegation_builds_fresh_lineage_and_deterministic_idempotency(tmp_path)
     )
 
     assert replayed.id == parent.id
+    assert observed.count("child.created") == 2
     assert nested.lineage.parent_task_id == parent.id
     assert nested.lineage.root_task_id == parent.id
     assert nested.lineage.depth == 2
     assert nested.parent_trace_id == "parent-trace"
+
+
+def test_goal_linking_and_shared_budget_resolution_are_automatic(tmp_path) -> None:
+    db_path = tmp_path / "control.sqlite"
+    goal_service = GoalService(GoalStore(db_path))
+    goal = goal_service.create(
+        title="Coordinate child work",
+        acceptance_criteria=("The child provides evidence.",),
+        steps=(
+            GoalStep(
+                id="delegate",
+                title="Delegate",
+                description="Run bounded child work.",
+                acceptance_criterion_ids=("criterion-1",),
+            ),
+        ),
+        budget=RunBudget(max_model_calls=4),
+    )
+    service = DelegationService(
+        ChildTaskStore(db_path),
+        policy=DelegationPolicy(max_depth=2),
+        goal_service=goal_service,
+    )
+
+    task = service.delegate(
+        DelegationRequest(
+            _spec(),
+            goal_id=goal.id,
+            goal_step_id="delegate",
+        ),
+        authority=_authority(),
+    )
+
+    linked = goal_service.store.get(goal.id)
+    assert linked.child_task_ids == (task.id,)
+    assert service.shared_budgets(task) == (linked.budget,)
 
 
 def test_store_enforces_parent_parallelism_at_claim_time(tmp_path) -> None:

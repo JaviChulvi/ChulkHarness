@@ -782,6 +782,30 @@ def main(
                 output_func=output_func,
                 error_func=error_func,
             )
+        if args.command == "child":
+            from chulk.children import ChildTaskStore, DelegationService
+            from chulk.cli.children import run_child_command
+
+            return run_child_command(
+                args.child_command,
+                service=DelegationService(
+                    ChildTaskStore(
+                        config.store_path,
+                        profile_id=profile.id,
+                    )
+                ),
+                task_id=getattr(args, "task_id", None),
+                expected_revision=getattr(args, "revision", None),
+                actor=getattr(args, "actor", "cli"),
+                reason=getattr(args, "reason", None),
+                status=getattr(args, "status", None),
+                goal_id=getattr(args, "goal", None),
+                parent_task_id=getattr(args, "parent", None),
+                limit=getattr(args, "limit", 100),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "session":
             return run_session_command(
                 args.session_command,

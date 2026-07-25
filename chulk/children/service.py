@@ -24,6 +24,7 @@ from chulk.tools.schema import (
     validate_tool_output,
     validate_tool_output_schema,
 )
+from chulk.usage import RunBudget
 
 
 _FORBIDDEN_CONTEXT_KEYS = frozenset(
@@ -239,7 +240,7 @@ class DelegationService:
             pass
         else:
             existing = True
-        active = sum(1 for task in self.store.list(limit=1000) if not task.terminal)
+        active = self.store.active_count()
         if not existing and active >= self.policy.max_active_tasks:
             raise ValueError("profile child-task limit is already active")
         task = ChildTask(
@@ -261,7 +262,7 @@ class DelegationService:
         )
         if created.goal_id is not None:
             self._link_goal(created, actor=actor)
-        if self.event_callback is not None:
+        if not existing and self.event_callback is not None:
             self.event_callback("child.created", created)
         return created
 
@@ -290,6 +291,17 @@ class DelegationService:
                     task,
                 )
         return changed
+
+    def shared_budgets(self, task: ChildTask) -> tuple[RunBudget, ...]:
+        """Resolve durable broader-scope budgets for runtime reservations."""
+        if task.goal_id is None:
+            return ()
+        if self.goal_service is None:
+            raise ValueError("goal-linked child task requires a goal service")
+        goal = self.goal_service.store.get(task.goal_id)
+        if goal.profile_id != task.profile_id:
+            raise ValueError("child task goal belongs to another profile")
+        return (goal.budget,)
 
     def _lineage(self, parent_task_id: str | None) -> ChildTaskLineage:
         clean_parent = _optional(parent_task_id)

@@ -212,6 +212,70 @@ def test_shared_goal_reservation_prevents_parallel_children_overspending(
     ).state is ReservationState.RELEASED
 
 
+def test_shared_tool_hold_reconciles_if_secondary_commit_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    agent = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        run_budget=RunBudget(
+            scope=BudgetScope.CHILD_TASK,
+            max_tool_calls=2,
+        ),
+        additional_run_budgets=(
+            RunBudget(scope=BudgetScope.GOAL, max_tool_calls=2),
+        ),
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            goal_id="goal-tool-recovery",
+            child_task_id="child-tool-recovery",
+        ),
+    )
+    assert agent.usage_accounting is not None
+    agent.usage_accounting.reserve_tool_call(
+        turn_id="tool-turn",
+        tool_call_index=1,
+        attempt=1,
+        tool_name="calculator",
+    )
+    original_commit = SQLiteUsageStore.commit
+    calls = 0
+
+    def interrupt_constraint(self, reservation_id, entries):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated crash during shared commit")
+        return original_commit(self, reservation_id, entries)
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_constraint)
+    with pytest.raises(RuntimeError, match="shared commit"):
+        agent.usage_accounting.commit_tool_call(
+            turn_id="tool-turn",
+            tool_call_index=1,
+            attempt=1,
+            tool_name="calculator",
+            success=True,
+            failure_kind=None,
+        )
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
+    store = SQLiteUsageStore(config.store_path)
+    assert [item.state for item in store.list_reservations()] == [
+        ReservationState.COMMITTED,
+        ReservationState.ACTIVE,
+    ]
+    assert store.reconcile_committed_constraints() == 1
+    assert all(
+        item.state is ReservationState.COMMITTED
+        for item in store.list_reservations()
+    )
+
+
 def test_tool_budget_stops_before_the_next_tool_attempt_and_records_goal_usage(
     tmp_path: Path,
 ) -> None:

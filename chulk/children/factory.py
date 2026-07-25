@@ -153,7 +153,12 @@ class RuntimeChildAgentFactory:
     ) -> ExecutionBackend | None:
         factory = self.backend_factories.get(task.spec.backend_name)
         if factory is not None:
-            return factory(task)
+            backend = factory(task)
+            if backend.name != task.spec.backend_name:
+                raise ValueError(
+                    "child backend factory returned a different backend"
+                )
+            return backend
         if task.spec.backend_name != profile_backend_name:
             raise ValueError(
                 f"child execution backend {task.spec.backend_name!r} "
@@ -226,12 +231,36 @@ def _default_result(
         if agent.trace_logger is not None
         else None
     )
+    change_sets = [
+        value
+        for call in (turn.tool_calls if turn is not None else ())
+        if isinstance((value := call.metadata.get("change_set")), dict)
+    ]
+    latest_change_set = change_sets[-1] if change_sets else None
+    raw_changes = (
+        latest_change_set.get("changes", ())
+        if latest_change_set is not None
+        else ()
+    )
+    changed_files = tuple(
+        str(change["path"])
+        for change in raw_changes
+        if isinstance(change, dict) and isinstance(change.get("path"), str)
+    )
+    change_set_id = (
+        str(latest_change_set["change_set_id"])
+        if latest_change_set is not None
+        and latest_change_set.get("change_set_id")
+        else None
+    )
     return ChildTaskResult(
         summary=response,
         structured_output={"response": response},
         artifact_refs=(trace_path,) if trace_path is not None else (),
         usage=turn.model_usage_totals if turn is not None else {},
         trace_id=agent.state.conversation_id,
+        changed_files=changed_files,
+        change_set_id=change_set_id,
     )
 
 

@@ -170,6 +170,9 @@ class TaskSupervisor:
     def _worker_loop(self, stop: Event, poll_seconds: float) -> None:
         while not stop.is_set():
             try:
+                self.store.recover_expired(
+                    actor=f"{self.worker_id}:recovery"
+                )
                 task = self.run_once()
             except Exception:
                 task = None
@@ -280,7 +283,10 @@ class _AttemptHeartbeat:
                 )
             except ChildTaskLeaseConflictError as exc:
                 self.error = exc
-                self.on_lost()
+                try:
+                    self.on_lost()
+                except Exception:
+                    pass
                 return
 
 

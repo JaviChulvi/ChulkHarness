@@ -255,6 +255,32 @@ class SQLiteUsageStore:
             ).fetchall()
         return tuple(_row_to_reservation(row) for row in rows)
 
+    def reconcile_committed_constraints(self) -> int:
+        """Close shared holds whose primary usage entry is already durable."""
+        now = self.clock()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE usage_reservations AS reservations
+                SET state = ?, updated_at = ?
+                WHERE reservations.state = ?
+                  AND reservations.idempotency_key LIKE '%:constraint:%'
+                  AND EXISTS (
+                      SELECT 1 FROM usage_ledger AS ledger
+                      WHERE ledger.resource_kind = reservations.resource_kind
+                        AND ledger.source_event_id LIKE
+                            reservations.source_event_id || ':%'
+                  )
+                """,
+                (
+                    ReservationState.COMMITTED.value,
+                    now.isoformat(),
+                    ReservationState.ACTIVE.value,
+                ),
+            )
+        return cursor.rowcount
+
     def list_entries(self, *, limit: int = 100) -> tuple[UsageEntry, ...]:
         clean_limit = max(1, min(limit, 10_000))
         with sqlite_connection(self.db_path) as conn:

@@ -77,6 +77,7 @@ class ModelUsageAccounting:
             tuple[BudgetReservation, ...],
         ] = {}
         self.reconcile_persisted_model_requests()
+        self.store.reconcile_committed_constraints()
         self.store.release_expired()
 
     def reserve_model_request(
