@@ -4,6 +4,14 @@ from chulk.gateway.adoption import (
     LegacyAdoptionResult,
     adopt_legacy_telegram_state,
 )
+from chulk.gateway.commands import (
+    ChannelCommand,
+    ChannelCommandSpec,
+    SHARED_CHANNEL_COMMANDS,
+    parse_channel_command,
+    shared_command_help,
+    shared_command_spec,
+)
 from chulk.gateway.ledger import (
     ExecutionClaim,
     GatewayAdapterStatus,
@@ -49,6 +57,8 @@ from chulk.gateway.runtime import (
 __all__ = [
     "AuthenticationState",
     "ChannelAdapter",
+    "ChannelCommand",
+    "ChannelCommandSpec",
     "ChannelIdentity",
     "ChannelScope",
     "DeliveryReceipt",
@@ -75,10 +85,14 @@ __all__ = [
     "ReplyPart",
     "SQLiteGatewayLedger",
     "SQLiteGatewayRouter",
+    "SHARED_CHANNEL_COMMANDS",
     "TextPart",
     "TrustLevel",
     "UNROUTED_PROFILE_ID",
     "UNCERTAIN_EXECUTION_MESSAGE",
     "adopt_legacy_telegram_state",
     "conversation_key_for",
+    "parse_channel_command",
+    "shared_command_help",
+    "shared_command_spec",
 ]

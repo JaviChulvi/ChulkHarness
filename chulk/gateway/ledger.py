@@ -688,6 +688,44 @@ class SQLiteGatewayLedger:
             )
         return cursor.rowcount == 1
 
+    def request_conversation_cancellation(
+        self,
+        *,
+        profile_id: str,
+        conversation_key: str,
+        exclude_inbox_id: str,
+    ) -> tuple[str, ...]:
+        """Cancel earlier work while leaving the stop command itself queued."""
+        observed = _utc_now()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT id FROM gateway_inbox
+                WHERE profile_id = ? AND conversation_key = ? AND id != ?
+                  AND state IN ('queued', 'processing')
+                ORDER BY created_at, id
+                """,
+                (profile_id, conversation_key, exclude_inbox_id),
+            ).fetchall()
+            ids = tuple(str(row["id"]) for row in rows)
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"""
+                    UPDATE gateway_inbox
+                    SET state = CASE
+                            WHEN state = 'queued' THEN 'cancelled'
+                            ELSE state
+                        END,
+                        cancellation_requested = 1,
+                        updated_at = ?
+                    WHERE id IN ({placeholders})
+                    """,
+                    (_encode(observed), *ids),
+                )
+        return ids
+
     def mark_execution_cancelled(self, inbox_id: str, execution_token: str) -> bool:
         with sqlite_connection(self.db_path) as conn:
             cursor = conn.execute(

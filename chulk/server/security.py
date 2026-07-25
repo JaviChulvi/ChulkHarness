@@ -142,6 +142,7 @@ class ControlSecurityMiddleware:
         request_timeout_seconds: float = 30.0,
         rate_limiter: SlidingWindowRateLimiter | None = None,
         audit_log: ControlAuditLog | None = None,
+        public_get_prefixes: Iterable[str] = (),
     ) -> None:
         if max_body_bytes < 1:
             raise ValueError("max_body_bytes must be greater than zero")
@@ -155,6 +156,9 @@ class ControlSecurityMiddleware:
         self._request_slots = asyncio.Semaphore(max_concurrent_requests)
         self.rate_limiter = rate_limiter or SlidingWindowRateLimiter()
         self.audit_log = audit_log
+        self.public_get_prefixes = tuple(
+            path.rstrip("/") or "/" for path in public_get_prefixes
+        )
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] not in {"http", "websocket"}:
@@ -168,8 +172,11 @@ class ControlSecurityMiddleware:
         if origin is not None and not self._allowed_origin(origin):
             await self._reject(scope, receive, send, 403, "origin_not_allowed")
             return
+        public_request = self._public_request(scope)
         token = _control_token(scope, headers)
-        if token is None or not self.token_store.matches(token):
+        if not public_request and (
+            token is None or not self.token_store.matches(token)
+        ):
             await self._reject(scope, receive, send, 401, "authentication_required")
             return
         if (
@@ -269,6 +276,15 @@ class ControlSecurityMiddleware:
             normalized == allowed
             or normalized.startswith(f"{allowed}:")
             for allowed in self.allowed_origins
+        )
+
+    def _public_request(self, scope: Mapping[str, Any]) -> bool:
+        if scope["type"] != "http" or scope.get("method") not in {"GET", "HEAD"}:
+            return False
+        path = str(scope.get("path", "")).rstrip("/") or "/"
+        return any(
+            path == prefix or path.startswith(f"{prefix}/")
+            for prefix in self.public_get_prefixes
         )
 
     async def _reject(self, scope, receive, send, status: int, code: str) -> None:

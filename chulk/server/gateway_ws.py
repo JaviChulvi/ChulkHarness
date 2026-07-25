@@ -15,7 +15,6 @@ from chulk.gateway import (
     ChannelScope,
     DeliveryReceipt,
     DeliveryState,
-    DeliveryTarget,
     GatewayLimits,
     GatewayRuntime,
     InboundEnvelope,
@@ -26,8 +25,8 @@ from chulk.gateway import (
     TrustLevel,
 )
 from chulk.profiles import ProfileNotFoundError
+from chulk.server.channel_runtime import ChannelConversationExecutor
 from chulk.server.dispatcher import ConversationDispatcher
-from chulk.sessions import SessionNotFoundError
 
 
 GATEWAY_PROTOCOL_VERSION = 1
@@ -175,78 +174,7 @@ async def serve_gateway_websocket(
         ledger=ledger,
     )
 
-    async def execute(
-        profile_id: str,
-        envelope: InboundEnvelope,
-    ) -> tuple[OutboundEnvelope, ...]:
-        text = "\n".join(
-            part.text for part in envelope.parts if isinstance(part, TextPart)
-        )
-        requested = envelope.extensions.get("conversation_id")
-        conversation_id = (
-            str(requested)
-            if isinstance(requested, str) and requested
-            else (
-                await dispatcher.create_conversation(
-                    profile_id,
-                    metadata={"channel": GATEWAY_ADAPTER_NAME},
-                )
-            )["id"]
-        )
-        mode = envelope.extensions.get("mode", "run")
-        try:
-            try:
-                command = await dispatcher.submit_and_wait(
-                    profile_id,
-                    conversation_id,
-                    text,
-                    mode="plan" if mode == "plan" else "run",
-                    source="gateway",
-                    idempotency_key=envelope.idempotency_key,
-                )
-            except SessionNotFoundError:
-                return (
-                    OutboundEnvelope(
-                        profile_id=profile_id,
-                        conversation_id=conversation_id,
-                        target=DeliveryTarget(
-                            GATEWAY_ADAPTER_NAME,
-                            account_id,
-                            envelope.destination_id,
-                        ),
-                        text="Conversation not found.",
-                        reply_to_event_id=envelope.event_id,
-                        extensions={
-                            "status": "failed",
-                            "error": "conversation_not_found",
-                        },
-                    ),
-                )
-        except asyncio.CancelledError:
-            await dispatcher.cancel(profile_id, conversation_id)
-            raise
-        result = command.result or {}
-        answer = result.get("content")
-        if not isinstance(answer, str):
-            answer = command.error or f"Command ended with status {command.status}."
-        return (
-            OutboundEnvelope(
-                profile_id=profile_id,
-                conversation_id=conversation_id,
-                target=DeliveryTarget(
-                    GATEWAY_ADAPTER_NAME,
-                    account_id,
-                    envelope.destination_id,
-                ),
-                text=answer,
-                reply_to_event_id=envelope.event_id,
-                extensions={
-                    "command_id": command.id,
-                    "status": command.status,
-                    "error": command.error,
-                },
-            ),
-        )
+    execute = ChannelConversationExecutor(dispatcher)
 
     runtime = GatewayRuntime(
         ledger=ledger,

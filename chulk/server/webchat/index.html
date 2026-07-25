@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Chulk control room</title>
+    <link rel="stylesheet" href="/webchat/assets/app.css">
+    <script src="/webchat/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#composer">Skip to message composer</a>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Local agent harness</p>
+        <h1>Chulk <span>control room</span></h1>
+      </div>
+      <div class="connection-pill" data-status="locked" aria-live="polite">
+        <span class="status-light" aria-hidden="true"></span>
+        <span id="connection-label">Locked</span>
+      </div>
+    </header>
+
+    <main class="control-grid">
+      <aside class="signal-rail" aria-label="Connection progress">
+        <p class="rail-title">Signal path</p>
+        <ol>
+          <li data-stage="auth" class="active">
+            <span>01</span>
+            <div><strong>Owner key</strong><small>Authenticate locally</small></div>
+          </li>
+          <li data-stage="profile">
+            <span>02</span>
+            <div><strong>Profile</strong><small>Select authority</small></div>
+          </li>
+          <li data-stage="socket">
+            <span>03</span>
+            <div><strong>Live link</strong><small>Open gateway</small></div>
+          </li>
+          <li data-stage="turn">
+            <span>04</span>
+            <div><strong>Turn</strong><small>Run or inspect</small></div>
+          </li>
+        </ol>
+      </aside>
+
+      <section class="conversation-panel" aria-labelledby="conversation-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">WebChat adapter</p>
+            <h2 id="conversation-title">One visible conversation</h2>
+          </div>
+          <div class="conversation-id">
+            <span>Conversation</span>
+            <code id="conversation-id">not started</code>
+          </div>
+        </div>
+
+        <section class="unlock-card" id="unlock-card" aria-labelledby="unlock-title">
+          <div>
+            <p class="eyebrow">Owner-only access</p>
+            <h3 id="unlock-title">Connect to this local server</h3>
+            <p>
+              Paste the token from your runtime directory. It stays in this
+              browser tab and is never written into the page.
+            </p>
+          </div>
+          <form id="unlock-form">
+            <label for="token">Control token</label>
+            <div class="field-row">
+              <input
+                id="token"
+                name="token"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                required
+              >
+              <button type="submit">Unlock</button>
+            </div>
+            <p class="form-note" id="unlock-error" role="alert"></p>
+          </form>
+        </section>
+
+        <div class="session-bar" id="session-bar" hidden>
+          <label for="profile">Profile</label>
+          <select id="profile" name="profile"></select>
+          <button type="button" class="quiet-button" id="reconnect">Reconnect</button>
+          <button type="button" class="quiet-button" id="new-conversation">New</button>
+          <button type="button" class="stop-button" id="stop-conversation">Stop</button>
+        </div>
+
+        <ol class="message-list" id="messages" aria-live="polite" aria-label="Messages">
+          <li class="empty-state" id="empty-state">
+            <span class="empty-mark" aria-hidden="true">⌁</span>
+            <h3>The line is quiet</h3>
+            <p>Unlock the server, choose a profile, then send a message or inspect a shared command.</p>
+          </li>
+        </ol>
+
+        <div class="command-strip" id="command-strip" hidden aria-label="Shared commands">
+          <button type="button" data-command="/status">/status</button>
+          <button type="button" data-command="/model">/model</button>
+          <button type="button" data-command="/skills">/skills</button>
+          <button type="button" data-command="/memory">/memory</button>
+          <button type="button" data-command="/agents">/agents</button>
+          <button type="button" data-command="/jobs">/jobs</button>
+        </div>
+
+        <form class="composer" id="composer">
+          <label for="message">Message</label>
+          <textarea
+            id="message"
+            name="message"
+            rows="3"
+            maxlength="100000"
+            placeholder="Ask the agent, or type /help"
+            disabled
+            required
+          ></textarea>
+          <div class="composer-footer">
+            <span><kbd>⌘</kbd><kbd>Enter</kbd> to send</span>
+            <button type="submit" id="send" disabled>Send message</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="pairing-panel" aria-labelledby="pairing-title">
+        <div class="panel-heading compact">
+          <div>
+            <p class="eyebrow">Channel access</p>
+            <h2 id="pairing-title">Pair a device</h2>
+          </div>
+        </div>
+        <p class="panel-copy">
+          Create a short-lived code, then send it to the bot in a direct message.
+        </p>
+        <form id="pairing-form">
+          <label for="pair-adapter">Channel</label>
+          <select id="pair-adapter" disabled>
+            <option value="telegram">Telegram</option>
+            <option value="discord">Discord</option>
+          </select>
+          <label for="pair-account">Account</label>
+          <input id="pair-account" value="primary" maxlength="128" disabled required>
+          <label for="pair-profile">Profile</label>
+          <select id="pair-profile" disabled></select>
+          <label for="pair-principal">Restrict to user ID <span>optional</span></label>
+          <input id="pair-principal" maxlength="128" disabled>
+          <button type="submit" id="create-pairing" disabled>Create pairing code</button>
+        </form>
+        <section class="pairing-result" id="pairing-result" hidden aria-live="polite">
+          <p>Send this code in a direct message</p>
+          <code id="pairing-code"></code>
+          <button type="button" class="quiet-button" id="copy-pairing">Copy code</button>
+          <small id="pairing-expiry"></small>
+        </section>
+        <div class="route-heading">
+          <h3>Active routes</h3>
+          <button type="button" class="text-button" id="refresh-routes" disabled>Refresh</button>
+        </div>
+        <ul class="route-list" id="route-list">
+          <li>No authenticated routes loaded.</li>
+        </ul>
+      </aside>
+    </main>
+
+    <footer>
+      <span>Loopback-first control surface</span>
+      <span id="event-status" role="status">Waiting for owner key</span>
+    </footer>
+  </body>
+</html>

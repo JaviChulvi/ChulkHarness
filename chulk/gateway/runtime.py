@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import logging
 
 from chulk.gateway.ledger import ExecutionClaim, SQLiteGatewayLedger
+from chulk.gateway.commands import parse_channel_command
 from chulk.gateway.models import (
     DeliveryReceipt,
     DeliveryState,
@@ -119,11 +120,22 @@ class GatewayRuntime:
             )
             await adapter.acknowledge(envelope)
             return False
-        self.ledger.ingest(
+        ingested = self.ledger.ingest(
             envelope,
             profile_id=route.profile_id,
             max_pending=self.limits.max_pending,
         )
+        if ingested.created and _is_stop_command(envelope):
+            cancelled_ids = await asyncio.to_thread(
+                self.ledger.request_conversation_cancellation,
+                profile_id=route.profile_id,
+                conversation_key=ingested.record.conversation_key,
+                exclude_inbox_id=ingested.record.id,
+            )
+            for inbox_id in cancelled_ids:
+                task = self._active_executions.get(inbox_id)
+                if task is not None:
+                    task.cancel()
         await adapter.acknowledge(envelope)
         return True
 
@@ -365,6 +377,13 @@ def _pairing_code(envelope: InboundEnvelope) -> str | None:
         return None
     code = envelope.parts[0].text.strip()
     return code if code and len(code) <= 128 else None
+
+
+def _is_stop_command(envelope: InboundEnvelope) -> bool:
+    if len(envelope.parts) != 1 or not isinstance(envelope.parts[0], TextPart):
+        return False
+    parsed = parse_channel_command(envelope.parts[0].text)
+    return parsed is not None and parsed.name == "stop"
 
 
 __all__ = [

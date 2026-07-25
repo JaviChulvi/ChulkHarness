@@ -113,6 +113,104 @@ def test_http_api_requires_auth_origin_and_browser_csrf(tmp_path) -> None:
     assert "request body" not in audit
 
 
+def test_webchat_shell_is_public_but_control_data_stays_authenticated(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        page = client.get("/webchat")
+        stylesheet = client.get("/webchat/assets/app.css")
+        script = client.get("/webchat/assets/app.js")
+
+        assert page.status_code == 200
+        assert "Chulk <span>control room</span>" in page.text
+        assert tokens.load_or_create() not in page.text
+        assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert stylesheet.status_code == 200
+        assert script.status_code == 200
+        assert "sessionStorage" in script.text
+        assert client.get("/v1/session").status_code == 401
+        assert client.get("/webchat/assets/missing.js").status_code == 404
+
+
+def test_authenticated_webchat_session_creates_pairing_and_lists_routes(
+    tmp_path,
+) -> None:
+    app, tokens = _app(tmp_path)
+    origin = "http://localhost:3000"
+    with TestClient(app) as client:
+        session = client.get(
+            "/v1/session",
+            headers={**_auth(tokens), "Origin": origin},
+        )
+        assert session.status_code == 200
+        csrf = session.json()["csrf_token"]
+
+        created = client.post(
+            "/v1/gateway/pairings",
+            headers={
+                **_auth(tokens),
+                "Origin": origin,
+                "X-Chulk-CSRF": csrf,
+            },
+            json={
+                "adapter": "discord",
+                "account_id": "primary",
+                "profile_id": "default",
+                "principal_id": "user-7",
+                "ttl_seconds": 600,
+            },
+        )
+        routes = client.get(
+            "/v1/gateway/routes",
+            headers={**_auth(tokens), "Origin": origin},
+        )
+
+        assert created.status_code == 201
+        assert len(created.json()["pairing"]["code"]) >= 24
+        assert created.json()["pairing"]["principal_id"] == "user-7"
+        assert routes.status_code == 200
+        assert routes.json()["routes"] == []
+        assert client.post(
+            "/v1/gateway/pairings",
+            headers={
+                **_auth(tokens),
+                "Origin": origin,
+                "X-Chulk-CSRF": csrf,
+            },
+            json={
+                "adapter": "discord",
+                "account_id": "primary",
+                "profile_id": "missing",
+            },
+        ).status_code == 404
+        assert client.post(
+            "/v1/gateway/pairings",
+            headers={
+                **_auth(tokens),
+                "Origin": origin,
+                "X-Chulk-CSRF": csrf,
+            },
+            json={
+                "adapter": "discord",
+                "account_id": "primary",
+                "profile_id": "default",
+                "ttl_seconds": 10,
+            },
+        ).status_code == 400
+        assert client.post(
+            "/v1/gateway/pairings",
+            headers={
+                **_auth(tokens),
+                "Origin": origin,
+                "X-Chulk-CSRF": csrf,
+            },
+            json={
+                "adapter": "unknown",
+                "account_id": "primary",
+                "profile_id": "default",
+            },
+        ).status_code == 400
+
+
 def test_http_api_creates_conversation_and_queues_idempotent_message(tmp_path) -> None:
     app, tokens = _app(tmp_path)
     with TestClient(app) as client:

@@ -120,6 +120,46 @@ class PlanDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class GatewayPairingRequest:
+    adapter: str
+    account_id: str
+    profile_id: str
+    principal_id: str | None = None
+    ttl_seconds: int = 600
+
+    @classmethod
+    def from_dict(cls, value: object) -> GatewayPairingRequest:
+        body = _object(value)
+        adapter = _required_text(body.get("adapter"), "adapter", max_chars=64)
+        if adapter not in {"telegram", "discord"}:
+            raise ValueError("adapter must be telegram or discord")
+        ttl = body.get("ttl_seconds", 600)
+        if isinstance(ttl, bool) or not isinstance(ttl, int):
+            raise ValueError("ttl_seconds must be an integer")
+        if ttl < 60 or ttl > 3_600:
+            raise ValueError("ttl_seconds must be between 60 and 3600")
+        return cls(
+            adapter=adapter,
+            account_id=_required_text(
+                body.get("account_id"),
+                "account_id",
+                max_chars=128,
+            ),
+            profile_id=_required_text(
+                body.get("profile_id"),
+                "profile_id",
+                max_chars=64,
+            ),
+            principal_id=_optional_text(
+                body.get("principal_id"),
+                "principal_id",
+                max_chars=128,
+            ),
+            ttl_seconds=ttl,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ApiError:
     code: str
     message: str
@@ -144,6 +184,7 @@ __all__ = [
     "ApiError",
     "ConversationCreateRequest",
     "ConversationMessageRequest",
+    "GatewayPairingRequest",
     "MessageMode",
     "PermissionAnswer",
     "PermissionDecisionRequest",
