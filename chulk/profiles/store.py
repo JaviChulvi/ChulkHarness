@@ -132,9 +132,141 @@ def _add_model_profile_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_gateway_control_schema(conn: sqlite3.Connection) -> None:
+    """Create owner-controlled channel routing and delivery state."""
+    conn.executescript(
+        """
+        CREATE TABLE gateway_adapters (
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'stopped',
+            instance_token TEXT,
+            lease_until TEXT,
+            cursor TEXT,
+            legacy_adopted_at TEXT,
+            started_at TEXT,
+            stopped_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (adapter, account_id),
+            CHECK (state IN ('stopped', 'running'))
+        );
+
+        CREATE TABLE gateway_inbox (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            thread_id TEXT,
+            envelope_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            execution_token TEXT,
+            execution_lease_until TEXT,
+            cancellation_requested INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            executed_at TEXT,
+            UNIQUE (adapter, account_id, idempotency_key),
+            CHECK (
+                state IN (
+                    'queued', 'processing', 'executed', 'ignored',
+                    'cancelled', 'uncertain'
+                )
+            ),
+            CHECK (cancellation_requested IN (0, 1))
+        );
+        CREATE INDEX idx_gateway_inbox_queue
+        ON gateway_inbox(state, created_at, id);
+        CREATE INDEX idx_gateway_inbox_profile_queue
+        ON gateway_inbox(profile_id, state, created_at, id);
+        CREATE INDEX idx_gateway_inbox_conversation
+        ON gateway_inbox(conversation_key, state, created_at, id);
+
+        CREATE TABLE gateway_outbox (
+            id TEXT PRIMARY KEY,
+            inbox_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            envelope_json TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            checkpoint TEXT,
+            delivery_token TEXT,
+            delivery_lease_until TEXT,
+            next_attempt_at TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            delivered_at TEXT,
+            UNIQUE (inbox_id, sequence),
+            FOREIGN KEY (inbox_id) REFERENCES gateway_inbox(id) ON DELETE CASCADE,
+            CHECK (sequence >= 0),
+            CHECK (attempt_count >= 0),
+            CHECK (state IN ('pending', 'delivering', 'delivered', 'failed'))
+        );
+        CREATE INDEX idx_gateway_outbox_delivery
+        ON gateway_outbox(state, next_attempt_at, created_at, id);
+        CREATE INDEX idx_gateway_outbox_profile
+        ON gateway_outbox(profile_id, state, created_at, id);
+
+        CREATE TABLE gateway_delivery_events (
+            id TEXT PRIMARY KEY,
+            outbox_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (outbox_id) REFERENCES gateway_outbox(id) ON DELETE CASCADE,
+            CHECK (attempt >= 1)
+        );
+        CREATE INDEX idx_gateway_delivery_events_outbox
+        ON gateway_delivery_events(outbox_id, recorded_at, id);
+
+        CREATE TABLE gateway_routes (
+            id TEXT PRIMARY KEY,
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL DEFAULT '',
+            destination_id TEXT NOT NULL DEFAULT '',
+            thread_id TEXT NOT NULL DEFAULT '',
+            profile_id TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (
+                adapter, account_id, principal_id, destination_id, thread_id
+            ),
+            CHECK (enabled IN (0, 1))
+        );
+        CREATE INDEX idx_gateway_routes_lookup
+        ON gateway_routes(adapter, account_id, enabled);
+
+        CREATE TABLE gateway_pairings (
+            id TEXT PRIMARY KEY,
+            code_digest TEXT NOT NULL UNIQUE,
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            principal_id TEXT,
+            profile_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_gateway_pairings_target
+        ON gateway_pairings(adapter, account_id, expires_at);
+        """
+    )
+
+
 CONTROL_MIGRATIONS = (
     SQLiteMigration(1, "agent profile control database", _create_control_schema),
     SQLiteMigration(2, "model profiles and provider health", _add_model_profile_schema),
+    SQLiteMigration(3, "channel gateway control ledger", _add_gateway_control_schema),
 )
 
 

@@ -1,5 +1,15 @@
 """Public channel-neutral gateway contracts."""
 
+from chulk.gateway.ledger import (
+    ExecutionClaim,
+    GatewayAdapterStatus,
+    InboxRecord,
+    IngestResult,
+    OutboxRecord,
+    SQLiteGatewayLedger,
+    UNCERTAIN_EXECUTION_MESSAGE,
+    conversation_key_for,
+)
 from chulk.gateway.models import (
     AuthenticationState,
     ChannelIdentity,
@@ -28,13 +38,21 @@ __all__ = [
     "DeliveryReceipt",
     "DeliveryState",
     "DeliveryTarget",
+    "ExecutionClaim",
+    "GatewayAdapterStatus",
     "InboundEnvelope",
     "InboundPart",
+    "InboxRecord",
+    "IngestResult",
     "MediaPart",
     "MediaReference",
     "OutboundEnvelope",
+    "OutboxRecord",
     "ReactionPart",
     "ReplyPart",
+    "SQLiteGatewayLedger",
     "TextPart",
     "TrustLevel",
+    "UNCERTAIN_EXECUTION_MESSAGE",
+    "conversation_key_for",
 ]
