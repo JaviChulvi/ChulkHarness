@@ -81,7 +81,7 @@ class ToolExecutor:
         result: ToolResult | None = None
         for attempt_number in range(1, max_attempts + 1):
             started_at = utc_now()
-            result = self._permission_result(
+            result = await self._permission_result_async(
                 tool_name,
                 arguments,
                 turn,
@@ -109,6 +109,33 @@ class ToolExecutor:
                 await asyncio.sleep(retry_policy.backoff_seconds)
         assert result is not None
         return replace(result, metadata={**result.metadata, "attempt_history": attempts})
+
+    async def _permission_result_async(
+        self,
+        tool_name: str,
+        arguments: dict,
+        turn: TurnState,
+    ) -> ToolResult | None:
+        """Resolve blocking host approvals without stalling the agent event loop."""
+        try:
+            tool = self.registry.get(tool_name)
+        except KeyError:
+            return None
+        request = self.permission_policy.request_for_tool(tool, arguments)
+        self.trace(
+            TraceEvent.TOOL_PERMISSION_REQUESTED,
+            {"turn_id": turn.turn_id, "request": request.to_dict()},
+        )
+        record = self.permission_policy.decide(request)
+        if record.decision == PermissionDecision.ASK:
+            record = await asyncio.to_thread(self._resolve_approval, request, record)
+        self.trace(
+            TraceEvent.TOOL_PERMISSION_DECIDED,
+            {"turn_id": turn.turn_id, "decision": record.to_dict()},
+        )
+        if record.decision == PermissionDecision.ALLOW:
+            return None
+        return _permission_denied_result(request, record)
 
     def resolve_hosted_mcp_approval(self, approval: dict, turn: TurnState) -> bool:
         """Resolve one provider-hosted MCP approval through the same policy."""

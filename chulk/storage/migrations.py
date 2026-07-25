@@ -724,6 +724,40 @@ def _migrate_to_public_control_plane(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_conversation_dispatch(conn: sqlite3.Connection) -> None:
+    """Persist API and gateway submissions before shared execution."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_commands (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            message TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (conversation_id, idempotency_key),
+            CHECK (mode IN ('run', 'plan')),
+            CHECK (
+                status IN (
+                    'queued', 'running', 'completed', 'failed',
+                    'cancelled', 'uncertain'
+                )
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversation_commands_queue
+        ON conversation_commands(profile_id, conversation_id, status, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -776,6 +810,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(10, "profile-session-search", _migrate_to_session_search),
     SQLiteMigration(11, "skill-lifecycle-and-learning", _migrate_to_skill_lifecycle),
     SQLiteMigration(12, "public-control-plane", _migrate_to_public_control_plane),
+    SQLiteMigration(13, "conversation-dispatch", _migrate_to_conversation_dispatch),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

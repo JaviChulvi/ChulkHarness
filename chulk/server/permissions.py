@@ -318,6 +318,38 @@ class PermissionBroker:
             )
         return cursor.rowcount
 
+    def cancel_pending(self, *, reason: str = "conversation cancelled") -> int:
+        """Deny outstanding requests and wake blocked tool callbacks."""
+        now = _encode(_utc_now())
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM permission_requests
+                WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
+                """,
+                (self.profile_id, self.conversation_id),
+            ).fetchall()
+            conn.execute(
+                """
+                UPDATE permission_requests
+                SET status = 'denied', decision = 'deny', decision_reason = ?,
+                    decided_at = ?, updated_at = ?
+                WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
+                """,
+                (
+                    reason,
+                    now,
+                    now,
+                    self.profile_id,
+                    self.conversation_id,
+                ),
+            )
+        with self._condition:
+            self._condition.notify_all()
+        for row in rows:
+            self._publish(self.get(str(row["id"])), EventName.PERMISSION_RESOLVED)
+        return len(rows)
+
     def _expire(self, request_id: str) -> PendingPermission:
         now = _encode(_utc_now())
         with sqlite_connection(self.db_path) as conn:
