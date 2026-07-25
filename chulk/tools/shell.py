@@ -131,6 +131,28 @@ def shell_tool(
     """Create the shell command tool."""
     _validate_output_limit("stdout_limit_bytes", stdout_limit_bytes)
     _validate_output_limit("stderr_limit_bytes", stderr_limit_bytes)
+
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return run_shell_command(
+                arguments,
+                project_root,
+                timeout_seconds,
+                stdout_limit_bytes=stdout_limit_bytes,
+                stderr_limit_bytes=stderr_limit_bytes,
+                execution_policy=execution_policy,
+                require_containment=require_containment,
+            )
+        from chulk.execution.models import CommandExecutionRequest
+
+        return session.run_command(
+            CommandExecutionRequest(
+                command=arguments["command"],
+                timeout_seconds=arguments.get("timeout_seconds"),
+            )
+        ).to_tool_result("run_cmd")
+
     return Tool(
         name="run_cmd",
         description=(
@@ -156,15 +178,8 @@ def shell_tool(
             "required": ["command"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: run_shell_command(
-            arguments,
-            project_root,
-            timeout_seconds,
-            stdout_limit_bytes=stdout_limit_bytes,
-            stderr_limit_bytes=stderr_limit_bytes,
-            execution_policy=execution_policy,
-            require_containment=require_containment,
-        ),
+        callable=invoke,
+        accepts_context=True,
         # The command enforces its own deadline and needs a small window to kill
         # descendants and drain the now-closed pipes before the executor returns.
         timeout_seconds=timeout_seconds + SHELL_CLEANUP_GRACE_SECONDS,

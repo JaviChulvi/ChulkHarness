@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
 import json
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, Protocol, TypeVar, cast
 
 from chulk.capabilities import ToolRetryPolicy
 from chulk.redaction import redact_data, redact_text
@@ -56,15 +56,33 @@ class ToolExecutionContext(Generic[DepsT]):
 
     metadata: dict[str, Any] = field(default_factory=dict)
     deps: DepsT | None = None
+    execution_session: object | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"metadata": self.metadata, "has_dependencies": self.deps is not None}
+        return {
+            "metadata": self.metadata,
+            "has_dependencies": self.deps is not None,
+            "has_execution_session": self.execution_session is not None,
+        }
 
     def require_deps(self) -> DepsT:
         """Return injected dependencies or fail before tool side effects begin."""
         if self.deps is None:
             raise ValueError("Required tool dependencies were not provided by the host")
         return self.deps
+
+
+class ToolContextLifecycle(Protocol):
+    """Host hook for attaching and releasing turn-scoped tool resources."""
+
+    def open(self, context: ToolExecutionContext[Any]) -> ToolExecutionContext[Any]:
+        """Attach resources to a newly-created turn context."""
+
+    def close(self, context: ToolExecutionContext[Any]) -> None:
+        """Release resources attached to a terminal turn context."""
+
+    async def aclose(self, context: ToolExecutionContext[Any]) -> None:
+        """Release resources attached to a terminal async turn context."""
 
 
 @dataclass(frozen=True)
