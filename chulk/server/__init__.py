@@ -12,6 +12,12 @@ from chulk.server.models import (
     ConversationMessageRequest,
     PermissionDecisionRequest,
 )
+from chulk.server.permissions import (
+    PendingPermission,
+    PermissionBroker,
+    PermissionDecisionConflictError,
+    PermissionRequestNotFoundError,
+)
 
 __all__ = [
     "API_SCHEMA_VERSION",
@@ -19,6 +25,10 @@ __all__ = [
     "ConversationCreateRequest",
     "ConversationMessageRequest",
     "PermissionDecisionRequest",
+    "PendingPermission",
+    "PermissionBroker",
+    "PermissionDecisionConflictError",
+    "PermissionRequestNotFoundError",
     "PublicEventCursorExpiredError",
     "PublicEventJournal",
     "PublicEventRecord",
