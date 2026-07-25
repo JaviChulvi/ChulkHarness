@@ -88,6 +88,7 @@ def run_exec_command(
         "status": "approval_required" if approval_required else turn.status,
         "content": response,
         "conversation_id": agent.state.conversation_id,
+        "profile_id": agent.profile_id,
         "trace_path": str(agent.trace_logger.path) if agent.trace_logger is not None else None,
         "usage": turn.model_usage_totals or None,
         "tool_calls": [

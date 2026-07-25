@@ -28,6 +28,7 @@ from chulk.cli.entrypoints import (
     run_init_command,
     run_trace_command,
 )
+from chulk.cli.profiles import run_profile_command
 from chulk.cli.parser import build_parser
 from chulk.config import Config, load_cli_config
 from chulk.core import Agent
@@ -47,6 +48,13 @@ from chulk.llm import (
     OpenRouterProvider,
 )
 from chulk.presets import software_engineer
+from chulk.profiles import (
+    AgentProfile,
+    ProfileAlreadyExistsError,
+    ProfileNotFoundError,
+    ProfileOwnershipError,
+    ProfileRuntimeFactory,
+)
 from chulk.runtime import create_agent
 from chulk.sessions import AmbiguousSessionError, SessionNotFoundError, SQLiteSessionStore
 from chulk.tools.permissions import PermissionDecision, PermissionDecisionRecord, PermissionRequest
@@ -67,6 +75,7 @@ def format_config(config: Config) -> str:
         "model": config.model,
         "llm_fallback_providers": _format_fallback_providers(config),
         "permission_profile": config.permission_profile,
+        "profile_id": config.profile_id,
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
         "deepseek_base_url": _format_base_url(config.deepseek_base_url),
@@ -126,9 +135,25 @@ def create_cli_agent(
     llm_client_factory: Callable[[Config], LLMClient] | None = None,
     *,
     conversation_id: str | None = None,
+    profile: AgentProfile | None = None,
 ) -> Agent:
     """Create the default CLI coding-agent runtime."""
     preset = software_engineer()
+    if profile is not None and profile.execution_backend_id != "host":
+        raise ValueError(
+            f"execution backend {profile.execution_backend_id!r} is not configured for the CLI host"
+        )
+    system_prompt = (
+        profile.system_prompt
+        if profile is not None and profile.system_prompt is not None
+        else preset.system_prompt
+    )
+    allowed_skill_names = profile.allowed_skills if profile is not None else None
+    memory_namespace = profile.memory_namespace if profile is not None else None
+    mcp_servers = config.mcp_servers
+    if profile is not None and profile.allowed_mcp_servers is not None:
+        allowed_mcp_servers = set(profile.allowed_mcp_servers)
+        mcp_servers = tuple(server for server in mcp_servers if server.label in allowed_mcp_servers)
     if llm_client_factory is not None:
         return create_agent(
             config,
@@ -136,7 +161,11 @@ def create_cli_agent(
             conversation_id=conversation_id,
             tool_specs=preset.tools,
             skill_specs=preset.skills,
-            system_prompt=preset.system_prompt,
+            system_prompt=system_prompt,
+            profile_id=profile.id if profile is not None else config.profile_id,
+            memory_namespace=memory_namespace,
+            allowed_skill_names=allowed_skill_names,
+            mcp_servers=mcp_servers,
         )
     return create_agent(
         config,
@@ -144,7 +173,11 @@ def create_cli_agent(
         llm_client=create_cli_llm(config),
         tool_specs=preset.tools,
         skill_specs=preset.skills,
-        system_prompt=preset.system_prompt,
+        system_prompt=system_prompt,
+        profile_id=profile.id if profile is not None else config.profile_id,
+        memory_namespace=memory_namespace,
+        allowed_skill_names=allowed_skill_names,
+        mcp_servers=mcp_servers,
     )
 
 
@@ -384,22 +417,61 @@ def main(
             error_func=error_func,
         )
 
-    if args.show_config:
-        try:
-            output_func(format_config(load_cli_config()))
-        except (OSError, ValueError) as exc:
-            error_func(terminal.error(f"configuration error: {exc}"))
-            return EXIT_CONFIGURATION_ERROR
-        return EXIT_OK
-
     try:
-        config = load_cli_config()
+        base_config = load_cli_config()
     except (OSError, ValueError, LLMConfigurationError) as exc:
         if args.command == "exec" and getattr(args, "json_output", False):
             output_func(json_text({"ok": False, "status": "configuration_error", "error": str(exc)}))
         else:
             error_func(terminal.error(f"configuration error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
+
+    try:
+        profile_factory = ProfileRuntimeFactory(base_config)
+        if args.command == "profile":
+            return run_profile_command(
+                args.profile_command,
+                store=profile_factory.profile_store,
+                profile_id=getattr(args, "profile_id", None),
+                project_root=getattr(args, "project_root", None),
+                permission_profile=getattr(args, "permission_profile", None),
+                model_profile_id=getattr(args, "model_profile", "default"),
+                execution_backend_id=getattr(args, "execution_backend", "host"),
+                allowed_skills=(
+                    tuple(args.allowed_skills)
+                    if getattr(args, "allowed_skills", None) is not None
+                    else None
+                ),
+                allowed_mcp_servers=(
+                    tuple(args.allowed_mcp_servers)
+                    if getattr(args, "allowed_mcp_servers", None) is not None
+                    else None
+                ),
+                credential_environment_names=tuple(getattr(args, "credential_env", ())),
+                system_prompt=getattr(args, "system_prompt", None),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
+        resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
+        config = resolved_profile.config
+        profile = resolved_profile.profile
+    except (
+        OSError,
+        ProfileAlreadyExistsError,
+        ProfileNotFoundError,
+        ProfileOwnershipError,
+        ValueError,
+    ) as exc:
+        if args.command == "exec" and getattr(args, "json_output", False):
+            output_func(json_text({"ok": False, "status": "configuration_error", "error": str(exc)}))
+        else:
+            error_func(terminal.error(f"configuration error: {exc}"))
+        return EXIT_CONFIGURATION_ERROR
+
+    if args.show_config:
+        output_func(format_config(config))
+        return EXIT_OK
 
     if args.command == "exec" or args.once is not None:
         if args.resume or args.continue_session:
@@ -409,7 +481,11 @@ def main(
         json_output = bool(getattr(args, "json_output", False))
         return run_exec_command(
             message,
-            agent_factory=lambda: create_cli_agent(config, llm_client_factory),
+            agent_factory=lambda: create_cli_agent(
+                config,
+                llm_client_factory,
+                profile=profile,
+            ),
             json_output=json_output,
             output_func=output_func,
             error_func=error_func,
@@ -421,7 +497,12 @@ def main(
         error_func(terminal.error(f"session error: {exc}"))
         return EXIT_CONFIGURATION_ERROR
     try:
-        agent = create_cli_agent(config, llm_client_factory, conversation_id=conversation_id)
+        agent = create_cli_agent(
+            config,
+            llm_client_factory,
+            conversation_id=conversation_id,
+            profile=profile,
+        )
         agent.permission_callback = _make_cli_permission_callback(
             terminal,
             input_func=input_func,
@@ -442,6 +523,7 @@ def main(
             config,
             llm_client_factory,
             conversation_id=conversation_id,
+            profile=profile,
         ),
         input_func=input_func,
         output_func=output_func,
