@@ -369,6 +369,8 @@ def _valid_endpoint(value: str) -> bool:
         and parsed.hostname is not None
         and parsed.username is None
         and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
     )
 
 

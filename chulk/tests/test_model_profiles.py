@@ -219,6 +219,28 @@ def test_missing_credentials_are_sanitized_and_skip_to_fallback(tmp_path: Path) 
     assert "secondary-secret" not in serialized
 
 
+def test_endpoint_diagnostics_reject_urls_with_embedded_query_credentials(
+    tmp_path: Path,
+) -> None:
+    _config, _agent_profile, _store, service = _runtime(
+        tmp_path,
+        environ={"LOCAL_ENDPOINT": "http://127.0.0.1:11434/v1?token=secret"},
+    )
+    profile = service.create(
+        ModelProfile(
+            id="unsafe-endpoint",
+            provider="local",
+            model="qwen/qwen3.5-35b-a3b",
+            endpoint_ref=EndpointRef("LOCAL_ENDPOINT", source="env"),
+        )
+    )
+
+    diagnostic = service.diagnose(profile.id)
+
+    assert diagnostic.category is DiagnosticCategory.UNAVAILABLE_ENDPOINT
+    assert "token=secret" not in json.dumps(diagnostic.to_dict())
+
+
 def test_fallback_cycles_are_detected_even_if_storage_is_tampered(
     tmp_path: Path,
 ) -> None:
@@ -364,6 +386,12 @@ class _FailingProfileClient(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
+    def complete(self, messages, *, max_output_tokens=None) -> str:
+        return self.complete_response(
+            messages,
+            max_output_tokens=max_output_tokens,
+        ).content
+
     def complete_response(self, messages, *, max_output_tokens=None) -> LLMResponse:
         self.calls += 1
         raise LLMError(
@@ -380,6 +408,12 @@ class _SuccessfulProfileClient(LLMClient):
 
     def __init__(self) -> None:
         self.calls = 0
+
+    def complete(self, messages, *, max_output_tokens=None) -> str:
+        return self.complete_response(
+            messages,
+            max_output_tokens=max_output_tokens,
+        ).content
 
     def complete_response(self, messages, *, max_output_tokens=None) -> LLMResponse:
         self.calls += 1
@@ -530,6 +564,69 @@ def test_selection_reason_is_exposed_in_public_result_and_trace() -> None:
         if event_type == TraceEvent.MODEL_PROFILE_SELECTED
     )
     assert selected_event["selected_profile_id"] == "fallback"
+
+
+class _SuccessfulActionProfileClient(_SuccessfulProfileClient):
+    def complete_response(self, messages, *, max_output_tokens=None) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(
+            content=json.dumps(
+                {"type": "final_answer", "content": "fallback response"}
+            ),
+            provider=self.provider,
+            model=self.model,
+        )
+
+
+def test_runtime_fallback_outcome_updates_public_result_and_trace(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _config, agent_profile, _store, service = _runtime(
+        tmp_path,
+        environ={"PRIMARY_KEY": "bad", "SECONDARY_KEY": "good"},
+    )
+    service.create(_openai_profile("secondary", "SECONDARY_KEY"))
+    service.create(_openai_profile("primary", "PRIMARY_KEY", fallbacks=("secondary",)))
+    primary = _FailingProfileClient()
+    secondary = _SuccessfulActionProfileClient()
+    monkeypatch.setattr(
+        "chulk.model_profiles.service.create_llm_client",
+        lambda **kwargs: (
+            primary if kwargs["connection"].api_key == "bad" else secondary
+        ),
+    )
+    runtime = service.resolve_for_agent(
+        agent_profile,
+        requested_profile_id="primary",
+    )
+    chain = service.create_chain(service.validator.config, runtime)
+    events: list[tuple[str, dict]] = []
+    agent = Agent(
+        chain,
+        event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        runtime_metadata={"model_selection": runtime.selection.to_dict()},
+    )
+
+    assert agent.run_turn("hello") == "fallback response"
+    result = run_result_from_runtime(agent)
+
+    selection = result.extension_metadata["model_selection"]
+    assert selection["requested_profile_id"] == "primary"
+    assert selection["selected_profile_id"] == "secondary"
+    assert selection["reason"].startswith("runtime fallback selected")
+    attempts = result.extension_metadata["model_attempts"]
+    assert [attempt["model_profile_id"] for attempt in attempts] == [
+        "primary",
+        "secondary",
+    ]
+    runtime_event = next(
+        payload
+        for event_type, payload in events
+        if event_type == TraceEvent.MODEL_PROFILE_SELECTED
+        and payload.get("phase") == "runtime_fallback"
+    )
+    assert runtime_event["selected_profile_id"] == "secondary"
 
 
 def test_billing_errors_have_a_stable_operational_category() -> None:

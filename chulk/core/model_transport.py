@@ -78,16 +78,14 @@ class ModelTransport:
         """Build the model input and context report."""
         native_action_protocol = self._native_tool_calling_enabled()
         action_tools = self._action_tools(require_plan=require_plan)
-        planning_tools = self._planning_tool_availability(turn, require_plan=require_plan)
+        planning_tools = self._planning_tool_availability(
+            turn, require_plan=require_plan
+        )
         native_tool_declarations = provider_action_tools(
             action_tools,
             planning_tools=planning_tools,
         )
-        if (
-            native_action_protocol
-            and not require_plan
-            and self._hosted_mcp_enabled()
-        ):
+        if native_action_protocol and not require_plan and self._hosted_mcp_enabled():
             native_tool_declarations.extend(
                 _safe_hosted_mcp_declaration(server) for server in self.mcp_servers
             )
@@ -109,9 +107,7 @@ class ModelTransport:
             require_plan=require_plan,
             native_action_protocol=native_action_protocol,
             native_tool_declarations=(
-                native_tool_declarations
-                if native_action_protocol
-                else []
+                native_tool_declarations if native_action_protocol else []
             ),
             context_budget=self.context_budget,
         )
@@ -180,9 +176,7 @@ class ModelTransport:
         """Request and record one validated action over the sync transport."""
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
-            native_action_protocol
-            and not require_plan
-            and self._hosted_mcp_enabled()
+            native_action_protocol and not require_plan and self._hosted_mcp_enabled()
         )
         messages = self._record_model_request(
             turn,
@@ -229,9 +223,7 @@ class ModelTransport:
         """Request and record one validated action over the async transport."""
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
-            native_action_protocol
-            and not require_plan
-            and self._hosted_mcp_enabled()
+            native_action_protocol and not require_plan and self._hosted_mcp_enabled()
         )
         messages = self._record_model_request(
             turn,
@@ -298,7 +290,9 @@ class ModelTransport:
             request_index=request_index,
         )
 
-    async def reflect_async(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
+    async def reflect_async(
+        self, proposed_answer: str, turn: TurnState
+    ) -> ReflectionResult:
         """Review a proposed answer through the async text transport."""
         attempt, messages, request_index = self._start_reflection(proposed_answer, turn)
         try:
@@ -430,16 +424,22 @@ class ModelTransport:
                 "error": str(exc),
             },
         )
-        return _fallback_context_summary(self.memory.conversation_summary, messages), True, str(exc)
+        return (
+            _fallback_context_summary(self.memory.conversation_summary, messages),
+            True,
+            str(exc),
+        )
 
     def _finish_summary(self, messages, turn, request_index, response):
         raw_summary = response.content
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        self._record_model_selection_outcome(turn, fallback_attempts)
         usage, cost = self.record_accounting(
             turn,
             request_index=request_index,
             usage=response.usage,
             cost=response.cost,
-            fallback_attempts=getattr(self.llm_client, "last_attempts", None),
+            fallback_attempts=fallback_attempts,
             purpose="context_summary",
         )
         self.trace(
@@ -455,7 +455,11 @@ class ModelTransport:
         )
         clean_summary = _clean_summary(raw_summary)
         if not clean_summary:
-            return _fallback_context_summary(self.memory.conversation_summary, messages), True, "empty_summary"
+            return (
+                _fallback_context_summary(self.memory.conversation_summary, messages),
+                True,
+                "empty_summary",
+            )
         return clean_summary, False, None
 
     def _record_model_request(
@@ -483,9 +487,7 @@ class ModelTransport:
         payload["action_transport"] = prompt.action_transport
         payload["hosted_mcp_enabled"] = hosted_mcp_enabled
         payload["hosted_mcp_server_labels"] = (
-            [server.label for server in self.mcp_servers]
-            if hosted_mcp_enabled
-            else []
+            [server.label for server in self.mcp_servers] if hosted_mcp_enabled else []
         )
         payload["native_tool_names"] = [
             str(declaration.get("name", ""))
@@ -504,7 +506,9 @@ class ModelTransport:
         exc: LLMActionError,
     ) -> ProtocolFailure:
         self.state.json_repair_attempts += exc.repair_attempts
-        self.state.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
+        self.state.errors.extend(
+            f"JSON repair attempt: {error}" for error in exc.errors
+        )
         turn.errors.extend(f"JSON repair attempt: {error}" for error in exc.errors)
         usage, cost = self.record_accounting(
             turn,
@@ -537,9 +541,12 @@ class ModelTransport:
     ) -> AgentAction:
         action = result.action
         self.state.json_repair_attempts += result.repair_attempts
-        self.state.errors.extend(f"JSON repair attempt: {error}" for error in result.errors)
+        self.state.errors.extend(
+            f"JSON repair attempt: {error}" for error in result.errors
+        )
         turn.errors.extend(f"JSON repair attempt: {error}" for error in result.errors)
         fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        self._record_model_selection_outcome(turn, fallback_attempts)
         if fallback_attempts:
             self.trace(
                 TraceEvent.LLM_FALLBACK_ATTEMPTS,
@@ -627,12 +634,14 @@ class ModelTransport:
         raw_response,
         response,
     ) -> None:
+        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
+        self._record_model_selection_outcome(turn, fallback_attempts)
         usage, cost = self.record_accounting(
             turn,
             request_index=request_index,
             usage=response.usage,
             cost=response.cost,
-            fallback_attempts=getattr(self.llm_client, "last_attempts", None),
+            fallback_attempts=fallback_attempts,
             purpose="reflection",
         )
         self.trace(
@@ -645,6 +654,59 @@ class ModelTransport:
                 "reflection_attempt": attempt,
                 "usage": usage,
                 "cost": cost,
+            },
+        )
+
+    def _record_model_selection_outcome(
+        self,
+        turn: TurnState,
+        attempts: object,
+    ) -> None:
+        if not isinstance(attempts, (list, tuple)) or not attempts:
+            return
+        serialized = [
+            attempt.to_dict()
+            if hasattr(attempt, "to_dict")
+            else {"attempt": str(attempt)}
+            for attempt in attempts
+        ]
+        turn.extension_metadata["model_attempts"] = serialized
+        selection = turn.extension_metadata.get("model_selection")
+        if not isinstance(selection, dict):
+            return
+        successful = next(
+            (
+                attempt
+                for attempt in attempts
+                if getattr(attempt, "success", False)
+                and isinstance(
+                    getattr(attempt, "model_profile_id", None),
+                    str,
+                )
+            ),
+            None,
+        )
+        if successful is None:
+            return
+        selected_id = successful.model_profile_id
+        previous_id = selection.get("selected_profile_id")
+        selection["selected_profile_id"] = selected_id
+        if selected_id == previous_id:
+            return
+        failed_count = sum(
+            1 for attempt in attempts if not getattr(attempt, "success", False)
+        )
+        reason = (
+            f"runtime fallback selected after {failed_count} failed or "
+            "unavailable profile(s)"
+        )
+        selection["reason"] = reason
+        self.trace(
+            TraceEvent.MODEL_PROFILE_SELECTED,
+            {
+                "turn_id": turn.turn_id,
+                **selection,
+                "phase": "runtime_fallback",
             },
         )
 
