@@ -14,6 +14,7 @@ from chulk.core import Agent, AgentState, TurnState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
+from chulk.execution import ExecutionBackend, ExecutionContextLifecycle, HostExecutionBackend
 from chulk.llm import (
     LLMClient,
     LLMModelCapabilities,
@@ -104,6 +105,7 @@ def create_agent(
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
+    execution_backend: ExecutionBackend | None = None,
     memory_namespace: str | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
@@ -174,6 +176,16 @@ def create_agent(
     )
     configured_mcp_servers = tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
     active_mcp_servers = configured_mcp_servers if selected_capabilities.external_services else ()
+    backend_is_owned = execution_backend is None
+    selected_execution_backend = execution_backend or HostExecutionBackend(
+        config.project_root,
+        shell_timeout_seconds=config.shell_timeout_seconds,
+        max_stdout_bytes=config.max_tool_stdout_chars,
+        max_stderr_bytes=config.max_tool_stderr_chars,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
+    )
+    execution_lifecycle = ExecutionContextLifecycle(selected_execution_backend)
     tool_registry, mcp_bridge_tool_names = _create_tool_registry(
         config,
         memory_store,
@@ -214,7 +226,9 @@ def create_agent(
                 ),
             },
         )
-    owned_resources = [client] if client_is_owned else []
+    owned_resources: list[object] = [client] if client_is_owned else []
+    if backend_is_owned:
+        owned_resources.append(selected_execution_backend)
     try:
         agent = Agent(
             client,
@@ -246,6 +260,7 @@ def create_agent(
             mcp_bridge_tool_names=mcp_bridge_tool_names,
             owned_resources=owned_resources,
             default_tool_context=ToolExecutionContext(deps=deps) if deps is not None else None,
+            tool_context_lifecycle=execution_lifecycle,
         )
     except Exception:
         for resource in reversed(owned_resources):

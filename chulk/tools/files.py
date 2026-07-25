@@ -122,6 +122,16 @@ def read_file_tool(
     *,
     read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
 ) -> Tool:
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return read_file(arguments, project_root, read_policy=read_policy)
+        from chulk.execution.models import FileReadRequest
+
+        return session.read_file(FileReadRequest(path=arguments["path"])).to_tool_result(
+            "read_file"
+        )
+
     return Tool(
         name="read_file",
         description="Read a UTF-8 text file inside the project directory.",
@@ -137,13 +147,28 @@ def read_file_tool(
             "required": ["path"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: read_file(arguments, project_root, read_policy=read_policy),
+        callable=invoke,
+        accepts_context=True,
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
 
 
 def write_file_tool(project_root: Path) -> Tool:
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return write_file(arguments, project_root)
+        from chulk.execution.models import FileWriteRequest
+
+        return session.write_file(
+            FileWriteRequest(
+                path=arguments["path"],
+                content=arguments["content"],
+                overwrite=arguments.get("overwrite", False),
+            )
+        ).to_tool_result("write_file")
+
     return Tool(
         name="write_file",
         description=(
@@ -168,13 +193,24 @@ def write_file_tool(project_root: Path) -> Tool:
             "required": ["path", "content"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: write_file(arguments, project_root),
+        callable=invoke,
+        accepts_context=True,
         run_in_executor=True,
         permission_level=ToolPermissionLevel.WRITE,
     )
 
 
 def apply_patch_tool(project_root: Path) -> Tool:
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return apply_patch(arguments, project_root)
+        from chulk.execution.models import PatchApplyRequest
+
+        return session.apply_patch(
+            PatchApplyRequest(patch=arguments["patch"])
+        ).to_tool_result("apply_patch")
+
     return Tool(
         name="apply_patch",
         description=(
@@ -194,7 +230,8 @@ def apply_patch_tool(project_root: Path) -> Tool:
             "required": ["patch"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: apply_patch(arguments, project_root),
+        callable=invoke,
+        accepts_context=True,
         run_in_executor=True,
         permission_level=ToolPermissionLevel.WRITE,
         metadata={"preferred_for": "file_edits"},
@@ -206,6 +243,21 @@ def list_files_tool(
     *,
     read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
 ) -> Tool:
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return list_files(arguments, project_root, read_policy=read_policy)
+        from chulk.execution.models import FileListRequest
+
+        return session.list_files(
+            FileListRequest(
+                path=arguments.get("path", "."),
+                pattern=arguments.get("pattern", "*"),
+                recursive=arguments.get("recursive", False),
+                max_results=arguments.get("max_results", 100),
+            )
+        ).to_tool_result("list_files")
+
     return Tool(
         name="list_files",
         description="List files inside the project directory.",
@@ -233,7 +285,8 @@ def list_files_tool(
             "required": [],
             "additionalProperties": False,
         },
-        callable=lambda arguments: list_files(arguments, project_root, read_policy=read_policy),
+        callable=invoke,
+        accepts_context=True,
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )
@@ -244,6 +297,21 @@ def search_files_tool(
     *,
     read_policy: FileReadPolicy = DEFAULT_FILE_READ_POLICY,
 ) -> Tool:
+    def invoke(arguments: dict[str, Any], context=None) -> ToolResult:
+        session = getattr(context, "execution_session", None)
+        if session is None:
+            return search_files(arguments, project_root, read_policy=read_policy)
+        from chulk.execution.models import FileSearchRequest
+
+        return session.search_files(
+            FileSearchRequest(
+                query=arguments["query"],
+                path=arguments.get("path", "."),
+                pattern=arguments.get("pattern", "*"),
+                max_results=arguments.get("max_results", 100),
+            )
+        ).to_tool_result("search_files")
+
     return Tool(
         name="search_files",
         description="Search text files inside the project directory.",
@@ -275,7 +343,8 @@ def search_files_tool(
             "required": ["query"],
             "additionalProperties": False,
         },
-        callable=lambda arguments: search_files(arguments, project_root, read_policy=read_policy),
+        callable=invoke,
+        accepts_context=True,
         run_in_executor=True,
         permission_level=ToolPermissionLevel.READ,
     )

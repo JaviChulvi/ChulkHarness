@@ -39,7 +39,7 @@ from chulk.tools.permissions import (
     PermissionRequest,
     ToolPermissionPolicy,
 )
-from chulk.tools.registry import ToolExecutionContext
+from chulk.tools.registry import ToolContextLifecycle, ToolExecutionContext
 from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
 
@@ -80,6 +80,7 @@ class Agent:
         mcp_bridge_tool_names: list[str] | None = None,
         owned_resources: list[object] | tuple[object, ...] | None = None,
         default_tool_context: ToolExecutionContext | None = None,
+        tool_context_lifecycle: ToolContextLifecycle | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -131,6 +132,7 @@ class Agent:
         self._closed = False
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self.default_tool_context = default_tool_context
+        self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -203,6 +205,14 @@ class Agent:
             return
         self._closed = True
         failures: list[Exception] = []
+        for context in tuple(self._tool_contexts.values()):
+            if context is None or self.tool_context_lifecycle is None:
+                continue
+            try:
+                self.tool_context_lifecycle.close(context)
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        self._tool_contexts.clear()
         for resource in reversed(self._owned_resources):
             try:
                 close_resources((resource,))
@@ -215,7 +225,6 @@ class Agent:
                 failures.append(exc)
         self.event_callback = None
         self.event_sink = None
-        self._tool_contexts.clear()
         if failures:
             raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
 
@@ -225,6 +234,14 @@ class Agent:
             return
         self._closed = True
         failures: list[Exception] = []
+        for context in tuple(self._tool_contexts.values()):
+            if context is None or self.tool_context_lifecycle is None:
+                continue
+            try:
+                await self.tool_context_lifecycle.aclose(context)
+            except Exception as exc:  # pragma: no cover - defensive aggregation
+                failures.append(exc)
+        self._tool_contexts.clear()
         for resource in reversed(self._owned_resources):
             try:
                 await aclose_resources((resource,))
@@ -237,7 +254,6 @@ class Agent:
                 failures.append(exc)
         self.event_callback = None
         self.event_sink = None
-        self._tool_contexts.clear()
         if failures:
             raise RuntimeError(f"Failed to close {len(failures)} owned agent resource(s)") from failures[0]
 
@@ -381,10 +397,10 @@ class Agent:
             turn = turn or self._turn_started_after(previous_turn_count)
             if turn is not None:
                 self._terminalize_exception(turn, exc)
-                self._release_tool_context(turn)
+                await self._release_tool_context_async(turn)
             raise
         if turn.status != "waiting_for_approval":
-            self._release_tool_context(turn)
+            await self._release_tool_context_async(turn)
         return result
 
     def _start_user_turn(
@@ -426,7 +442,10 @@ class Agent:
                 "turn_id": turn.turn_id,
             },
             deps=execution_context.deps,
+            execution_session=execution_context.execution_session,
         )
+        if self.tool_context_lifecycle is not None and execution_context.execution_session is None:
+            execution_context = self.tool_context_lifecycle.open(execution_context)
         self.state.current_turn_id = turn.turn_id
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
@@ -500,7 +519,7 @@ class Agent:
             raise
         finally:
             if turn is not None:
-                self._release_tool_context(turn)
+                await self._release_tool_context_async(turn)
 
     def _prepare_plan_execution(self) -> TurnState | str:
         """Approve a pending plan or continue an already-approved durable plan."""
@@ -970,9 +989,13 @@ class Agent:
         if turn.turn_id in self._tool_contexts:
             return self._tool_contexts[turn.turn_id]
         default_context = self.default_tool_context
-        if not turn.tool_context_metadata and default_context is None:
+        if (
+            not turn.tool_context_metadata
+            and default_context is None
+            and self.tool_context_lifecycle is None
+        ):
             return None
-        return ToolExecutionContext(
+        context = ToolExecutionContext(
             metadata={
                 **(default_context.metadata if default_context is not None else {}),
                 **turn.tool_context_metadata,
@@ -980,11 +1003,26 @@ class Agent:
                 "turn_id": turn.turn_id,
             },
             deps=default_context.deps if default_context is not None else None,
+            execution_session=(
+                default_context.execution_session if default_context is not None else None
+            ),
         )
+        if self.tool_context_lifecycle is not None and context.execution_session is None:
+            context = self.tool_context_lifecycle.open(context)
+        self._tool_contexts[turn.turn_id] = context
+        return context
 
     def _release_tool_context(self, turn: TurnState) -> None:
         """Release request-scoped host dependencies after terminal work."""
-        self._tool_contexts.pop(turn.turn_id, None)
+        context = self._tool_contexts.pop(turn.turn_id, None)
+        if context is not None and self.tool_context_lifecycle is not None:
+            self.tool_context_lifecycle.close(context)
+
+    async def _release_tool_context_async(self, turn: TurnState) -> None:
+        """Release request-scoped host dependencies after terminal async work."""
+        context = self._tool_contexts.pop(turn.turn_id, None)
+        if context is not None and self.tool_context_lifecycle is not None:
+            await self.tool_context_lifecycle.aclose(context)
 
     def _write_tool_output_artifact(self, name: str, content: str) -> dict | None:
         if self.trace_logger is None:

@@ -26,6 +26,7 @@ from chulk.core import Agent as CoreAgent
 from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
+from chulk.execution import ExecutionBackend
 from chulk.mcp import MCPServerConfig
 from chulk.results import MemoryProposal, RunStatus
 from chulk.runtime import create_agent as create_runtime_agent
@@ -472,6 +473,7 @@ class Agent:
         deps: object | None = None,
         shell_execution_policy: ShellExecutionPolicy | None = None,
         require_shell_containment: bool = False,
+        execution_backend: ExecutionBackend | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -494,6 +496,7 @@ class Agent:
                 deps=deps,
                 shell_execution_policy=shell_execution_policy,
                 require_shell_containment=require_shell_containment,
+                execution_backend=execution_backend,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -900,6 +903,7 @@ def _build_handle(
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
+    execution_backend: ExecutionBackend | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -922,6 +926,7 @@ def _build_handle(
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
+        execution_backend=execution_backend,
     )
     return AgentHandle(runtime, on_event=on_event)
 

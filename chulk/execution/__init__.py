@@ -1,0 +1,50 @@
+"""Stable execution backend interfaces and the direct host implementation."""
+
+from chulk.execution.base import ExecutionBackend, ExecutionSession
+from chulk.execution.host import ExecutionContextLifecycle, HostExecutionBackend, HostExecutionSession
+from chulk.execution.models import (
+    ChangeDisposition,
+    ChangeRecord,
+    ChangeSet,
+    CommandExecutionRequest,
+    ContainmentStatus,
+    ExecutionPolicy,
+    ExecutionResult,
+    ExecutionSessionRequest,
+    ExecutionWorkspace,
+    FileListRequest,
+    FileReadRequest,
+    FileSearchRequest,
+    FileWriteRequest,
+    NetworkPolicy,
+    PatchApplyRequest,
+    ProcessHandle,
+    WorkspaceMode,
+    WorkspacePersistence,
+)
+
+__all__ = [
+    "ChangeDisposition",
+    "ChangeRecord",
+    "ChangeSet",
+    "CommandExecutionRequest",
+    "ContainmentStatus",
+    "ExecutionBackend",
+    "ExecutionContextLifecycle",
+    "ExecutionPolicy",
+    "ExecutionResult",
+    "ExecutionSession",
+    "ExecutionSessionRequest",
+    "ExecutionWorkspace",
+    "FileListRequest",
+    "FileReadRequest",
+    "FileSearchRequest",
+    "FileWriteRequest",
+    "HostExecutionBackend",
+    "HostExecutionSession",
+    "NetworkPolicy",
+    "PatchApplyRequest",
+    "ProcessHandle",
+    "WorkspaceMode",
+    "WorkspacePersistence",
+]
