@@ -8,6 +8,12 @@ from pathlib import Path
 import re
 from typing import Any
 
+from chulk.skills.manifest import (
+    SkillManifest,
+    load_skill_package,
+    resolve_skill_resource,
+    split_skill_front_matter,
+)
 
 DEFAULT_MAX_SKILLS = 3
 DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
@@ -103,6 +109,10 @@ class Skill:
     metadata: dict[str, Any] = field(default_factory=dict)
     keywords: list[str] = field(default_factory=list)
     loaded_content: str | None = None
+    manifest: SkillManifest | None = None
+    digest: str | None = None
+    root: Path | None = None
+    loaded_resources: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -240,12 +250,34 @@ class SkillRegistry:
         return selections
 
     def load_content(self, name: str) -> str:
-        """Load skill instructions without repeating parsed front matter."""
+        """Progressively load entrypoint and reference text under one budget."""
         skill = self._skills[_normalize_skill_name(name)]
         if skill.loaded_content is None:
-            text = skill.path.read_text(encoding="utf-8")
-            _front_matter, body = _split_front_matter(text)
-            skill.loaded_content = body.strip()
+            root = skill.root or skill.path.parent.resolve(strict=True)
+            manifest = skill.manifest
+            entrypoint = (
+                resolve_skill_resource(root, manifest.entrypoint)
+                if manifest is not None
+                else skill.path
+            )
+            text = entrypoint.read_text(encoding="utf-8")
+            if entrypoint == skill.path:
+                _front_matter, text = split_skill_front_matter(text)
+            content = text.strip()[: self.max_content_chars]
+            loaded_resources = [entrypoint.relative_to(root).as_posix()]
+            for reference in manifest.references if manifest is not None else ():
+                if len(content) >= self.max_content_chars:
+                    break
+                reference_path = resolve_skill_resource(root, reference)
+                reference_text = reference_path.read_text(encoding="utf-8").strip()
+                header = f"\n\nReference: {reference}\n"
+                remaining = self.max_content_chars - len(content)
+                addition = f"{header}{reference_text}"[:remaining]
+                if addition:
+                    content += addition
+                    loaded_resources.append(reference)
+            skill.loaded_content = content
+            skill.loaded_resources = loaded_resources
         return skill.loaded_content
 
     def _selection_limit(self, limit: int | None) -> int:
@@ -257,74 +289,32 @@ class SkillRegistry:
 
 
 def _skill_from_markdown(path: Path) -> Skill:
-    text = path.read_text(encoding="utf-8")
-    front_matter, body = _split_front_matter(text)
-    name = _normalize_skill_name(str(front_matter.pop("name", path.parent.name)))
-    description = str(front_matter.pop("description", "")).strip() or _extract_description(body, name)
+    package = load_skill_package(path)
+    manifest = package.manifest
+    text = package.manifest_path.read_text(encoding="utf-8")
+    _front_matter, body = split_skill_front_matter(text)
+    name = _normalize_skill_name(manifest.name)
+    description = manifest.description
     keywords = _normalize_keywords(
         [
             name,
-            *_metadata_list(front_matter.pop("keywords", [])),
+            *manifest.keywords,
+            *manifest.tags,
             *DEFAULT_SKILL_KEYWORDS.get(name, []),
             *_tokenize(description),
             *_heading_terms(body),
         ]
     )
-    metadata = {key: value for key, value in front_matter.items() if value not in (None, "", [])}
-    return Skill(name=name, description=description, path=path, metadata=metadata, keywords=keywords)
-
-
-def _split_front_matter(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---"):
-        return {}, text
-
-    lines = text.splitlines()
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            return _parse_front_matter(lines[1:index]), "\n".join(lines[index + 1 :])
-    return {}, text
-
-
-def _parse_front_matter(lines: list[str]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#") or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        clean_key = key.strip().lower().replace("-", "_")
-        metadata[clean_key] = _parse_metadata_value(value.strip())
-    return metadata
-
-
-def _parse_metadata_value(value: str) -> Any:
-    if value.startswith("[") and value.endswith("]"):
-        inner = value[1:-1].strip()
-        if not inner:
-            return []
-        return [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
-    return value.strip("'\"")
-
-
-def _metadata_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value]
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return [str(value)]
-
-
-def _extract_description(body: str, name: str) -> str:
-    lines = [line.strip() for line in body.splitlines()]
-    for line in lines:
-        if line.lower().startswith("use this skill when"):
-            return line
-    for line in lines:
-        if line and not line.startswith("#") and not line.startswith("-"):
-            return line
-    return f"Procedural instructions for {name} requests."
+    return Skill(
+        name=name,
+        description=description,
+        path=package.manifest_path,
+        metadata=dict(manifest.extensions),
+        keywords=keywords,
+        manifest=manifest,
+        digest=package.digest,
+        root=package.root,
+    )
 
 
 def _heading_terms(body: str) -> list[str]:

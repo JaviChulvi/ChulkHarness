@@ -23,6 +23,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "PyYAML>=6.0.2,<7",
   "tzdata>=2025.2; platform_system == 'Windows'",
 ]
 
@@ -42,6 +43,7 @@ dev = [
   "ruff>=0.14,<0.15",
   "mypy>=1.11",
   "setuptools>=77",
+  "types-PyYAML>=6.0.12",
 ]
 openai = [
   "openai>=1.109.0",

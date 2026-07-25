@@ -3,6 +3,16 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from chulk.skills.manifest import (
+    LEGACY_SKILL_VERSION,
+    SKILL_MANIFEST_SCHEMA_VERSION,
+    SkillManifest,
+    SkillManifestError,
+    SkillPackage,
+    load_skill_package,
+    resolve_skill_resource,
+    skill_package_digest,
+)
 from chulk.skills.registry import Skill, SkillRegistry, SkillSelection
 
 
@@ -87,12 +97,20 @@ __all__ = [
     "SkillRef",
     "SkillRegistry",
     "SkillSelection",
+    "SkillManifest",
+    "SkillManifestError",
+    "SkillPackage",
+    "LEGACY_SKILL_VERSION",
+    "SKILL_MANIFEST_SCHEMA_VERSION",
     "bundled_skills_dir",
     "files",
     "from_dir",
     "memory",
+    "load_skill_package",
     "only",
     "path",
     "pin",
+    "resolve_skill_resource",
     "shell",
+    "skill_package_digest",
 ]
