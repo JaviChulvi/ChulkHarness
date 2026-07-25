@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from chulk.config import load_config
 from chulk.llm import LLMClient
@@ -162,3 +164,43 @@ def test_rate_limiter_bounds_repeated_requests() -> None:
         return await limiter.allow("client"), await limiter.allow("client")
 
     assert asyncio.run(scenario()) == (True, False)
+
+
+def test_websocket_gateway_uses_authenticated_shared_dispatch(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    protocol = f"chulk.control.{tokens.load_or_create()}"
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/v1/gateway/ws"):
+                pass
+
+        with client.websocket_connect(
+            "/v1/gateway/ws",
+            subprotocols=[protocol],
+        ) as socket:
+            socket.send_json(
+                {
+                    "type": "hello",
+                    "schema_version": 1,
+                    "profile_id": "default",
+                    "client_id": "browser-1",
+                }
+            )
+            assert socket.receive_json()["type"] == "ready"
+            socket.send_json(
+                {
+                    "type": "message",
+                    "schema_version": 1,
+                    "event_id": "event-1",
+                    "idempotency_key": "ws-message-1",
+                    "message": "hello websocket",
+                }
+            )
+            accepted = socket.receive_json()
+            completed = socket.receive_json()
+
+            assert accepted["type"] == "message.accepted"
+            assert accepted["inbox_id"]
+            assert completed["type"] == "message.completed"
+            assert completed["text"] == "answer hello websocket"
+            assert completed["conversation_id"]

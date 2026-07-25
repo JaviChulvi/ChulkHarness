@@ -68,7 +68,7 @@ def create_control_app(
     try:
         from starlette.applications import Starlette
         from starlette.responses import JSONResponse
-        from starlette.routing import Route
+        from starlette.routing import Route, WebSocketRoute
     except ImportError as exc:
         raise ServerDependencyError(
             "Control server dependencies are unavailable; install chulkharness[server]"
@@ -262,6 +262,11 @@ def create_control_app(
     async def schema(_request):
         return _json(_schema())
 
+    async def gateway_websocket(websocket):
+        from chulk.server.gateway_ws import serve_gateway_websocket
+
+        await serve_gateway_websocket(websocket, dispatcher=controller)
+
     routes = [
         Route("/v1/profiles", profiles, methods=["GET"]),
         Route(
@@ -310,6 +315,7 @@ def create_control_app(
             methods=["POST"],
         ),
         Route("/v1/schema", schema, methods=["GET"]),
+        WebSocketRoute("/v1/gateway/ws", gateway_websocket),
     ]
     app = Starlette(
         routes=routes,
@@ -392,6 +398,7 @@ def _schema() -> dict[str, Any]:
             "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/turns/{turn_id}/plan/reject",
             "GET /v1/profiles/{profile_id}/conversations/{conversation_id}/permissions",
             "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/permissions/{permission_request_id}",
+            "WEBSOCKET /v1/gateway/ws",
         ),
         "excluded": ("raw_traces", "credentials", "prompt_dumps"),
     }

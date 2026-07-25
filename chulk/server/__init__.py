@@ -6,6 +6,12 @@ from chulk.server.journal import (
     PublicEventJournal,
     PublicEventRecord,
 )
+from chulk.server.gateway_ws import (
+    GATEWAY_PROTOCOL_VERSION,
+    GatewayHello,
+    GatewayMessage,
+    WebSocketChannelAdapter,
+)
 from chulk.server.dispatcher import (
     ConversationBackpressureError,
     ConversationCommand,
@@ -35,6 +41,9 @@ __all__ = [
     "ConversationCommandNotFoundError",
     "ConversationDispatcher",
     "ConversationMessageRequest",
+    "GATEWAY_PROTOCOL_VERSION",
+    "GatewayHello",
+    "GatewayMessage",
     "PermissionDecisionRequest",
     "PendingPermission",
     "PermissionBroker",
@@ -44,5 +53,6 @@ __all__ = [
     "PublicEventJournal",
     "PublicEventRecord",
     "ServerDependencyError",
+    "WebSocketChannelAdapter",
     "create_control_app",
 ]
