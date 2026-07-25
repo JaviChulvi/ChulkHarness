@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import chulk.sessions.sqlite_store as session_store_module
 from chulk import Agent, AgentConfig, AsyncAgent
 from chulk.cli.sessions import run_session_command
 from chulk.llm import LLMClient
@@ -195,6 +196,58 @@ def test_search_enforces_profile_ownership_and_content_exclusions(
         .search("needle")
         .hits
     ] == ["legacy"]
+
+
+def test_message_updates_and_deletes_synchronize_search_transactionally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    _conversation(store, "owned", profile_id="alpha")
+    _message(store, "owned", "message", "original searchable evidence")
+    service = SessionSearchService(store, profile_id="alpha")
+    message_id = service.search("original").hits[0].message_id
+
+    assert store.update_message(
+        "owned",
+        message_id,
+        content="revised searchable evidence",
+    )
+    assert service.search("original").hits == ()
+    assert service.search("revised").hits[0].message_id == message_id
+
+    original_replace = session_store_module._replace_session_fts
+
+    def fail_index_update(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated index failure")
+
+    monkeypatch.setattr(
+        session_store_module,
+        "_replace_session_fts",
+        fail_index_update,
+    )
+    with pytest.raises(RuntimeError, match="simulated index failure"):
+        store.update_message(
+            "owned",
+            message_id,
+            content="must roll back",
+        )
+    monkeypatch.setattr(
+        session_store_module,
+        "_replace_session_fts",
+        original_replace,
+    )
+
+    assert service.search("revised").hits[0].message_id == message_id
+    assert service.search("roll back").hits == ()
+    assert store.update_message(
+        "owned",
+        message_id,
+        metadata={"sensitive": True},
+    )
+    assert service.search("revised").hits == ()
+    assert store.delete_message("owned", message_id)
+    assert store.delete_message("owned", message_id) is False
 
 
 def test_window_reads_paginate_without_crossing_query_shape(tmp_path: Path) -> None:

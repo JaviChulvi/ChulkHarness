@@ -252,6 +252,100 @@ class SQLiteSessionStore:
             ).fetchall()
         return [_row_to_message(row) for row in reversed(rows)]
 
+    def update_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Update searchable message fields and the index in one transaction."""
+        if content is None and metadata is None:
+            return False
+        clean_content = content.strip() if content is not None else None
+        if clean_content == "":
+            raise ValueError("Message content cannot be empty")
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT role, content, metadata
+                FROM conversation_messages
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, message_id),
+            ).fetchone()
+            if row is None:
+                return False
+            next_content = (
+                clean_content if clean_content is not None else str(row["content"])
+            )
+            next_metadata = (
+                dict(metadata)
+                if metadata is not None
+                else _safe_json_dict(row["metadata"])
+            )
+            conn.execute(
+                """
+                UPDATE conversation_messages
+                SET content = ?, metadata = ?
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (
+                    next_content,
+                    json.dumps(next_metadata, sort_keys=True),
+                    conversation_id,
+                    message_id,
+                ),
+            )
+            _replace_session_fts(
+                conn,
+                enabled=self.fts_enabled,
+                message_id=message_id,
+                conversation_id=conversation_id,
+                role=str(row["role"]),
+                content=next_content,
+                metadata=next_metadata,
+            )
+            _touch_conversation(conn, conversation_id, now)
+        return True
+
+    def delete_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+    ) -> bool:
+        """Delete a message and its search row in one transaction."""
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM conversation_messages
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, message_id),
+            ).fetchone()
+            if row is None:
+                return False
+            if self.fts_enabled:
+                conn.execute(
+                    "DELETE FROM session_messages_fts WHERE message_id = ?",
+                    (message_id,),
+                )
+            conn.execute(
+                """
+                DELETE FROM conversation_messages
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, message_id),
+            )
+            _touch_conversation(conn, conversation_id, now)
+        return True
+
     def save_terminal_turn_bundle(
         self,
         conversation_id: str,

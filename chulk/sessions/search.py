@@ -33,6 +33,51 @@ MAX_SESSION_WINDOW_LIMIT = 100
 MAX_SESSION_WINDOW_RADIUS = 100
 MAX_SESSION_SNIPPET_CHARS = 280
 _TOKEN_PATTERN = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
+_SEARCH_SCOPE_SQL = """
+    messages.role IN ('user', 'assistant')
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.internal') END,
+        0
+    ) != 1
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.prompt_excluded') END,
+        0
+    ) != 1
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.sensitive') END,
+        0
+    ) != 1
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.contains_secrets') END,
+        0
+    ) != 1
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.external_content') END,
+        0
+    ) != 1
+    AND COALESCE(
+        CASE WHEN json_valid(messages.metadata)
+             THEN json_extract(messages.metadata, '$.content_class') END,
+        ''
+    ) != 'sensitive'
+    AND (
+        CASE WHEN json_valid(conversations.metadata)
+             THEN json_extract(conversations.metadata, '$.profile_id') END = ?
+        OR (
+            ? = 'default'
+            AND CASE WHEN json_valid(conversations.metadata)
+                     THEN json_extract(
+                         conversations.metadata,
+                         '$.profile_id'
+                     ) END IS NULL
+        )
+    )
+"""
 
 SessionAuditCallback = Callable[[str, dict[str, Any]], None]
 SessionRedactor = Callable[[str], str]
@@ -236,7 +281,7 @@ class SessionSearchService:
             try:
                 with self.store._connect() as conn:
                     return conn.execute(
-                        """
+                        f"""
                         SELECT messages.*, conversations.trace_path,
                                conversations.metadata AS conversation_metadata,
                                bm25(session_messages_fts) AS search_rank
@@ -246,29 +291,31 @@ class SessionSearchService:
                         JOIN conversations
                           ON conversations.id = messages.conversation_id
                         WHERE session_messages_fts MATCH ?
+                          AND ({_SEARCH_SCOPE_SQL})
                         ORDER BY search_rank, messages.created_at DESC,
                                  messages.conversation_id, messages.ordinal,
                                  messages.id
                         LIMIT ?
                         """,
-                        (query, limit),
+                        (query, self.profile_id, self.profile_id, limit),
                     ).fetchall()
             except sqlite3.OperationalError:
                 pass
         with self.store._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT messages.*, conversations.trace_path,
                        conversations.metadata AS conversation_metadata,
                        0.0 AS search_rank
                 FROM conversation_messages AS messages
                 JOIN conversations
                   ON conversations.id = messages.conversation_id
+                WHERE ({_SEARCH_SCOPE_SQL})
                 ORDER BY messages.created_at DESC, messages.conversation_id,
                          messages.ordinal, messages.id
                 LIMIT ?
                 """,
-                (10_000,),
+                (self.profile_id, self.profile_id, 10_000),
             ).fetchall()
         return [
             row
