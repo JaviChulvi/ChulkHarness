@@ -372,7 +372,8 @@ def main(
     if args.command == "trace":
         return run_trace_command(
             args.trace_command,
-            args.path,
+            getattr(args, "path", None),
+            execute_fixture_path=getattr(args, "execute_fixture", None),
             json_output=args.json_output,
             output_path=getattr(args, "output", None),
             force=bool(getattr(args, "force", False)),

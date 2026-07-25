@@ -10,6 +10,7 @@ from chulk.cli.maintenance import (
     TraceFormatError,
     export_trace_html,
     format_doctor_report,
+    format_fixture_replay,
     format_init_changes,
     format_trace_replay,
     format_trace_summary,
@@ -21,6 +22,8 @@ from chulk.cli.maintenance import (
 from chulk.core import Agent
 from chulk.llm import LLMConfigurationError, LLMError
 from chulk.tools.permissions import PermissionDecision
+from chulk.tracing.execution import execute_replay_fixture
+from chulk.tracing.fixtures import load_replay_fixture
 
 
 EXIT_OK = 0
@@ -158,8 +161,9 @@ def run_init_command(
 
 def run_trace_command(
     command: str,
-    path: Path | str,
+    path: Path | str | None,
     *,
+    execute_fixture_path: Path | str | None = None,
     json_output: bool,
     output_path: Path | str | None,
     force: bool,
@@ -170,6 +174,29 @@ def run_trace_command(
     error_func: Callable[[str], None],
 ) -> int:
     try:
+        if command == "replay" and execute_fixture_path is not None:
+            if path is not None:
+                raise ValueError(
+                    "Choose either a trace path or --execute-fixture, not both"
+                )
+            if max_events is not None or unbounded:
+                raise ValueError(
+                    "Executable fixtures use a strict byte limit; "
+                    "--max-events and --unbounded are not supported"
+                )
+            fixture = load_replay_fixture(
+                execute_fixture_path,
+                **({"max_bytes": max_bytes} if max_bytes is not None else {}),
+            )
+            report = execute_replay_fixture(fixture).to_dict()
+            output_func(
+                json_text(report)
+                if json_output
+                else format_fixture_replay(report)
+            )
+            return EXIT_OK if report["ok"] else EXIT_RUNTIME_ERROR
+        if path is None:
+            raise ValueError("A trace path is required")
         if command == "inspect":
             summary = inspect_trace(
                 path,

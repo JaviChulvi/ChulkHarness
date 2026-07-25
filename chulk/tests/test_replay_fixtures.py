@@ -223,6 +223,8 @@ def test_normalizer_removes_runtime_variance_but_preserves_event_order() -> None
     first = {
         "conversation_id": "conversation-a",
         "turn_id": "turn-a",
+        "current_turn_id": "turn-a",
+        "pending_plan_turn_id": "turn-a",
         "started_at": "2026-01-01T00:00:00+00:00",
         "duration_ms": 12.5,
         "available_tool_names": ["write_file", "read_file"],
@@ -250,6 +252,8 @@ def test_normalizer_removes_runtime_variance_but_preserves_event_order() -> None
         **first,
         "conversation_id": "conversation-b",
         "turn_id": "turn-b",
+        "current_turn_id": "turn-b",
+        "pending_plan_turn_id": "turn-b",
         "started_at": "2030-04-05T10:20:30+00:00",
         "duration_ms": 999,
         "available_tool_names": ["read_file", "write_file"],
@@ -271,6 +275,7 @@ def test_normalizer_removes_runtime_variance_but_preserves_event_order() -> None
     normalized = normalize_replay_value(first)
 
     assert normalized == normalize_replay_value(second)
+    assert normalized == normalize_replay_value(normalized)
     assert normalized["conversation_id"] == "<conversation_id:1>"
     assert normalized["turn_id"] == "<turn_id:1>"
     assert normalized["started_at"] == "<timestamp>"

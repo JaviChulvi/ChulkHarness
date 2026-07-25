@@ -215,6 +215,26 @@ def replay_trace(
     ).replay()
 
 
+def format_fixture_replay(report: dict[str, Any]) -> str:
+    """Format an executable fixture comparison."""
+    lines = [
+        "Chulk fixture replay",
+        "  mode          executable offline fixture",
+        f"  status        {report.get('status')}",
+        f"  model actions {report.get('model_actions_consumed', 0)}",
+        f"  tool results  {report.get('tool_results_consumed', 0)}",
+    ]
+    comparisons = report.get("comparisons")
+    if isinstance(comparisons, dict):
+        for name, matched in comparisons.items():
+            lines.append(f"  {name:<13} {'matched' if matched else 'mismatch'}")
+    mismatches = report.get("mismatches")
+    if isinstance(mismatches, list) and mismatches:
+        lines.append(f"  mismatches    {', '.join(str(item) for item in mismatches)}")
+    lines.append("  safety        no provider, registered tool, network, or delivery execution")
+    return "\n".join(lines)
+
+
 def format_trace_summary(summary: dict[str, Any]) -> str:
     event_types = summary.get("event_types", {})
     type_text = ", ".join(f"{name} x{count}" for name, count in event_types.items())
@@ -786,6 +806,7 @@ __all__ = [
     "TraceFormatError",
     "export_trace_html",
     "format_doctor_report",
+    "format_fixture_replay",
     "format_init_changes",
     "format_trace_replay",
     "format_trace_summary",
