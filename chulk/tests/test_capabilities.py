@@ -43,7 +43,14 @@ def test_capability_matrix_advertises_only_enabled_default_tools(tmp_path):
     assert _names(
         tmp_path / "shell",
         Capabilities(files="off", shell=True, memory="off", utilities=False),
-    ) == {"run_cmd"}
+    ) == {
+        "process_logs",
+        "process_poll",
+        "process_start",
+        "process_terminate",
+        "process_write",
+        "run_cmd",
+    }
     assert _names(
         tmp_path / "memory-read",
         Capabilities(files="off", memory="read-only", utilities=False),
