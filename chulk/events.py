@@ -12,7 +12,8 @@ from chulk.redaction import redact_data
 from chulk.results import Cost, Plan, RunResult, Usage, freeze_mapping, plain_data
 
 
-EVENT_SCHEMA_VERSION = 1
+EVENT_SCHEMA_VERSION = 2
+SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2)
 
 
 class EventName(str, Enum):
@@ -109,6 +110,17 @@ class RunFailedPayload(ExtensiblePayload):
         object.__setattr__(self, "error", freeze_mapping(redact_data(dict(self.error))))
 
 
+@dataclass(frozen=True)
+class SerializedEventPayload(ExtensiblePayload):
+    """Typed wrapper used when reading a serialized event envelope."""
+
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "data", freeze_mapping(redact_data(dict(self.data))))
+
+
 EventPayload: TypeAlias = (
     RunStartedPayload
     | ModelRequestPayload
@@ -120,6 +132,7 @@ EventPayload: TypeAlias = (
     | PlanPayload
     | RunCompletedPayload
     | RunFailedPayload
+    | SerializedEventPayload
 )
 
 
@@ -131,6 +144,7 @@ class AgentEvent:
     conversation_id: str
     payload: EventPayload
     turn_id: str | None = None
+    profile_id: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     schema_version: int = EVENT_SCHEMA_VERSION
     extensions: Mapping[str, Any] = field(default_factory=dict)
@@ -144,19 +158,53 @@ class AgentEvent:
         return self.name
 
     def to_dict(self) -> dict[str, Any]:
+        payload = (
+            dict(self.payload.data)
+            if isinstance(self.payload, SerializedEventPayload)
+            else redact_data(plain_data(self.payload))
+        )
         return {
             "name": self.name,
             "timestamp": self.timestamp,
             "schema_version": self.schema_version,
             "conversation_id": self.conversation_id,
             "turn_id": self.turn_id,
-            "payload": redact_data(plain_data(self.payload)),
+            "profile_id": self.profile_id,
+            "payload": payload,
             "extensions": dict(self.extensions),
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> AgentEvent:
+        """Read schema-v1 or schema-v2 envelopes without executing runtime code."""
+        schema_version = value.get("schema_version", 1)
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ValueError("event schema_version must be an integer")
+        if schema_version not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
+            raise ValueError(f"unsupported event schema_version: {schema_version}")
+        payload = value.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("event payload must be an object")
+        extensions = value.get("extensions", {})
+        if not isinstance(extensions, Mapping):
+            raise ValueError("event extensions must be an object")
+        raw_profile_id = value.get("profile_id")
+        profile_id = raw_profile_id if isinstance(raw_profile_id, str) and raw_profile_id else "default"
+        return cls(
+            name=str(value.get("name") or value.get("type") or ""),
+            conversation_id=str(value.get("conversation_id") or ""),
+            turn_id=value.get("turn_id") if isinstance(value.get("turn_id"), str) else None,
+            profile_id=profile_id,
+            timestamp=str(value.get("timestamp") or value.get("created_at") or ""),
+            schema_version=schema_version,
+            payload=SerializedEventPayload(data=payload),
+            extensions=extensions,
+        )
 
 
 __all__ = [
     "EVENT_SCHEMA_VERSION",
+    "SUPPORTED_EVENT_SCHEMA_VERSIONS",
     "AgentEvent",
     "EventName",
     "EventPayload",
@@ -169,5 +217,6 @@ __all__ = [
     "RunCompletedPayload",
     "RunFailedPayload",
     "RunStartedPayload",
+    "SerializedEventPayload",
     "ToolCallPayload",
 ]

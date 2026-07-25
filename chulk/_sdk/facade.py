@@ -641,13 +641,16 @@ class Agent:
             except Exception as exc:
                 terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
                 event = terminalized or failure_event(
-                    exc, conversation_id=self.conversation_id, turn_id=attempted_turn_id
+                    exc,
+                    conversation_id=self.conversation_id,
+                    turn_id=attempted_turn_id,
+                    profile_id=self.runtime.profile_id,
                 )
                 channel.finish(event)
                 if terminalized is None:
                     _notify_event_callback_safely(caller_on_event, event)
             else:
-                channel.finish(terminal_event(result))
+                channel.finish(terminal_event(result, profile_id=self.runtime.profile_id))
 
         worker = threading.Thread(target=work, name="chulk-run-events")
         worker.start()
@@ -815,13 +818,16 @@ class AsyncAgent:
             except Exception as exc:
                 terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
                 event = terminalized or failure_event(
-                    exc, conversation_id=self.conversation_id, turn_id=attempted_turn_id
+                    exc,
+                    conversation_id=self.conversation_id,
+                    turn_id=attempted_turn_id,
+                    profile_id=self.runtime.profile_id,
                 )
                 channel.finish(event)
                 if terminalized is None:
                     _notify_event_callback_safely(caller_on_event, event)
             else:
-                channel.finish(terminal_event(result))
+                channel.finish(terminal_event(result, profile_id=self.runtime.profile_id))
 
         worker = asyncio.create_task(work())
         try:
@@ -879,7 +885,7 @@ def _terminalized_failure_event(runtime: CoreAgent, attempted_turn_id: str | Non
         result.turn_id == attempted_turn_id
         and result.status in {RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.CANCELLED}
     ):
-        return terminal_event(result)
+        return terminal_event(result, profile_id=runtime.profile_id)
     return None
 
 
