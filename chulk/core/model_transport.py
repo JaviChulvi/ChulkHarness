@@ -575,6 +575,7 @@ class ModelTransport:
             },
         )
         payload = format_action_trace(action)
+        payload["request_index"] = turn.model_request_count
         self.trace(TraceEvent.PARSED_ACTION, payload)
         self.trace(TraceEvent.MODEL_RESPONSE_PARSED, payload)
         return action

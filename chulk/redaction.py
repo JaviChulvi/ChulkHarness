@@ -23,12 +23,16 @@ _SECRET_KEY_MARKERS = (
 def redact_text(text: str) -> str:
     """Return free-form text with common credential shapes removed."""
     redacted = re.sub(
+        r"(?i)\bbearer\s+[a-z0-9._~+/=-]+",
+        f"Bearer {REDACTED}",
+        text,
+    )
+    redacted = re.sub(
         r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|authorization|cookie|credential|password|secret|token)[a-z0-9_-]*)"
         r"\s*([:=])\s*['\"]?[^'\"\s,;}]+",
         lambda match: f"{match.group(1)}{match.group(2)} {REDACTED}",
-        text,
+        redacted,
     )
-    redacted = re.sub(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+", f"Bearer {REDACTED}", redacted)
     redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", REDACTED, redacted)
     return redacted
 

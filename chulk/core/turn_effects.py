@@ -369,6 +369,7 @@ class TurnEffects:
                 **record.to_dict(),
                 "turn_id": turn.turn_id,
                 "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                "exit_code": result.exit_code,
             },
         )
         observation, metadata = self._format_observation(action.tool_name, result)

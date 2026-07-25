@@ -93,7 +93,12 @@ def test_finished_tool_adds_bounded_redacted_action_before_observation() -> None
         turn,
         FinishToolEffect(disposition="none"),
         pending=pending,
-        result=ToolResult(tool_name="lookup", success=True, observation="lookup complete"),
+        result=ToolResult(
+            tool_name="lookup",
+            success=True,
+            observation="lookup complete",
+            exit_code=0,
+        ),
     )
 
     assert blocked_message is None
@@ -111,7 +116,8 @@ def test_finished_tool_adds_bounded_redacted_action_before_observation() -> None
     )
     assert action_payload["tool_name"] == "lookup"
     assert action_payload["arguments_truncated"] is True
-    assert memory.messages[1]["content"].endswith("lookup complete")
+    assert "lookup complete" in memory.messages[1]["content"]
+    assert memory.messages[1]["content"].endswith("exit_code: 0")
     action_metadata = turn.observations[0].output_metadata["tool_action_context"]
     assert action_metadata["arguments"]["truncated"] is True
     assert action_metadata["redaction"]["redacted"] is True
@@ -122,9 +128,15 @@ def test_finished_tool_adds_bounded_redacted_action_before_observation() -> None
     ]
     assert observation_events[-1]["tool_action_context"] == action_context
     assert observation_events[-1]["observation_index"] == 1
-    assert observation_events[-1]["turn"]["observations"][0]["content"].endswith(
-        "lookup complete"
+    assert "lookup complete" in observation_events[-1]["turn"]["observations"][0][
+        "content"
+    ]
+    completed_payload = next(
+        payload
+        for event, payload in events
+        if event == TraceEvent.TOOL_CALL_COMPLETED and payload is not None
     )
+    assert completed_payload["exit_code"] == 0
 
 
 def test_planned_tool_observation_checkpoint_includes_step_evidence() -> None:
