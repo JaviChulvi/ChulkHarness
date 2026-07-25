@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +18,9 @@ from chulk.usage import (
     RunBudget,
     SQLiteUsageStore,
     UnknownCostPolicy,
+    UsageGroupBy,
+    UsageLedger,
+    UsageQuery,
     UsageDimensions,
     UsageEntry,
 )
@@ -62,13 +66,16 @@ def _entry(
     *,
     amount: str = "0.125",
     dimensions: UsageDimensions | None = None,
+    occurred_at: datetime = NOW,
+    credential_ref: str | None = None,
+    model: str = "gpt-4.1-mini",
 ) -> UsageEntry:
     return UsageEntry(
         id=f"entry-{source_event_id}",
         resource_kind=ResourceKind.MODEL,
         source_event_id=source_event_id,
         dimensions=dimensions or _dimensions(),
-        occurred_at=NOW,
+        occurred_at=occurred_at,
         billing_period="2026-07",
         purpose="agent_action",
         units={
@@ -84,7 +91,8 @@ def _entry(
             estimated=True,
         ),
         provider="openai",
-        model="gpt-4.1-mini",
+        model=model,
+        credential_ref=credential_ref,
         model_profile_id="fast",
     )
 
@@ -325,3 +333,158 @@ def test_budget_scope_requires_its_owning_dimension() -> None:
 
     with pytest.raises(ValueError, match="turn budget scope requires conversation_id"):
         dimensions.scope_values(BudgetScope.TURN)
+
+
+def test_usage_query_is_profile_owned_and_cursor_paginated(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteUsageStore(tmp_path / "store.sqlite", clock=lambda: NOW)
+    store.ingest(
+        _entry(
+            "work-1",
+            dimensions=_dimensions(profile_id="work", turn_id="turn-1"),
+            occurred_at=NOW - timedelta(hours=2),
+        )
+    )
+    store.ingest(
+        _entry(
+            "work-2",
+            dimensions=_dimensions(profile_id="work", turn_id="turn-2"),
+            occurred_at=NOW - timedelta(hours=1),
+        )
+    )
+    store.ingest(
+        _entry(
+            "personal-1",
+            dimensions=_dimensions(profile_id="personal"),
+        )
+    )
+
+    first = store.query(
+        UsageQuery(
+            profile_id="work",
+            start=NOW - timedelta(days=1),
+            end=NOW + timedelta(days=1),
+            limit=1,
+        )
+    )
+    second = store.query(
+        UsageQuery(
+            profile_id="work",
+            start=NOW - timedelta(days=1),
+            end=NOW + timedelta(days=1),
+            limit=1,
+            cursor=first.next_cursor,
+        )
+    )
+
+    assert [entry.source_event_id for entry in first.entries] == ["work-1"]
+    assert first.next_cursor is not None
+    assert [entry.source_event_id for entry in second.entries] == ["work-2"]
+    assert second.next_cursor is None
+    with pytest.raises(ValueError, match="invalid usage cursor"):
+        store.query(UsageQuery(profile_id="work", cursor="not-a-cursor"))
+    with pytest.raises(ValueError, match="invalid usage cursor"):
+        store.query(UsageQuery(profile_id="work", cursor="_"))
+
+
+def test_usage_query_normalizes_timezone_boundaries(tmp_path: Path) -> None:
+    store = SQLiteUsageStore(tmp_path / "store.sqlite", clock=lambda: NOW)
+    madrid = timezone(timedelta(hours=2))
+    store.ingest(
+        _entry(
+            "boundary",
+            occurred_at=datetime(2026, 7, 25, 0, 30, tzinfo=madrid),
+        )
+    )
+
+    page = store.query(
+        UsageQuery(
+            profile_id="work",
+            start=datetime(2026, 7, 24, 22, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 7, 24, 23, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    assert [entry.source_event_id for entry in page.entries] == ["boundary"]
+    assert page.entries[0].occurred_at == datetime(
+        2026,
+        7,
+        24,
+        22,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_usage_grouping_preserves_decimal_totals_and_unknown_cost(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteUsageStore(tmp_path / "store.sqlite", clock=lambda: NOW)
+    store.ingest(_entry("small-1", amount="0.1"))
+    store.ingest(
+        _entry(
+            "large-1",
+            amount="0.2",
+            model="gpt-4.1",
+            dimensions=_dimensions(turn_id="turn-2"),
+        )
+    )
+    unknown = _entry(
+        "small-unknown",
+        dimensions=_dimensions(turn_id="turn-3"),
+    )
+    store.ingest(replace(unknown, cost=ExactCost(None)))
+
+    groups = store.aggregate(
+        UsageQuery(profile_id="work", limit=100),
+        group_by=UsageGroupBy.MODEL,
+    )
+
+    assert [group.key for group in groups] == [
+        "openai:gpt-4.1",
+        "openai:gpt-4.1-mini",
+    ]
+    assert groups[0].cost.amount == Decimal("0.2")
+    assert groups[1].cost.amount == Decimal("0.1")
+    assert groups[1].unknown_cost_entries == 1
+    assert not groups[1].cost.pricing_known
+
+
+def test_bounded_exports_exclude_credential_references(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "store.sqlite"
+    store = SQLiteUsageStore(db_path, clock=lambda: NOW)
+    store.ingest(_entry("request-1", credential_ref="env:SECRET_NAME"))
+    ledger = UsageLedger(db_path, profile_id="work")
+
+    json_path = ledger.export(tmp_path / "usage.json", format="json")
+    csv_path = ledger.export(tmp_path / "usage.csv", format="csv")
+
+    json_content = json_path.read_text()
+    csv_content = csv_path.read_text()
+    assert "credential_ref" not in json_content
+    assert "SECRET_NAME" not in json_content
+    assert "credential_ref" not in csv_content
+    assert "SECRET_NAME" not in csv_content
+    assert json_path.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(FileExistsError):
+        ledger.export(json_path, format="json")
+
+
+def test_export_refuses_to_write_a_partial_bounded_result(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.sqlite"
+    store = SQLiteUsageStore(db_path, clock=lambda: NOW)
+    store.ingest(_entry("request-1"))
+    store.ingest(_entry("request-2", dimensions=_dimensions(turn_id="turn-2")))
+    destination = tmp_path / "too-small.json"
+
+    with pytest.raises(ValueError, match="exceeds max_entries"):
+        UsageLedger(db_path, profile_id="work").export(
+            destination,
+            format="json",
+            max_entries=1,
+        )
+
+    assert not destination.exists()

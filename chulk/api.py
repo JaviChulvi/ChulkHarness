@@ -187,8 +187,13 @@ from chulk.usage import (
     RunBudget,
     SQLiteUsageStore,
     UnknownCostPolicy,
+    UsageAggregate,
     UsageDimensions,
     UsageEntry,
+    UsageGroupBy,
+    UsageLedger,
+    UsagePage,
+    UsageQuery,
 )
 
 
@@ -353,8 +358,13 @@ __all__ = [
     "UnsafePathAction",
     "UnknownCostPolicy",
     "Usage",
+    "UsageAggregate",
     "UsageDimensions",
     "UsageEntry",
+    "UsageGroupBy",
+    "UsageLedger",
+    "UsagePage",
+    "UsageQuery",
     "WorkspaceMaterializationPolicy",
     "WorkspaceMode",
     "WorkspacePolicyError",

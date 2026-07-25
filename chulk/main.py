@@ -31,9 +31,11 @@ from chulk.cli.entrypoints import (
 )
 from chulk.cli.profiles import run_profile_command
 from chulk.cli.models import run_model_command
+from chulk.cli.usage import run_usage_command
 from chulk.cli.parser import build_parser
 from chulk.config import Config, LLMFallbackProviderConfig, load_cli_config
 from chulk.core import Agent
+from chulk.errors import ChulkError
 from chulk.llm import (
     AnthropicProvider,
     BedrockProvider,
@@ -77,6 +79,7 @@ from chulk.tools.permissions import (
     PermissionRequest,
 )
 from chulk.usage import ExactCost, RunBudget, UsageDimensions
+from chulk.usage import UsageLedger
 
 
 def format_config(config: Config) -> str:
@@ -486,6 +489,9 @@ def run_chat_loop(
         except LLMError as exc:
             error_func(terminal.error(f"error: {exc}"))
             return 1
+        except ChulkError as exc:
+            error_func(terminal.error(f"error: {exc}"))
+            return 1
         except Exception as exc:
             error_func(terminal.error(f"error: unexpected failure: {exc}"))
             return 1
@@ -513,6 +519,9 @@ def run_chat_loop(
         try:
             assistant_response = command_context.agent.run_turn(user_message)
         except LLMError as exc:
+            error_func(terminal.error(f"error: {exc}"))
+            return 1
+        except ChulkError as exc:
             error_func(terminal.error(f"error: {exc}"))
             return 1
         except Exception as exc:
@@ -625,6 +634,28 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        if args.command == "usage":
+            return run_usage_command(
+                args.usage_command,
+                ledger=UsageLedger(
+                    config.store_path,
+                    profile_id=profile.id,
+                ),
+                start=getattr(args, "start", None),
+                end=getattr(args, "end", None),
+                group_by=getattr(args, "by", None),
+                resource_kind=getattr(args, "resource_kind", None),
+                channel=getattr(args, "channel", None),
+                limit=getattr(args, "limit", 100),
+                cursor=getattr(args, "cursor", None),
+                output_path=getattr(args, "output", None),
+                export_format=getattr(args, "format", "json"),
+                max_entries=getattr(args, "max_entries", 10_000),
+                force=bool(getattr(args, "force", False)),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         model_service = ModelProfileService(
             ModelProfileStore(
                 base_config.runtime_dir / "control.sqlite",

@@ -36,7 +36,14 @@ from chulk.tracing.artifacts import (
     ArtifactReadMode,
     DEFAULT_ARTIFACT_READ_BYTES,
 )
-from chulk.usage import RunBudget, UsageDimensions
+from chulk.usage import (
+    RunBudget,
+    UsageAggregate,
+    UsageDimensions,
+    UsageGroupBy,
+    UsageLedger,
+    UsagePage,
+)
 
 
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
@@ -586,6 +593,35 @@ class Agent:
 
         return self._invoke("list_memory_proposals", operation)
 
+    @property
+    def usage_ledger(self) -> UsageLedger:
+        """Return a query facade bound to this runtime's profile database."""
+        accounting = self.runtime.usage_accounting
+        if accounting is None:  # pragma: no cover - runtime assembly always supplies it
+            raise RuntimeError("Usage accounting is not configured")
+        return UsageLedger(
+            accounting.store.db_path,
+            profile_id=self.runtime.profile_id,
+        )
+
+    def query_usage(self, **kwargs: Any) -> UsagePage:
+        """Query profile-owned durable usage without prompt or credential data."""
+        return self._invoke(
+            "query_usage",
+            lambda: self.usage_ledger.query(**kwargs),
+        )
+
+    def group_usage(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        """Return exact grouped totals from the profile-owned usage ledger."""
+        return self._invoke(
+            "group_usage",
+            lambda: self.usage_ledger.group(group_by, **kwargs),
+        )
+
     def read_artifact(
         self,
         artifact_id: str,
@@ -777,6 +813,24 @@ class AsyncAgent:
 
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
+
+    @property
+    def usage_ledger(self) -> UsageLedger:
+        return self._agent.usage_ledger
+
+    async def query_usage(self, **kwargs: Any) -> UsagePage:
+        return await asyncio.to_thread(self._agent.query_usage, **kwargs)
+
+    async def group_usage(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        return await asyncio.to_thread(
+            self._agent.group_usage,
+            group_by,
+            **kwargs,
+        )
 
     async def read_artifact(
         self,

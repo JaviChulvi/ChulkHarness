@@ -20,6 +20,7 @@ from chulk.usage import (
     RunBudget,
     SQLiteUsageStore,
     UsageDimensions,
+    UsageGroupBy,
 )
 
 
@@ -171,6 +172,30 @@ def test_budget_exhaustion_is_a_typed_public_error_and_event(
     assert isinstance(events[-1].payload, RunFailedPayload)
     assert events[-1].payload.error["category"] == "budget_exhausted"
     assert client.remaining == 1
+
+
+def test_sdk_exposes_profile_owned_usage_queries(tmp_path: Path) -> None:
+    facade = PublicAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "done"}]
+        ),
+        tools=[],
+        skills=[],
+        usage_dimensions=UsageDimensions(
+            profile_id="default",
+            channel="sdk",
+        ),
+    )
+
+    assert facade.run("hello") == "done"
+    page = facade.query_usage(channel="sdk")
+    groups = facade.group_usage(UsageGroupBy.MODEL)
+
+    assert len(page.entries) == 1
+    assert page.entries[0].dimensions.profile_id == "default"
+    assert page.entries[0].dimensions.channel == "sdk"
+    assert groups[0].key == "openai:gpt-4.1-mini"
 
 
 def test_transport_failure_releases_the_request_allowance(tmp_path: Path) -> None:

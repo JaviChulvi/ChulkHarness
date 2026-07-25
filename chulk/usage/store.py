@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import base64
+import binascii
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -22,6 +24,10 @@ from chulk.usage.models import (
     UnknownCostPolicy,
     UsageDimensions,
     UsageEntry,
+    UsageAggregate,
+    UsageGroupBy,
+    UsagePage,
+    UsageQuery,
 )
 
 
@@ -232,6 +238,81 @@ class SQLiteUsageStore:
                 (clean_limit,),
             ).fetchall()
         return tuple(_row_to_entry(row) for row in rows)
+
+    def query(self, query: UsageQuery) -> UsagePage:
+        """Return one ascending, cursor-paginated, profile-owned ledger page."""
+        clauses = ["profile_id = ?"]
+        parameters: list[object] = [query.profile_id]
+        if query.start is not None:
+            clauses.append("occurred_at >= ?")
+            parameters.append(query.start.isoformat())
+        if query.end is not None:
+            clauses.append("occurred_at < ?")
+            parameters.append(query.end.isoformat())
+        for column, value in (
+            (
+                "resource_kind",
+                query.resource_kind.value
+                if query.resource_kind is not None
+                else None,
+            ),
+            ("channel", query.channel),
+            ("conversation_id", query.conversation_id),
+            ("goal_id", query.goal_id),
+            ("job_id", query.job_id),
+            ("child_task_id", query.child_task_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+        if query.cursor is not None:
+            occurred_at, entry_id = _decode_cursor(query.cursor)
+            clauses.append("(occurred_at > ? OR (occurred_at = ? AND id > ?))")
+            parameters.extend((occurred_at, occurred_at, entry_id))
+        parameters.append(query.limit + 1)
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM usage_ledger
+                WHERE {' AND '.join(clauses)}
+                ORDER BY occurred_at, id
+                LIMIT ?
+                """,
+                tuple(parameters),
+            ).fetchall()
+        has_more = len(rows) > query.limit
+        page_rows = rows[: query.limit]
+        entries = tuple(_row_to_entry(row) for row in page_rows)
+        next_cursor = (
+            _encode_cursor(
+                entries[-1].occurred_at.isoformat(),
+                entries[-1].id,
+            )
+            if has_more and entries
+            else None
+        )
+        return UsagePage(entries, next_cursor)
+
+    def aggregate(
+        self,
+        query: UsageQuery,
+        *,
+        group_by: UsageGroupBy,
+    ) -> tuple[UsageAggregate, ...]:
+        """Aggregate one bounded query without floating-point cost arithmetic."""
+        page = self.query(query)
+        if page.next_cursor is not None:
+            raise ValueError(
+                "usage aggregation exceeds the bounded query limit; narrow the range"
+            )
+        groups: dict[str, list[UsageEntry]] = {}
+        for entry in page.entries:
+            key = _group_key(entry, group_by)
+            groups.setdefault(key, []).append(entry)
+        return tuple(
+            _aggregate_entries(key, entries)
+            for key, entries in sorted(groups.items())
+        )
 
     def list_reservations(
         self,
@@ -629,6 +710,100 @@ def _dimensions_from_row(row: sqlite3.Row) -> UsageDimensions:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _group_key(entry: UsageEntry, group_by: UsageGroupBy) -> str:
+    if group_by is UsageGroupBy.RESOURCE_KIND:
+        return entry.resource_kind.value
+    if group_by is UsageGroupBy.MODEL:
+        provider = entry.provider or "unknown"
+        model = entry.model or "unknown"
+        return f"{provider}:{model}"
+    if group_by is UsageGroupBy.TOOL_SERVICE:
+        return entry.tool_or_service or "unknown"
+    if group_by is UsageGroupBy.PROFILE:
+        return entry.dimensions.profile_id
+    if group_by is UsageGroupBy.CHANNEL:
+        return entry.dimensions.channel or "unknown"
+    if group_by is UsageGroupBy.GOAL:
+        return entry.dimensions.goal_id or "none"
+    if group_by is UsageGroupBy.JOB:
+        return entry.dimensions.job_id or "none"
+    return entry.dimensions.child_task_id or "none"
+
+
+def _aggregate_entries(
+    key: str,
+    entries: list[UsageEntry],
+) -> UsageAggregate:
+    currencies = {entry.cost.currency for entry in entries}
+    known_amount = sum(
+        (
+            entry.cost.amount
+            for entry in entries
+            if entry.cost.amount is not None
+        ),
+        start=Decimal(0),
+    )
+    unknown = sum(
+        1
+        for entry in entries
+        if not entry.cost.pricing_known or entry.cost.amount is None
+    )
+    currency = next(iter(currencies)) if len(currencies) == 1 else "MIXED"
+    return UsageAggregate(
+        key=key,
+        entry_count=len(entries),
+        model_calls=sum(
+            int(entry.units.get("model_calls", Decimal(0))) for entry in entries
+        ),
+        tool_calls=sum(
+            int(entry.units.get("tool_calls", Decimal(0))) for entry in entries
+        ),
+        total_tokens=sum(
+            int(entry.units.get("total_tokens", Decimal(0))) for entry in entries
+        ),
+        cost=ExactCost(
+            known_amount if len(currencies) == 1 else None,
+            currency=currency,
+            pricing_known=unknown == 0 and len(currencies) == 1,
+            estimated=any(entry.cost.estimated for entry in entries),
+            reported=all(entry.cost.reported for entry in entries),
+        ),
+        unknown_cost_entries=unknown,
+    )
+
+
+def _encode_cursor(occurred_at: str, entry_id: str) -> str:
+    payload = json.dumps(
+        {"occurred_at": occurred_at, "id": entry_id},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_cursor(value: str) -> tuple[str, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode((value + padding).encode()).decode()
+        )
+        occurred_at = str(payload["occurred_at"])
+        entry_id = str(payload["id"])
+        datetime.fromisoformat(occurred_at)
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("invalid usage cursor") from exc
+    if not entry_id:
+        raise ValueError("invalid usage cursor")
+    return occurred_at, entry_id
 
 
 __all__ = ["DEFAULT_RESERVATION_TTL", "SQLiteUsageStore"]

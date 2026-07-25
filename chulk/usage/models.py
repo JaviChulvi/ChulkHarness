@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -43,6 +43,17 @@ class ReservationState(StrEnum):
     ACTIVE = "active"
     COMMITTED = "committed"
     RELEASED = "released"
+
+
+class UsageGroupBy(StrEnum):
+    RESOURCE_KIND = "resource_kind"
+    MODEL = "model"
+    TOOL_SERVICE = "tool_service"
+    PROFILE = "profile"
+    CHANNEL = "channel"
+    GOAL = "goal"
+    JOB = "job"
+    CHILD_TASK = "child_task"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +243,11 @@ class UsageEntry:
             raise ValueError("usage entry ids cannot be empty")
         if self.occurred_at.tzinfo is None:
             raise ValueError("usage entry timestamp must be timezone-aware")
+        object.__setattr__(
+            self,
+            "occurred_at",
+            self.occurred_at.astimezone(timezone.utc),
+        )
         if not self.billing_period.strip():
             raise ValueError("billing_period cannot be empty")
         if not self.purpose.strip():
@@ -269,6 +285,94 @@ class UsageEntry:
             "usage_estimated": self.usage_estimated,
             "trace_path": self.trace_path,
             "metadata": dict(self.metadata),
+        }
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return safe query/export data without credential references."""
+        payload = self.to_dict()
+        payload.pop("credential_ref", None)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class UsageQuery:
+    """Bounded, profile-owned ledger query."""
+
+    profile_id: str
+    start: datetime | None = None
+    end: datetime | None = None
+    resource_kind: ResourceKind | None = None
+    channel: str | None = None
+    conversation_id: str | None = None
+    goal_id: str | None = None
+    job_id: str | None = None
+    child_task_id: str | None = None
+    limit: int = 100
+    cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        profile_id = self.profile_id.strip()
+        if not profile_id:
+            raise ValueError("usage query profile_id cannot be empty")
+        object.__setattr__(self, "profile_id", profile_id)
+        if self.resource_kind is not None:
+            object.__setattr__(
+                self,
+                "resource_kind",
+                ResourceKind(self.resource_kind),
+            )
+        for field_name in ("start", "end"):
+            value = getattr(self, field_name)
+            if value is not None:
+                if value.tzinfo is None:
+                    raise ValueError(f"usage query {field_name} must be timezone-aware")
+                object.__setattr__(self, field_name, value.astimezone(timezone.utc))
+        if self.start is not None and self.end is not None and self.start >= self.end:
+            raise ValueError("usage query start must be earlier than end")
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int):
+            raise ValueError("usage query limit must be an integer")
+        if self.limit < 1 or self.limit > 10_000:
+            raise ValueError("usage query limit must be between 1 and 10000")
+
+
+@dataclass(frozen=True, slots=True)
+class UsagePage:
+    """One deterministic page of immutable usage entries."""
+
+    entries: tuple[UsageEntry, ...]
+    next_cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entries", tuple(self.entries))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entries": [entry.to_public_dict() for entry in self.entries],
+            "next_cursor": self.next_cursor,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageAggregate:
+    """Exact totals for one query group."""
+
+    key: str
+    entry_count: int
+    model_calls: int
+    tool_calls: int
+    total_tokens: int
+    cost: ExactCost
+    unknown_cost_entries: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "entry_count": self.entry_count,
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "total_tokens": self.total_tokens,
+            "cost": self.cost.to_dict(),
+            "unknown_cost_entries": self.unknown_cost_entries,
         }
 
 
@@ -379,4 +483,8 @@ __all__ = [
     "UnknownCostPolicy",
     "UsageDimensions",
     "UsageEntry",
+    "UsageAggregate",
+    "UsageGroupBy",
+    "UsagePage",
+    "UsageQuery",
 ]
