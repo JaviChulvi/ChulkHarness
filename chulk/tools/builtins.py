@@ -6,6 +6,7 @@ from pathlib import Path
 
 from chulk.capabilities import Capabilities, FileAccess, MemoryMode
 from chulk.memory import MemoryPolicy, SQLiteMemoryStore
+from chulk.sessions import SessionSearchService
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.memory import (
@@ -24,6 +25,7 @@ from chulk.tools.memory import (
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.processes import process_tools
 from chulk.tools.registry import Tool, ToolRegistry, ToolResult
+from chulk.tools.sessions import session_read_tool, session_search_tool
 from chulk.tools.shell import (
     DEFAULT_SHELL_STDERR_LIMIT_BYTES,
     DEFAULT_SHELL_STDOUT_LIMIT_BYTES,
@@ -43,6 +45,7 @@ def create_default_tool_registry(
     max_tool_stderr_bytes: int = DEFAULT_SHELL_STDERR_LIMIT_BYTES,
     shell_execution_policy: ShellExecutionPolicy | None = None,
     require_shell_containment: bool = False,
+    session_search_service: SessionSearchService | None = None,
 ) -> ToolRegistry:
     """Create the default tool registry for the agent runtime."""
     selected = capabilities or Capabilities.full()
@@ -84,6 +87,9 @@ def create_default_tool_registry(
             registry.register(compact_memories_tool(memory_store))
             registry.register(import_memories_tool(memory_store, project_root))
             registry.register(export_memories_tool(memory_store, project_root))
+    if session_search_service is not None:
+        registry.register(session_search_tool(session_search_service))
+        registry.register(session_read_tool(session_search_service))
     return registry
 
 

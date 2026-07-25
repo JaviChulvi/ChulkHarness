@@ -32,6 +32,7 @@ from chulk.cli.entrypoints import (
 from chulk.cli.profiles import run_profile_command
 from chulk.cli.models import run_model_command
 from chulk.cli.usage import run_usage_command
+from chulk.cli.sessions import run_session_command
 from chulk.cli.parser import build_parser
 from chulk.config import Config, LLMFallbackProviderConfig, load_cli_config
 from chulk.core import Agent
@@ -652,6 +653,26 @@ def main(
                 export_format=getattr(args, "format", "json"),
                 max_entries=getattr(args, "max_entries", 10_000),
                 force=bool(getattr(args, "force", False)),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
+        if args.command == "session":
+            return run_session_command(
+                args.session_command,
+                store=SQLiteSessionStore(config.store_path),
+                profile_id=profile.id,
+                query=(
+                    " ".join(args.query)
+                    if getattr(args, "query", None) is not None
+                    else None
+                ),
+                conversation_id=getattr(args, "conversation_id", None),
+                ordinal=getattr(args, "ordinal", None),
+                before=getattr(args, "before", 3),
+                after=getattr(args, "after", 3),
+                limit=getattr(args, "limit", 20),
+                cursor=getattr(args, "cursor", None),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,

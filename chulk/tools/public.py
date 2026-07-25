@@ -30,6 +30,7 @@ from chulk.tools.memory import (
     update_memory_tool,
 )
 from chulk.tools.registry import Tool, ToolExecutionContext, ToolResult
+from chulk.tools.sessions import session_read_tool, session_search_tool
 from chulk.tools.shell import shell_tool
 
 
@@ -157,6 +158,8 @@ def default_software_engineer(*, include_memory: bool = True) -> list[ToolRef]:
         write_file,
         list_files,
         search_files,
+        session_search,
+        session_read,
     ]
     if include_memory:
         refs.extend(
@@ -190,6 +193,15 @@ def _artifact_tool(factory: Callable[[Any], Tool]) -> Callable[[Any], Tool]:
     def bind(context: Any) -> Tool:
         if context.artifact_store is None:
             raise ValueError("Trace artifact tool requires a bound artifact store")
+        return factory(context)
+
+    return bind
+
+
+def _session_tool(factory: Callable[[Any], Tool]) -> Callable[[Any], Tool]:
+    def bind(context: Any) -> Tool:
+        if context.session_search_service is None:
+            raise ValueError("Session tool requires a configured session search service")
         return factory(context)
 
     return bind
@@ -260,6 +272,18 @@ import_memories = ToolRef(
 export_memories = ToolRef(
     "export_memories",
     _memory_tool(lambda context: export_memories_tool(context.memory_store, context.project_root)),
+)
+session_search = ToolRef(
+    "session_search",
+    _session_tool(
+        lambda context: session_search_tool(context.session_search_service)
+    ),
+)
+session_read = ToolRef(
+    "session_read",
+    _session_tool(
+        lambda context: session_read_tool(context.session_search_service)
+    ),
 )
 
 
@@ -638,6 +662,8 @@ __all__ = [
     "save_memory",
     "search_files",
     "search_memory",
+    "session_read",
+    "session_search",
     "summarize_memories",
     "tool",
     "update_memory",

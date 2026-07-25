@@ -171,6 +171,13 @@ from chulk.results import (
     ToolAttempt,
     Usage,
 )
+from chulk.sessions import (
+    SessionHit,
+    SessionMessage,
+    SessionSearchPage,
+    SessionSearchService,
+    SessionWindow,
+)
 from chulk.tools import (
     ShellExecutionDecision,
     ShellExecutionPolicy,
@@ -335,6 +342,11 @@ __all__ = [
     "RunStatus",
     "SafetyError",
     "SecretPolicy",
+    "SessionHit",
+    "SessionMessage",
+    "SessionSearchPage",
+    "SessionSearchService",
+    "SessionWindow",
     "ShellExecutionDecision",
     "ShellExecutionPolicy",
     "ShellExecutionRequest",

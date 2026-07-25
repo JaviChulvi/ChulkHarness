@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from chulk import Agent, AgentConfig, AsyncAgent
+from chulk.cli.sessions import run_session_command
+from chulk.llm import LLMClient
+from chulk.main import main
 from chulk.sessions import (
     MAX_SESSION_QUERY_CHARS,
     SessionNotFoundError,
     SessionSearchService,
     SQLiteSessionStore,
 )
+from chulk.tools import (
+    ToolPermissionLevel,
+    session_read_tool,
+    session_search_tool,
+)
+
+
+class _UnusedLLM(LLMClient):
+    def complete(self, messages: list[dict[str, str]]) -> str:
+        raise AssertionError("session read APIs must not call the model")
 
 
 def _conversation(
@@ -309,3 +324,183 @@ def test_search_audit_contains_only_query_metadata_and_selected_ids(
     assert "audit-only private phrase" not in serialized
     assert hit.message_id in serialized
 
+
+def test_model_tools_are_read_only_redacted_and_cannot_request_sensitive_text(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    _conversation(store, "owned", profile_id="alpha")
+    _message(
+        store,
+        "owned",
+        "normal",
+        "deploy token=model-secret",
+    )
+    _message(
+        store,
+        "owned",
+        "sensitive",
+        "deploy sensitive text",
+        metadata={"sensitive": True},
+    )
+    service = SessionSearchService(store, profile_id="alpha")
+    search_tool = session_search_tool(service)
+    read_tool = session_read_tool(service)
+
+    search_result = search_tool.callable({"query": "deploy"})
+    read_result = read_tool.callable(
+        {
+            "conversation_id": "owned",
+            "ordinal": 1,
+            "before": 1,
+            "after": 1,
+        }
+    )
+
+    assert search_tool.permission_level is ToolPermissionLevel.READ
+    assert read_tool.permission_level is ToolPermissionLevel.READ
+    assert search_tool.idempotent is True
+    assert read_tool.idempotent is True
+    assert "include_sensitive" not in read_tool.args_schema["properties"]
+    assert "model-secret" not in search_result.observation
+    assert "model-secret" not in read_result.observation
+    assert "sensitive text" not in read_result.observation
+
+
+def test_public_sdk_exposes_profile_bound_session_search_and_trusted_read(
+    tmp_path: Path,
+) -> None:
+    agent = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_UnusedLLM(),
+        tools=[],
+        skills=[],
+    )
+    store = agent.runtime.session_store
+    _conversation(store, "prior", profile_id="default")
+    _message(store, "prior", "normal", "sdk searchable evidence")
+    _message(
+        store,
+        "prior",
+        "sensitive",
+        "sdk sensitive evidence",
+        metadata={"sensitive": True},
+    )
+
+    hit = agent.search_sessions("searchable").hits[0]
+    safe = agent.read_session_window("prior", ordinal=hit.ordinal, after=2)
+    trusted = agent.read_session_window(
+        "prior",
+        ordinal=hit.ordinal,
+        after=2,
+        include_sensitive=True,
+    )
+
+    assert hit.conversation_id == "prior"
+    assert [message.ordinal for message in safe.messages] == [1]
+    assert [message.ordinal for message in trusted.messages] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_async_sdk_session_search_matches_sync_semantics(
+    tmp_path: Path,
+) -> None:
+    agent = AsyncAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_UnusedLLM(),
+        tools=[],
+        skills=[],
+    )
+    store = agent.runtime.session_store
+    _conversation(store, "prior", profile_id="default")
+    _message(store, "prior", "normal", "async searchable evidence")
+
+    page = await agent.search_sessions("searchable")
+    window = await agent.read_session_window(
+        "prior",
+        ordinal=page.hits[0].ordinal,
+    )
+
+    assert page.hits[0].conversation_id == "prior"
+    assert window.messages[0].content == "async searchable evidence"
+    await agent.close()
+
+
+def test_default_runtime_registers_session_tools(tmp_path: Path) -> None:
+    agent = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_UnusedLLM(),
+        skills=[],
+    )
+
+    tools = {
+        tool.name: tool for tool in agent.tool_registry.list_tools()
+    }
+
+    assert tools["session_search"].permission_level is ToolPermissionLevel.READ
+    assert tools["session_read"].permission_level is ToolPermissionLevel.READ
+    agent.close()
+
+
+def test_session_cli_search_read_and_rebuild_share_the_service(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    _conversation(store, "prior", profile_id="alpha")
+    _message(store, "prior", "normal", "cli searchable evidence")
+    output: list[str] = []
+
+    assert (
+        run_session_command(
+            "search",
+            store=store,
+            profile_id="alpha",
+            query="searchable",
+            json_output=True,
+            output_func=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["hits"][0]["conversation_id"] == "prior"
+    assert (
+        run_session_command(
+            "read",
+            store=store,
+            profile_id="alpha",
+            conversation_id="prior",
+            ordinal=1,
+            output_func=output.append,
+        )
+        == 0
+    )
+    assert "cli searchable evidence" in output[-1]
+    assert (
+        run_session_command(
+            "rebuild-index",
+            store=store,
+            profile_id="alpha",
+            json_output=True,
+            output_func=output.append,
+        )
+        == 0
+    )
+    assert json.loads(output[-1])["indexed_messages"] == 1
+
+
+def test_main_routes_session_rebuild_without_constructing_a_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    output: list[str] = []
+
+    exit_code = main(
+        ["session", "rebuild-index", "--json"],
+        output_func=output.append,
+        error_func=output.append,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output[-1])
+    assert payload["ok"] is True
+    assert isinstance(payload["fts_enabled"], bool)

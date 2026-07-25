@@ -62,6 +62,8 @@ from chulk.tools.public import (
     save_memory,
     search_files,
     search_memory,
+    session_read,
+    session_search,
     summarize_memories,
     tool,
     update_memory,
@@ -75,6 +77,7 @@ from chulk.tools.shell import (
     run_shell_command,
     shell_tool,
 )
+from chulk.tools.sessions import session_read_tool, session_search_tool
 
 __all__ = [
     "Tool",
@@ -130,6 +133,10 @@ __all__ = [
     "search_files_tool",
     "search_memory",
     "search_memory_tool",
+    "session_read",
+    "session_read_tool",
+    "session_search",
+    "session_search_tool",
     "shell_tool",
     "normalize_permission_profile",
     "permission_policy_for_profile",

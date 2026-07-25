@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_profile_parser(subparsers)
     _add_model_parser(subparsers)
     _add_usage_parser(subparsers)
+    _add_session_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -250,6 +251,44 @@ def _add_usage_query_options(
     parser.add_argument("--channel")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_session_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "session",
+        help="Search, read, or rebuild profile-owned session evidence.",
+    )
+    session_subparsers = parser.add_subparsers(
+        dest="session_command",
+        required=True,
+    )
+
+    search = session_subparsers.add_parser(
+        "search",
+        help="Search eligible prior-session messages.",
+    )
+    search.add_argument("query", nargs="+")
+    search.add_argument("--limit", type=int, default=10)
+    search.add_argument("--cursor")
+    search.add_argument("--json", action="store_true", dest="json_output")
+
+    read = session_subparsers.add_parser(
+        "read",
+        help="Read a bounded redacted message window.",
+    )
+    read.add_argument("conversation_id")
+    read.add_argument("ordinal", type=int)
+    read.add_argument("--before", type=int, default=3)
+    read.add_argument("--after", type=int, default=3)
+    read.add_argument("--limit", type=int, default=20)
+    read.add_argument("--cursor")
+    read.add_argument("--json", action="store_true", dest="json_output")
+
+    rebuild = session_subparsers.add_parser(
+        "rebuild-index",
+        help="Deterministically rebuild the eligible session FTS index.",
+    )
+    rebuild.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_doctor_parser(subparsers: argparse._SubParsersAction) -> None:
