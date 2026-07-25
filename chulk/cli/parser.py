@@ -408,6 +408,15 @@ def _add_goal_parser(subparsers: argparse._SubParsersAction) -> None:
     inspect.add_argument("goal_id")
     inspect.add_argument("--json", action="store_true", dest="json_output")
 
+    export = commands.add_parser(
+        "export",
+        help="Write one bounded redacted goal and its event history.",
+    )
+    export.add_argument("goal_id")
+    export.add_argument("--output", required=True)
+    export.add_argument("--force", action="store_true")
+    export.add_argument("--json", action="store_true", dest="json_output")
+
     promote = commands.add_parser(
         "promote",
         help="Copy a persisted conversation plan into a durable goal.",

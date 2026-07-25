@@ -17,12 +17,15 @@ from chulk.goals.models import (
     GoalActionState,
     GoalClaim,
     GoalEvent,
+    GoalRetentionPolicy,
     GoalStatus,
     GoalStepStatus,
     goal_from_dict,
 )
 from chulk.goals.transitions import GoalMutation, mark_step_uncertain
+from chulk.redaction import redact_data
 from chulk.storage import initialize_sqlite_database, sqlite_connection
+from chulk.storage.private_files import write_private_text
 
 
 DEFAULT_GOAL_LEASE_SECONDS = 120
@@ -109,8 +112,8 @@ class GoalStore:
         status: GoalStatus | str | None = None,
         limit: int = 100,
     ) -> tuple[Goal, ...]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
-            raise ValueError("goal list limit must be between 1 and 1000")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("goal list limit must be between 1 and 10000")
         clauses = ["profile_id = ?"]
         parameters: list[Any] = [self.profile_id]
         if status is not None:
@@ -169,12 +172,26 @@ class GoalStore:
                 raise ValueError("goal mutation cannot change goal ownership or identity")
             if changed.revision != current.revision:
                 raise ValueError("goal mutation cannot assign its own revision")
+            if changed == current:
+                return current
             updated = changed.with_revision(current.revision + 1, now=now)
             cursor = conn.execute(
                 """
                 UPDATE goals
                 SET title = ?, status = ?, revision = ?, snapshot_json = ?,
-                    cancellation_requested = ?, updated_at = ?, completed_at = ?
+                    cancellation_requested = ?, updated_at = ?, completed_at = ?,
+                    claim_token = CASE
+                        WHEN ? IN ('completed', 'cancelled', 'failed') THEN NULL
+                        ELSE claim_token
+                    END,
+                    runner_id = CASE
+                        WHEN ? IN ('completed', 'cancelled', 'failed') THEN NULL
+                        ELSE runner_id
+                    END,
+                    lease_until = CASE
+                        WHEN ? IN ('completed', 'cancelled', 'failed') THEN NULL
+                        ELSE lease_until
+                    END
                 WHERE id = ? AND profile_id = ? AND revision = ?
                 """,
                 (
@@ -185,6 +202,9 @@ class GoalStore:
                     int(updated.cancellation_requested),
                     updated.updated_at.isoformat(),
                     _iso(updated.completed_at),
+                    updated.status.value,
+                    updated.status.value,
+                    updated.status.value,
                     updated.id,
                     updated.profile_id,
                     current.revision,
@@ -281,6 +301,8 @@ class GoalStore:
         """Renew an unexpired lease only for its exact owner token."""
         if claim.profile_id != self.profile_id:
             raise GoalLeaseConflictError("claim belongs to another profile")
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
         observed = self._now(now)
         lease_until = observed + timedelta(seconds=lease_seconds)
         with sqlite_connection(self.db_path) as conn:
@@ -327,6 +349,23 @@ class GoalStore:
             )
         return cursor.rowcount == 1
 
+    def has_active_claim(
+        self,
+        goal_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        observed = self._now(now)
+        with sqlite_connection(self.db_path) as conn:
+            row = _goal_row(conn, goal_id, self.profile_id)
+        lease_until = _optional_datetime(row["lease_until"])
+        return (
+            row["claim_token"] is not None
+            and row["runner_id"] is not None
+            and lease_until is not None
+            and lease_until >= observed
+        )
+
     def assert_action_boundary(
         self,
         claim: GoalClaim,
@@ -337,24 +376,13 @@ class GoalStore:
         """Return the latest snapshot only if work may safely start now."""
         observed = self._now(now)
         with sqlite_connection(self.db_path) as conn:
-            row = _goal_row(conn, claim.goal_id, self.profile_id)
-        goal = _goal_from_row(row)
-        if (
-            row["claim_token"] != claim.claim_token
-            or row["runner_id"] != claim.runner_id
-        ):
-            raise GoalLeaseConflictError("goal is claimed by another runner")
-        lease_until = _optional_datetime(row["lease_until"])
-        if lease_until is None or lease_until < observed:
-            raise GoalLeaseConflictError("goal runner lease expired")
-        if goal.status is not GoalStatus.RUNNING:
-            raise GoalLeaseConflictError("goal is not running")
-        if goal.cancellation_requested:
-            raise GoalLeaseConflictError("goal cancellation requested before next action")
-        step = goal.step(step_id)
-        if step.status is not GoalStepStatus.RUNNING:
-            raise GoalLeaseConflictError("goal step is not running")
-        return goal
+            return _assert_action_boundary(
+                conn,
+                claim,
+                profile_id=self.profile_id,
+                step_id=step_id,
+                now=observed,
+            )
 
     def begin_action(
         self,
@@ -367,7 +395,6 @@ class GoalStore:
         now: datetime | None = None,
     ) -> GoalActionCheckpoint:
         """Checkpoint intent before a potentially side-effecting action."""
-        self.assert_action_boundary(claim, step_id=step_id, now=now)
         observed = self._now(now)
         clean_key = idempotency_key.strip()
         clean_kind = action_kind.strip()
@@ -388,6 +415,13 @@ class GoalStore:
         )
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            _assert_action_boundary(
+                conn,
+                claim,
+                profile_id=self.profile_id,
+                step_id=step_id,
+                now=observed,
+            )
             existing = conn.execute(
                 """
                 SELECT * FROM goal_action_checkpoints
@@ -396,7 +430,25 @@ class GoalStore:
                 (claim.goal_id, clean_key),
             ).fetchone()
             if existing is not None:
-                return _checkpoint_from_row(existing)
+                stored = _checkpoint_from_row(existing)
+                if (
+                    stored.step_id != step_id
+                    or stored.action_kind != clean_kind
+                    or stored.action_ref != checkpoint.action_ref
+                ):
+                    raise GoalActionConflictError(
+                        "goal action idempotency key was reused for different work"
+                    )
+                if (
+                    stored.state is GoalActionState.STARTED
+                    and stored.claim_token != claim.claim_token
+                ):
+                    raise GoalActionConflictError(
+                        "unfinished goal action belongs to an earlier runner claim"
+                    )
+                raise GoalActionConflictError(
+                    "goal action was already checkpointed and will not be replayed"
+                )
             conn.execute(
                 """
                 INSERT INTO goal_action_checkpoints (
@@ -448,6 +500,12 @@ class GoalStore:
                 return current
             if current.claim_token != claim.claim_token:
                 raise GoalActionConflictError("goal action belongs to another claim")
+            _assert_claim_owner(
+                conn,
+                claim,
+                profile_id=self.profile_id,
+                now=observed,
+            )
             conn.execute(
                 """
                 UPDATE goal_action_checkpoints
@@ -469,6 +527,100 @@ class GoalStore:
             ).fetchone()
         assert updated is not None
         return _checkpoint_from_row(updated)
+
+    def retention_candidates(
+        self,
+        policy: GoalRetentionPolicy,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[Goal, ...]:
+        """Return terminal goals old enough for an explicit purge decision."""
+        observed = self._now(now)
+        candidates: list[Goal] = []
+        for goal in self.list(limit=policy.max_export_goals):
+            if goal.completed_at is None:
+                continue
+            retention = policy.retention_for(goal.status)
+            if retention is not None and goal.completed_at + retention <= observed:
+                candidates.append(goal)
+        return tuple(candidates)
+
+    def purge_terminal(self, expected_revisions: Mapping[str, int]) -> tuple[str, ...]:
+        """Delete explicitly selected terminal goals using revision CAS checks."""
+        if not expected_revisions:
+            return ()
+        purged: list[str] = []
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for goal_id, expected_revision in expected_revisions.items():
+                row = _goal_row(conn, goal_id, self.profile_id)
+                goal = _goal_from_row(row)
+                if goal.revision != expected_revision:
+                    raise GoalRevisionConflictError(
+                        goal_id,
+                        expected_revision,
+                        goal.revision,
+                    )
+                if not goal.terminal:
+                    raise ValueError(
+                        f"goal {goal_id!r} is not terminal and cannot be purged"
+                    )
+                cursor = conn.execute(
+                    """
+                    DELETE FROM goals
+                    WHERE id = ? AND profile_id = ? AND revision = ?
+                    """,
+                    (goal_id, self.profile_id, expected_revision),
+                )
+                if cursor.rowcount != 1:
+                    raise GoalRevisionConflictError(goal_id, expected_revision, -1)
+                purged.append(goal_id)
+        return tuple(purged)
+
+    def export(
+        self,
+        destination: Path | str,
+        *,
+        goal_id: str | None = None,
+        include_events: bool = True,
+        max_goals: int = 1_000,
+        force: bool = False,
+    ) -> Path:
+        """Write a bounded, redacted profile-owned JSON export."""
+        if not 1 <= max_goals <= 10_000:
+            raise ValueError("max_goals must be between 1 and 10000")
+        goals = (
+            (self.get(goal_id),)
+            if goal_id is not None
+            else self.list(limit=max_goals)
+        )
+        payload = {
+            "schema_version": 1,
+            "profile_id": self.profile_id,
+            "goals": [
+                {
+                    "goal": goal.to_dict(),
+                    "events": (
+                        [item.to_dict() for item in self.events(goal.id)]
+                        if include_events
+                        else []
+                    ),
+                }
+                for goal in goals
+            ],
+        }
+        text = json.dumps(
+            redact_data(payload),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        return write_private_text(
+            destination,
+            text,
+            overwrite=force,
+            private_parent=False,
+        )
 
     def action_checkpoints(
         self,
@@ -507,7 +659,7 @@ class GoalStore:
             rows = conn.execute(
                 """
                 SELECT * FROM goals
-                WHERE profile_id = ? AND status = 'running'
+                WHERE profile_id = ? AND status IN ('running', 'paused')
                   AND lease_until IS NOT NULL AND lease_until < ?
                 ORDER BY updated_at, id
                 """,
@@ -582,7 +734,6 @@ class GoalStore:
         if observed.tzinfo is None:
             raise ValueError("goal clock must return a timezone-aware datetime")
         return observed.astimezone(timezone.utc)
-
 
 SQLiteGoalStore = GoalStore
 
@@ -667,6 +818,47 @@ def _goal_from_row(row: sqlite3.Row) -> Goal:
     value["updated_at"] = str(row["updated_at"])
     value["completed_at"] = row["completed_at"]
     return goal_from_dict(value)
+
+
+def _assert_action_boundary(
+    conn: sqlite3.Connection,
+    claim: GoalClaim,
+    *,
+    profile_id: str,
+    step_id: str,
+    now: datetime,
+) -> Goal:
+    goal = _assert_claim_owner(
+        conn,
+        claim,
+        profile_id=profile_id,
+        now=now,
+    )
+    if goal.status is not GoalStatus.RUNNING:
+        raise GoalLeaseConflictError("goal is not running")
+    if goal.cancellation_requested:
+        raise GoalLeaseConflictError("goal cancellation requested before next action")
+    step = goal.step(step_id)
+    if step.status is not GoalStepStatus.RUNNING:
+        raise GoalLeaseConflictError("goal step is not running")
+    return goal
+
+
+def _assert_claim_owner(
+    conn: sqlite3.Connection,
+    claim: GoalClaim,
+    *,
+    profile_id: str,
+    now: datetime,
+) -> Goal:
+    row = _goal_row(conn, claim.goal_id, profile_id)
+    goal = _goal_from_row(row)
+    if row["claim_token"] != claim.claim_token or row["runner_id"] != claim.runner_id:
+        raise GoalLeaseConflictError("goal is claimed by another runner")
+    lease_until = _optional_datetime(row["lease_until"])
+    if lease_until is None or lease_until < now:
+        raise GoalLeaseConflictError("goal runner lease expired")
+    return goal
 
 
 def _event_from_row(row: sqlite3.Row) -> GoalEvent:

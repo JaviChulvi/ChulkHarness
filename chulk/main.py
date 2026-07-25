@@ -776,6 +776,8 @@ def main(
                 max_tokens=getattr(args, "max_tokens", None),
                 max_cost=getattr(args, "max_cost", None),
                 deadline=getattr(args, "deadline", None),
+                output_path=getattr(args, "output", None),
+                force=bool(getattr(args, "force", False)),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,

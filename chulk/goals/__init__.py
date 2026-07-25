@@ -10,13 +10,20 @@ from chulk.goals.models import (
     GoalEvent,
     GoalEvidence,
     GoalRisk,
+    GoalRetentionPolicy,
     GoalStatus,
     GoalSteering,
     GoalStep,
     GoalStepStatus,
     goal_from_dict,
 )
-from chulk.goals.service import GoalCancellationPropagator, GoalService, PlanLike
+from chulk.goals.service import (
+    GoalCancellationPropagator,
+    GoalEventCallback,
+    GoalService,
+    PlanLike,
+)
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.goals.store import (
     DEFAULT_GOAL_LEASE_SECONDS,
     GoalActionConflictError,
@@ -39,11 +46,14 @@ __all__ = [
     "GoalClaim",
     "GoalCriterion",
     "GoalEvent",
+    "GoalEventCallback",
     "GoalEvidence",
+    "GoalExecutionContext",
     "GoalLeaseConflictError",
     "GoalNotFoundError",
     "GoalRevisionConflictError",
     "GoalRisk",
+    "GoalRetentionPolicy",
     "GoalService",
     "GoalStatus",
     "GoalSteering",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -47,6 +47,7 @@ class ModelUsageAccounting:
         budget: RunBudget,
         max_output_tokens: int,
         trace_path: Path | str | None = None,
+        boundary_callback: Callable[[], object] | None = None,
     ) -> None:
         if max_output_tokens < 1:
             raise ValueError("max_output_tokens must be positive")
@@ -59,6 +60,7 @@ class ModelUsageAccounting:
         self.budget = budget
         self.max_output_tokens = max_output_tokens
         self.trace_path = str(trace_path) if trace_path is not None else None
+        self.boundary_callback = boundary_callback
         self._reservations: dict[tuple[str, int], BudgetReservation] = {}
         self._tool_reservations: dict[tuple[str, int, int], BudgetReservation] = {}
         self.reconcile_persisted_model_requests()
@@ -78,6 +80,8 @@ class ModelUsageAccounting:
         existing = self._reservations.get(key)
         if existing is not None:
             return existing
+        if self.boundary_callback is not None:
+            self.boundary_callback()
         meters = _model_meters(self.client)
         attempt_multiplier = max(1, repair_attempts + 1)
         prompt_tokens = sum(estimate_message_tokens(message) for message in messages)
@@ -305,6 +309,8 @@ class ModelUsageAccounting:
         existing = self._tool_reservations.get(key)
         if existing is not None:
             return existing
+        if self.boundary_callback is not None:
+            self.boundary_callback()
         source_event_id = _tool_event_id(
             self.conversation_id,
             turn_id,

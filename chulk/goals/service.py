@@ -13,10 +13,12 @@ from chulk.goals.models import (
     GoalApproval,
     GoalCriterion,
     GoalEvidence,
+    GoalEvent,
     GoalRisk,
     GoalSteering,
     GoalStep,
 )
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.goals.store import GoalStore
 from chulk.goals.transitions import (
     approve_goal,
@@ -57,6 +59,12 @@ class GoalCancellationPropagator(Protocol):
     ) -> None: ...
 
 
+class GoalEventCallback(Protocol):
+    """Receives the committed typed event and matching goal snapshot."""
+
+    def __call__(self, event: GoalEvent, goal: Goal) -> None: ...
+
+
 class GoalService:
     """Operate a profile-scoped GoalStore through explicit audited transitions."""
 
@@ -66,10 +74,12 @@ class GoalService:
         *,
         clock: Callable[[], datetime] | None = None,
         cancellation_propagator: GoalCancellationPropagator | None = None,
+        event_callback: GoalEventCallback | None = None,
     ) -> None:
         self.store = store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.cancellation_propagator = cancellation_propagator
+        self.event_callback = event_callback
 
     def create(
         self,
@@ -104,7 +114,9 @@ class GoalService:
             created_at=now,
             updated_at=now,
         )
-        return self.store.create(goal, actor=actor)
+        created = self.store.create(goal, actor=actor)
+        self._emit(created)
+        return created
 
     def promote_plan(
         self,
@@ -450,7 +462,13 @@ class GoalService:
                 schedule_ids=goal.schedule_ids,
                 process_ids=goal.process_ids,
             )
-        return goal
+        if self.store.has_active_claim(goal.id):
+            return goal
+        return self.cancel(
+            goal.id,
+            expected_revision=goal.revision,
+            actor=actor,
+        )
 
     def cancel(
         self,
@@ -499,6 +517,56 @@ class GoalService:
             {"reason": reason},
         )
 
+    def link_resource(
+        self,
+        goal_id: str,
+        *,
+        expected_revision: int,
+        kind: str,
+        resource_id: str,
+        actor: str,
+    ) -> Goal:
+        """Link one trace, task, schedule, process, or artifact idempotently."""
+        fields = {
+            "child_task": "child_task_ids",
+            "schedule": "schedule_ids",
+            "process": "process_ids",
+            "trace": "trace_ids",
+            "artifact": "artifact_refs",
+        }
+        field_name = fields.get(kind)
+        if field_name is None:
+            raise ValueError(
+                "goal resource kind must be child_task, schedule, process, "
+                "trace, or artifact"
+            )
+        clean_id = resource_id.strip()
+        if not clean_id:
+            raise ValueError("goal resource id cannot be empty")
+
+        def link(goal: Goal) -> Goal:
+            values = getattr(goal, field_name)
+            if clean_id in values:
+                return goal
+            if field_name == "child_task_ids":
+                return replace(goal, child_task_ids=(*goal.child_task_ids, clean_id))
+            if field_name == "schedule_ids":
+                return replace(goal, schedule_ids=(*goal.schedule_ids, clean_id))
+            if field_name == "process_ids":
+                return replace(goal, process_ids=(*goal.process_ids, clean_id))
+            if field_name == "trace_ids":
+                return replace(goal, trace_ids=(*goal.trace_ids, clean_id))
+            return replace(goal, artifact_refs=(*goal.artifact_refs, clean_id))
+
+        return self._mutate(
+            goal_id,
+            expected_revision,
+            "goal.resource_linked",
+            actor,
+            link,
+            {"kind": kind, "resource_id": clean_id},
+        )
+
     def runtime_options(
         self,
         goal_id: str,
@@ -524,6 +592,31 @@ class GoalService:
             },
         }
 
+    def claim_execution(
+        self,
+        goal_id: str,
+        step_id: str,
+        *,
+        expected_revision: int,
+        runner_id: str,
+        lease_seconds: int = 120,
+    ) -> GoalExecutionContext:
+        """Claim one running step for boundary-enforced agent execution."""
+        goal = self.store.get(goal_id)
+        if goal.step(step_id).status.value != "running":
+            raise ValueError("goal execution requires a running step")
+        claim = self.store.claim(
+            goal_id,
+            runner_id=runner_id,
+            expected_revision=expected_revision,
+            lease_seconds=lease_seconds,
+        )
+        return GoalExecutionContext(
+            store=self.store,
+            claim=claim,
+            step_id=step_id,
+        )
+
     def _mutate(
         self,
         goal_id: str,
@@ -533,7 +626,7 @@ class GoalService:
         mutation,
         payload: Mapping[str, Any] | None = None,
     ) -> Goal:
-        return self.store.mutate(
+        goal = self.store.mutate(
             goal_id,
             expected_revision=expected_revision,
             kind=kind,
@@ -541,6 +634,19 @@ class GoalService:
             mutation=mutation,
             payload=payload,
         )
+        if goal.revision != expected_revision:
+            self._emit(goal)
+        return goal
+
+    def _emit(self, goal: Goal) -> None:
+        if self.event_callback is None:
+            return
+        events = self.store.events(
+            goal.id,
+            after_revision=goal.revision - 1,
+        )
+        if events:
+            self.event_callback(events[-1], goal)
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -553,4 +659,9 @@ def _goal_budget(budget: RunBudget) -> RunBudget:
     return replace(budget, scope=BudgetScope.GOAL)
 
 
-__all__ = ["GoalCancellationPropagator", "GoalService", "PlanLike"]
+__all__ = [
+    "GoalCancellationPropagator",
+    "GoalEventCallback",
+    "GoalService",
+    "PlanLike",
+]

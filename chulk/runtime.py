@@ -19,6 +19,7 @@ from chulk.execution import (
     ExecutionContextLifecycle,
     HostExecutionBackend,
 )
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.llm import (
     LLMClient,
     LLMModelCapabilities,
@@ -153,6 +154,7 @@ def create_agent(
     learning_review_quota: LearningReviewQuota | None = None,
     automatic_learning_approval: bool = False,
     plugin_registry: LocalPluginRegistry | None = None,
+    goal_execution: GoalExecutionContext | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -161,6 +163,25 @@ def create_agent(
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
     effective_profile_id = profile_id or config.profile_id
+    goal_snapshot = (
+        goal_execution.assert_boundary()
+        if goal_execution is not None
+        else None
+    )
+    if goal_snapshot is not None and goal_snapshot.profile_id != effective_profile_id:
+        raise ValueError("goal execution profile does not match runtime profile")
+    if (
+        goal_snapshot is not None
+        and run_budget is not None
+        and run_budget != goal_snapshot.budget
+    ):
+        raise ValueError("run_budget does not match the claimed goal budget")
+    if (
+        goal_snapshot is not None
+        and usage_dimensions is not None
+        and usage_dimensions.goal_id not in {None, goal_snapshot.id}
+    ):
+        raise ValueError("usage dimensions do not match the claimed goal")
     selected_plugin_registry = plugin_registry or LocalPluginRegistry(
         config.runtime_dir,
         profile_id=effective_profile_id,
@@ -322,6 +343,11 @@ def create_agent(
             else None
         ),
     )
+    if goal_snapshot is not None:
+        base_usage_dimensions = replace(
+            base_usage_dimensions,
+            goal_id=goal_snapshot.id,
+        )
     if base_usage_dimensions.profile_id != effective_profile_id:
         raise ValueError(
             "usage dimensions profile_id does not match the runtime profile"
@@ -340,12 +366,21 @@ def create_agent(
             base_usage_dimensions,
             conversation_id=state.conversation_id,
         ),
-        budget=run_budget or RunBudget(),
+        budget=(
+            goal_snapshot.budget
+            if goal_snapshot is not None
+            else run_budget or RunBudget()
+        ),
         max_output_tokens=(
             model_capabilities.max_output_tokens
             or model_capabilities.default_response_reserve_tokens
         ),
         trace_path=trace_logger.path,
+        boundary_callback=(
+            goal_execution.assert_boundary
+            if goal_execution is not None
+            else None
+        ),
     )
     configured_mcp_servers = (
         tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
@@ -464,6 +499,7 @@ def create_agent(
             learning_reviewer=learning_reviewer,
             plugin_registry=selected_plugin_registry,
             plugin_audit_report=plugin_audit_report,
+            goal_execution=goal_execution,
         )
     except Exception:
         for resource in reversed(owned_resources):

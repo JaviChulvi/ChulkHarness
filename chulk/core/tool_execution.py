@@ -6,9 +6,11 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 import time
+from typing import Protocol
 
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
+from chulk.goals.models import GoalActionCheckpoint
 from chulk.tools import ToolRegistry
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -19,6 +21,29 @@ from chulk.tools.permissions import (
 )
 from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResult
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
+
+
+class GoalExecutionPort(Protocol):
+    def begin_tool(
+        self,
+        *,
+        turn_id: str,
+        tool_call_index: int,
+        attempt: int,
+        tool_name: str,
+    ) -> GoalActionCheckpoint: ...
+
+    def finish_tool(
+        self,
+        checkpoint: GoalActionCheckpoint,
+        result: ToolResult,
+    ) -> GoalActionCheckpoint: ...
+
+    def abort_tool(
+        self,
+        checkpoint: GoalActionCheckpoint,
+        error: BaseException,
+    ) -> GoalActionCheckpoint: ...
 
 
 @dataclass
@@ -34,6 +59,7 @@ class ToolExecutor:
     trace: Callable[[str, dict | None], None]
     get_context: Callable[[TurnState], ToolExecutionContext | None]
     usage_accounting: ModelUsageAccounting | None = None
+    goal_execution: GoalExecutionPort | None = None
 
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
@@ -50,6 +76,15 @@ class ToolExecutor:
                 attempt=attempt_number,
             )
             try:
+                goal_checkpoint = self._begin_goal_tool(
+                    turn,
+                    tool_name=tool_name,
+                    attempt=attempt_number,
+                )
+            except BaseException:
+                self._release_tool_attempt(turn, attempt=attempt_number)
+                raise
+            try:
                 result = self._permission_result(
                     tool_name,
                     arguments,
@@ -59,15 +94,21 @@ class ToolExecutor:
                     arguments,
                     context=self.get_context(turn),
                 )
+            except BaseException as exc:
+                self._release_tool_attempt(turn, attempt=attempt_number)
+                self._abort_goal_tool(goal_checkpoint, exc)
+                raise
+            try:
+                self._finish_goal_tool(goal_checkpoint, result)
+                self._commit_tool_attempt(
+                    turn,
+                    tool_name=tool_name,
+                    attempt=attempt_number,
+                    result=result,
+                )
             except BaseException:
                 self._release_tool_attempt(turn, attempt=attempt_number)
                 raise
-            self._commit_tool_attempt(
-                turn,
-                tool_name=tool_name,
-                attempt=attempt_number,
-                result=result,
-            )
             retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
             record = _attempt_payload(
                 attempt_number,
@@ -108,6 +149,15 @@ class ToolExecutor:
                 attempt=attempt_number,
             )
             try:
+                goal_checkpoint = self._begin_goal_tool(
+                    turn,
+                    tool_name=tool_name,
+                    attempt=attempt_number,
+                )
+            except BaseException:
+                self._release_tool_attempt(turn, attempt=attempt_number)
+                raise
+            try:
                 result = await self._permission_result_async(
                     tool_name,
                     arguments,
@@ -117,15 +167,21 @@ class ToolExecutor:
                     arguments,
                     context=self.get_context(turn),
                 )
+            except BaseException as exc:
+                self._release_tool_attempt(turn, attempt=attempt_number)
+                self._abort_goal_tool(goal_checkpoint, exc)
+                raise
+            try:
+                self._finish_goal_tool(goal_checkpoint, result)
+                self._commit_tool_attempt(
+                    turn,
+                    tool_name=tool_name,
+                    attempt=attempt_number,
+                    result=result,
+                )
             except BaseException:
                 self._release_tool_attempt(turn, attempt=attempt_number)
                 raise
-            self._commit_tool_attempt(
-                turn,
-                tool_name=tool_name,
-                attempt=attempt_number,
-                result=result,
-            )
             retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
             record = _attempt_payload(
                 attempt_number,
@@ -145,6 +201,38 @@ class ToolExecutor:
                 await asyncio.sleep(retry_policy.backoff_seconds)
         assert result is not None
         return replace(result, metadata={**result.metadata, "attempt_history": attempts})
+
+    def _begin_goal_tool(
+        self,
+        turn: TurnState,
+        *,
+        tool_name: str,
+        attempt: int,
+    ) -> GoalActionCheckpoint | None:
+        if self.goal_execution is None:
+            return None
+        return self.goal_execution.begin_tool(
+            turn_id=turn.turn_id,
+            tool_call_index=turn.tool_call_count,
+            attempt=attempt,
+            tool_name=tool_name,
+        )
+
+    def _finish_goal_tool(
+        self,
+        checkpoint: GoalActionCheckpoint | None,
+        result: ToolResult,
+    ) -> None:
+        if self.goal_execution is not None and checkpoint is not None:
+            self.goal_execution.finish_tool(checkpoint, result)
+
+    def _abort_goal_tool(
+        self,
+        checkpoint: GoalActionCheckpoint | None,
+        error: BaseException,
+    ) -> None:
+        if self.goal_execution is not None and checkpoint is not None:
+            self.goal_execution.abort_tool(checkpoint, error)
 
     def _reserve_tool_attempt(
         self,

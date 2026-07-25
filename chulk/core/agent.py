@@ -27,6 +27,7 @@ from chulk.llm.usage import (
     cost_from_dict,
     usage_from_dict,
 )
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory import (
@@ -117,6 +118,7 @@ class Agent:
         learning_reviewer: LearningReviewCoordinator | None = None,
         plugin_registry: LocalPluginRegistry | None = None,
         plugin_audit_report: PluginAuditReport | None = None,
+        goal_execution: GoalExecutionContext | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -185,6 +187,7 @@ class Agent:
         self.learning_reviewer = learning_reviewer
         self.plugin_registry = plugin_registry
         self.plugin_audit_report = plugin_audit_report
+        self.goal_execution = goal_execution
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
@@ -198,6 +201,7 @@ class Agent:
             trace=self._trace,
             get_context=self._tool_context_for_turn,
             usage_accounting=self.usage_accounting,
+            goal_execution=self.goal_execution,
         )
         self._plan_execution = PlanExecution(
             state=self.state,
@@ -735,6 +739,7 @@ class Agent:
         tools.permission_policy = self.permission_policy
         tools.permission_callback = self.permission_callback
         tools.usage_accounting = self.usage_accounting
+        tools.goal_execution = self.goal_execution
 
         self._plan_execution.state = self.state
         self._plan_execution.memory = self.memory

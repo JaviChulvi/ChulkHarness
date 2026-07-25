@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -97,7 +97,7 @@ class GoalEvidence:
             _required(self.recorded_by, "evidence actor"),
         )
         object.__setattr__(self, "recorded_at", _utc(self.recorded_at, "recorded_at"))
-        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,7 +109,7 @@ class GoalEvidence:
             "reference": self.reference,
             "recorded_by": self.recorded_by,
             "recorded_at": self.recorded_at.isoformat(),
-            "metadata": dict(self.metadata),
+            "metadata": _plain(self.metadata),
         }
 
 
@@ -230,7 +230,11 @@ class GoalStep:
             _unique_optional(self.expected_tools),
         )
         object.__setattr__(self, "status", GoalStepStatus(self.status))
-        if isinstance(self.attempt, bool) or self.attempt < 0:
+        if (
+            isinstance(self.attempt, bool)
+            or not isinstance(self.attempt, int)
+            or self.attempt < 0
+        ):
             raise ValueError("step attempt must be a non-negative integer")
         if (
             isinstance(self.max_attempts, bool)
@@ -343,7 +347,7 @@ class Goal:
             object.__setattr__(
                 self,
                 "source_plan",
-                MappingProxyType(dict(self.source_plan)),
+                _freeze_mapping(self.source_plan),
             )
         for field_name in (
             "child_task_ids",
@@ -414,7 +418,7 @@ class Goal:
             "steering": [item.to_dict() for item in self.steering],
             "source_conversation_id": self.source_conversation_id,
             "source_turn_id": self.source_turn_id,
-            "source_plan": dict(self.source_plan) if self.source_plan is not None else None,
+            "source_plan": _plain(self.source_plan) if self.source_plan is not None else None,
             "child_task_ids": list(self.child_task_ids),
             "schedule_ids": list(self.schedule_ids),
             "process_ids": list(self.process_ids),
@@ -445,7 +449,15 @@ class GoalEvent:
     created_at: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+        object.__setattr__(self, "id", _required(self.id, "goal event id"))
+        object.__setattr__(self, "goal_id", _required(self.goal_id, "goal id"))
+        object.__setattr__(self, "profile_id", _required(self.profile_id, "profile id"))
+        if isinstance(self.revision, bool) or self.revision < 0:
+            raise ValueError("goal event revision must be a non-negative integer")
+        object.__setattr__(self, "kind", _required(self.kind, "goal event kind"))
+        object.__setattr__(self, "actor", _required(self.actor, "goal event actor"))
+        object.__setattr__(self, "payload", _freeze_mapping(self.payload))
+        object.__setattr__(self, "created_at", _utc(self.created_at, "created_at"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -455,7 +467,7 @@ class GoalEvent:
             "revision": self.revision,
             "kind": self.kind,
             "actor": self.actor,
-            "payload": dict(self.payload),
+            "payload": _plain(self.payload),
             "created_at": self.created_at.isoformat(),
         }
 
@@ -467,6 +479,13 @@ class GoalClaim:
     runner_id: str
     claim_token: str
     lease_until: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "goal_id", _required(self.goal_id, "goal id"))
+        object.__setattr__(self, "profile_id", _required(self.profile_id, "profile id"))
+        object.__setattr__(self, "runner_id", _required(self.runner_id, "runner id"))
+        object.__setattr__(self, "claim_token", _required(self.claim_token, "claim token"))
+        object.__setattr__(self, "lease_until", _utc(self.lease_until, "lease_until"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,9 +505,27 @@ class GoalActionCheckpoint:
     error: str | None = None
 
     def __post_init__(self) -> None:
+        for field_name, label in (
+            ("id", "checkpoint id"),
+            ("goal_id", "goal id"),
+            ("step_id", "step id"),
+            ("profile_id", "profile id"),
+            ("idempotency_key", "idempotency key"),
+            ("action_kind", "action kind"),
+            ("claim_token", "claim token"),
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required(getattr(self, field_name), label),
+            )
+        object.__setattr__(self, "action_ref", _optional(self.action_ref))
         object.__setattr__(self, "state", GoalActionState(self.state))
+        object.__setattr__(self, "created_at", _utc(self.created_at, "created_at"))
+        object.__setattr__(self, "updated_at", _utc(self.updated_at, "updated_at"))
         if self.result is not None:
-            object.__setattr__(self, "result", MappingProxyType(dict(self.result)))
+            object.__setattr__(self, "result", _freeze_mapping(self.result))
+        object.__setattr__(self, "error", _optional(self.error))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -501,10 +538,49 @@ class GoalActionCheckpoint:
             "action_ref": self.action_ref,
             "state": self.state.value,
             "claim_token": self.claim_token,
-            "result": dict(self.result) if self.result is not None else None,
+            "result": _plain(self.result) if self.result is not None else None,
             "error": self.error,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GoalRetentionPolicy:
+    """Explicit terminal-goal retention windows and export bound."""
+
+    completed_for: timedelta | None = timedelta(days=90)
+    cancelled_for: timedelta | None = timedelta(days=30)
+    failed_for: timedelta | None = timedelta(days=30)
+    max_export_goals: int = 1_000
+
+    def __post_init__(self) -> None:
+        for field_name in ("completed_for", "cancelled_for", "failed_for"):
+            value = getattr(self, field_name)
+            if value is not None and value < timedelta(0):
+                raise ValueError(f"{field_name} cannot be negative")
+        if (
+            isinstance(self.max_export_goals, bool)
+            or not isinstance(self.max_export_goals, int)
+            or not 1 <= self.max_export_goals <= 10_000
+        ):
+            raise ValueError("max_export_goals must be between 1 and 10000")
+
+    def retention_for(self, status: GoalStatus) -> timedelta | None:
+        if status is GoalStatus.COMPLETED:
+            return self.completed_for
+        if status is GoalStatus.CANCELLED:
+            return self.cancelled_for
+        if status is GoalStatus.FAILED:
+            return self.failed_for
+        return None
+
+    def to_dict(self) -> dict[str, int | None]:
+        return {
+            "completed_seconds": _total_seconds(self.completed_for),
+            "cancelled_seconds": _total_seconds(self.cancelled_for),
+            "failed_seconds": _total_seconds(self.failed_for),
+            "max_export_goals": self.max_export_goals,
         }
 
 
@@ -801,6 +877,38 @@ def _optional_int(value: Any, label: str) -> int | None:
     return value
 
 
+def _total_seconds(value: timedelta | None) -> int | None:
+    return int(value.total_seconds()) if value is not None else None
+
+
+def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(
+        {str(key): _freeze(item) for key, item in value.items()}
+    )
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_mapping(value)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_plain(item) for item in value]
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
 __all__ = [
     "Goal",
     "GoalActionCheckpoint",
@@ -811,6 +919,7 @@ __all__ = [
     "GoalEvent",
     "GoalEvidence",
     "GoalRisk",
+    "GoalRetentionPolicy",
     "GoalStatus",
     "GoalSteering",
     "GoalStep",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from chulk.cli.entrypoints import EXIT_OK, EXIT_RUNTIME_ERROR, json_text
 from chulk.core.state import TurnState
@@ -33,6 +34,8 @@ def run_goal_command(
     max_tokens: int | None = None,
     max_cost: str | None = None,
     deadline: str | None = None,
+    output_path: Path | str | None = None,
+    force: bool = False,
     json_output: bool = False,
     output_func: Callable[[str], None] = print,
     error_func: Callable[[str], None] = print,
@@ -54,6 +57,23 @@ def run_goal_command(
             goal = service.store.get(_required(goal_id, "goal id"))
             payload = {"ok": True, "goal": goal.to_dict()}
             return _emit(payload, _format_goal(goal), json_output, output_func)
+        if command == "export":
+            destination = service.store.export(
+                _required_path(output_path),
+                goal_id=goal_id,
+                force=force,
+            )
+            payload = {
+                "ok": True,
+                "action": "exported",
+                "output_path": str(destination),
+            }
+            return _emit(
+                payload,
+                f"Goal export written to {destination}",
+                json_output,
+                output_func,
+            )
         if command == "promote":
             clean_conversation = _required(conversation_id, "conversation id")
             turn = _select_plan_turn(session_store, clean_conversation, turn_id)
@@ -222,6 +242,12 @@ def _required(value: str | None, label: str) -> str:
     if not clean:
         raise ValueError(f"{label} is required")
     return clean
+
+
+def _required_path(value: Path | str | None) -> Path:
+    if value is None or not str(value).strip():
+        raise ValueError("export output path is required")
+    return Path(value)
 
 
 def _emit(

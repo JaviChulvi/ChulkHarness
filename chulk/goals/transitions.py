@@ -57,10 +57,6 @@ def start_goal(goal: Goal, *, now: datetime) -> Goal:
 def pause_goal(goal: Goal, *, now: datetime) -> Goal:
     del now
     _require_status(goal, GoalStatus.RUNNING, GoalStatus.BLOCKED)
-    if any(item.status is GoalStepStatus.RUNNING for item in goal.steps):
-        raise InvalidGoalTransitionError(
-            "goal can only pause between actions; a step is still running"
-        )
     return replace(goal, status=GoalStatus.PAUSED)
 
 

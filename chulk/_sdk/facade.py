@@ -31,6 +31,7 @@ from chulk.core.context import TurnContextSection
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
+from chulk.goals import GoalExecutionContext
 from chulk.mcp import MCPServerConfig
 from chulk.plugins import (
     LoadedPluginEntryPoint,
@@ -519,6 +520,7 @@ class Agent:
         learning_review_quota: LearningReviewQuota | None = None,
         automatic_learning_approval: bool = False,
         plugin_registry: LocalPluginRegistry | None = None,
+        goal_execution: GoalExecutionContext | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -548,6 +550,7 @@ class Agent:
                 learning_review_quota=learning_review_quota,
                 automatic_learning_approval=automatic_learning_approval,
                 plugin_registry=plugin_registry,
+                goal_execution=goal_execution,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -1515,6 +1518,7 @@ def _build_handle(
     learning_review_quota: LearningReviewQuota | None = None,
     automatic_learning_approval: bool = False,
     plugin_registry: LocalPluginRegistry | None = None,
+    goal_execution: GoalExecutionContext | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -1544,6 +1548,7 @@ def _build_handle(
         learning_review_quota=learning_review_quota,
         automatic_learning_approval=automatic_learning_approval,
         plugin_registry=plugin_registry,
+        goal_execution=goal_execution,
     )
     return AgentHandle(runtime, on_event=on_event)
 
