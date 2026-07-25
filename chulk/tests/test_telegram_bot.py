@@ -11,6 +11,8 @@ import pytest
 import chulk.telegram.bot as telegram_bot_module
 from chulk import MemoryMode
 from chulk.config import load_config
+from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
+from chulk.profiles import ProfileRuntimeFactory
 from chulk.sessions import SessionRecorder, SQLiteSessionStore
 from chulk.telegram.bot import TELEGRAM_CHAT_METADATA_KEY, TelegramAgentBot
 from chulk.telegram.client import TelegramAttachment, TelegramError, TelegramUpdate
@@ -332,7 +334,9 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
 
     assert bot._offset == 100
     assert client.sent == [(9, "answer: hello")]
-    assert bot.session_store.get_adapter_cursor("telegram") == 100
+    status = bot.gateway_ledger.adapter_status("telegram", "primary")
+    assert status is not None
+    assert status.cursor == "100"
 
     restarted_client = FakeClient()
     restarted_bot = _bot(tmp_path, restarted_client, [])
@@ -725,6 +729,58 @@ async def test_multi_user_agents_receive_distinct_nondefault_memory_namespaces(
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_route_selects_an_isolated_profile_without_startup_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(telegram_bot_module, "AsyncAgent", CapturingAgent)
+    config = _config(tmp_path)
+    profile_factory = ProfileRuntimeFactory(config)
+    profile_factory.profile_store.create_profile(
+        "work",
+        project_root=tmp_path,
+    )
+    control_path = config.runtime_dir / "control.sqlite"
+    ledger = SQLiteGatewayLedger(control_path)
+    router = SQLiteGatewayRouter(control_path)
+    router.add_route(
+        adapter="telegram",
+        account_id="primary",
+        principal_id="7",
+        profile_id="work",
+    )
+    bot = TelegramAgentBot(
+        config=config,
+        telegram_config=TelegramConfig(
+            bot_token="fake",
+            allowed_user_ids=frozenset({7}),
+        ),
+        client=FakeClient(),  # type: ignore[arg-type]
+        gateway_ledger=ledger,
+        gateway_router=router,
+        profile_runtime_factory=profile_factory,
+    )
+
+    selected = router.list_routes()[0]
+    assert selected.profile_id == "work"
+    agent = bot._default_agent_factory_for_profile("work", 9, None)
+    try:
+        assert captured["config"].profile_id == "work"
+        assert captured["memory_namespace"] == "profile:work:telegram:chat:9"
+    finally:
+        await agent.close()
 
 
 def test_session_metadata_persists_telegram_chat_mapping(tmp_path: Path) -> None:

@@ -3,28 +3,43 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
 import logging
+from pathlib import Path
 from typing import Protocol
 
 from chulk import AsyncAgent, Capabilities, FileAccess, MemoryMode, Tools
 from chulk.config import Config
 from chulk.core.context import TurnContextSection
+from chulk.gateway import (
+    DeliveryTarget,
+    GatewayLimits,
+    GatewayRuntime,
+    InboundEnvelope,
+    OutboundEnvelope,
+    SQLiteGatewayLedger,
+    SQLiteGatewayRouter,
+    TextPart,
+    adopt_legacy_telegram_state,
+)
 from chulk.llm.lifecycle import aclose_resources
+from chulk.profiles import ProfileRuntimeFactory
 from chulk.scheduling import SQLiteScheduleStore
 from chulk.scheduling.tools import format_jobs, scheduled_job_tools
 from chulk.sessions import SQLiteSessionStore
 from chulk.telegram.client import (
     TELEGRAM_COMMANDS,
     TELEGRAM_SCHEDULING_COMMANDS,
+    TelegramAttachment,
     TelegramClient,
     TelegramError,
     TelegramUpdate,
     split_message,
 )
 from chulk.telegram.config import TelegramConfig
+from chulk.telegram.adapter import TelegramChannelAdapter
+from chulk.telegram.gateway_ledger import TelegramGatewayLedgerView
 from chulk.telegram.ledger import SQLiteAdapterUpdateLedger
 from chulk.telegram.media import (
     TelegramMediaError,
@@ -43,9 +58,6 @@ TELEGRAM_CURSOR_NAME = "telegram"
 TELEGRAM_TYPING_REFRESH_SECONDS = 4.0
 SCHEDULE_LEASE_SECONDS = 120
 SCHEDULE_LEASE_RENEW_SECONDS = 40.0
-UPDATE_EXECUTION_LEASE_SECONDS = 300
-UPDATE_EXECUTION_RENEW_SECONDS = 100.0
-UPDATE_LEDGER_RETENTION_DAYS = 30
 
 
 class TelegramAgent(Protocol):
@@ -82,6 +94,10 @@ class TelegramAgentBot:
         schedule_store: SQLiteScheduleStore | None = None,
         media_processor: TelegramMediaProcessor | None = None,
         update_ledger: SQLiteAdapterUpdateLedger | None = None,
+        gateway_ledger: SQLiteGatewayLedger | None = None,
+        gateway_router: SQLiteGatewayRouter | None = None,
+        control_db_path: Path | str | None = None,
+        profile_runtime_factory: ProfileRuntimeFactory | None = None,
         owns_media_processor: bool = False,
     ) -> None:
         self.config = config
@@ -94,12 +110,78 @@ class TelegramAgentBot:
             else None
         )
         self._agent_factory = agent_factory or self._default_agent_factory
+        self._custom_agent_factory = agent_factory
+        self._profile_runtime_factory = profile_runtime_factory
+        self._profile_configs: dict[str, Config] = {config.profile_id: config}
+        self._session_stores: dict[str, SQLiteSessionStore] = {
+            config.profile_id: self.session_store
+        }
+        self._schedule_stores: dict[str, SQLiteScheduleStore] = {}
+        if self.schedule_store is not None:
+            self._schedule_stores[config.profile_id] = self.schedule_store
         self._media_processor = media_processor
         self._owns_media_processor = owns_media_processor
-        self.update_ledger = update_ledger or SQLiteAdapterUpdateLedger(config.store_path)
-        self._agents: dict[int, TelegramAgent] = {}
+        legacy_ledger = update_ledger or SQLiteAdapterUpdateLedger(config.store_path)
+        control_path = (
+            gateway_ledger.db_path
+            if gateway_ledger is not None
+            else (
+                config.runtime_dir / "control.sqlite"
+                if control_db_path is None
+                else control_db_path
+            )
+        )
+        adopt_legacy_telegram_state(
+            control_db_path=control_path,
+            profile_db_path=legacy_ledger.db_path,
+            profile_id=config.profile_id,
+        )
+        self.gateway_ledger = gateway_ledger or SQLiteGatewayLedger(control_path)
+        self.gateway_router = gateway_router or SQLiteGatewayRouter(control_path)
+        existing_routes = self.gateway_router.list_routes(include_disabled=True)
+        for user_id in telegram_config.allowed_user_ids:
+            if not any(
+                route.adapter == TELEGRAM_CURSOR_NAME
+                and route.account_id == "primary"
+                and route.principal_id == str(user_id)
+                and route.destination_id is None
+                and route.thread_id is None
+                for route in existing_routes
+            ):
+                self.gateway_router.add_route(
+                    adapter=TELEGRAM_CURSOR_NAME,
+                    account_id="primary",
+                    principal_id=str(user_id),
+                    profile_id=config.profile_id,
+                )
+        self.channel_adapter = TelegramChannelAdapter(
+            client=client,
+            config=telegram_config,
+            ledger=self.gateway_ledger,
+            defer_cursor=True,
+        )
+        self.gateway_runtime = GatewayRuntime(
+            ledger=self.gateway_ledger,
+            router=self.gateway_router,
+            adapters=(self.channel_adapter,),
+            executor=self._execute_gateway_envelope,
+            limits=GatewayLimits(global_concurrency=4, profile_concurrency=1),
+            propagate_delivery_errors=True,
+            delivery_retry_delay_seconds=0,
+        )
+        self.update_ledger = TelegramGatewayLedgerView(self.gateway_ledger)
+        self._agents: dict[tuple[str, int], TelegramAgent] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
-        self._offset = self.session_store.get_adapter_cursor(TELEGRAM_CURSOR_NAME)
+        self._gateway_stop_requested = False
+        adapter_status = self.gateway_ledger.adapter_status(
+            TELEGRAM_CURSOR_NAME,
+            "primary",
+        )
+        self._offset = (
+            int(adapter_status.cursor)
+            if adapter_status is not None and adapter_status.cursor is not None
+            else None
+        )
 
     async def run_forever(self) -> None:
         """Poll until cancelled, retrying sanitized transport failures."""
@@ -110,9 +192,17 @@ class TelegramAgentBot:
                 scheduler_task = asyncio.create_task(self._scheduler_loop())
             while True:
                 try:
-                    await self.poll_once()
+                    owned_adapter = await self.poll_once()
+                    if self._gateway_stop_requested:
+                        return
+                    if not owned_adapter:
+                        await asyncio.sleep(
+                            self.telegram_config.retry_delay_seconds
+                        )
                 except TelegramError as exc:
                     LOGGER.warning("Telegram polling failed: %s", exc)
+                    if self._gateway_stop_requested:
+                        return
                     await asyncio.sleep(self.telegram_config.retry_delay_seconds)
         finally:
             if scheduler_task is not None:
@@ -121,91 +211,115 @@ class TelegramAgentBot:
                     await scheduler_task
             await self.close()
 
-    async def poll_once(self) -> None:
+    async def poll_once(self) -> bool:
         """Fetch and process one batch of updates."""
-        updates = await asyncio.to_thread(
-            self.client.get_updates,
-            offset=self._offset,
-            timeout_seconds=self.telegram_config.poll_timeout_seconds,
-        )
-        for update_id, destination_id in getattr(self.client, "ignored_updates", ()):
-            await asyncio.to_thread(
-                self.update_ledger.ignore,
-                adapter=TELEGRAM_CURSOR_NAME,
-                update_id=update_id,
-                destination_id=destination_id,
+        try:
+            envelopes = await self.channel_adapter.poll_once()
+        except RuntimeError as exc:
+            if "already running" in str(exc):
+                return False
+            raise
+        try:
+            all_complete = True
+            for envelope in envelopes:
+                event_id = int(envelope.event_id)
+                if self._offset is not None and event_id < self._offset:
+                    continue
+                if (
+                    envelope.scope.value == "group"
+                    and envelope.identity.principal_id
+                    in {str(value) for value in self.telegram_config.allowed_user_ids}
+                ):
+                    routes = self.gateway_router.list_routes(include_disabled=True)
+                    exact_group = next(
+                        (
+                            route
+                            for route in routes
+                            if route.adapter == TELEGRAM_CURSOR_NAME
+                            and route.account_id == "primary"
+                            and route.principal_id
+                            == envelope.identity.principal_id
+                            and route.destination_id == envelope.destination_id
+                            and route.thread_id is None
+                        ),
+                        None,
+                    )
+                    principal_route = next(
+                        (
+                            route
+                            for route in routes
+                            if route.enabled
+                            and route.adapter == TELEGRAM_CURSOR_NAME
+                            and route.account_id == "primary"
+                            and route.principal_id
+                            == envelope.identity.principal_id
+                            and route.destination_id is None
+                            and route.thread_id is None
+                        ),
+                        None,
+                    )
+                    if exact_group is None:
+                        self.gateway_router.add_route(
+                            adapter=TELEGRAM_CURSOR_NAME,
+                            account_id="primary",
+                            principal_id=envelope.identity.principal_id,
+                            destination_id=envelope.destination_id,
+                            profile_id=(
+                                principal_route.profile_id
+                                if principal_route is not None
+                                else self.config.profile_id
+                            ),
+                        )
+                await self.gateway_runtime.accept(
+                    self.channel_adapter,
+                    envelope,
+                )
+                await self.gateway_runtime.run_once()
+                record = self.gateway_ledger.find_inbox(
+                    adapter=TELEGRAM_CURSOR_NAME,
+                    account_id="primary",
+                    idempotency_key=envelope.idempotency_key,
+                )
+                if record is None or not self.gateway_ledger.inbox_complete(record.id):
+                    all_complete = False
+                    break
+                await self.channel_adapter.commit_acknowledgements()
+                self._refresh_offset()
+            if all_complete and self.client.next_offset is not None:
+                if not envelopes:
+                    await self.gateway_runtime.run_once()
+                await self.channel_adapter.commit_cursor(self.client.next_offset)
+                self._refresh_offset()
+        finally:
+            status = self.gateway_ledger.adapter_status(
+                TELEGRAM_CURSOR_NAME,
+                "primary",
             )
-        all_recorded = True
-        for update in updates:
-            if self._offset is not None and update.update_id < self._offset:
-                continue
-            if not await self._handle_polled_update(update):
-                all_recorded = False
-                break
-            self._save_offset(update.update_id + 1)
-        if all_recorded and self.client.next_offset is not None:
-            self._save_offset(self.client.next_offset)
-        await asyncio.to_thread(
-            self.update_ledger.purge_terminal,
-            before=datetime.now(timezone.utc) - timedelta(days=UPDATE_LEDGER_RETENTION_DAYS),
-        )
+            if status is not None and status.stop_requested:
+                self._gateway_stop_requested = True
+            await self.channel_adapter.close()
+        return True
 
     async def handle_update(self, update: TelegramUpdate) -> None:
         """Handle one update directly without changing the polling ledger."""
-        response = await self._response_for_update(update)
+        response = await self._response_for_update(
+            update,
+            profile_id=self.config.profile_id,
+        )
         if response is not None:
             await self._send(update.chat_id, response)
 
-    async def _handle_polled_update(self, update: TelegramUpdate) -> bool:
-        """Execute a polled update once and retry only its durable response."""
-        if update.user_id not in self.telegram_config.allowed_user_ids:
-            await asyncio.to_thread(
-                self.update_ledger.ignore,
-                adapter=TELEGRAM_CURSOR_NAME,
-                update_id=update.update_id,
-                destination_id=str(update.chat_id),
-            )
-            LOGGER.warning("Ignored Telegram message from unauthorized user id %s", update.user_id)
-            return True
-
-        claim = await asyncio.to_thread(
-            self.update_ledger.begin_execution,
-            adapter=TELEGRAM_CURSOR_NAME,
-            update_id=update.update_id,
-            destination_id=str(update.chat_id),
-            lease_seconds=UPDATE_EXECUTION_LEASE_SECONDS,
-        )
-        if claim.should_execute:
-            assert claim.execution_token is not None
-            renewal_task = asyncio.create_task(
-                self._renew_update_execution(update.update_id, claim.execution_token)
-            )
-            try:
-                response = await self._response_for_update(update)
-                assert response is not None
-                recorded = await asyncio.to_thread(
-                    self.update_ledger.record_response,
-                    adapter=TELEGRAM_CURSOR_NAME,
-                    update_id=update.update_id,
-                    execution_token=claim.execution_token,
-                    response_parts=split_message(response),
-                )
-            finally:
-                renewal_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await renewal_task
-            if not recorded:
-                LOGGER.warning("Telegram update execution lost its durable claim")
-                return False
-        elif claim.record.status == "processing":
-            return False
-        elif claim.record.status in {"delivered", "ignored"}:
-            return True
-
-        return await self._deliver_polled_response(update.update_id)
-
-    async def _response_for_update(self, update: TelegramUpdate) -> str | None:
-        if update.user_id not in self.telegram_config.allowed_user_ids:
+    async def _response_for_update(
+        self,
+        update: TelegramUpdate,
+        *,
+        gateway_authorized: bool = False,
+        profile_id: str | None = None,
+    ) -> str | None:
+        if (
+            not gateway_authorized
+            and update.user_id not in self.telegram_config.allowed_user_ids
+        ):
             LOGGER.warning("Ignored Telegram message from unauthorized user id %s", update.user_id)
             return None
         if update.chat_type != "private":
@@ -223,6 +337,7 @@ class TelegramAgentBot:
                     response = await self._dispatch(
                         update.chat_id,
                         text,
+                        profile_id=profile_id or self.config.profile_id,
                         context_sections=context_sections,
                     )
             except TelegramMediaError as exc:
@@ -236,64 +351,6 @@ class TelegramAgentBot:
             with suppress(asyncio.CancelledError):
                 await typing_task
         return response
-
-    async def _renew_update_execution(self, update_id: int, execution_token: str) -> None:
-        while True:
-            await asyncio.sleep(UPDATE_EXECUTION_RENEW_SECONDS)
-            renewed = await asyncio.to_thread(
-                self.update_ledger.renew_execution,
-                adapter=TELEGRAM_CURSOR_NAME,
-                update_id=update_id,
-                execution_token=execution_token,
-                lease_seconds=UPDATE_EXECUTION_LEASE_SECONDS,
-            )
-            if not renewed:
-                LOGGER.warning("Telegram update execution renewal lost its claim")
-                return
-
-    async def _deliver_polled_response(self, update_id: int) -> bool:
-        claimed = await asyncio.to_thread(
-            self.update_ledger.claim_delivery,
-            adapter=TELEGRAM_CURSOR_NAME,
-            update_id=update_id,
-        )
-        if claimed is None:
-            current = await asyncio.to_thread(
-                self.update_ledger.get,
-                adapter=TELEGRAM_CURSOR_NAME,
-                update_id=update_id,
-            )
-            return current is not None and current.status in {"delivered", "ignored"}
-        assert claimed.delivery_token is not None
-        try:
-            for part_index in range(
-                claimed.next_response_part,
-                len(claimed.response_parts),
-            ):
-                await self._send(
-                    int(claimed.destination_id),
-                    claimed.response_parts[part_index],
-                )
-                checkpointed = await asyncio.to_thread(
-                    self.update_ledger.mark_response_part_delivered,
-                    adapter=TELEGRAM_CURSOR_NAME,
-                    update_id=update_id,
-                    delivery_token=claimed.delivery_token,
-                    expected_part=part_index,
-                )
-                if not checkpointed:
-                    LOGGER.warning("Telegram response delivery lost its durable claim")
-                    return False
-        except TelegramError as exc:
-            await asyncio.to_thread(
-                self.update_ledger.release_delivery,
-                adapter=TELEGRAM_CURSOR_NAME,
-                update_id=update_id,
-                delivery_token=claimed.delivery_token,
-                error=type(exc).__name__,
-            )
-            raise
-        return True
 
     async def _process_attachment(
         self,
@@ -341,6 +398,7 @@ class TelegramAgentBot:
 
     async def close(self) -> None:
         """Close all cached agent runtimes."""
+        await self.channel_adapter.close()
         agents = tuple(self._agents.values())
         self._agents.clear()
         for agent in agents:
@@ -349,27 +407,70 @@ class TelegramAgentBot:
             await aclose_resources((self._media_processor,))
             self._owns_media_processor = False
 
+    async def _execute_gateway_envelope(
+        self,
+        profile_id: str,
+        envelope: InboundEnvelope,
+    ) -> tuple[OutboundEnvelope, ...]:
+        update = _telegram_update_from_envelope(envelope)
+        response = await self._response_for_update(
+            update,
+            gateway_authorized=True,
+            profile_id=profile_id,
+        )
+        if response is None:
+            raise RuntimeError("authorized Telegram execution produced no response")
+        conversation = self._session_store_for(profile_id).find_conversation_by_metadata(
+            TELEGRAM_CHAT_METADATA_KEY,
+            update.chat_id,
+        )
+        conversation_id = (
+            conversation.id
+            if conversation is not None
+            else f"telegram:{update.chat_id}"
+        )
+        parts = split_message(response)
+        return tuple(
+            OutboundEnvelope(
+                profile_id=profile_id,
+                conversation_id=conversation_id,
+                target=DeliveryTarget(
+                    TELEGRAM_CURSOR_NAME,
+                    "primary",
+                    str(update.chat_id),
+                ),
+                text=part,
+                reply_to_event_id=envelope.event_id,
+                sequence=index,
+                final=index == len(parts) - 1,
+            )
+            for index, part in enumerate(parts)
+        )
+
     async def _dispatch(
         self,
         chat_id: int,
         text: str,
         *,
+        profile_id: str,
         context_sections: list[TurnContextSection] | None = None,
     ) -> str:
+        runtime_config = self._config_for_profile(profile_id)
+        schedule_store = self._schedule_store_for(profile_id)
         command, arguments = _parse_command(text)
         if command in {"/start", "/help"}:
             return _help_text()
         if command == "/new":
-            old_agent = self._agents.pop(chat_id, None)
+            old_agent = self._agents.pop((profile_id, chat_id), None)
             if old_agent is not None:
                 await old_agent.close()
-            agent = self._create_agent(chat_id, None)
+            agent = self._create_agent(profile_id, chat_id, None)
             return f"Started a new conversation ({agent.conversation_id[:8]})."
-        agent = self._agent_for_chat(chat_id)
+        agent = self._agent_for_chat(profile_id, chat_id)
         if command == "/status":
             return (
-                f"Provider: {self.config.llm_provider}\n"
-                f"Model: {self.config.model}\n"
+                f"Provider: {runtime_config.llm_provider}\n"
+                f"Model: {runtime_config.model}\n"
                 f"Conversation: {agent.conversation_id[:8]}"
             )
         if command == "/plan":
@@ -381,22 +482,22 @@ class TelegramAgentBot:
         if command == "/reject":
             return await agent.reject()
         if command == "/reminders":
-            if self.schedule_store is None:
+            if schedule_store is None:
                 return "Scheduling is disabled for this Telegram agent."
             return format_jobs(
-                self.schedule_store.list(adapter="telegram", destination_id=str(chat_id)),
+                schedule_store.list(adapter="telegram", destination_id=str(chat_id)),
                 timezone_name=self.telegram_config.timezone,
             )
         if command == "/cancel":
-            if self.schedule_store is None:
+            if schedule_store is None:
                 return "Scheduling is disabled for this Telegram agent."
             if not arguments:
                 return "Usage: /cancel <task-id>"
-            jobs = self.schedule_store.list(adapter="telegram", destination_id=str(chat_id))
+            jobs = schedule_store.list(adapter="telegram", destination_id=str(chat_id))
             matches = [job for job in jobs if job.id.startswith(arguments)]
             if len(matches) != 1:
                 return "Task id is missing or ambiguous. Use /reminders."
-            self.schedule_store.cancel(
+            schedule_store.cancel(
                 matches[0].id,
                 adapter="telegram",
                 destination_id=str(chat_id),
@@ -412,22 +513,57 @@ class TelegramAgentBot:
             extension_metadata={"source": "telegram", "telegram_chat_id": chat_id},
         )
 
-    def _agent_for_chat(self, chat_id: int) -> TelegramAgent:
-        cached = self._agents.get(chat_id)
+    def _agent_for_chat(self, profile_id: str, chat_id: int) -> TelegramAgent:
+        key = (profile_id, chat_id)
+        cached = self._agents.get(key)
         if cached is not None:
             return cached
-        conversation = self.session_store.find_conversation_by_metadata(
+        conversation = self._session_store_for(profile_id).find_conversation_by_metadata(
             TELEGRAM_CHAT_METADATA_KEY,
             chat_id,
         )
-        return self._create_agent(chat_id, conversation.id if conversation is not None else None)
+        return self._create_agent(
+            profile_id,
+            chat_id,
+            conversation.id if conversation is not None else None,
+        )
 
-    def _create_agent(self, chat_id: int, conversation_id: str | None) -> TelegramAgent:
-        agent = self._agent_factory(chat_id, conversation_id)
-        self._agents[chat_id] = agent
+    def _create_agent(
+        self,
+        profile_id: str,
+        chat_id: int,
+        conversation_id: str | None,
+    ) -> TelegramAgent:
+        if profile_id == self.config.profile_id:
+            agent = self._agent_factory(chat_id, conversation_id)
+        elif self._custom_agent_factory is not None:
+            raise RuntimeError(
+                "the injected Telegram agent factory cannot serve another profile"
+            )
+        else:
+            agent = self._default_agent_factory_for_profile(
+                profile_id,
+                chat_id,
+                conversation_id,
+            )
+        self._agents[(profile_id, chat_id)] = agent
         return agent
 
     def _default_agent_factory(self, chat_id: int, conversation_id: str | None) -> TelegramAgent:
+        return self._default_agent_factory_for_profile(
+            self.config.profile_id,
+            chat_id,
+            conversation_id,
+        )
+
+    def _default_agent_factory_for_profile(
+        self,
+        profile_id: str,
+        chat_id: int,
+        conversation_id: str | None,
+    ) -> TelegramAgent:
+        runtime_config = self._config_for_profile(profile_id)
+        schedule_store = self._schedule_store_for(profile_id)
         tool_specs: list[object] = [
             Tools.calculator,
             Tools.read_file,
@@ -442,10 +578,10 @@ class TelegramAgentBot:
                     Tools.summarize_memories,
                 )
             )
-        if self.schedule_store is not None:
+        if schedule_store is not None:
             tool_specs.extend(
                 scheduled_job_tools(
-                    self.schedule_store,
+                    schedule_store,
                     adapter="telegram",
                     destination_id=str(chat_id),
                     timezone_name=self.telegram_config.timezone,
@@ -459,8 +595,12 @@ class TelegramAgentBot:
                 )
             )
         return AsyncAgent(
-            config=self.config,
-            memory_namespace=f"telegram:chat:{chat_id}",
+            config=runtime_config,
+            memory_namespace=(
+                f"telegram:chat:{chat_id}"
+                if profile_id == self.config.profile_id
+                else f"profile:{profile_id}:telegram:chat:{chat_id}"
+            ),
             tools=tool_specs,
             capabilities=Capabilities(
                 files=FileAccess.READ,
@@ -478,6 +618,36 @@ class TelegramAgentBot:
             conversation_id=conversation_id,
             conversation_metadata={TELEGRAM_CHAT_METADATA_KEY: chat_id},
         )
+
+    def _config_for_profile(self, profile_id: str) -> Config:
+        cached = self._profile_configs.get(profile_id)
+        if cached is not None:
+            return cached
+        if self._profile_runtime_factory is None:
+            raise RuntimeError(
+                f"gateway route selected unavailable profile {profile_id!r}"
+            )
+        resolved = self._profile_runtime_factory.resolve(profile_id)
+        self._profile_configs[profile_id] = resolved.config
+        return resolved.config
+
+    def _session_store_for(self, profile_id: str) -> SQLiteSessionStore:
+        cached = self._session_stores.get(profile_id)
+        if cached is not None:
+            return cached
+        store = SQLiteSessionStore(self._config_for_profile(profile_id).store_path)
+        self._session_stores[profile_id] = store
+        return store
+
+    def _schedule_store_for(self, profile_id: str) -> SQLiteScheduleStore | None:
+        if not self.telegram_config.scheduling_enabled:
+            return None
+        cached = self._schedule_stores.get(profile_id)
+        if cached is not None:
+            return cached
+        store = SQLiteScheduleStore(self._config_for_profile(profile_id).store_path)
+        self._schedule_stores[profile_id] = store
+        return store
 
     async def _send(self, chat_id: int, text: str) -> None:
         await asyncio.to_thread(self.client.send_message, chat_id, text)
@@ -505,8 +675,13 @@ class TelegramAgentBot:
             await asyncio.sleep(TELEGRAM_TYPING_REFRESH_SECONDS)
             await self._send_typing_once(chat_id)
 
-    def _save_offset(self, offset: int) -> None:
-        self._offset = self.session_store.save_adapter_cursor(TELEGRAM_CURSOR_NAME, offset)
+    def _refresh_offset(self) -> None:
+        status = self.gateway_ledger.adapter_status(TELEGRAM_CURSOR_NAME, "primary")
+        self._offset = (
+            int(status.cursor)
+            if status is not None and status.cursor is not None
+            else None
+        )
 
     def _chat_lock(self, chat_id: int) -> asyncio.Lock:
         return self._chat_locks.setdefault(chat_id, asyncio.Lock())
@@ -521,9 +696,14 @@ class TelegramAgentBot:
 
     async def run_due_jobs_once(self) -> None:
         """Claim and execute one bounded batch of due Telegram jobs."""
-        if self.schedule_store is None:
-            return
-        store = self.schedule_store
+        for profile_id, store in tuple(self._schedule_stores.items()):
+            await self._run_due_jobs_for_profile(profile_id, store)
+
+    async def _run_due_jobs_for_profile(
+        self,
+        profile_id: str,
+        store: SQLiteScheduleStore,
+    ) -> None:
         jobs = await asyncio.to_thread(
             store.claim_due,
             adapter="telegram",
@@ -534,12 +714,12 @@ class TelegramAgentBot:
                 LOGGER.error("Scheduled Telegram job has no claim token")
                 continue
             renewal_task = asyncio.create_task(
-                self._renew_schedule_lease(job.id, job.claim_token)
+                self._renew_schedule_lease(store, job.id, job.claim_token)
             )
             try:
                 chat_id = int(job.destination_id)
                 async with self._chat_lock(chat_id):
-                    response = await self._agent_for_chat(chat_id).run(
+                    response = await self._agent_for_chat(profile_id, chat_id).run(
                         job.prompt,
                         extension_metadata={
                             "source": "telegram_schedule",
@@ -564,13 +744,16 @@ class TelegramAgentBot:
                 with suppress(asyncio.CancelledError):
                     await renewal_task
 
-    async def _renew_schedule_lease(self, job_id: str, claim_token: str) -> None:
-        if self.schedule_store is None:
-            return
+    async def _renew_schedule_lease(
+        self,
+        store: SQLiteScheduleStore,
+        job_id: str,
+        claim_token: str,
+    ) -> None:
         while True:
             await asyncio.sleep(SCHEDULE_LEASE_RENEW_SECONDS)
             renewed = await asyncio.to_thread(
-                self.schedule_store.renew_lease,
+                store.renew_lease,
                 job_id,
                 claim_token,
                 lease_seconds=SCHEDULE_LEASE_SECONDS,
@@ -586,6 +769,34 @@ def _parse_command(text: str) -> tuple[str | None, str]:
     raw_command, _, arguments = text.partition(" ")
     command = raw_command.split("@", 1)[0].lower()
     return command, arguments.strip()
+
+
+def _telegram_update_from_envelope(envelope: InboundEnvelope) -> TelegramUpdate:
+    text = next(
+        (part.text for part in envelope.parts if isinstance(part, TextPart)),
+        "",
+    )
+    attachment_value = envelope.extensions.get("attachment")
+    attachment = None
+    if isinstance(attachment_value, Mapping):
+        attachment = TelegramAttachment(
+            file_id=str(attachment_value["file_id"]),
+            kind=str(attachment_value["kind"]),
+            mime_type=str(attachment_value["mime_type"]),
+            file_name=(
+                str(attachment_value["file_name"])
+                if attachment_value.get("file_name") is not None
+                else None
+            ),
+        )
+    return TelegramUpdate(
+        update_id=int(envelope.event_id),
+        chat_id=int(envelope.destination_id),
+        user_id=int(envelope.identity.principal_id),
+        text=text,
+        chat_type=str(envelope.extensions.get("chat_type", "private")),
+        attachment=attachment,
+    )
 
 
 def _help_text() -> str:

@@ -29,6 +29,7 @@ from chulk.cli.entrypoints import (
     run_init_command,
     run_trace_command,
 )
+from chulk.cli.gateway import run_gateway_command
 from chulk.cli.profiles import run_profile_command
 from chulk.cli.plugins import run_plugin_command
 from chulk.cli.models import run_model_command
@@ -69,6 +70,7 @@ from chulk.profiles import (
     ProfileOwnershipError,
     ProfileRuntimeFactory,
 )
+from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
 from chulk.plugins import LocalPluginRegistry
 from chulk.runtime import create_agent
 from chulk.sessions import (
@@ -637,6 +639,36 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        if args.command == "gateway":
+            from chulk.telegram.main import run_telegram_gateway
+
+            control_path = base_config.runtime_dir / "control.sqlite"
+            return run_gateway_command(
+                args.gateway_command,
+                ledger=SQLiteGatewayLedger(control_path),
+                router=SQLiteGatewayRouter(control_path),
+                profile_store=profile_factory.profile_store,
+                start_func=lambda: run_telegram_gateway(
+                    config,
+                    control_db_path=control_path,
+                    profile_runtime_factory=profile_factory,
+                ),
+                adapter=getattr(args, "adapter", "telegram"),
+                account_id=getattr(args, "account", "primary"),
+                route_command=getattr(args, "route_command", None),
+                route_id=getattr(args, "route_id", None),
+                profile_id=getattr(args, "profile", None),
+                principal_id=getattr(args, "principal", None),
+                destination_id=getattr(args, "destination", None),
+                thread_id=getattr(args, "thread", None),
+                pairing_ttl_seconds=getattr(args, "ttl_seconds", 600),
+                include_disabled=bool(
+                    getattr(args, "include_disabled", False)
+                ),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "plugins":
             return run_plugin_command(
                 args.plugin_command,

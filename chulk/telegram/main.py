@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
-from chulk.config import ConfigValueError, load_config
+from chulk.config import Config, ConfigValueError, load_config
 from chulk.llm.base import LLMConfigurationError
 from chulk.llm.lifecycle import close_resources
 from chulk.llm.providers.gemini_media import GeminiMediaProcessor
+from chulk.profiles import ProfileRuntimeFactory
 from chulk.telegram.bot import TelegramAgentBot
 from chulk.telegram.client import TelegramClient
 from chulk.telegram.config import TelegramConfigError, load_telegram_config
@@ -19,11 +21,24 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         config = load_config()
-        telegram_config = load_telegram_config(env_file=config.project_root / ".env")
-    except (ConfigValueError, TelegramConfigError) as exc:
+    except ConfigValueError as exc:
         logging.error("configuration error: %s", exc)
         return 2
+    return run_telegram_gateway(config)
 
+
+def run_telegram_gateway(
+    config: Config,
+    *,
+    control_db_path: Path | str | None = None,
+    profile_runtime_factory: ProfileRuntimeFactory | None = None,
+) -> int:
+    """Run Telegram through the shared gateway for one resolved agent profile."""
+    try:
+        telegram_config = load_telegram_config(env_file=config.project_root / ".env")
+    except TelegramConfigError as exc:
+        logging.error("configuration error: %s", exc)
+        return 2
     media_processor = None
     try:
         if config.llm_provider == "gemini":
@@ -39,6 +54,10 @@ def main() -> int:
             client=TelegramClient(telegram_config.bot_token),
             media_processor=media_processor,
             owns_media_processor=media_processor is not None,
+            control_db_path=(
+                str(control_db_path) if control_db_path is not None else None
+            ),
+            profile_runtime_factory=profile_runtime_factory,
         )
     except (LLMConfigurationError, ValueError) as exc:
         close_resources((media_processor,))

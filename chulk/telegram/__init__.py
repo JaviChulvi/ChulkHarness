@@ -7,11 +7,13 @@ from chulk.telegram.client import (
     TelegramUpdate,
 )
 from chulk.telegram.bot import TelegramAgentBot
+from chulk.telegram.adapter import TelegramChannelAdapter
 from chulk.telegram.config import TelegramConfig, TelegramConfigError, load_telegram_config
 
 __all__ = [
     "TelegramClient",
     "TelegramAgentBot",
+    "TelegramChannelAdapter",
     "TelegramAttachment",
     "TelegramConfig",
     "TelegramConfigError",
