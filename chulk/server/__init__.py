@@ -1,5 +1,6 @@
 """Optional local control-server contracts."""
 
+from chulk.server.app import ServerDependencyError, create_control_app
 from chulk.server.journal import (
     PublicEventCursorExpiredError,
     PublicEventJournal,
@@ -42,4 +43,6 @@ __all__ = [
     "PublicEventCursorExpiredError",
     "PublicEventJournal",
     "PublicEventRecord",
+    "ServerDependencyError",
+    "create_control_app",
 ]
