@@ -35,6 +35,10 @@ class ConversationCommandNotFoundError(LookupError):
     """Raised when a command does not belong to the requested conversation."""
 
 
+class ControlDecisionConflictError(RuntimeError):
+    """Raised when a plan decision races or reuses an idempotency key."""
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationCommand:
     id: str
@@ -79,6 +83,7 @@ class _ConversationWorker:
     journal: PublicEventJournal
     broker: PermissionBroker
     queue: asyncio.Queue[str]
+    control_lock: asyncio.Lock
     task: asyncio.Task[None] | None = None
     active_task: asyncio.Task[RunResult] | None = None
 
@@ -220,26 +225,38 @@ class ConversationDispatcher:
         profile_id: str,
         conversation_id: str,
         turn_id: str,
-    ) -> RunResult:
+        *,
+        idempotency_key: str,
+    ) -> Mapping[str, Any]:
         worker = self._worker(profile_id, conversation_id)
-        if worker.agent.state.current_turn_id != turn_id:
-            raise ValueError("turn is not the current conversation turn")
-        return await self._run_control(worker, worker.agent.approve_plan_async)
+        return await self._apply_plan_decision(
+            worker,
+            turn_id=turn_id,
+            action="approve",
+            idempotency_key=idempotency_key,
+            operation=worker.agent.approve_plan_async,
+        )
 
     async def reject_plan(
         self,
         profile_id: str,
         conversation_id: str,
         turn_id: str,
-    ) -> RunResult:
+        *,
+        idempotency_key: str,
+    ) -> Mapping[str, Any]:
         worker = self._worker(profile_id, conversation_id)
-        if worker.agent.state.current_turn_id != turn_id:
-            raise ValueError("turn is not the current conversation turn")
 
         async def reject() -> str:
             return worker.agent.reject_plan()
 
-        return await self._run_control(worker, reject)
+        return await self._apply_plan_decision(
+            worker,
+            turn_id=turn_id,
+            action="reject",
+            idempotency_key=idempotency_key,
+            operation=reject,
+        )
 
     async def cancel(self, profile_id: str, conversation_id: str) -> bool:
         worker = self._worker(profile_id, conversation_id)
@@ -335,9 +352,11 @@ class ConversationDispatcher:
             journal=journal,
             broker=broker,
             queue=asyncio.Queue(maxsize=self.max_pending_per_conversation),
+            control_lock=asyncio.Lock(),
         )
         self._workers[key] = worker
         self._recover_commands(worker)
+        self._recover_control_decisions(worker)
         return worker
 
     def _enqueue(
@@ -508,6 +527,162 @@ class ConversationDispatcher:
             await value
         return run_result_from_runtime(worker.agent)
 
+    async def _apply_plan_decision(
+        self,
+        worker: _ConversationWorker,
+        *,
+        turn_id: str,
+        action: str,
+        idempotency_key: str,
+        operation: Callable[[], Any],
+    ) -> Mapping[str, Any]:
+        async with worker.control_lock:
+            existing = self._begin_control_decision(
+                worker,
+                turn_id=turn_id,
+                action=action,
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                return existing
+            if worker.agent.state.current_turn_id != turn_id:
+                self._finish_control_decision(
+                    worker,
+                    turn_id=turn_id,
+                    status="failed",
+                    error="turn is not the current conversation turn",
+                )
+                raise ValueError("turn is not the current conversation turn")
+            try:
+                result = await self._run_control(worker, operation)
+            except BaseException as exc:
+                self._finish_control_decision(
+                    worker,
+                    turn_id=turn_id,
+                    status="uncertain",
+                    error=f"plan decision failed with {type(exc).__name__}",
+                )
+                raise
+            payload = result.to_dict()
+            self._finish_control_decision(
+                worker,
+                turn_id=turn_id,
+                status="completed",
+                result=payload,
+            )
+            return payload
+
+    def _begin_control_decision(
+        self,
+        worker: _ConversationWorker,
+        *,
+        turn_id: str,
+        action: str,
+        idempotency_key: str,
+    ) -> Mapping[str, Any] | None:
+        path = self._store_path(worker.profile_id)
+        now = _utc_now()
+        with sqlite_connection(path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM control_decisions
+                WHERE conversation_id = ? AND target_type = 'plan'
+                  AND target_id = ?
+                """,
+                (worker.conversation_id, turn_id),
+            ).fetchone()
+            if row is not None:
+                if (
+                    str(row["action"]) != action
+                    or str(row["idempotency_key"]) != idempotency_key
+                ):
+                    raise ControlDecisionConflictError(
+                        "plan already has a different control decision"
+                    )
+                if row["status"] != "completed" or row["result_json"] is None:
+                    raise ControlDecisionConflictError(
+                        f"plan decision is {row['status']}"
+                    )
+                result = json.loads(str(row["result_json"]))
+                if not isinstance(result, dict):
+                    raise ValueError("stored plan decision result is invalid")
+                return result
+            duplicate = conn.execute(
+                """
+                SELECT target_id FROM control_decisions
+                WHERE profile_id = ? AND idempotency_key = ?
+                """,
+                (worker.profile_id, idempotency_key),
+            ).fetchone()
+            if duplicate is not None:
+                raise ControlDecisionConflictError(
+                    "idempotency key was used for another control decision"
+                )
+            conn.execute(
+                """
+                INSERT INTO control_decisions (
+                    id, profile_id, conversation_id, target_type, target_id,
+                    action, idempotency_key, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'plan', ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    uuid4().hex,
+                    worker.profile_id,
+                    worker.conversation_id,
+                    turn_id,
+                    action,
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+        return None
+
+    def _finish_control_decision(
+        self,
+        worker: _ConversationWorker,
+        *,
+        turn_id: str,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        with sqlite_connection(self._store_path(worker.profile_id)) as conn:
+            conn.execute(
+                """
+                UPDATE control_decisions
+                SET status = ?, result_json = ?, error = ?, updated_at = ?
+                WHERE conversation_id = ? AND target_type = 'plan'
+                  AND target_id = ? AND status = 'pending'
+                """,
+                (
+                    status,
+                    (
+                        json.dumps(dict(result), sort_keys=True)
+                        if result is not None
+                        else None
+                    ),
+                    error,
+                    _utc_now(),
+                    worker.conversation_id,
+                    turn_id,
+                ),
+            )
+
+    def _recover_control_decisions(self, worker: _ConversationWorker) -> None:
+        with sqlite_connection(self._store_path(worker.profile_id)) as conn:
+            conn.execute(
+                """
+                UPDATE control_decisions
+                SET status = 'uncertain',
+                    error = 'server restarted during plan decision',
+                    updated_at = ?
+                WHERE conversation_id = ? AND status = 'pending'
+                """,
+                (_utc_now(), worker.conversation_id),
+            )
+
     def _mark_running(self, worker: _ConversationWorker, command_id: str) -> None:
         now = _utc_now()
         with sqlite_connection(self._store_path(worker.profile_id)) as conn:
@@ -635,4 +810,5 @@ __all__ = [
     "ConversationCommand",
     "ConversationCommandNotFoundError",
     "ConversationDispatcher",
+    "ControlDecisionConflictError",
 ]

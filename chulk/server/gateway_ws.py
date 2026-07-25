@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -26,6 +27,7 @@ from chulk.gateway import (
 )
 from chulk.profiles import ProfileNotFoundError
 from chulk.server.dispatcher import ConversationDispatcher
+from chulk.sessions import SessionNotFoundError
 
 
 GATEWAY_PROTOCOL_VERSION = 1
@@ -104,6 +106,8 @@ class WebSocketChannelAdapter:
                 "reply_to_event_id": envelope.reply_to_event_id,
                 "sequence": envelope.sequence,
                 "final": envelope.final,
+                "status": envelope.extensions.get("status", "completed"),
+                "error": envelope.extensions.get("error"),
             }
         )
         return DeliveryReceipt(
@@ -190,14 +194,37 @@ async def serve_gateway_websocket(
             )["id"]
         )
         mode = envelope.extensions.get("mode", "run")
-        command = await dispatcher.submit_and_wait(
-            profile_id,
-            conversation_id,
-            text,
-            mode="plan" if mode == "plan" else "run",
-            source="gateway",
-            idempotency_key=envelope.idempotency_key,
-        )
+        try:
+            try:
+                command = await dispatcher.submit_and_wait(
+                    profile_id,
+                    conversation_id,
+                    text,
+                    mode="plan" if mode == "plan" else "run",
+                    source="gateway",
+                    idempotency_key=envelope.idempotency_key,
+                )
+            except SessionNotFoundError:
+                return (
+                    OutboundEnvelope(
+                        profile_id=profile_id,
+                        conversation_id=conversation_id,
+                        target=DeliveryTarget(
+                            GATEWAY_ADAPTER_NAME,
+                            account_id,
+                            envelope.destination_id,
+                        ),
+                        text="Conversation not found.",
+                        reply_to_event_id=envelope.event_id,
+                        extensions={
+                            "status": "failed",
+                            "error": "conversation_not_found",
+                        },
+                    ),
+                )
+        except asyncio.CancelledError:
+            await dispatcher.cancel(profile_id, conversation_id)
+            raise
         result = command.result or {}
         answer = result.get("content")
         if not isinstance(answer, str):
@@ -213,7 +240,11 @@ async def serve_gateway_websocket(
                 ),
                 text=answer,
                 reply_to_event_id=envelope.event_id,
-                extensions={"command_id": command.id, "status": command.status},
+                extensions={
+                    "command_id": command.id,
+                    "status": command.status,
+                    "error": command.error,
+                },
             ),
         )
 
@@ -298,6 +329,8 @@ async def serve_gateway_websocket(
     except Exception as exc:
         if type(exc).__name__ != "WebSocketDisconnect":
             await _send_error(adapter, "invalid_frame")
+            with suppress(Exception):
+                await websocket.close(code=4400)
     finally:
         router.remove_route(route.id)
         await runtime.close()

@@ -104,6 +104,22 @@ class PermissionDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanDecisionRequest:
+    idempotency_key: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> PlanDecisionRequest:
+        body = _object(value)
+        return cls(
+            idempotency_key=_required_text(
+                body.get("idempotency_key"),
+                "idempotency_key",
+                max_chars=256,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ApiError:
     code: str
     message: str
@@ -131,4 +147,5 @@ __all__ = [
     "MessageMode",
     "PermissionAnswer",
     "PermissionDecisionRequest",
+    "PlanDecisionRequest",
 ]

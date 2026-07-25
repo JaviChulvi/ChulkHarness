@@ -43,6 +43,19 @@ class BlockingLLM(LLMClient):
         return json.dumps({"type": "final_answer", "content": "late answer"})
 
 
+class SequenceLLM(LLMClient):
+    provider = "test"
+    model = "sequence"
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    def complete(self, messages, *, max_output_tokens=None) -> str:
+        self.calls += 1
+        return self.responses.pop(0)
+
+
 def _dispatcher(tmp_path: Path, llm: LLMClient) -> ConversationDispatcher:
     config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
     store = SQLiteProfileStore(
@@ -169,4 +182,86 @@ async def test_dispatcher_cancels_active_and_queued_commands(tmp_path) -> None:
     assert dispatcher.get_command(
         "default", conversation["id"], second.id
     ).status == "cancelled"
+    await dispatcher.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_persists_idempotent_plan_decisions(tmp_path) -> None:
+    plan = {
+        "summary": "Implement",
+        "steps": [
+            {
+                "id": "1",
+                "title": "Finish",
+                "description": "Finish the work.",
+                "status": "pending",
+                "acceptance_criteria": ["Work is finished."],
+            }
+        ],
+    }
+    llm = SequenceLLM(
+        [
+            json.dumps(
+                {
+                    "type": "plan",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": json.dumps(plan),
+                    "step_update_json": "{}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "Finished.",
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "implemented"}),
+        ]
+    )
+    dispatcher = _dispatcher(tmp_path, llm)
+    conversation = await dispatcher.create_conversation("default")
+    planned = await dispatcher.submit_and_wait(
+        "default",
+        conversation["id"],
+        "make a plan",
+        mode="plan",
+        idempotency_key="plan-command",
+    )
+    turn_id = planned.result["turn_id"]
+
+    first = await dispatcher.approve_plan(
+        "default",
+        conversation["id"],
+        turn_id,
+        idempotency_key="plan-decision",
+    )
+    replay = await dispatcher.approve_plan(
+        "default",
+        conversation["id"],
+        turn_id,
+        idempotency_key="plan-decision",
+    )
+
+    assert first == replay
+    assert first["content"] == "implemented"
+    assert llm.calls == 3
+    with pytest.raises(RuntimeError, match="different control decision"):
+        await dispatcher.reject_plan(
+            "default",
+            conversation["id"],
+            turn_id,
+            idempotency_key="other-decision",
+        )
     await dispatcher.close()

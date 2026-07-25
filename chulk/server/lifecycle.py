@@ -219,34 +219,35 @@ async def serve_control_server(
         ) from exc
     ledger = ControlServerLedger(config.runtime_dir / "control.sqlite")
     instance_token = ledger.acquire(host=host, port=port)
-    application = create_control_app(config)
-    server = uvicorn.Server(
-        uvicorn.Config(
-            application,
-            host=host,
-            port=port,
-            access_log=False,
-            server_header=False,
-        )
-    )
-
-    async def monitor() -> None:
-        while not server.should_exit:
-            await asyncio.sleep(5)
-            if ledger.stop_requested(instance_token):
-                server.should_exit = True
-                return
-            if not ledger.renew(instance_token):
-                server.should_exit = True
-                return
-
-    watcher = asyncio.create_task(monitor())
+    watcher: asyncio.Task[None] | None = None
     try:
+        application = create_control_app(config)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                application,
+                host=host,
+                port=port,
+                access_log=False,
+                server_header=False,
+            )
+        )
+
+        async def monitor() -> None:
+            while not server.should_exit:
+                await asyncio.sleep(5)
+                if ledger.stop_requested(instance_token):
+                    server.should_exit = True
+                    return
+                if not ledger.renew(instance_token):
+                    server.should_exit = True
+                    return
+
+        watcher = asyncio.create_task(monitor())
         await server.serve()
     finally:
-        server.should_exit = True
-        watcher.cancel()
-        await asyncio.gather(watcher, return_exceptions=True)
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
         ledger.release(instance_token)
     return 0
 

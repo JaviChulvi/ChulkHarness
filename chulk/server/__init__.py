@@ -17,6 +17,7 @@ from chulk.server.dispatcher import (
     ConversationCommand,
     ConversationCommandNotFoundError,
     ConversationDispatcher,
+    ControlDecisionConflictError,
 )
 from chulk.server.models import (
     API_SCHEMA_VERSION,
@@ -24,6 +25,7 @@ from chulk.server.models import (
     ConversationCreateRequest,
     ConversationMessageRequest,
     PermissionDecisionRequest,
+    PlanDecisionRequest,
 )
 from chulk.server.lifecycle import (
     ControlServerLedger,
@@ -46,6 +48,7 @@ __all__ = [
     "ConversationCommand",
     "ConversationCommandNotFoundError",
     "ConversationDispatcher",
+    "ControlDecisionConflictError",
     "ConversationMessageRequest",
     "ControlServerLedger",
     "ControlServerStatus",
@@ -53,6 +56,7 @@ __all__ = [
     "GatewayHello",
     "GatewayMessage",
     "PermissionDecisionRequest",
+    "PlanDecisionRequest",
     "PendingPermission",
     "PermissionBroker",
     "PermissionDecisionConflictError",

@@ -758,6 +758,35 @@ def _migrate_to_conversation_dispatch(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_control_decisions(conn: sqlite3.Connection) -> None:
+    """Persist idempotent plan decisions across host restarts."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS control_decisions (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (conversation_id, target_type, target_id),
+            UNIQUE (profile_id, idempotency_key),
+            CHECK (target_type = 'plan'),
+            CHECK (action IN ('approve', 'reject')),
+            CHECK (status IN ('pending', 'completed', 'failed', 'uncertain'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_decisions_conversation
+        ON control_decisions(profile_id, conversation_id, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -811,6 +840,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(11, "skill-lifecycle-and-learning", _migrate_to_skill_lifecycle),
     SQLiteMigration(12, "public-control-plane", _migrate_to_public_control_plane),
     SQLiteMigration(13, "conversation-dispatch", _migrate_to_conversation_dispatch),
+    SQLiteMigration(14, "idempotent-control-decisions", _migrate_to_control_decisions),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

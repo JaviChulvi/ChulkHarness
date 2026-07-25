@@ -252,10 +252,16 @@ def test_http_api_rejects_malformed_and_oversized_requests(tmp_path) -> None:
             headers=_auth(tokens),
             json={"metadata": {"value": "x" * 100}},
         )
+        chunked = client.post(
+            "/v1/profiles/default/conversations",
+            headers={**_auth(tokens), "Content-Type": "application/json"},
+            content=(part for part in (b'{"metadata":{"value":"', b"x" * 100, b'"}}')),
+        )
 
         assert malformed.status_code == 400
         assert malformed.json()["error"]["code"] == "malformed_json"
         assert oversized.status_code == 413
+        assert chunked.status_code == 413
 
 
 def test_rate_limiter_bounds_repeated_requests() -> None:
@@ -306,6 +312,20 @@ def test_websocket_gateway_uses_authenticated_shared_dispatch(tmp_path) -> None:
             assert completed["type"] == "message.completed"
             assert completed["text"] == "answer hello websocket"
             assert completed["conversation_id"]
+            socket.send_json(
+                {
+                    "type": "message",
+                    "schema_version": 1,
+                    "event_id": "event-2",
+                    "idempotency_key": "ws-message-2",
+                    "conversation_id": "missing-conversation",
+                    "message": "hello missing",
+                }
+            )
+            assert socket.receive_json()["type"] == "message.accepted"
+            missing = socket.receive_json()
+            assert missing["status"] == "failed"
+            assert missing["error"] == "conversation_not_found"
 
 
 @pytest.mark.asyncio

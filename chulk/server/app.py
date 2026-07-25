@@ -15,6 +15,7 @@ from chulk.server.dispatcher import (
     ConversationBackpressureError,
     ConversationCommandNotFoundError,
     ConversationDispatcher,
+    ControlDecisionConflictError,
 )
 from chulk.server.journal import PublicEventCursorExpiredError
 from chulk.server.models import (
@@ -23,6 +24,7 @@ from chulk.server.models import (
     ConversationCreateRequest,
     ConversationMessageRequest,
     PermissionDecisionRequest,
+    PlanDecisionRequest,
 )
 from chulk.server.operators import OperatorService, integer_query, parse_timestamp
 from chulk.server.permissions import (
@@ -255,22 +257,32 @@ def create_control_app(
         return _json({"cancel_requested": cancelled}, status_code=202)
 
     async def approve_plan(request):
+        body = PlanDecisionRequest.from_dict(await _json_body(request))
         profile_id, conversation_id = _conversation_params(request)
-        result = await controller.approve_plan(
-            profile_id,
-            conversation_id,
-            request.path_params["turn_id"],
-        )
-        return _json({"result": result.to_dict()})
+        try:
+            result = await controller.approve_plan(
+                profile_id,
+                conversation_id,
+                request.path_params["turn_id"],
+                idempotency_key=body.idempotency_key,
+            )
+        except ControlDecisionConflictError as exc:
+            raise ApiProblem(409, "plan_decision_conflict", str(exc)) from exc
+        return _json({"result": result})
 
     async def reject_plan(request):
+        body = PlanDecisionRequest.from_dict(await _json_body(request))
         profile_id, conversation_id = _conversation_params(request)
-        result = await controller.reject_plan(
-            profile_id,
-            conversation_id,
-            request.path_params["turn_id"],
-        )
-        return _json({"result": result.to_dict()})
+        try:
+            result = await controller.reject_plan(
+                profile_id,
+                conversation_id,
+                request.path_params["turn_id"],
+                idempotency_key=body.idempotency_key,
+            )
+        except ControlDecisionConflictError as exc:
+            raise ApiProblem(409, "plan_decision_conflict", str(exc)) from exc
+        return _json({"result": result})
 
     async def list_permissions(request):
         profile_id, conversation_id = _conversation_params(request)
@@ -540,6 +552,8 @@ async def _json_body(request) -> object:
         )
     try:
         return await request.json()
+    except RequestBodyTooLargeError:
+        raise
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise ApiProblem(400, "malformed_json", "request body is not valid JSON") from exc
 
