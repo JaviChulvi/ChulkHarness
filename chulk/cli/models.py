@@ -143,12 +143,13 @@ def run_model_command(
                 "health": service.store.health(profile).to_dict(),
                 "probe_may_consume_quota": probe,
             }
-            return _emit(
+            _emit(
                 payload,
                 json_output=json_output,
                 text=_format_inspect(payload),
                 output_func=output_func,
             )
+            return 0 if diagnostic.ok else 2
         if command == "health":
             health_profiles = (
                 (service.store.get(profile_id),)

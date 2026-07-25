@@ -184,6 +184,46 @@ def test_exec_override_reports_model_selection_without_persisting_it(
     )
 
 
+def test_model_inspect_returns_failure_for_an_unavailable_reference(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    outputs: list[str] = []
+    errors: list[str] = []
+    assert (
+        _run(
+            [
+                "model",
+                "create",
+                "missing-key",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-4.1-mini",
+                "--credential-ref",
+                "env:KEY_THAT_IS_NOT_SET",
+            ],
+            outputs=outputs,
+            errors=errors,
+        )
+        == 0
+    )
+    outputs.clear()
+
+    assert (
+        _run(
+            ["model", "inspect", "missing-key", "--json"],
+            outputs=outputs,
+            errors=errors,
+        )
+        == 2
+    )
+    payload = json.loads(outputs.pop())
+    assert payload["ok"] is False
+    assert payload["diagnostic"]["category"] == "missing_credential"
+
+
 def test_interactive_model_command_switches_and_persists_channel_selection(
     monkeypatch,
     tmp_path: Path,

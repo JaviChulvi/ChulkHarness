@@ -1,6 +1,6 @@
 """Durable named model profiles, diagnostics, health, and selection."""
 
-from chulk.model_profiles.client import RefreshingLLMClient, RequestClientLease
+from chulk.model_profiles.client import RefreshingLLMClient
 from chulk.model_profiles.diagnostics import (
     EndpointProvider,
     ModelProfileValidator,
@@ -57,7 +57,6 @@ __all__ = [
     "ProviderHealthStatus",
     "ProviderProbe",
     "RefreshingLLMClient",
-    "RequestClientLease",
     "ResolvedModelCandidate",
     "ResolvedModelRuntime",
     "SecretProvider",

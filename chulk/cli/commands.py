@@ -10,6 +10,7 @@ from chulk.cli.progress import ProgressSettings
 from chulk.cli.terminal import TerminalUI
 from chulk.config import Config
 from chulk.core import Agent
+from chulk.llm import LLMError
 from chulk.sessions import (
     AmbiguousSessionError,
     SessionNotFoundError,
@@ -155,7 +156,7 @@ def _model(arguments: str, context: CLICommandContext) -> None:
             arguments,
             context.agent.state.conversation_id,
         )
-    except (LookupError, OSError, ValueError) as exc:
+    except (LLMError, LookupError, OSError, ValueError) as exc:
         context.output_func(context.terminal.warning(str(exc)))
         return
     context.switch_runtime(next_agent, next_config)

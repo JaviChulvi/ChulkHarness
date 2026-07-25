@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -203,11 +204,22 @@ class ModelProfileStore:
                 "SELECT * FROM provider_health WHERE health_key = ?",
                 (key,),
             ).fetchone()
-        return (
+        health = (
             _row_to_health(row, model_profile_id=profile.id)
             if row is not None
             else _healthy(profile, key)
         )
+        if (
+            health.status is ProviderHealthStatus.COOLDOWN
+            and health.cooldown_until is not None
+            and health.cooldown_until <= self.clock()
+        ):
+            return replace(
+                health,
+                status=ProviderHealthStatus.DEGRADED,
+                cooldown_until=None,
+            )
+        return health
 
     def record_success(self, profile: ModelProfile) -> ProviderHealth:
         current = self.health(profile)
@@ -240,14 +252,33 @@ class ModelProfileStore:
         cooldown_seconds: int = 60,
         max_cooldown_seconds: int = 900,
     ) -> ProviderHealth:
+        if failure_threshold < 1:
+            raise ValueError("failure_threshold must be greater than zero")
+        if cooldown_seconds < 1:
+            raise ValueError("cooldown_seconds must be greater than zero")
+        if max_cooldown_seconds < cooldown_seconds:
+            raise ValueError("max_cooldown_seconds must be at least cooldown_seconds")
         current = self.health(profile)
         now = self.clock()
-        failures = current.consecutive_failures + 1
+        circuit_categories = {
+            DiagnosticCategory.AUTHENTICATION,
+            DiagnosticCategory.BILLING,
+            DiagnosticCategory.RATE_LIMIT,
+            DiagnosticCategory.TIMEOUT,
+            DiagnosticCategory.INVALID_MODEL,
+            DiagnosticCategory.UNAVAILABLE_ENDPOINT,
+            DiagnosticCategory.UNSUPPORTED_CAPABILITY,
+            DiagnosticCategory.UNSUPPORTED_SCHEMA,
+        }
+        affects_circuit = category in circuit_categories
+        failures = current.consecutive_failures + 1 if affects_circuit else 0
         immediate = category in {
             DiagnosticCategory.AUTHENTICATION,
             DiagnosticCategory.BILLING,
         }
-        enter_cooldown = immediate or failures >= failure_threshold
+        enter_cooldown = affects_circuit and (
+            immediate or failures >= failure_threshold
+        )
         cooldown_until = None
         status = ProviderHealthStatus.DEGRADED
         if enter_cooldown:

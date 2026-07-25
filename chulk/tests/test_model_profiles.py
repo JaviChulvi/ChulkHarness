@@ -311,10 +311,33 @@ def test_cooldown_is_deterministic_bounded_observable_and_resettable(
     assert third.status is ProviderHealthStatus.COOLDOWN
     assert third.cooldown_until == clock.now + timedelta(seconds=60)
     assert third.failed_requests == 3
+    assert third.cooldown_until is not None
+    clock.now = third.cooldown_until
+    expired = store.health(profile)
+    assert expired.status is ProviderHealthStatus.DEGRADED
+    assert expired.cooldown_until is None
 
     reset = store.reset_health(profile)
     assert reset.status is ProviderHealthStatus.HEALTHY
     assert reset.failed_requests == 0
+
+
+def test_unknown_failures_are_counted_without_opening_the_circuit(
+    tmp_path: Path,
+) -> None:
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    store = ModelProfileStore(
+        config.runtime_dir / "control.sqlite",
+        base_config=config,
+    )
+    profile = store.create(_openai_profile("coding", "MODEL_KEY"))
+
+    for _index in range(5):
+        health = store.record_failure(profile, DiagnosticCategory.UNKNOWN)
+
+    assert health.status is ProviderHealthStatus.DEGRADED
+    assert health.consecutive_failures == 0
+    assert health.failed_requests == 5
 
 
 def test_circuit_state_is_shared_by_provider_and_credential_reference(
