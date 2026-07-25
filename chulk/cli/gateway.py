@@ -34,10 +34,12 @@ def run_gateway_command(
     """Execute one deterministic owner-side gateway operation."""
     try:
         if command == "start":
-            if adapter != "telegram":
-                raise ValueError("only the telegram adapter is currently available")
-            if account_id != "primary":
-                raise ValueError("the Telegram gateway currently uses account 'primary'")
+            if adapter not in {"telegram", "discord"}:
+                raise ValueError("gateway adapter must be telegram or discord")
+            if adapter == "telegram" and account_id != "primary":
+                raise ValueError(
+                    "the Telegram gateway currently uses account 'primary'"
+                )
             return start_func()
         if command == "status":
             statuses = [

@@ -8,6 +8,7 @@ from chulk.cli.gateway import run_gateway_command
 from chulk.cli.parser import build_parser
 from chulk.config import load_config
 from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
+from chulk.main import main
 from chulk.profiles import SQLiteProfileStore
 
 
@@ -81,6 +82,56 @@ def test_gateway_parser_exposes_lifecycle_routes_and_pairing() -> None:
         ).gateway_command
         == "pair"
     )
+
+
+def test_gateway_start_accepts_discord_as_an_optional_adapter(tmp_path) -> None:
+    ledger, router, profiles = _services(tmp_path)
+    started: list[str] = []
+
+    result = run_gateway_command(
+        "start",
+        ledger=ledger,
+        router=router,
+        profile_store=profiles,
+        start_func=lambda: started.append("discord") or 0,
+        adapter="discord",
+        account_id="team-bot",
+        route_command=None,
+        route_id=None,
+        profile_id=None,
+        principal_id=None,
+        destination_id=None,
+        thread_id=None,
+        pairing_ttl_seconds=600,
+        include_disabled=False,
+        json_output=True,
+        output_func=lambda _value: None,
+        error_func=lambda _value: None,
+    )
+
+    assert result == 0
+    assert started == ["discord"]
+
+
+def test_main_dispatches_discord_gateway_without_starting_telegram(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import chulk.discord.main as discord_main
+
+    calls: list[tuple[object, object]] = []
+
+    def run_discord(config, *, control_db_path, profile_runtime_factory):
+        calls.append((control_db_path, profile_runtime_factory))
+        assert config.project_root == tmp_path.resolve()
+        return 0
+
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(discord_main, "run_discord_gateway", run_discord)
+
+    assert main(["gateway", "start", "--adapter", "discord"]) == 0
+    assert calls
+    assert calls[0][0] == (tmp_path / ".chulk" / "control.sqlite").resolve()
 
 
 def test_gateway_cli_controls_status_and_cooperative_stop(tmp_path) -> None:

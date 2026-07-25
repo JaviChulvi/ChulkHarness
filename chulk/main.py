@@ -656,17 +656,30 @@ def main(
             from chulk.telegram.main import run_telegram_gateway
 
             control_path = base_config.runtime_dir / "control.sqlite"
+            adapter_name = getattr(args, "adapter", "telegram")
+
+            def start_gateway() -> int:
+                if adapter_name == "discord":
+                    from chulk.discord.main import run_discord_gateway
+
+                    return run_discord_gateway(
+                        config,
+                        control_db_path=control_path,
+                        profile_runtime_factory=profile_factory,
+                    )
+                return run_telegram_gateway(
+                    config,
+                    control_db_path=control_path,
+                    profile_runtime_factory=profile_factory,
+                )
+
             return run_gateway_command(
                 args.gateway_command,
                 ledger=SQLiteGatewayLedger(control_path),
                 router=SQLiteGatewayRouter(control_path),
                 profile_store=profile_factory.profile_store,
-                start_func=lambda: run_telegram_gateway(
-                    config,
-                    control_db_path=control_path,
-                    profile_runtime_factory=profile_factory,
-                ),
-                adapter=getattr(args, "adapter", "telegram"),
+                start_func=start_gateway,
+                adapter=adapter_name,
                 account_id=getattr(args, "account", "primary"),
                 route_command=getattr(args, "route_command", None),
                 route_id=getattr(args, "route_id", None),
