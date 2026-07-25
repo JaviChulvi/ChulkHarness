@@ -51,6 +51,7 @@ class GatewayAdapterStatus:
     instance_token: str | None
     lease_until: datetime | None
     legacy_adopted_at: datetime | None
+    stop_requested: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,7 @@ class SQLiteGatewayLedger:
                     state = 'running',
                     instance_token = excluded.instance_token,
                     lease_until = excluded.lease_until,
+                    stop_requested = 0,
                     started_at = excluded.started_at,
                     stopped_at = NULL,
                     updated_at = excluded.updated_at
@@ -173,6 +175,7 @@ class SQLiteGatewayLedger:
                 SET lease_until = ?, updated_at = ?
                 WHERE adapter = ? AND account_id = ? AND state = 'running'
                   AND instance_token = ? AND lease_until >= ?
+                  AND stop_requested = 0
                 """,
                 (
                     _encode(observed + timedelta(seconds=lease_seconds)),
@@ -207,7 +210,7 @@ class SQLiteGatewayLedger:
                 f"""
                 UPDATE gateway_adapters
                 SET state = 'stopped', instance_token = NULL, lease_until = NULL,
-                    stopped_at = ?, updated_at = ?
+                    stop_requested = 0, stopped_at = ?, updated_at = ?
                 WHERE adapter = ? AND account_id = ?{where_token}
                 """,
                 arguments,
@@ -222,6 +225,29 @@ class SQLiteGatewayLedger:
         with sqlite_connection(self.db_path) as conn:
             row = _adapter_row(conn, adapter, account_id)
         return _row_to_adapter_status(row) if row is not None else None
+
+    def list_adapter_statuses(self) -> tuple[GatewayAdapterStatus, ...]:
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM gateway_adapters
+                ORDER BY adapter, account_id
+                """
+            ).fetchall()
+        return tuple(_row_to_adapter_status(row) for row in rows)
+
+    def request_adapter_stop(self, adapter: str, account_id: str) -> bool:
+        """Ask the active lease owner to stop without impersonating it."""
+        with sqlite_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE gateway_adapters
+                SET stop_requested = 1, updated_at = ?
+                WHERE adapter = ? AND account_id = ? AND state = 'running'
+                """,
+                (_encode(_utc_now()), adapter, account_id),
+            )
+        return cursor.rowcount == 1
 
     def save_cursor(
         self,
@@ -1159,6 +1185,7 @@ def _row_to_adapter_status(row: sqlite3.Row) -> GatewayAdapterStatus:
         ),
         lease_until=_optional_datetime(row["lease_until"]),
         legacy_adopted_at=_optional_datetime(row["legacy_adopted_at"]),
+        stop_requested=bool(row["stop_requested"]),
     )
 
 

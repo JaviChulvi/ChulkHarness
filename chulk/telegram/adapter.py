@@ -51,10 +51,22 @@ class TelegramChannelAdapter:
         self._instance_token: str | None = None
         self._pending_cursor: int | None = None
         self._renewal_task: asyncio.Task[None] | None = None
+        self._stop_requested = asyncio.Event()
 
     async def receive(self) -> AsyncIterator[InboundEnvelope]:
         await self.start()
         while True:
+            status = await asyncio.to_thread(
+                self.ledger.adapter_status,
+                self.name,
+                self.account_id,
+            )
+            if (
+                self._stop_requested.is_set()
+                or status is None
+                or status.stop_requested
+            ):
+                return
             for envelope in await self.poll_once():
                 yield envelope
 
@@ -69,6 +81,7 @@ class TelegramChannelAdapter:
         )
         assert status.instance_token is not None
         self._instance_token = status.instance_token
+        self._stop_requested.clear()
         self._renewal_task = asyncio.create_task(self._renew_lease(status.instance_token))
 
     async def poll_once(self) -> tuple[InboundEnvelope, ...]:
@@ -133,8 +146,6 @@ class TelegramChannelAdapter:
             ),
             authentication=(
                 AuthenticationState.AUTHENTICATED
-                if allowed
-                else AuthenticationState.UNAUTHENTICATED
             ),
             trust=TrustLevel.TRUSTED if allowed else TrustLevel.UNTRUSTED,
             extensions={
@@ -250,6 +261,7 @@ class TelegramChannelAdapter:
                 lease_seconds=ADAPTER_LEASE_SECONDS,
             )
             if not renewed:
+                self._stop_requested.set()
                 return
 
 

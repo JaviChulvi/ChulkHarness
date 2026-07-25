@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_plugins_parser(subparsers)
     _add_usage_parser(subparsers)
     _add_session_parser(subparsers)
+    _add_gateway_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -185,6 +186,53 @@ def _add_profile_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     inspect.add_argument("profile_id")
     inspect.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_gateway_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "gateway",
+        help="Run or administer the shared channel gateway.",
+    )
+    commands = parser.add_subparsers(dest="gateway_command", required=True)
+
+    start = commands.add_parser("start", help="Run the configured gateway.")
+    _add_gateway_identity(start)
+
+    status = commands.add_parser("status", help="Show durable adapter status.")
+    _add_gateway_identity(status)
+    status.add_argument("--json", action="store_true", dest="json_output")
+
+    stop = commands.add_parser("stop", help="Request a running adapter to stop.")
+    _add_gateway_identity(stop)
+    stop.add_argument("--json", action="store_true", dest="json_output")
+
+    routes = commands.add_parser("routes", help="List or change identity routes.")
+    route_commands = routes.add_subparsers(dest="route_command", required=True)
+    route_list = route_commands.add_parser("list", help="List gateway routes.")
+    route_list.add_argument("--include-disabled", action="store_true")
+    route_list.add_argument("--json", action="store_true", dest="json_output")
+    route_add = route_commands.add_parser("add", help="Add an owner-approved route.")
+    _add_gateway_identity(route_add)
+    route_add.add_argument("--profile", required=True)
+    route_add.add_argument("--principal")
+    route_add.add_argument("--destination")
+    route_add.add_argument("--thread")
+    route_add.add_argument("--json", action="store_true", dest="json_output")
+    route_remove = route_commands.add_parser("remove", help="Disable a route.")
+    route_remove.add_argument("route_id")
+    route_remove.add_argument("--json", action="store_true", dest="json_output")
+
+    pair = commands.add_parser("pair", help="Create a one-time pairing code.")
+    _add_gateway_identity(pair)
+    pair.add_argument("--profile", required=True)
+    pair.add_argument("--principal")
+    pair.add_argument("--ttl-seconds", type=int, default=600)
+    pair.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_gateway_identity(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--adapter", default="telegram")
+    parser.add_argument("--account", default="primary")
 
 
 def _add_plugins_parser(

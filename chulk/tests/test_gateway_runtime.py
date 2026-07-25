@@ -145,6 +145,54 @@ async def test_unrouted_identity_is_durably_ignored_without_execution(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_authenticated_pairing_code_binds_identity_without_executing_it(
+    tmp_path,
+) -> None:
+    calls: list[str] = []
+
+    async def execute(
+        _profile_id: str,
+        envelope: InboundEnvelope,
+    ) -> tuple[OutboundEnvelope, ...]:
+        calls.append(envelope.event_id)
+        return ()
+
+    runtime, ledger, adapter = _runtime(tmp_path, execute)
+    runtime.router.remove_route(runtime.router.list_routes()[0].id)
+    pairing = runtime.router.create_pairing(
+        adapter="fake",
+        account_id="primary",
+        profile_id="work",
+    )
+    envelope = InboundEnvelope(
+        event_id="pair",
+        idempotency_key="fake:primary:pair",
+        identity=ChannelIdentity("fake", "primary", "new-user"),
+        destination_id="chat-9",
+        parts=(TextPart(pairing.code),),
+        scope=ChannelScope.DIRECT,
+        authentication=AuthenticationState.AUTHENTICATED,
+        trust=TrustLevel.UNTRUSTED,
+    )
+
+    assert not await runtime.accept(adapter, envelope)
+    assert calls == []
+    assert runtime.router.resolve(
+        InboundEnvelope(
+            event_id="next",
+            idempotency_key="fake:primary:next",
+            identity=envelope.identity,
+            destination_id="chat-9",
+            parts=(TextPart("hello"),),
+            scope=ChannelScope.DIRECT,
+            authentication=AuthenticationState.AUTHENTICATED,
+            trust=TrustLevel.UNTRUSTED,
+        )
+    )
+    assert ledger.pending_count() == 0
+
+
+@pytest.mark.asyncio
 async def test_backpressure_leaves_transport_event_unacknowledged(tmp_path) -> None:
     async def execute(
         _profile_id: str,

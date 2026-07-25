@@ -14,6 +14,7 @@ from chulk.gateway.models import (
     DeliveryState,
     InboundEnvelope,
     OutboundEnvelope,
+    TextPart,
 )
 from chulk.gateway.protocol import ChannelAdapter
 from chulk.gateway.routing import SQLiteGatewayRouter
@@ -98,6 +99,18 @@ class GatewayRuntime:
         if actual != expected:
             raise ValueError("adapter identity does not match the inbound envelope")
         route = self.router.resolve(envelope)
+        if route is None:
+            pairing_code = _pairing_code(envelope)
+            if pairing_code is not None:
+                route = self.router.consume_pairing(pairing_code, envelope)
+                if route is not None:
+                    self.ledger.ignore(
+                        envelope,
+                        profile_id=route.profile_id,
+                        reason="pairing challenge consumed",
+                    )
+                    await adapter.acknowledge(envelope)
+                    return False
         if route is None:
             self.ledger.ignore(
                 envelope,
@@ -227,8 +240,16 @@ class GatewayRuntime:
             for adapter in self._adapters.values()
         ]
         worker = asyncio.create_task(self._worker_loop())
+        tasks = (*receivers, worker)
         try:
-            await asyncio.gather(*receivers, worker)
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                error = task.exception()
+                if error is not None:
+                    raise error
         finally:
             self._stopping.set()
             for task in receivers:
@@ -335,6 +356,13 @@ class GatewayRuntime:
             )
             if not renewed:
                 return
+
+
+def _pairing_code(envelope: InboundEnvelope) -> str | None:
+    if len(envelope.parts) != 1 or not isinstance(envelope.parts[0], TextPart):
+        return None
+    code = envelope.parts[0].text.strip()
+    return code if code and len(code) <= 128 else None
 
 
 __all__ = [

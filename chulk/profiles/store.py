@@ -144,11 +144,13 @@ def _add_gateway_control_schema(conn: sqlite3.Connection) -> None:
             lease_until TEXT,
             cursor TEXT,
             legacy_adopted_at TEXT,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
             started_at TEXT,
             stopped_at TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (adapter, account_id),
-            CHECK (state IN ('stopped', 'running'))
+            CHECK (state IN ('stopped', 'running')),
+            CHECK (stop_requested IN (0, 1))
         );
 
         CREATE TABLE gateway_inbox (

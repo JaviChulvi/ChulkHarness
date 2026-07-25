@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from chulk.config import ConfigValueError, load_config
+from chulk.config import Config, ConfigValueError, load_config
 from chulk.llm.base import LLMConfigurationError
 from chulk.llm.lifecycle import close_resources
 from chulk.llm.providers.gemini_media import GeminiMediaProcessor
@@ -19,11 +19,19 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         config = load_config()
-        telegram_config = load_telegram_config(env_file=config.project_root / ".env")
-    except (ConfigValueError, TelegramConfigError) as exc:
+    except ConfigValueError as exc:
         logging.error("configuration error: %s", exc)
         return 2
+    return run_telegram_gateway(config)
 
+
+def run_telegram_gateway(config: Config) -> int:
+    """Run Telegram through the shared gateway for one resolved agent profile."""
+    try:
+        telegram_config = load_telegram_config(env_file=config.project_root / ".env")
+    except TelegramConfigError as exc:
+        logging.error("configuration error: %s", exc)
+        return 2
     media_processor = None
     try:
         if config.llm_provider == "gemini":
