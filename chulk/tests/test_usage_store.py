@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import os
 from pathlib import Path
 from threading import Barrier
 
@@ -468,7 +469,8 @@ def test_bounded_exports_exclude_credential_references(
     assert "SECRET_NAME" not in json_content
     assert "credential_ref" not in csv_content
     assert "SECRET_NAME" not in csv_content
-    assert json_path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert json_path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         ledger.export(json_path, format="json")
 
