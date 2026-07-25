@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -17,6 +18,7 @@ from chulk.skills.lifecycle_models import (
     LearningProposalKind,
     LearningProposalRecord,
     LearningProposalStatus,
+    LearningReviewUsage,
     SkillLifecycleRecord,
     SkillLifecycleStatus,
     SkillRevisionRecord,
@@ -54,84 +56,85 @@ class SQLiteSkillLifecycleStore:
         metadata: Mapping[str, Any] | None = None,
     ) -> LearningProposalRecord:
         """Create one bounded pending proposal without applying it."""
-        proposal_kind = LearningProposalKind(kind)
-        clean_rationale = _required_text(rationale, "rationale", max_chars=4_000)
-        clean_target = _optional_text(target_name, "target_name", max_chars=128)
-        if proposal_kind.value.startswith("skill_") and clean_target is None:
-            raise ValueError("skill proposals require target_name")
-        if proposal_kind in {
-            LearningProposalKind.SKILL_CREATE,
-            LearningProposalKind.SKILL_PATCH,
-            LearningProposalKind.MEMORY_CREATE,
-            LearningProposalKind.MEMORY_UPDATE,
-        } and not (content and content.strip()):
-            raise ValueError(f"{proposal_kind.value} proposals require content")
-        if proposal_kind in {
-            LearningProposalKind.SKILL_PATCH,
-            LearningProposalKind.SKILL_ARCHIVE,
-        } and not (diff and diff.strip()):
-            raise ValueError(f"{proposal_kind.value} proposals require diff")
-        clean_confidence = _confidence(confidence)
-        clean_evidence = _text_tuple(
-            evidence_turn_ids,
-            "evidence_turn_ids",
-            max_items=50,
-            max_chars=128,
-        )
-        clean_capabilities = _text_tuple(
-            required_capabilities,
-            "required_capabilities",
-            max_items=50,
-            max_chars=128,
-        )
-        clean_steps = _text_tuple(
-            verification_steps,
-            "verification_steps",
-            max_items=50,
-            max_chars=1_000,
-        )
-        clean_metadata = dict(metadata or {})
-        encoded_metadata = json.dumps(clean_metadata, sort_keys=True)
-        if len(encoded_metadata) > 50_000:
-            raise ValueError("proposal metadata cannot exceed 50000 characters")
-        proposal_id = str(uuid4())
-        created_at = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO learning_proposals (
-                    id, profile_id, kind, target_name, rationale,
-                    evidence_turn_ids_json, source_trace, content, diff,
-                    required_capabilities_json, confidence,
-                    verification_steps_json, reviewer_model, cost, status,
-                    created_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    proposal_id,
-                    self.profile_id,
-                    proposal_kind.value,
-                    clean_target,
-                    clean_rationale,
-                    json.dumps(clean_evidence),
-                    _optional_text(source_trace, "source_trace", max_chars=2_000),
-                    _optional_blob(content, "content", max_chars=500_000),
-                    _optional_blob(diff, "diff", max_chars=200_000),
-                    json.dumps(clean_capabilities),
-                    clean_confidence,
-                    json.dumps(clean_steps),
-                    _optional_text(
-                        reviewer_model,
-                        "reviewer_model",
-                        max_chars=256,
-                    ),
-                    _optional_text(cost, "cost", max_chars=128),
-                    LearningProposalStatus.PENDING.value,
-                    created_at,
-                    encoded_metadata,
-                ),
+        records = self.create_proposals(
+            (
+                {
+                    "kind": kind,
+                    "rationale": rationale,
+                    "target_name": target_name,
+                    "evidence_turn_ids": evidence_turn_ids,
+                    "source_trace": source_trace,
+                    "content": content,
+                    "diff": diff,
+                    "required_capabilities": required_capabilities,
+                    "confidence": confidence,
+                    "verification_steps": verification_steps,
+                    "reviewer_model": reviewer_model,
+                    "cost": cost,
+                    "metadata": metadata,
+                },
             )
-        return self.get_proposal(proposal_id)
+        )
+        return records[0]
+
+    def create_proposals(
+        self,
+        proposals: tuple[Mapping[str, Any], ...],
+        *,
+        review_run_id: str | None = None,
+        review_token_count: int = 0,
+        review_cost_amount: Decimal = Decimal(0),
+    ) -> tuple[LearningProposalRecord, ...]:
+        """Validate and insert one reviewer batch atomically."""
+        if not proposals and review_run_id is None:
+            return ()
+        values = tuple(
+            _proposal_values(profile_id=self.profile_id, **dict(proposal))
+            for proposal in proposals
+        )
+        actual = _review_usage(
+            proposal_count=len(values),
+            token_count=review_token_count,
+            cost_amount=review_cost_amount,
+        )
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if values:
+                conn.executemany(
+                    """
+                    INSERT INTO learning_proposals (
+                        id, profile_id, kind, target_name, rationale,
+                        evidence_turn_ids_json, source_trace, content, diff,
+                        required_capabilities_json, confidence,
+                        verification_steps_json, reviewer_model, cost, status,
+                        created_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+            if review_run_id is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE learning_review_runs
+                    SET status = 'completed', proposal_count = ?,
+                        token_count = ?, cost_amount = ?, completed_at = ?,
+                        error = NULL
+                    WHERE id = ? AND profile_id = ? AND status = 'reserved'
+                    """,
+                    (
+                        actual.proposal_count,
+                        actual.token_count,
+                        str(actual.cost_amount),
+                        _utc_now(),
+                        review_run_id,
+                        self.profile_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise KeyError(
+                        f"learning review run {review_run_id!r} is not reserved"
+                    )
+        return tuple(self.get_proposal(str(value[0])) for value in values)
 
     def get_proposal(self, proposal_id: str) -> LearningProposalRecord:
         with sqlite_connection(self.db_path) as conn:
@@ -175,6 +178,122 @@ class SQLiteSkillLifecycleStore:
                 (self.profile_id, occurred_at),
             ).fetchone()
         return int(row["proposal_count"]) if row is not None else 0
+
+    def review_usage_since(
+        self,
+        occurred_at: str,
+        *,
+        currency: str = "USD",
+    ) -> LearningReviewUsage:
+        with sqlite_connection(self.db_path) as conn:
+            return _review_usage_in_connection(
+                conn,
+                profile_id=self.profile_id,
+                occurred_at=occurred_at,
+                currency=_currency(currency),
+            )
+
+    def reserve_review_run(
+        self,
+        *,
+        trigger: str,
+        reviewer_model: str | None,
+        proposal_count: int,
+        token_count: int,
+        cost_amount: Decimal,
+        occurred_at: str,
+        max_proposals: int,
+        max_tokens: int,
+        max_cost: Decimal | None,
+        currency: str = "USD",
+    ) -> str:
+        """Atomically reserve one bounded reviewer call against daily quotas."""
+        requested = _review_usage(
+            proposal_count=proposal_count,
+            token_count=token_count,
+            cost_amount=cost_amount,
+        )
+        run_id = str(uuid4())
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            used = _review_usage_in_connection(
+                conn,
+                profile_id=self.profile_id,
+                occurred_at=occurred_at,
+                currency=_currency(currency),
+            )
+            if used.proposal_count + requested.proposal_count > max_proposals:
+                raise ValueError("daily learning proposal quota exceeded")
+            if used.token_count + requested.token_count > max_tokens:
+                raise ValueError("daily learning reviewer token quota exceeded")
+            if (
+                max_cost is not None
+                and used.cost_amount + requested.cost_amount > max_cost
+            ):
+                raise ValueError("daily learning reviewer cost quota exceeded")
+            conn.execute(
+                """
+                INSERT INTO learning_review_runs (
+                    id, profile_id, trigger, reviewer_model, status,
+                    proposal_count, token_count, cost_amount, currency,
+                    created_at
+                ) VALUES (?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    self.profile_id,
+                    _required_text(trigger, "trigger", max_chars=64),
+                    _optional_text(
+                        reviewer_model,
+                        "reviewer_model",
+                        max_chars=256,
+                    ),
+                    requested.proposal_count,
+                    requested.token_count,
+                    str(requested.cost_amount),
+                    _currency(currency),
+                    _utc_now(),
+                ),
+            )
+        return run_id
+
+    def finalize_review_run(
+        self,
+        run_id: str,
+        *,
+        proposal_count: int,
+        token_count: int,
+        cost_amount: Decimal,
+        failed: bool = False,
+        error: str | None = None,
+    ) -> None:
+        """Replace a reservation with actual reviewer consumption."""
+        actual = _review_usage(
+            proposal_count=proposal_count,
+            token_count=token_count,
+            cost_amount=cost_amount,
+        )
+        with sqlite_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE learning_review_runs
+                SET status = ?, proposal_count = ?, token_count = ?,
+                    cost_amount = ?, completed_at = ?, error = ?
+                WHERE id = ? AND profile_id = ? AND status = 'reserved'
+                """,
+                (
+                    "failed" if failed else "completed",
+                    actual.proposal_count,
+                    actual.token_count,
+                    str(actual.cost_amount),
+                    _utc_now(),
+                    _optional_text(error, "error", max_chars=4_000),
+                    run_id,
+                    self.profile_id,
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"learning review run {run_id!r} is not reserved")
 
     def transition_proposal(
         self,
@@ -610,6 +729,89 @@ class SQLiteSkillLifecycleStore:
         return self.get_skill(name, scope=scope)
 
 
+def _proposal_values(
+    *,
+    profile_id: str,
+    kind: LearningProposalKind | str,
+    rationale: str,
+    target_name: str | None = None,
+    evidence_turn_ids: tuple[str, ...] = (),
+    source_trace: str | None = None,
+    content: str | None = None,
+    diff: str | None = None,
+    required_capabilities: tuple[str, ...] = (),
+    confidence: float = 1.0,
+    verification_steps: tuple[str, ...] = (),
+    reviewer_model: str | None = None,
+    cost: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> tuple[object, ...]:
+    proposal_kind = LearningProposalKind(kind)
+    clean_rationale = _required_text(
+        rationale,
+        "rationale",
+        max_chars=4_000,
+    )
+    clean_target = _optional_text(target_name, "target_name", max_chars=128)
+    if (
+        proposal_kind.value.startswith("skill_")
+        or proposal_kind is LearningProposalKind.MEMORY_UPDATE
+    ) and clean_target is None:
+        raise ValueError(f"{proposal_kind.value} proposals require target_name")
+    if proposal_kind in {
+        LearningProposalKind.SKILL_CREATE,
+        LearningProposalKind.SKILL_PATCH,
+        LearningProposalKind.MEMORY_CREATE,
+        LearningProposalKind.MEMORY_UPDATE,
+    } and not (content and content.strip()):
+        raise ValueError(f"{proposal_kind.value} proposals require content")
+    if proposal_kind in {
+        LearningProposalKind.SKILL_PATCH,
+        LearningProposalKind.SKILL_ARCHIVE,
+    } and not (diff and diff.strip()):
+        raise ValueError(f"{proposal_kind.value} proposals require diff")
+    clean_evidence = _text_tuple(
+        evidence_turn_ids,
+        "evidence_turn_ids",
+        max_items=50,
+        max_chars=128,
+    )
+    clean_capabilities = _text_tuple(
+        required_capabilities,
+        "required_capabilities",
+        max_items=50,
+        max_chars=128,
+    )
+    clean_steps = _text_tuple(
+        verification_steps,
+        "verification_steps",
+        max_items=50,
+        max_chars=1_000,
+    )
+    encoded_metadata = json.dumps(dict(metadata or {}), sort_keys=True)
+    if len(encoded_metadata) > 50_000:
+        raise ValueError("proposal metadata cannot exceed 50000 characters")
+    return (
+        str(uuid4()),
+        profile_id,
+        proposal_kind.value,
+        clean_target,
+        clean_rationale,
+        json.dumps(clean_evidence),
+        _optional_text(source_trace, "source_trace", max_chars=2_000),
+        _optional_blob(content, "content", max_chars=500_000),
+        _optional_blob(diff, "diff", max_chars=200_000),
+        json.dumps(clean_capabilities),
+        _confidence(confidence),
+        json.dumps(clean_steps),
+        _optional_text(reviewer_model, "reviewer_model", max_chars=256),
+        _optional_text(cost, "cost", max_chars=128),
+        LearningProposalStatus.PENDING.value,
+        _utc_now(),
+        encoded_metadata,
+    )
+
+
 def _row_to_proposal(row: sqlite3.Row) -> LearningProposalRecord:
     return LearningProposalRecord(
         id=str(row["id"]),
@@ -890,6 +1092,67 @@ def _limit(value: int, *, maximum: int = 1_000) -> int:
     return min(value, maximum)
 
 
+def _review_usage(
+    *,
+    proposal_count: int,
+    token_count: int,
+    cost_amount: Decimal,
+) -> LearningReviewUsage:
+    for label, value in (
+        ("proposal_count", proposal_count),
+        ("token_count", token_count),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{label} must be a non-negative integer")
+    if (
+        not isinstance(cost_amount, Decimal)
+        or not cost_amount.is_finite()
+        or cost_amount < 0
+    ):
+        raise ValueError("cost_amount must be a finite non-negative Decimal")
+    return LearningReviewUsage(
+        proposal_count=proposal_count,
+        token_count=token_count,
+        cost_amount=cost_amount,
+    )
+
+
+def _review_usage_in_connection(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: str,
+    occurred_at: str,
+    currency: str,
+) -> LearningReviewUsage:
+    rows = conn.execute(
+        """
+        SELECT proposal_count, token_count, cost_amount, currency
+        FROM learning_review_runs
+        WHERE profile_id = ? AND created_at >= ?
+        """,
+        (profile_id, occurred_at),
+    ).fetchall()
+    currencies = {str(row["currency"]).upper() for row in rows}
+    if currencies - {currency}:
+        raise ValueError(
+            "stored learning review usage uses a different currency"
+        )
+    proposal_count = sum(int(row["proposal_count"]) for row in rows)
+    token_count = sum(int(row["token_count"]) for row in rows)
+    try:
+        cost_amount = sum(
+            (Decimal(str(row["cost_amount"])) for row in rows),
+            Decimal(0),
+        )
+    except InvalidOperation as exc:
+        raise ValueError("stored learning review cost is invalid") from exc
+    return LearningReviewUsage(
+        proposal_count=proposal_count,
+        token_count=token_count,
+        cost_amount=cost_amount,
+    )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -908,6 +1171,13 @@ def _scope(value: str) -> str:
     if value not in {"project", "profile"}:
         raise ValueError("skill scope must be 'project' or 'profile'")
     return value
+
+
+def _currency(value: str) -> str:
+    clean = value.strip().upper()
+    if not clean or len(clean) > 16:
+        raise ValueError("currency must be a short non-empty code")
+    return clean
 
 
 __all__ = ["SQLiteSkillLifecycleStore"]

@@ -76,6 +76,34 @@ class SQLiteMemoryStore:
         dedupe: bool = True,
     ) -> str:
         """Save a new long-term memory and return its id."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self.save_memory_in_connection(
+                conn,
+                content,
+                tags=tags,
+                metadata=metadata,
+                importance=importance,
+                source=source,
+                confidence=confidence,
+                embedding=embedding,
+                dedupe=dedupe,
+            )
+
+    def save_memory_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual",
+        confidence: float = 1.0,
+        embedding: list[float] | None = None,
+        dedupe: bool = True,
+    ) -> str:
+        """Save one memory inside a caller-owned immediate transaction."""
         clean_content = content.strip()
         if not clean_content:
             raise ValueError("Memory content cannot be empty")
@@ -92,20 +120,17 @@ class SQLiteMemoryStore:
             source=clean_source,
         )
         clean_embedding = _normalize_embedding(embedding) or text_to_embedding(clean_content)
-
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            return self._save_memory_in_connection(
-                conn,
-                content=clean_content,
-                tags=clean_tags,
-                metadata=clean_metadata,
-                importance=clean_importance,
-                source=clean_source,
-                confidence=clean_confidence,
-                embedding=clean_embedding,
-                dedupe=dedupe,
-            )
+        return self._save_memory_in_connection(
+            conn,
+            content=clean_content,
+            tags=clean_tags,
+            metadata=clean_metadata,
+            importance=clean_importance,
+            source=clean_source,
+            confidence=clean_confidence,
+            embedding=clean_embedding,
+            dedupe=dedupe,
+        )
 
     def _save_memory_in_connection(
         self,
@@ -225,66 +250,110 @@ class SQLiteMemoryStore:
         """Update an existing memory. Returns False when the id is unknown."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM memories WHERE id = ? AND namespace = ?",
-                (memory_id, self.namespace),
-            ).fetchone()
-            if row is None:
-                return False
-            existing = _row_to_memory(row)
-
-            next_content = existing.content if content is None else content.strip()
-            if not next_content:
-                raise ValueError("Memory content cannot be empty")
-
-            next_tags = existing.tags if tags is None else _normalize_tags(tags)
-            next_metadata = existing.metadata if metadata is None else metadata
-            next_importance = existing.importance if importance is None else _normalize_importance(importance)
-            next_source = existing.source if source is None else _normalize_source(source)
-            next_confidence = existing.confidence if confidence is None else _normalize_confidence(confidence)
-            next_embedding = existing.embedding if embedding is None else _normalize_embedding(embedding)
-            next_archived_at = existing.archived_at if archived_at is None else archived_at
-            if next_embedding is None:
-                next_embedding = text_to_embedding(next_content)
-            ensure_memory_payload_safe(
-                content=next_content,
-                tags=next_tags,
-                metadata=next_metadata,
-                source=next_source,
-            )
-
-            cursor = conn.execute(
-                """
-                UPDATE memories
-                SET content = ?, updated_at = ?, tags = ?, metadata = ?, importance = ?,
-                    source = ?, confidence = ?, embedding = ?, archived_at = ?
-                WHERE id = ? AND namespace = ?
-                """,
-                (
-                    next_content,
-                    _utc_now(),
-                    json.dumps(next_tags, sort_keys=True),
-                    json.dumps(next_metadata, sort_keys=True),
-                    next_importance,
-                    next_source,
-                    next_confidence,
-                    json.dumps(next_embedding),
-                    next_archived_at,
-                    memory_id,
-                    self.namespace,
-                ),
-            )
-            _replace_memory_tags(conn, memory_id, next_tags)
-            _replace_memory_fts(
+            return self.update_memory_in_connection(
                 conn,
-                enabled=self.fts_enabled,
-                memory_id=memory_id,
-                content=next_content,
-                tags=next_tags,
-                metadata=next_metadata,
-                source=next_source,
-                namespace=self.namespace,
+                memory_id,
+                content=content,
+                tags=tags,
+                metadata=metadata,
+                importance=importance,
+                source=source,
+                confidence=confidence,
+                embedding=embedding,
+                archived_at=archived_at,
             )
+
+    def update_memory_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int | None = None,
+        source: str | None = None,
+        confidence: float | None = None,
+        embedding: list[float] | None = None,
+        archived_at: str | None = None,
+    ) -> bool:
+        """Update a memory inside an existing immediate transaction."""
+        row = conn.execute(
+            "SELECT * FROM memories WHERE id = ? AND namespace = ?",
+            (memory_id, self.namespace),
+        ).fetchone()
+        if row is None:
+            return False
+        existing = _row_to_memory(row)
+
+        next_content = existing.content if content is None else content.strip()
+        if not next_content:
+            raise ValueError("Memory content cannot be empty")
+
+        next_tags = existing.tags if tags is None else _normalize_tags(tags)
+        next_metadata = existing.metadata if metadata is None else metadata
+        next_importance = (
+            existing.importance
+            if importance is None
+            else _normalize_importance(importance)
+        )
+        next_source = (
+            existing.source if source is None else _normalize_source(source)
+        )
+        next_confidence = (
+            existing.confidence
+            if confidence is None
+            else _normalize_confidence(confidence)
+        )
+        next_embedding = (
+            existing.embedding
+            if embedding is None
+            else _normalize_embedding(embedding)
+        )
+        next_archived_at = (
+            existing.archived_at if archived_at is None else archived_at
+        )
+        if next_embedding is None:
+            next_embedding = text_to_embedding(next_content)
+        ensure_memory_payload_safe(
+            content=next_content,
+            tags=next_tags,
+            metadata=next_metadata,
+            source=next_source,
+        )
+
+        cursor = conn.execute(
+            """
+            UPDATE memories
+            SET content = ?, updated_at = ?, tags = ?, metadata = ?, importance = ?,
+                source = ?, confidence = ?, embedding = ?, archived_at = ?
+            WHERE id = ? AND namespace = ?
+            """,
+            (
+                next_content,
+                _utc_now(),
+                json.dumps(next_tags, sort_keys=True),
+                json.dumps(next_metadata, sort_keys=True),
+                next_importance,
+                next_source,
+                next_confidence,
+                json.dumps(next_embedding),
+                next_archived_at,
+                memory_id,
+                self.namespace,
+            ),
+        )
+        _replace_memory_tags(conn, memory_id, next_tags)
+        _replace_memory_fts(
+            conn,
+            enabled=self.fts_enabled,
+            memory_id=memory_id,
+            content=next_content,
+            tags=next_tags,
+            metadata=next_metadata,
+            source=next_source,
+            namespace=self.namespace,
+        )
         return cursor.rowcount > 0
 
     def restore_memory(self, memory_id: str) -> bool:

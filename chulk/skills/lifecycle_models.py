@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -34,6 +35,15 @@ class SkillUsageKind(StrEnum):
     USE = "use"
     SUCCESS = "success"
     PATCH = "patch"
+
+
+@dataclass(frozen=True, slots=True)
+class LearningReviewUsage:
+    """Daily reviewer usage reserved or consumed for quota enforcement."""
+
+    proposal_count: int = 0
+    token_count: int = 0
+    cost_amount: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +162,7 @@ __all__ = [
     "LearningProposalKind",
     "LearningProposalRecord",
     "LearningProposalStatus",
+    "LearningReviewUsage",
     "SkillLifecycleRecord",
     "SkillLifecycleStatus",
     "SkillRevisionRecord",

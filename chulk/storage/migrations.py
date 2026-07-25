@@ -637,6 +637,33 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
         ON learning_proposals(profile_id, status, created_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learning_review_runs (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            reviewer_model TEXT,
+            status TEXT NOT NULL,
+            proposal_count INTEGER NOT NULL,
+            token_count INTEGER NOT NULL,
+            cost_amount TEXT NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT,
+            CHECK (status IN ('reserved', 'completed', 'failed')),
+            CHECK (proposal_count >= 0),
+            CHECK (token_count >= 0)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_learning_review_runs_profile_created
+        ON learning_review_runs(profile_id, created_at)
+        """
+    )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
