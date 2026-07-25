@@ -6,10 +6,12 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from chulk.config import Config
+from chulk.gateway import SQLiteGatewayRouter
 from chulk.profiles import ProfileNotFoundError, ProfileRuntimeFactory
 from chulk.server.dispatcher import (
     ConversationBackpressureError,
@@ -23,6 +25,7 @@ from chulk.server.models import (
     ApiError,
     ConversationCreateRequest,
     ConversationMessageRequest,
+    GatewayPairingRequest,
     PermissionDecisionRequest,
     PlanDecisionRequest,
 )
@@ -72,7 +75,7 @@ def create_control_app(
     """Build the optional ASGI app without adding imports to the base SDK."""
     try:
         from starlette.applications import Starlette
-        from starlette.responses import JSONResponse
+        from starlette.responses import FileResponse, JSONResponse
         from starlette.routing import Route, WebSocketRoute
     except ImportError as exc:
         raise ServerDependencyError(
@@ -87,6 +90,8 @@ def create_control_app(
         config.runtime_dir / "control.token"
     )
     credentials.load_or_create()
+    router = SQLiteGatewayRouter(config.runtime_dir / "control.sqlite")
+    webchat_root = Path(__file__).with_name("webchat")
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -123,6 +128,86 @@ def create_control_app(
             for stored in runtime_factory.profile_store.list()
         ]
         return _json({"profiles": items})
+
+    async def session_info(_request):
+        return _json(
+            {
+                "csrf_token": credentials.csrf_token(),
+                "websocket_path": "/v1/gateway/ws",
+            }
+        )
+
+    async def gateway_routes(_request):
+        return _json(
+            {
+                "routes": [
+                    {
+                        "id": item.id,
+                        "adapter": item.adapter,
+                        "account_id": item.account_id,
+                        "profile_id": item.profile_id,
+                        "principal_id": item.principal_id,
+                        "destination_id": item.destination_id,
+                        "thread_id": item.thread_id,
+                    }
+                    for item in router.list_routes()
+                    if item.adapter != "websocket"
+                ]
+            }
+        )
+
+    async def create_gateway_pairing(request):
+        body = GatewayPairingRequest.from_dict(await _json_body(request))
+        try:
+            runtime_factory.resolve(body.profile_id)
+        except ProfileNotFoundError as exc:
+            raise ApiProblem(404, "profile_not_found", str(exc)) from exc
+        challenge = router.create_pairing(
+            adapter=body.adapter,
+            account_id=body.account_id,
+            profile_id=body.profile_id,
+            principal_id=body.principal_id,
+            ttl_seconds=body.ttl_seconds,
+        )
+        return _json(
+            {
+                "pairing": {
+                    "id": challenge.id,
+                    "code": challenge.code,
+                    "adapter": challenge.adapter,
+                    "account_id": challenge.account_id,
+                    "profile_id": challenge.profile_id,
+                    "principal_id": challenge.principal_id,
+                    "expires_at": challenge.expires_at.isoformat(),
+                }
+            },
+            status_code=201,
+        )
+
+    async def webchat(_request):
+        return FileResponse(
+            webchat_root / "index.html",
+            media_type="text/html",
+            headers=_webchat_headers(cache_control="no-store"),
+        )
+
+    async def webchat_asset(request):
+        name = request.path_params["name"]
+        assets = {
+            "app.css": "text/css",
+            "app.js": "text/javascript",
+        }
+        media_type = assets.get(name)
+        if media_type is None:
+            raise ApiProblem(404, "asset_not_found", "webchat asset not found")
+        return FileResponse(
+            webchat_root / name,
+            media_type=media_type,
+            headers=_webchat_headers(
+                cache_control="public, max-age=300",
+                content_security=False,
+            ),
+        )
 
     async def create_conversation(request):
         body = ConversationCreateRequest.from_dict(await _json_body(request))
@@ -429,7 +514,21 @@ def create_control_app(
         await serve_gateway_websocket(websocket, dispatcher=controller)
 
     routes = [
+        Route("/webchat", webchat, methods=["GET"]),
+        Route("/webchat/", webchat, methods=["GET"]),
+        Route(
+            "/webchat/assets/{name:str}",
+            webchat_asset,
+            methods=["GET"],
+        ),
+        Route("/v1/session", session_info, methods=["GET"]),
         Route("/v1/profiles", profiles, methods=["GET"]),
+        Route("/v1/gateway/routes", gateway_routes, methods=["GET"]),
+        Route(
+            "/v1/gateway/pairings",
+            create_gateway_pairing,
+            methods=["POST"],
+        ),
         Route(
             "/v1/profiles/{profile_id:str}/conversations",
             create_conversation,
@@ -538,6 +637,7 @@ def create_control_app(
         allowed_origins=allowed_origins,
         max_body_bytes=max_body_bytes,
         audit_log=ControlAuditLog(config.runtime_dir / "control-audit.jsonl"),
+        public_get_prefixes=("/webchat",),
     )
     return app
 
@@ -597,6 +697,28 @@ def _sse(name: str, event_id: str, value: Mapping[str, Any]) -> bytes:
     return f"id: {event_id}\nevent: {name}\ndata: {data}\n\n".encode()
 
 
+def _webchat_headers(
+    *,
+    cache_control: str,
+    content_security: bool = True,
+) -> dict[str, str]:
+    headers = {
+        "Cache-Control": cache_control,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+    if content_security:
+        headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self'; "
+            "img-src 'self' data:; "
+            "connect-src 'self' ws://127.0.0.1:* ws://localhost:*; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        )
+    return headers
+
+
 def _schema() -> dict[str, Any]:
     return {
         "openapi": "3.1.0",
@@ -606,6 +728,11 @@ def _schema() -> dict[str, Any]:
         },
         "paths": {
             "/v1/profiles": {"get": {"operationId": "listProfiles"}},
+            "/v1/session": {"get": {"operationId": "getSession"}},
+            "/v1/gateway/routes": {"get": {"operationId": "listGatewayRoutes"}},
+            "/v1/gateway/pairings": {
+                "post": {"operationId": "createGatewayPairing"}
+            },
             "/v1/profiles/{profile_id}/conversations": {
                 "get": {"operationId": "listConversations"},
                 "post": {"operationId": "createConversation"}

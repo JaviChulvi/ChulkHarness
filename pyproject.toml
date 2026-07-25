@@ -90,6 +90,7 @@ exclude = ["chulk.tests*", "chulkharness.egg-info*"]
 "chulk" = ["py.typed"]
 "chulk.presets" = ["AGENT.md"]
 "chulk.skills" = ["bundled/*/SKILL.md"]
+"chulk.server" = ["webchat/*.html", "webchat/*.css", "webchat/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["chulk/tests"]
