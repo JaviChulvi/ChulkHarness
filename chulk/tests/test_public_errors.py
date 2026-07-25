@@ -196,6 +196,7 @@ def test_public_error_redacts_messages_details_and_serialization():
     for secret in secrets:
         assert secret not in str(error)
         assert secret not in serialized
+    assert "abc.def.ghi" not in serialized
     assert "[redacted]" in serialized
 
 
