@@ -639,6 +639,19 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        if args.command == "server":
+            from chulk.server.lifecycle import run_server_command
+
+            return run_server_command(
+                args.server_command,
+                config=base_config,
+                host=getattr(args, "host", "127.0.0.1"),
+                port=getattr(args, "port", 8765),
+                allow_remote=bool(getattr(args, "allow_remote", False)),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "gateway":
             from chulk.telegram.main import run_telegram_gateway
 

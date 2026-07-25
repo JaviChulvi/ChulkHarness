@@ -267,10 +267,33 @@ def _add_gateway_control_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_control_server_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE control_server (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            state TEXT NOT NULL,
+            instance_token TEXT,
+            pid INTEGER,
+            host TEXT,
+            port INTEGER,
+            lease_until TEXT,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            stopped_at TEXT,
+            updated_at TEXT NOT NULL,
+            CHECK (state IN ('stopped', 'running')),
+            CHECK (stop_requested IN (0, 1))
+        )
+        """
+    )
+
+
 CONTROL_MIGRATIONS = (
     SQLiteMigration(1, "agent profile control database", _create_control_schema),
     SQLiteMigration(2, "model profiles and provider health", _add_model_profile_schema),
     SQLiteMigration(3, "channel gateway control ledger", _add_gateway_control_schema),
+    SQLiteMigration(4, "local control server lifecycle", _add_control_server_schema),
 )
 
 

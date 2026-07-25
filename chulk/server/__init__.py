@@ -25,6 +25,12 @@ from chulk.server.models import (
     ConversationMessageRequest,
     PermissionDecisionRequest,
 )
+from chulk.server.lifecycle import (
+    ControlServerLedger,
+    ControlServerStatus,
+    run_server_command,
+    serve_control_server,
+)
 from chulk.server.permissions import (
     PendingPermission,
     PermissionBroker,
@@ -41,6 +47,8 @@ __all__ = [
     "ConversationCommandNotFoundError",
     "ConversationDispatcher",
     "ConversationMessageRequest",
+    "ControlServerLedger",
+    "ControlServerStatus",
     "GATEWAY_PROTOCOL_VERSION",
     "GatewayHello",
     "GatewayMessage",
@@ -55,4 +63,6 @@ __all__ = [
     "ServerDependencyError",
     "WebSocketChannelAdapter",
     "create_control_app",
+    "run_server_command",
+    "serve_control_server",
 ]
