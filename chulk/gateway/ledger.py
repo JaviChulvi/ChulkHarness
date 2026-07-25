@@ -641,6 +641,55 @@ class SQLiteGatewayLedger:
             row = _inbox_row(conn, inbox_id)
         return _row_to_inbox(row) if row is not None else None
 
+    def find_inbox(
+        self,
+        *,
+        adapter: str,
+        account_id: str,
+        idempotency_key: str,
+    ) -> InboxRecord | None:
+        with sqlite_connection(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM gateway_inbox
+                WHERE adapter = ? AND account_id = ? AND idempotency_key = ?
+                """,
+                (adapter, account_id, idempotency_key),
+            ).fetchone()
+        return _row_to_inbox(row) if row is not None else None
+
+    def list_outbox(self, inbox_id: str) -> tuple[OutboxRecord, ...]:
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM gateway_outbox
+                WHERE inbox_id = ?
+                ORDER BY sequence, id
+                """,
+                (inbox_id,),
+            ).fetchall()
+        return tuple(_row_to_outbox(row) for row in rows)
+
+    def inbox_complete(self, inbox_id: str) -> bool:
+        """Return whether an event is terminal and has no outstanding delivery."""
+        with sqlite_connection(self.db_path) as conn:
+            inbox = _inbox_row(conn, inbox_id)
+            if inbox is None:
+                return False
+            if inbox["state"] in {"ignored", "cancelled"}:
+                return True
+            if inbox["state"] not in {"executed", "uncertain"}:
+                return False
+            outstanding = conn.execute(
+                """
+                SELECT 1 FROM gateway_outbox
+                WHERE inbox_id = ? AND state NOT IN ('delivered', 'failed')
+                LIMIT 1
+                """,
+                (inbox_id,),
+            ).fetchone()
+        return outstanding is None
+
     def pending_count(self, *, profile_id: str | None = None) -> int:
         clause = " AND profile_id = ?" if profile_id is not None else ""
         parameters: tuple[object, ...] = (profile_id,) if profile_id is not None else ()

@@ -1,5 +1,9 @@
 """Public channel-neutral gateway contracts."""
 
+from chulk.gateway.adoption import (
+    LegacyAdoptionResult,
+    adopt_legacy_telegram_state,
+)
 from chulk.gateway.ledger import (
     ExecutionClaim,
     GatewayAdapterStatus,
@@ -61,6 +65,7 @@ __all__ = [
     "InboundPart",
     "InboxRecord",
     "IngestResult",
+    "LegacyAdoptionResult",
     "MediaPart",
     "MediaReference",
     "OutboundEnvelope",
@@ -74,5 +79,6 @@ __all__ = [
     "TrustLevel",
     "UNROUTED_PROFILE_ID",
     "UNCERTAIN_EXECUTION_MESSAGE",
+    "adopt_legacy_telegram_state",
     "conversation_key_for",
 ]

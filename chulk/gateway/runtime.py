@@ -64,11 +64,20 @@ class GatewayRuntime:
         adapters: Iterable[ChannelAdapter],
         executor: EnvelopeExecutor,
         limits: GatewayLimits | None = None,
+        propagate_delivery_errors: bool = False,
+        delivery_retry_delay_seconds: float | None = None,
     ) -> None:
         self.ledger = ledger
         self.router = router
         self.executor = executor
         self.limits = limits or GatewayLimits()
+        if (
+            delivery_retry_delay_seconds is not None
+            and delivery_retry_delay_seconds < 0
+        ):
+            raise ValueError("delivery_retry_delay_seconds cannot be negative")
+        self.propagate_delivery_errors = propagate_delivery_errors
+        self.delivery_retry_delay_seconds = delivery_retry_delay_seconds
         self._adapters = {
             (adapter.name, adapter.account_id): adapter for adapter in adapters
         }
@@ -146,9 +155,11 @@ class GatewayRuntime:
                     error_message="configured adapter is unavailable",
                 )
             else:
+                delivery_error: Exception | None = None
                 try:
                     returned = await adapter.deliver(record.envelope)
                 except Exception as exc:
+                    delivery_error = exc
                     LOGGER.warning(
                         "Gateway delivery failed (%s)",
                         type(exc).__name__,
@@ -158,7 +169,11 @@ class GatewayRuntime:
                         state=DeliveryState.RETRYABLE,
                         attempt=record.attempt_count,
                         checkpoint=record.checkpoint,
-                        retry_after_seconds=min(60.0, 2.0**record.attempt_count),
+                        retry_after_seconds=(
+                            self.delivery_retry_delay_seconds
+                            if self.delivery_retry_delay_seconds is not None
+                            else min(60.0, 2.0**record.attempt_count)
+                        ),
                         error_code=type(exc).__name__,
                         error_message="channel delivery failed",
                     )
@@ -191,6 +206,12 @@ class GatewayRuntime:
                 receipt,
             )
             delivered += 1
+            if (
+                adapter is not None
+                and delivery_error is not None
+                and self.propagate_delivery_errors
+            ):
+                raise delivery_error
 
     async def run_once(self) -> tuple[int, int]:
         """Recover leases, execute one worker wave, then drain due deliveries."""

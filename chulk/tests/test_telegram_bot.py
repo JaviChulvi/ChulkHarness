@@ -332,7 +332,9 @@ async def test_poll_once_advances_offset_and_processes_updates(tmp_path: Path) -
 
     assert bot._offset == 100
     assert client.sent == [(9, "answer: hello")]
-    assert bot.session_store.get_adapter_cursor("telegram") == 100
+    status = bot.gateway_ledger.adapter_status("telegram", "primary")
+    assert status is not None
+    assert status.cursor == "100"
 
     restarted_client = FakeClient()
     restarted_bot = _bot(tmp_path, restarted_client, [])
