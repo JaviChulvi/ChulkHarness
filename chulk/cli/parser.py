@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_init_parser(subparsers)
     _add_profile_parser(subparsers)
     _add_model_parser(subparsers)
+    _add_plugins_parser(subparsers)
     _add_usage_parser(subparsers)
     _add_session_parser(subparsers)
     _add_trace_parser(subparsers)
@@ -184,6 +185,57 @@ def _add_profile_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     inspect.add_argument("profile_id")
     inspect.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_plugins_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    parser = subparsers.add_parser(
+        "plugins",
+        help="Inspect, register, list, or audit local plugins.",
+    )
+    plugin_subparsers = parser.add_subparsers(
+        dest="plugin_command",
+        required=True,
+    )
+
+    inspect = plugin_subparsers.add_parser(
+        "inspect",
+        help="Statically inspect a local package without importing it.",
+    )
+    inspect.add_argument("path")
+    inspect.add_argument("--json", action="store_true", dest="json_output")
+
+    register = plugin_subparsers.add_parser(
+        "register",
+        help="Register an exact local package after explicit review.",
+    )
+    register.add_argument("path")
+    register.add_argument("--approved-by", required=True)
+    register.add_argument(
+        "--acknowledge-host-authority",
+        action="store_true",
+        help="Acknowledge that importing Python code has host-process authority.",
+    )
+    register.add_argument(
+        "--grant-capability",
+        action="append",
+        default=[],
+        dest="granted_capabilities",
+    )
+    register.add_argument("--json", action="store_true", dest="json_output")
+
+    list_parser = plugin_subparsers.add_parser(
+        "list",
+        help="List reviewed profile-local registrations.",
+    )
+    list_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    audit = plugin_subparsers.add_parser(
+        "audit",
+        help="Verify exact locks and packages without importing code.",
+    )
+    audit.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_usage_parser(subparsers: argparse._SubParsersAction) -> None:

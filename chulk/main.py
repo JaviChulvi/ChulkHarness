@@ -30,6 +30,7 @@ from chulk.cli.entrypoints import (
     run_trace_command,
 )
 from chulk.cli.profiles import run_profile_command
+from chulk.cli.plugins import run_plugin_command
 from chulk.cli.models import run_model_command
 from chulk.cli.usage import run_usage_command
 from chulk.cli.sessions import run_session_command
@@ -68,6 +69,7 @@ from chulk.profiles import (
     ProfileOwnershipError,
     ProfileRuntimeFactory,
 )
+from chulk.plugins import LocalPluginRegistry
 from chulk.runtime import create_agent
 from chulk.sessions import (
     AmbiguousSessionError,
@@ -635,6 +637,31 @@ def main(
         resolved_profile = profile_factory.resolve_cli(getattr(args, "profile", None))
         config = resolved_profile.config
         profile = resolved_profile.profile
+        if args.command == "plugins":
+            return run_plugin_command(
+                args.plugin_command,
+                registry=LocalPluginRegistry(
+                    config.runtime_dir,
+                    profile_id=profile.id,
+                ),
+                path=getattr(args, "path", None),
+                approved_by=getattr(args, "approved_by", None),
+                acknowledge_host_authority=bool(
+                    getattr(
+                        args,
+                        "acknowledge_host_authority",
+                        False,
+                    )
+                ),
+                granted_capabilities=tuple(
+                    getattr(args, "granted_capabilities", ())
+                ),
+                json_output=bool(
+                    getattr(args, "json_output", False)
+                ),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "usage":
             return run_usage_command(
                 args.usage_command,

@@ -23,6 +23,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "packaging>=24,<27",
   "PyYAML>=6.0.2,<7",
   "tzdata>=2025.2; platform_system == 'Windows'",
 ]

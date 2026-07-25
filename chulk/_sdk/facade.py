@@ -32,6 +32,14 @@ from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.mcp import MCPServerConfig
+from chulk.plugins import (
+    LoadedPluginEntryPoint,
+    LocalPluginRegistry,
+    PluginAuditReport,
+    PluginCategory,
+    PluginInspection,
+    PluginLockEntry,
+)
 from chulk.results import (
     GovernedSkill,
     GovernedSkillRevision,
@@ -510,6 +518,7 @@ class Agent:
         learning_review_policy: LearningReviewPolicy | None = None,
         learning_review_quota: LearningReviewQuota | None = None,
         automatic_learning_approval: bool = False,
+        plugin_registry: LocalPluginRegistry | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -538,6 +547,7 @@ class Agent:
                 learning_review_policy=learning_review_policy,
                 learning_review_quota=learning_review_quota,
                 automatic_learning_approval=automatic_learning_approval,
+                plugin_registry=plugin_registry,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -810,6 +820,76 @@ class Agent:
                 governed_skill_snapshot(item)
                 for item in self.runtime.confirm_skill_success(turn_id=turn_id)
             ),
+        )
+
+    def inspect_plugin(self, path: Path | str) -> PluginInspection:
+        """Inspect a local plugin package without importing its code."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "inspect_plugin",
+            lambda: registry.inspect(path),
+        )
+
+    def register_local_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLockEntry:
+        """Register one exact local package through an explicit host action."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "register_local_plugin",
+            lambda: registry.register_local(
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+            ),
+            serialized=True,
+        )
+
+    def list_plugins(self) -> tuple[PluginLockEntry, ...]:
+        """List reviewed plugin registrations without importing them."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            return ()
+        return self._invoke("list_plugins", registry.list)
+
+    def audit_plugins(self) -> PluginAuditReport:
+        """Recheck exact plugin identities without importing plugin code."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke("audit_plugins", registry.audit)
+
+    def load_plugin_entry_point(
+        self,
+        plugin_name: str,
+        category: PluginCategory | str,
+        entry_name: str,
+        *,
+        available_capabilities: tuple[str, ...] = (),
+    ) -> LoadedPluginEntryPoint:
+        """Import an exact reviewed factory through the host SDK boundary."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "load_plugin_entry_point",
+            lambda: registry.load_entry_point(
+                plugin_name,
+                category,
+                entry_name,
+                available_capabilities=available_capabilities,
+            ),
+            serialized=True,
         )
 
     @property
@@ -1190,6 +1270,50 @@ class AsyncAgent:
             turn_id=turn_id,
         )
 
+    async def inspect_plugin(
+        self,
+        path: Path | str,
+    ) -> PluginInspection:
+        return await asyncio.to_thread(self._agent.inspect_plugin, path)
+
+    async def register_local_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLockEntry:
+        return await asyncio.to_thread(
+            self._agent.register_local_plugin,
+            path,
+            approved_by=approved_by,
+            acknowledge_host_authority=acknowledge_host_authority,
+            granted_capabilities=granted_capabilities,
+        )
+
+    async def list_plugins(self) -> tuple[PluginLockEntry, ...]:
+        return await asyncio.to_thread(self._agent.list_plugins)
+
+    async def audit_plugins(self) -> PluginAuditReport:
+        return await asyncio.to_thread(self._agent.audit_plugins)
+
+    async def load_plugin_entry_point(
+        self,
+        plugin_name: str,
+        category: PluginCategory | str,
+        entry_name: str,
+        *,
+        available_capabilities: tuple[str, ...] = (),
+    ) -> LoadedPluginEntryPoint:
+        return await asyncio.to_thread(
+            self._agent.load_plugin_entry_point,
+            plugin_name,
+            category,
+            entry_name,
+            available_capabilities=available_capabilities,
+        )
+
     @property
     def usage_ledger(self) -> UsageLedger:
         return self._agent.usage_ledger
@@ -1390,6 +1514,7 @@ def _build_handle(
     learning_review_policy: LearningReviewPolicy | None = None,
     learning_review_quota: LearningReviewQuota | None = None,
     automatic_learning_approval: bool = False,
+    plugin_registry: LocalPluginRegistry | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -1418,6 +1543,7 @@ def _build_handle(
         learning_review_policy=learning_review_policy,
         learning_review_quota=learning_review_quota,
         automatic_learning_approval=automatic_learning_approval,
+        plugin_registry=plugin_registry,
     )
     return AgentHandle(runtime, on_event=on_event)
 

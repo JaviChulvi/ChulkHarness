@@ -35,6 +35,7 @@ from chulk.llm.capabilities import (
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
+from chulk.plugins import LocalPluginRegistry
 from chulk.redaction import redact_text
 from chulk.sessions import (
     ConversationSummaryRecord,
@@ -151,6 +152,7 @@ def create_agent(
     learning_review_policy: LearningReviewPolicy | None = None,
     learning_review_quota: LearningReviewQuota | None = None,
     automatic_learning_approval: bool = False,
+    plugin_registry: LocalPluginRegistry | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -159,6 +161,15 @@ def create_agent(
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
     effective_profile_id = profile_id or config.profile_id
+    selected_plugin_registry = plugin_registry or LocalPluginRegistry(
+        config.runtime_dir,
+        profile_id=effective_profile_id,
+    )
+    if selected_plugin_registry.profile_id != effective_profile_id:
+        raise ValueError(
+            "plugin registry profile does not match the runtime profile"
+        )
+    plugin_audit_report = selected_plugin_registry.verify_startup()
     effective_conversation_metadata = dict(conversation_metadata or {})
     metadata_profile_id = effective_conversation_metadata.get("profile_id")
     if metadata_profile_id is not None and metadata_profile_id != effective_profile_id:
@@ -451,6 +462,8 @@ def create_agent(
             skill_lifecycle=skill_lifecycle,
             learning_proposals=learning_proposals,
             learning_reviewer=learning_reviewer,
+            plugin_registry=selected_plugin_registry,
+            plugin_audit_report=plugin_audit_report,
         )
     except Exception:
         for resource in reversed(owned_resources):

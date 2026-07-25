@@ -2,6 +2,7 @@
 
 from chulk._version import __version__
 
+from chulk import plugins as Plugins
 from chulk import skills as Skills
 from chulk import tools as Tools
 from chulk.api import (
@@ -14,6 +15,7 @@ from chulk.api import (
     AsyncAgent,
     AsyncChatAgent,
     AuthenticationState,
+    AuditSeverity,
     AuxiliaryModelProfiles,
     BudgetExceededError,
     BudgetPayload,
@@ -70,6 +72,7 @@ from chulk.api import (
     FileReadRequest,
     FileSearchRequest,
     FileWriteRequest,
+    FilesystemAccess,
     GitWorktreeBackend,
     GitWorktreePolicy,
     GovernedSkill,
@@ -88,6 +91,8 @@ from chulk.api import (
     LearningReview,
     LearningReviewPolicy,
     LearningReviewQuota,
+    LoadedPluginEntryPoint,
+    LocalPluginRegistry,
     NetworkPolicy,
     ModelDeltaPayload,
     ModelCapabilityRequirements,
@@ -114,6 +119,27 @@ from chulk.api import (
     PlanStep,
     PlanStepEvidence,
     PlanStepStatus,
+    PluginAuditFinding,
+    PluginAuditReport,
+    PluginCategory,
+    PluginDependency,
+    PluginEntryPoint,
+    PluginFilesystemRequirement,
+    PluginInspection,
+    PluginInspectionError,
+    PluginLoadError,
+    PluginLockEntry,
+    PluginLockError,
+    PluginLockFile,
+    PluginManifest,
+    PluginManifestError,
+    PluginPackage,
+    PluginRegistrationError,
+    PluginRegistrationStatus,
+    PluginReview,
+    PluginSourceKind,
+    PluginTrustState,
+    PluginVerificationError,
     PatchApplyRequest,
     ProcessHandle,
     ProcessLogChunk,
@@ -191,6 +217,8 @@ from chulk.api import (
     async_agent,
     async_chat_agent,
     chat_agent,
+    inspect_plugin_directory,
+    load_plugin_manifest,
 )
 from chulk.tools import (
     PermissionDecision,
@@ -202,6 +230,7 @@ from chulk.tools import (
 )
 
 Tool = tool
+plugins = Plugins
 skills = Skills
 tools = Tools
 
@@ -216,6 +245,7 @@ __all__ = [
     "AsyncAgentHandle",
     "AsyncChatAgent",
     "AuthenticationState",
+    "AuditSeverity",
     "AuxiliaryModelProfiles",
     "BudgetExceededError",
     "BudgetPayload",
@@ -270,6 +300,7 @@ __all__ = [
     "FileReadRequest",
     "FileSearchRequest",
     "FileWriteRequest",
+    "FilesystemAccess",
     "GitWorktreeBackend",
     "GitWorktreePolicy",
     "GovernedSkill",
@@ -289,6 +320,8 @@ __all__ = [
     "LearningReviewPolicy",
     "LearningReviewQuota",
     "LearningProposalChangedPayload",
+    "LoadedPluginEntryPoint",
+    "LocalPluginRegistry",
     "NetworkPolicy",
     "ModelDeltaPayload",
     "ModelCapabilityRequirements",
@@ -318,6 +351,28 @@ __all__ = [
     "PlanStep",
     "PlanStepEvidence",
     "PlanStepStatus",
+    "PluginAuditFinding",
+    "PluginAuditReport",
+    "PluginCategory",
+    "PluginDependency",
+    "PluginEntryPoint",
+    "PluginFilesystemRequirement",
+    "PluginInspection",
+    "PluginInspectionError",
+    "PluginLoadError",
+    "PluginLockEntry",
+    "PluginLockError",
+    "PluginLockFile",
+    "PluginManifest",
+    "PluginManifestError",
+    "PluginPackage",
+    "PluginRegistrationError",
+    "PluginRegistrationStatus",
+    "PluginReview",
+    "PluginSourceKind",
+    "PluginTrustState",
+    "PluginVerificationError",
+    "Plugins",
     "PatchApplyRequest",
     "ProcessHandle",
     "ProcessLogChunk",
@@ -401,6 +456,9 @@ __all__ = [
     "async_agent",
     "async_chat_agent",
     "chat_agent",
+    "inspect_plugin_directory",
+    "load_plugin_manifest",
+    "plugins",
     "skills",
     "tool",
     "tools",

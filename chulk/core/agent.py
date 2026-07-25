@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
@@ -62,6 +62,10 @@ from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
 
+if TYPE_CHECKING:
+    from chulk.plugins.models import PluginAuditReport
+    from chulk.plugins.registry import LocalPluginRegistry
+
 
 class Agent:
     """Coordinates model calls, memory retrieval, skill loading, and tools."""
@@ -111,6 +115,8 @@ class Agent:
         skill_lifecycle: SkillLifecycleManager | None = None,
         learning_proposals: LearningProposalService | None = None,
         learning_reviewer: LearningReviewCoordinator | None = None,
+        plugin_registry: LocalPluginRegistry | None = None,
+        plugin_audit_report: PluginAuditReport | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -177,6 +183,8 @@ class Agent:
         self.skill_lifecycle = skill_lifecycle
         self.learning_proposals = learning_proposals
         self.learning_reviewer = learning_reviewer
+        self.plugin_registry = plugin_registry
+        self.plugin_audit_report = plugin_audit_report
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
