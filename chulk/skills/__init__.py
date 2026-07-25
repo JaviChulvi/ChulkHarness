@@ -22,7 +22,20 @@ from chulk.skills.lifecycle_models import (
     SkillRevisionRecord,
     SkillUsageKind,
 )
+from chulk.skills.lifecycle import (
+    SkillApprovalError,
+    SkillConflictError,
+    SkillLifecycleError,
+    SkillLifecycleManager,
+    SkillScope,
+    proposal_diff,
+)
 from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
+from chulk.skills.locks import (
+    SKILL_LOCK_SCHEMA_VERSION,
+    SkillLockEntry,
+    SkillLockFile,
+)
 from chulk.skills.registry import (
     Skill,
     SkillRegistry,
@@ -127,9 +140,17 @@ __all__ = [
     "LearningProposalStatus",
     "SKILL_MANIFEST_SCHEMA_VERSION",
     "SQLiteSkillLifecycleStore",
+    "SKILL_LOCK_SCHEMA_VERSION",
+    "SkillApprovalError",
+    "SkillConflictError",
+    "SkillLifecycleError",
+    "SkillLifecycleManager",
     "SkillLifecycleRecord",
     "SkillLifecycleStatus",
+    "SkillLockEntry",
+    "SkillLockFile",
     "SkillRevisionRecord",
+    "SkillScope",
     "SkillUsageKind",
     "bundled_skills_dir",
     "explicit_skill_names",
@@ -140,6 +161,7 @@ __all__ = [
     "only",
     "path",
     "pin",
+    "proposal_diff",
     "resolve_skill_resource",
     "shell",
     "skill_package_digest",

@@ -57,6 +57,7 @@ class LearningProposalRecord:
     status: LearningProposalStatus
     created_at: str
     reviewed_at: str | None = None
+    reviewed_by: str | None = None
     applied_revision_id: str | None = None
     accepted_memory_id: str | None = None
     error: str | None = None
@@ -81,6 +82,7 @@ class LearningProposalRecord:
             "status": self.status.value,
             "created_at": self.created_at,
             "reviewed_at": self.reviewed_at,
+            "reviewed_by": self.reviewed_by,
             "applied_revision_id": self.applied_revision_id,
             "accepted_memory_id": self.accepted_memory_id,
             "error": self.error,
@@ -94,6 +96,7 @@ class SkillRevisionRecord:
 
     id: str
     profile_id: str
+    scope: str
     name: str
     version: str
     digest: str
@@ -110,6 +113,7 @@ class SkillLifecycleRecord:
     """Current governed state and counters for one profile-owned skill."""
 
     profile_id: str
+    scope: str
     name: str
     version: str
     digest: str
@@ -127,6 +131,7 @@ class SkillLifecycleRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id,
+            "scope": self.scope,
             "name": self.name,
             "version": self.version,
             "digest": self.digest,

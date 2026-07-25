@@ -525,6 +525,7 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS skill_packages (
             profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
             name TEXT NOT NULL,
             version TEXT NOT NULL,
             digest TEXT NOT NULL,
@@ -538,7 +539,8 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
             patch_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (profile_id, name),
+            PRIMARY KEY (profile_id, scope, name),
+            CHECK (scope IN ('project', 'profile')),
             CHECK (status IN ('active', 'stale', 'archived', 'pinned')),
             CHECK (
                 view_count >= 0 AND use_count >= 0
@@ -552,6 +554,7 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS skill_package_revisions (
             id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
             name TEXT NOT NULL,
             version TEXT NOT NULL,
             digest TEXT NOT NULL,
@@ -561,14 +564,15 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
             manifest_json TEXT NOT NULL,
             proposal_id TEXT,
             created_at TEXT NOT NULL,
-            UNIQUE (profile_id, name, digest)
+            UNIQUE (profile_id, scope, name, digest),
+            CHECK (scope IN ('project', 'profile'))
         )
         """
     )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_skill_revisions_lookup
-        ON skill_package_revisions(profile_id, name, created_at)
+        ON skill_package_revisions(profile_id, scope, name, created_at)
         """
     )
     conn.execute(
@@ -576,6 +580,7 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS skill_usage_events (
             id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
             skill_name TEXT NOT NULL,
             skill_version TEXT NOT NULL,
             skill_digest TEXT NOT NULL,
@@ -583,7 +588,8 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
             source_event_id TEXT NOT NULL,
             host_confirmed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            UNIQUE (profile_id, skill_name, source_event_id, kind),
+            UNIQUE (profile_id, scope, skill_name, source_event_id, kind),
+            CHECK (scope IN ('project', 'profile')),
             CHECK (kind IN ('view', 'use', 'success', 'patch')),
             CHECK (host_confirmed IN (0, 1))
         )
@@ -609,6 +615,7 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
             reviewed_at TEXT,
+            reviewed_by TEXT,
             applied_revision_id TEXT,
             accepted_memory_id TEXT,
             error TEXT,

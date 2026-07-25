@@ -66,6 +66,11 @@ class SQLiteSkillLifecycleStore:
             LearningProposalKind.MEMORY_UPDATE,
         } and not (content and content.strip()):
             raise ValueError(f"{proposal_kind.value} proposals require content")
+        if proposal_kind in {
+            LearningProposalKind.SKILL_PATCH,
+            LearningProposalKind.SKILL_ARCHIVE,
+        } and not (diff and diff.strip()):
+            raise ValueError(f"{proposal_kind.value} proposals require diff")
         clean_confidence = _confidence(confidence)
         clean_evidence = _text_tuple(
             evidence_turn_ids,
@@ -179,6 +184,7 @@ class SQLiteSkillLifecycleStore:
         applied_revision_id: str | None = None,
         accepted_memory_id: str | None = None,
         error: str | None = None,
+        reviewed_by: str | None = None,
     ) -> LearningProposalRecord:
         """Move a pending proposal to one terminal state idempotently."""
         next_status = LearningProposalStatus(status)
@@ -199,13 +205,18 @@ class SQLiteSkillLifecycleStore:
                 conn.execute(
                     """
                     UPDATE learning_proposals
-                    SET status = ?, reviewed_at = ?, applied_revision_id = ?,
-                        accepted_memory_id = ?, error = ?
+                    SET status = ?, reviewed_at = ?, reviewed_by = ?,
+                        applied_revision_id = ?, accepted_memory_id = ?, error = ?
                     WHERE id = ? AND profile_id = ? AND status = 'pending'
                     """,
                     (
                         next_status.value,
                         _utc_now(),
+                        _optional_text(
+                            reviewed_by,
+                            "reviewed_by",
+                            max_chars=256,
+                        ),
                         applied_revision_id,
                         accepted_memory_id,
                         _optional_text(error, "error", max_chars=4_000),
@@ -221,6 +232,7 @@ class SQLiteSkillLifecycleStore:
         manifest: SkillManifest,
         digest: str,
         package_files: Mapping[str, bytes],
+        scope: str = "project",
         proposal_id: str | None = None,
         status: SkillLifecycleStatus | str = SkillLifecycleStatus.ACTIVE,
         increment_patch: bool = False,
@@ -235,69 +247,174 @@ class SQLiteSkillLifecycleStore:
         lifecycle_status = SkillLifecycleStatus(status)
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            existing_revision = conn.execute(
-                """
-                SELECT id FROM skill_package_revisions
-                WHERE profile_id = ? AND name = ? AND digest = ?
-                """,
-                (self.profile_id, manifest.name, clean_digest),
-            ).fetchone()
-            if existing_revision is not None:
-                revision_id = str(existing_revision["id"])
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO skill_package_revisions (
-                        id, profile_id, name, version, digest, source, trust,
-                        package_json, manifest_json, proposal_id, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        revision_id,
-                        self.profile_id,
-                        manifest.name,
-                        manifest.version,
-                        clean_digest,
-                        manifest.source,
-                        manifest.trust,
-                        encoded_package,
-                        json.dumps(manifest.to_dict(), sort_keys=True),
-                        proposal_id,
-                        now,
-                    ),
-                )
-            conn.execute(
-                """
-                INSERT INTO skill_packages (
-                    profile_id, name, version, digest, source, trust, status,
-                    active_revision_id, patch_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(profile_id, name) DO UPDATE SET
-                    version = excluded.version,
-                    digest = excluded.digest,
-                    source = excluded.source,
-                    trust = excluded.trust,
-                    status = excluded.status,
-                    active_revision_id = excluded.active_revision_id,
-                    patch_count = skill_packages.patch_count + ?,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    self.profile_id,
-                    manifest.name,
-                    manifest.version,
-                    clean_digest,
-                    manifest.source,
-                    manifest.trust,
-                    lifecycle_status.value,
-                    revision_id,
-                    int(increment_patch),
-                    now,
-                    now,
-                    int(increment_patch),
-                ),
+            revision_id = _save_revision_in_connection(
+                conn,
+                profile_id=self.profile_id,
+                scope=_scope(scope),
+                manifest=manifest,
+                digest=clean_digest,
+                encoded_package=encoded_package,
+                proposal_id=proposal_id,
+                status=lifecycle_status,
+                increment_patch=increment_patch,
+                revision_id=revision_id,
+                now=now,
             )
         return self.get_revision(revision_id)
+
+    def approve_skill_revision(
+        self,
+        proposal_id: str,
+        *,
+        manifest: SkillManifest,
+        digest: str,
+        package_files: Mapping[str, bytes],
+        status: SkillLifecycleStatus | str = SkillLifecycleStatus.ACTIVE,
+        increment_patch: bool = True,
+        revision_id: str | None = None,
+        reviewed_by: str,
+        scope: str = "project",
+    ) -> LearningProposalRecord:
+        """Commit a validated revision and approve its proposal atomically."""
+        clean_digest = _required_text(digest, "digest", max_chars=128)
+        if not clean_digest.startswith("sha256:"):
+            raise ValueError("skill digest must use sha256")
+        encoded_package = _encode_package(package_files)
+        lifecycle_status = SkillLifecycleStatus(status)
+        now = _utc_now()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            proposal = _pending_skill_proposal(
+                conn,
+                profile_id=self.profile_id,
+                proposal_id=proposal_id,
+            )
+            if proposal.status is not LearningProposalStatus.PENDING:
+                return proposal
+            if proposal.target_name != manifest.name:
+                raise ValueError(
+                    "proposal target does not match validated skill manifest"
+                )
+            revision_id = _save_revision_in_connection(
+                conn,
+                profile_id=self.profile_id,
+                scope=_scope(scope),
+                manifest=manifest,
+                digest=clean_digest,
+                encoded_package=encoded_package,
+                proposal_id=proposal_id,
+                status=lifecycle_status,
+                increment_patch=increment_patch,
+                revision_id=revision_id or str(uuid4()),
+                now=now,
+            )
+            conn.execute(
+                """
+                UPDATE learning_proposals
+                SET status = 'approved', reviewed_at = ?, reviewed_by = ?,
+                    applied_revision_id = ?, error = NULL
+                WHERE id = ? AND profile_id = ? AND status = 'pending'
+                """,
+                (
+                    now,
+                    _required_text(
+                        reviewed_by,
+                        "reviewed_by",
+                        max_chars=256,
+                    ),
+                    revision_id,
+                    proposal_id,
+                    self.profile_id,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM learning_proposals
+                WHERE id = ? AND profile_id = ?
+                """,
+                (proposal_id, self.profile_id),
+            ).fetchone()
+        assert row is not None
+        return _row_to_proposal(row)
+
+    def find_revision(
+        self,
+        *,
+        name: str,
+        digest: str,
+        scope: str = "project",
+    ) -> SkillRevisionRecord | None:
+        with sqlite_connection(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM skill_package_revisions
+                WHERE profile_id = ? AND scope = ? AND name = ? AND digest = ?
+                """,
+                (self.profile_id, _scope(scope), name, digest),
+            ).fetchone()
+        return _row_to_revision(row) if row is not None else None
+
+    def approve_skill_archive(
+        self,
+        proposal_id: str,
+        *,
+        name: str,
+        reviewed_by: str,
+        scope: str = "project",
+    ) -> LearningProposalRecord:
+        """Archive a skill and approve the matching proposal atomically."""
+        now = _utc_now()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            proposal = _pending_skill_proposal(
+                conn,
+                profile_id=self.profile_id,
+                proposal_id=proposal_id,
+            )
+            if proposal.status is not LearningProposalStatus.PENDING:
+                return proposal
+            if (
+                proposal.kind is not LearningProposalKind.SKILL_ARCHIVE
+                or proposal.target_name != name
+            ):
+                raise ValueError("proposal does not authorize this skill archive")
+            cursor = conn.execute(
+                """
+                UPDATE skill_packages
+                SET status = 'archived', updated_at = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
+                """,
+                (now, self.profile_id, _scope(scope), name),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"governed skill {name!r} does not exist")
+            conn.execute(
+                """
+                UPDATE learning_proposals
+                SET status = 'approved', reviewed_at = ?, reviewed_by = ?,
+                    error = NULL
+                WHERE id = ? AND profile_id = ? AND status = 'pending'
+                """,
+                (
+                    now,
+                    _required_text(
+                        reviewed_by,
+                        "reviewed_by",
+                        max_chars=256,
+                    ),
+                    proposal_id,
+                    self.profile_id,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM learning_proposals
+                WHERE id = ? AND profile_id = ?
+                """,
+                (proposal_id, self.profile_id),
+            ).fetchone()
+        assert row is not None
+        return _row_to_proposal(row)
 
     def get_revision(self, revision_id: str) -> SkillRevisionRecord:
         with sqlite_connection(self.db_path) as conn:
@@ -316,50 +433,62 @@ class SQLiteSkillLifecycleStore:
         self,
         name: str,
         *,
+        scope: str = "project",
         limit: int = 100,
     ) -> tuple[SkillRevisionRecord, ...]:
         with sqlite_connection(self.db_path) as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM skill_package_revisions
-                WHERE profile_id = ? AND name = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
-                (self.profile_id, name, _limit(limit)),
+                (self.profile_id, _scope(scope), name, _limit(limit)),
             ).fetchall()
         return tuple(_row_to_revision(row) for row in rows)
 
-    def get_skill(self, name: str) -> SkillLifecycleRecord:
+    def get_skill(
+        self,
+        name: str,
+        *,
+        scope: str = "project",
+    ) -> SkillLifecycleRecord:
         with sqlite_connection(self.db_path) as conn:
             row = conn.execute(
                 """
                 SELECT * FROM skill_packages
-                WHERE profile_id = ? AND name = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
                 """,
-                (self.profile_id, name),
+                (self.profile_id, _scope(scope), name),
             ).fetchone()
         if row is None:
             raise KeyError(f"governed skill {name!r} does not exist")
         return _row_to_skill(row)
 
-    def list_skills(self, *, limit: int = 1_000) -> tuple[SkillLifecycleRecord, ...]:
+    def list_skills(
+        self,
+        *,
+        scope: str | None = None,
+        limit: int = 1_000,
+    ) -> tuple[SkillLifecycleRecord, ...]:
+        query = "SELECT * FROM skill_packages WHERE profile_id = ?"
+        parameters: list[object] = [self.profile_id]
+        if scope is not None:
+            query += " AND scope = ?"
+            parameters.append(_scope(scope))
+        query += " ORDER BY scope, name LIMIT ?"
+        parameters.append(_limit(limit, maximum=10_000))
         with sqlite_connection(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM skill_packages
-                WHERE profile_id = ?
-                ORDER BY name
-                LIMIT ?
-                """,
-                (self.profile_id, _limit(limit, maximum=10_000)),
-            ).fetchall()
+            rows = conn.execute(query, tuple(parameters)).fetchall()
         return tuple(_row_to_skill(row) for row in rows)
 
     def set_skill_status(
         self,
         name: str,
         status: SkillLifecycleStatus | str,
+        *,
+        scope: str = "project",
     ) -> SkillLifecycleRecord:
         lifecycle_status = SkillLifecycleStatus(status)
         with sqlite_connection(self.db_path) as conn:
@@ -367,18 +496,19 @@ class SQLiteSkillLifecycleStore:
                 """
                 UPDATE skill_packages
                 SET status = ?, updated_at = ?
-                WHERE profile_id = ? AND name = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
                 """,
                 (
                     lifecycle_status.value,
                     _utc_now(),
                     self.profile_id,
+                    _scope(scope),
                     name,
                 ),
             )
         if cursor.rowcount == 0:
             raise KeyError(f"governed skill {name!r} does not exist")
-        return self.get_skill(name)
+        return self.get_skill(name, scope=scope)
 
     def activate_revision(self, revision_id: str) -> SkillLifecycleRecord:
         revision = self.get_revision(revision_id)
@@ -389,7 +519,7 @@ class SQLiteSkillLifecycleStore:
                 SET version = ?, digest = ?, source = ?, trust = ?,
                     status = 'active', active_revision_id = ?,
                     patch_count = patch_count + 1, updated_at = ?
-                WHERE profile_id = ? AND name = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
                 """,
                 (
                     revision.version,
@@ -399,12 +529,13 @@ class SQLiteSkillLifecycleStore:
                     revision.id,
                     _utc_now(),
                     self.profile_id,
+                    revision.scope,
                     revision.name,
                 ),
             )
         if cursor.rowcount == 0:
             raise KeyError(f"governed skill {revision.name!r} does not exist")
-        return self.get_skill(revision.name)
+        return self.get_skill(revision.name, scope=revision.scope)
 
     def record_usage(
         self,
@@ -415,6 +546,7 @@ class SQLiteSkillLifecycleStore:
         kind: SkillUsageKind | str,
         source_event_id: str,
         host_confirmed: bool = False,
+        scope: str = "project",
     ) -> SkillLifecycleRecord:
         """Record one idempotent counter event against an exact skill version."""
         usage_kind = SkillUsageKind(kind)
@@ -430,9 +562,9 @@ class SQLiteSkillLifecycleStore:
             current = conn.execute(
                 """
                 SELECT version, digest FROM skill_packages
-                WHERE profile_id = ? AND name = ?
+                WHERE profile_id = ? AND scope = ? AND name = ?
                 """,
-                (self.profile_id, name),
+                (self.profile_id, _scope(scope), name),
             ).fetchone()
             if current is None:
                 raise KeyError(f"governed skill {name!r} does not exist")
@@ -443,13 +575,14 @@ class SQLiteSkillLifecycleStore:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO skill_usage_events (
-                    id, profile_id, skill_name, skill_version, skill_digest,
+                    id, profile_id, scope, skill_name, skill_version, skill_digest,
                     kind, source_event_id, host_confirmed, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid4()),
                     self.profile_id,
+                    _scope(scope),
                     name,
                     version,
                     digest,
@@ -470,11 +603,11 @@ class SQLiteSkillLifecycleStore:
                     f"""
                     UPDATE skill_packages
                     SET {column} = {column} + 1, updated_at = ?
-                    WHERE profile_id = ? AND name = ?
+                    WHERE profile_id = ? AND scope = ? AND name = ?
                     """,
-                    (_utc_now(), self.profile_id, name),
+                    (_utc_now(), self.profile_id, _scope(scope), name),
                 )
-        return self.get_skill(name)
+        return self.get_skill(name, scope=scope)
 
 
 def _row_to_proposal(row: sqlite3.Row) -> LearningProposalRecord:
@@ -498,6 +631,7 @@ def _row_to_proposal(row: sqlite3.Row) -> LearningProposalRecord:
         status=LearningProposalStatus(str(row["status"])),
         created_at=str(row["created_at"]),
         reviewed_at=row["reviewed_at"],
+        reviewed_by=row["reviewed_by"],
         applied_revision_id=row["applied_revision_id"],
         accepted_memory_id=row["accepted_memory_id"],
         error=row["error"],
@@ -505,10 +639,113 @@ def _row_to_proposal(row: sqlite3.Row) -> LearningProposalRecord:
     )
 
 
+def _save_revision_in_connection(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: str,
+    scope: str,
+    manifest: SkillManifest,
+    digest: str,
+    encoded_package: str,
+    proposal_id: str | None,
+    status: SkillLifecycleStatus,
+    increment_patch: bool,
+    revision_id: str,
+    now: str,
+) -> str:
+    existing_revision = conn.execute(
+        """
+        SELECT id FROM skill_package_revisions
+        WHERE profile_id = ? AND scope = ? AND name = ? AND digest = ?
+        """,
+        (profile_id, scope, manifest.name, digest),
+    ).fetchone()
+    if existing_revision is not None:
+        revision_id = str(existing_revision["id"])
+    else:
+        conn.execute(
+            """
+            INSERT INTO skill_package_revisions (
+                id, profile_id, scope, name, version, digest, source, trust,
+                package_json, manifest_json, proposal_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                revision_id,
+                profile_id,
+                scope,
+                manifest.name,
+                manifest.version,
+                digest,
+                manifest.source,
+                manifest.trust,
+                encoded_package,
+                json.dumps(manifest.to_dict(), sort_keys=True),
+                proposal_id,
+                now,
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO skill_packages (
+            profile_id, scope, name, version, digest, source, trust, status,
+            active_revision_id, patch_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(profile_id, scope, name) DO UPDATE SET
+            version = excluded.version,
+            digest = excluded.digest,
+            source = excluded.source,
+            trust = excluded.trust,
+            status = excluded.status,
+            active_revision_id = excluded.active_revision_id,
+            patch_count = skill_packages.patch_count + ?,
+            updated_at = excluded.updated_at
+        """,
+        (
+            profile_id,
+            scope,
+            manifest.name,
+            manifest.version,
+            digest,
+            manifest.source,
+            manifest.trust,
+            status.value,
+            revision_id,
+            int(increment_patch),
+            now,
+            now,
+            int(increment_patch),
+        ),
+    )
+    return revision_id
+
+
+def _pending_skill_proposal(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: str,
+    proposal_id: str,
+) -> LearningProposalRecord:
+    row = conn.execute(
+        """
+        SELECT * FROM learning_proposals
+        WHERE id = ? AND profile_id = ?
+        """,
+        (proposal_id, profile_id),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"learning proposal {proposal_id!r} does not exist")
+    proposal = _row_to_proposal(row)
+    if not proposal.kind.value.startswith("skill_"):
+        raise ValueError("proposal is not a skill change")
+    return proposal
+
+
 def _row_to_revision(row: sqlite3.Row) -> SkillRevisionRecord:
     return SkillRevisionRecord(
         id=str(row["id"]),
         profile_id=str(row["profile_id"]),
+        scope=str(row["scope"]),
         name=str(row["name"]),
         version=str(row["version"]),
         digest=str(row["digest"]),
@@ -524,6 +761,7 @@ def _row_to_revision(row: sqlite3.Row) -> SkillRevisionRecord:
 def _row_to_skill(row: sqlite3.Row) -> SkillLifecycleRecord:
     return SkillLifecycleRecord(
         profile_id=str(row["profile_id"]),
+        scope=str(row["scope"]),
         name=str(row["name"]),
         version=str(row["version"]),
         digest=str(row["digest"]),
@@ -664,6 +902,12 @@ def _normalize_profile_id(value: str) -> str:
             "letters, digits, underscores, or hyphens"
         )
     return normalized
+
+
+def _scope(value: str) -> str:
+    if value not in {"project", "profile"}:
+        raise ValueError("skill scope must be 'project' or 'profile'")
+    return value
 
 
 __all__ = ["SQLiteSkillLifecycleStore"]
