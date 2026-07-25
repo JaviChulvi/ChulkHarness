@@ -34,6 +34,7 @@ class EventName(str, Enum):
     PERMISSION_RESOLVED = "permission.resolved"
     MEMORY_LOADED = "memory.loaded"
     SKILL_LOADED = "skill.loaded"
+    LEARNING_PROPOSAL_CHANGED = "learning.proposal.changed"
     PLAN_CREATED = "plan.created"
     PLAN_APPROVED = "plan.approved"
     RUN_COMPLETED = "run.completed"
@@ -105,6 +106,15 @@ class ResourcesLoadedPayload(ExtensiblePayload):
 
 
 @dataclass(frozen=True)
+class LearningProposalChangedPayload(ExtensiblePayload):
+    proposal_id: str
+    kind: str
+    status: str
+    action: str
+    target_name: str | None = None
+
+
+@dataclass(frozen=True)
 class PlanPayload(ExtensiblePayload):
     plan: Plan
 
@@ -143,6 +153,7 @@ EventPayload: TypeAlias = (
     | ToolCallPayload
     | PermissionPayload
     | ResourcesLoadedPayload
+    | LearningProposalChangedPayload
     | PlanPayload
     | RunCompletedPayload
     | RunFailedPayload
@@ -223,6 +234,7 @@ __all__ = [
     "BudgetPayload",
     "EventName",
     "EventPayload",
+    "LearningProposalChangedPayload",
     "ModelDeltaPayload",
     "ModelRequestPayload",
     "ModelResponsePayload",

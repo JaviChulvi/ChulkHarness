@@ -16,10 +16,12 @@ from chulk import (
     AgentEvent,
     AsyncAgent,
     EventName,
+    LearningProposalChangedPayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunStartedPayload,
     Tools,
+    Skills,
 )
 from chulk._sdk.event_channel import RunEventChannel
 from chulk._sdk.events import project_event
@@ -131,6 +133,37 @@ def test_projection_excludes_unknown_internal_events(tmp_path):
     facade = _agent(tmp_path)
 
     assert project_event(facade.runtime, "future_internal_diagnostic", {"secret": "value"}) is None
+
+
+def test_learning_proposal_changes_emit_typed_content_free_events(tmp_path):
+    events: list[AgentEvent] = []
+    facade = _agent(tmp_path, on_event=events.append)
+    service = facade.runtime.learning_proposals
+    assert service is not None
+
+    proposal = service.create(
+        Skills.LearningProposalDraft(
+            kind=Skills.LearningProposalKind.MEMORY_CREATE,
+            rationale="Explicit durable preference.",
+            content="User prefers direct summaries.",
+        )
+    )
+    facade.approve_learning_proposal(proposal.id)
+
+    learning_events = [
+        event
+        for event in events
+        if event.name == EventName.LEARNING_PROPOSAL_CHANGED.value
+    ]
+    assert [event.payload.action for event in learning_events] == [
+        "created",
+        "approved",
+    ]
+    assert all(
+        isinstance(event.payload, LearningProposalChangedPayload)
+        for event in learning_events
+    )
+    assert all("content" not in event.to_dict()["payload"] for event in learning_events)
 
 
 def test_tool_permission_and_plan_lifecycle_use_curated_names(tmp_path):

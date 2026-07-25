@@ -35,6 +35,7 @@ _GITIGNORE_RULES = (
     "!.chulk/",
     ".chulk/*",
     "!.chulk/mcp.json",
+    "!.chulk/skills.lock",
     "!.chulk/skills/",
     "!.chulk/skills/**",
     "traces/",

@@ -43,8 +43,15 @@ from chulk.sessions import (
     SessionRecorder,
 )
 from chulk.skills import (
+    LearningProposalService,
+    LearningReviewCoordinator,
+    LearningReviewPolicy,
+    LearningReviewQuota,
+    RestrictedLearningReviewer,
+    SQLiteSkillLifecycleStore,
     SkillAllowlistRef,
     SkillDirectoryRef,
+    SkillLifecycleManager,
     SkillPinRef,
     SkillRef,
     SkillRegistry,
@@ -141,6 +148,9 @@ def create_agent(
     runtime_metadata: dict | None = None,
     run_budget: RunBudget | None = None,
     usage_dimensions: UsageDimensions | None = None,
+    learning_review_policy: LearningReviewPolicy | None = None,
+    learning_review_quota: LearningReviewQuota | None = None,
+    automatic_learning_approval: bool = False,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -163,9 +173,13 @@ def create_agent(
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
     session_store = SQLiteSessionStore(config.store_path)
+    profile_skills_dir = config.runtime_dir / "profile-skills"
+    registry_skill_dirs = tuple(
+        dict.fromkeys((*config.skills_dirs, profile_skills_dir))
+    )
     skill_registry = SkillRegistry(
         config.skills_dir,
-        skills_dirs=config.skills_dirs,
+        skills_dirs=registry_skill_dirs,
         max_skills=config.max_skills_per_turn,
         max_content_chars=config.max_skill_content_chars,
     )
@@ -174,6 +188,26 @@ def create_agent(
         config.traces_dir,
         state.conversation_id,
         defer_until_event=TraceEvent.TURN_STARTED if conversation_id is None else None,
+    )
+    skill_lifecycle_store = SQLiteSkillLifecycleStore(
+        config.store_path,
+        profile_id=effective_profile_id,
+    )
+    skill_lifecycle = SkillLifecycleManager(
+        skill_lifecycle_store,
+        project_skills_dir=config.skills_dir,
+        profile_skills_dir=profile_skills_dir,
+        project_lock_path=config.skills_dir.parent / "skills.lock",
+        profile_lock_path=config.runtime_dir / "profile-skills.lock",
+        registry=skill_registry,
+    )
+    skill_lifecycle.register_existing(scope="project")
+    skill_lifecycle.register_existing(scope="profile")
+    learning_proposals = LearningProposalService(
+        memory_store=memory_store,
+        lifecycle_store=skill_lifecycle_store,
+        lifecycle_manager=skill_lifecycle,
+        automatic_approval_enabled=automatic_learning_approval,
     )
     def audit_session_read(
         event_type: str,
@@ -248,6 +282,17 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+    learning_reviewer = LearningReviewCoordinator(
+        reviewer=RestrictedLearningReviewer(client),
+        proposal_service=learning_proposals,
+        lifecycle_store=skill_lifecycle_store,
+        policy=learning_review_policy,
+        quota=learning_review_quota,
+        automatic_approval=automatic_learning_approval,
+        granted_capabilities=tuple(
+            sorted(_skill_capability_names(selected_capabilities))
+        ),
+    )
     selection_result = getattr(client, "selection_result", None)
     effective_runtime_metadata = dict(runtime_metadata or {})
     if selection_result is not None and hasattr(selection_result, "to_dict"):
@@ -402,6 +447,10 @@ def create_agent(
             tool_context_lifecycle=execution_lifecycle,
             profile_id=effective_profile_id,
             usage_accounting=usage_accounting,
+            skill_lifecycle_store=skill_lifecycle_store,
+            skill_lifecycle=skill_lifecycle,
+            learning_proposals=learning_proposals,
+            learning_reviewer=learning_reviewer,
         )
     except Exception:
         for resource in reversed(owned_resources):
@@ -410,6 +459,7 @@ def create_agent(
     agent.session_store = session_store
     agent.session_recorder = session_recorder
     agent.session_search_service = session_search_service
+    learning_proposals.event_callback = agent._trace
     return agent
 
 

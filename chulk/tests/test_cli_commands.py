@@ -89,6 +89,45 @@ Instructions for {name}.
     assert "<name>tests</name>" in system_prompt
 
 
+def test_skill_lifecycle_commands_are_handled_without_model_calls(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    skills_root = tmp_path / ".chulk" / "skills"
+    skill_root = skills_root / "review"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        """\
+---
+schema_version: 1
+name: review
+version: 1.0.0
+description: Review workflow.
+source: project
+trust: reviewed
+---
+# Review
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
+    client = RecordingLLMClient()
+    inputs = iter(["/skills list", "/learning pending", "/q"])
+
+    exit_code = main(
+        [],
+        input_func=lambda _prompt: next(inputs),
+        llm_client_factory=lambda _config: client,
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "project:review 1.0.0 active" in output
+    assert "No pending proposals." in output
+    assert client.requests == []
+
+
 def test_invisible_skill_slash_invocation_is_rejected_before_model(
     monkeypatch,
     tmp_path,

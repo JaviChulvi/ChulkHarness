@@ -37,7 +37,19 @@ from chulk.memory import (
     route_memory_candidates,
     select_memories_for_prompt,
 )
-from chulk.skills import SkillRegistry, SkillSelection
+from chulk.skills import (
+    LearningProposalService,
+    LearningReviewContext,
+    LearningReviewCoordinator,
+    LearningReviewOutcome,
+    LearningReviewTrigger,
+    SQLiteSkillLifecycleStore,
+    SkillLifecycleManager,
+    SkillLifecycleRecord,
+    SkillRegistry,
+    SkillSelection,
+    SkillUsageKind,
+)
 from chulk.tools import ToolRegistry
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -95,6 +107,10 @@ class Agent:
         tool_context_lifecycle: ToolContextLifecycle | None = None,
         profile_id: str = "default",
         usage_accounting: ModelUsageAccounting | None = None,
+        skill_lifecycle_store: SQLiteSkillLifecycleStore | None = None,
+        skill_lifecycle: SkillLifecycleManager | None = None,
+        learning_proposals: LearningProposalService | None = None,
+        learning_reviewer: LearningReviewCoordinator | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -157,6 +173,10 @@ class Agent:
         self.default_tool_context = default_tool_context
         self.runtime_metadata = deepcopy(runtime_metadata or {})
         self.usage_accounting = usage_accounting
+        self.skill_lifecycle_store = skill_lifecycle_store
+        self.skill_lifecycle = skill_lifecycle
+        self.learning_proposals = learning_proposals
+        self.learning_reviewer = learning_reviewer
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
@@ -817,6 +837,18 @@ class Agent:
                     "memory_namespace": self.memory_store.namespace,
                 },
             )
+        for proposal_id in result.proposal_ids:
+            self._trace(
+                TraceEvent.LEARNING_PROPOSAL_CHANGED,
+                {
+                    "turn_id": self.state.current_turn_id,
+                    "proposal_id": proposal_id,
+                    "kind": "memory_create",
+                    "status": "pending",
+                    "action": "created",
+                    "target_name": None,
+                },
+            )
 
     def _select_long_term_memories(self, user_message: str) -> None:
         """Select durable memories that should shape this turn."""
@@ -894,6 +926,16 @@ class Agent:
                             if selection.skill.manifest is not None
                             else None
                         ),
+                        "source": (
+                            selection.skill.manifest.source
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
+                        "trust": (
+                            selection.skill.manifest.trust
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
                         "digest": selection.skill.digest,
                         "loaded_resources": list(selection.skill.loaded_resources),
                     }
@@ -903,6 +945,166 @@ class Agent:
                     decision.to_dict() for decision in routing_result.decisions
                 ],
             },
+        )
+        self._record_selected_skill_usage()
+
+    def _record_selected_skill_usage(self) -> None:
+        if self.skill_lifecycle_store is None:
+            return
+        turn = self.state.turns[-1] if self.state.turns else None
+        if turn is None:
+            return
+        versions: list[dict[str, str]] = []
+        for selection in self._selected_skills:
+            manifest = selection.skill.manifest
+            digest = selection.skill.digest
+            root = selection.skill.root
+            if (
+                manifest is None
+                or digest is None
+                or root is None
+                or self.skill_lifecycle is None
+            ):
+                continue
+            resolved_root = root.resolve()
+            if resolved_root.parent == self.skill_lifecycle.project_skills_dir:
+                scope = "project"
+            elif (
+                resolved_root.parent
+                == self.skill_lifecycle.profile_skills_dir
+            ):
+                scope = "profile"
+            else:
+                continue
+            try:
+                matched = self.skill_lifecycle_store.get_skill(
+                    selection.skill.name,
+                    scope=scope,
+                )
+                if matched.digest != digest:
+                    continue
+                self.skill_lifecycle_store.record_usage(
+                    name=matched.name,
+                    version=matched.version,
+                    digest=matched.digest,
+                    kind=SkillUsageKind.USE,
+                    source_event_id=turn.turn_id,
+                    scope=matched.scope,
+                )
+            except (KeyError, OSError, ValueError) as exc:
+                self._trace(
+                    "skill_usage_record_failed",
+                    {
+                        "turn_id": turn.turn_id,
+                        "skill_name": selection.skill.name,
+                        "scope": scope,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+            versions.append(
+                {
+                    "name": matched.name,
+                    "scope": matched.scope,
+                    "version": matched.version,
+                    "digest": matched.digest,
+                }
+            )
+        if versions:
+            turn.extension_metadata["loaded_skill_versions"] = versions
+
+    def confirm_skill_success(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[SkillLifecycleRecord, ...]:
+        """Record host-confirmed success for exact skill versions on one run."""
+        if self.skill_lifecycle_store is None:
+            raise RuntimeError("skill lifecycle is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.status != "completed":
+            raise ValueError("skill success requires a completed host run")
+        raw_versions = selected_turn.extension_metadata.get(
+            "loaded_skill_versions",
+            [],
+        )
+        if not isinstance(raw_versions, list):
+            return ()
+        records: list[SkillLifecycleRecord] = []
+        for item in raw_versions:
+            if not isinstance(item, dict):
+                continue
+            required = ("name", "scope", "version", "digest")
+            if not all(isinstance(item.get(key), str) for key in required):
+                continue
+            records.append(
+                self.skill_lifecycle_store.record_usage(
+                    name=item["name"],
+                    scope=item["scope"],
+                    version=item["version"],
+                    digest=item["digest"],
+                    kind=SkillUsageKind.SUCCESS,
+                    source_event_id=f"{selected_turn.turn_id}:host-success",
+                    host_confirmed=True,
+                )
+            )
+        return tuple(records)
+
+    def review_learning(
+        self,
+        *,
+        trigger: LearningReviewTrigger | str = LearningReviewTrigger.MANUAL,
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReviewOutcome:
+        """Review one completed turn without granting the reviewer tool authority."""
+        if self.learning_reviewer is None:
+            raise RuntimeError("learning reviewer is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.final_answer is None:
+            raise ValueError("learning review requires a finished turn")
+        manifests = tuple(
+            skill.manifest.to_dict()
+            for skill in (
+                self.skill_registry.list_visible_skills()
+                if self.skill_registry is not None
+                else ()
+            )
+            if skill.manifest is not None
+        )
+        return self.learning_reviewer.review(
+            LearningReviewContext(
+                trigger=LearningReviewTrigger(trigger),
+                user_message=selected_turn.user_message,
+                assistant_response=selected_turn.final_answer,
+                turn_id=selected_turn.turn_id,
+                source_trace=(
+                    str(self.trace_logger.path)
+                    if self.trace_logger is not None
+                    else None
+                ),
+                tool_call_count=selected_turn.tool_call_count,
+                host_confirmed_success=host_confirmed_success,
+                current_skill_manifests=manifests,
+            )
         )
 
     def _turn_started_after(self, previous_turn_count: int) -> TurnState | None:

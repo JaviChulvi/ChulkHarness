@@ -12,6 +12,9 @@ from chulk.results import (
     ContextReport,
     ContextSection,
     Cost,
+    GovernedSkill,
+    GovernedSkillRevision,
+    LearningProposal,
     MemoryProposal,
     MemoryProposalStatus,
     Observation,
@@ -178,6 +181,80 @@ def memory_proposal_snapshot(value: object) -> MemoryProposal:
     )
 
 
+def learning_proposal_snapshot(value: object) -> LearningProposal:
+    payload = _mapping(value)
+    return LearningProposal(
+        id=str(payload.get("id") or ""),
+        profile_id=str(payload.get("profile_id") or "default"),
+        kind=str(payload.get("kind") or "unknown"),
+        target_name=_optional_str(payload.get("target_name")),
+        rationale=str(payload.get("rationale") or ""),
+        evidence_turn_ids=tuple(
+            str(item) for item in payload.get("evidence_turn_ids") or ()
+        ),
+        source_trace=_optional_str(payload.get("source_trace")),
+        content=_optional_str(payload.get("content")),
+        diff=_optional_str(payload.get("diff")),
+        required_capabilities=tuple(
+            str(item)
+            for item in payload.get("required_capabilities") or ()
+        ),
+        confidence=float(payload.get("confidence") or 0),
+        verification_steps=tuple(
+            str(item) for item in payload.get("verification_steps") or ()
+        ),
+        reviewer_model=_optional_str(payload.get("reviewer_model")),
+        cost=_optional_str(payload.get("cost")),
+        status=str(payload.get("status") or "unknown"),
+        created_at=str(payload.get("created_at") or ""),
+        reviewed_at=_optional_str(payload.get("reviewed_at")),
+        reviewed_by=_optional_str(payload.get("reviewed_by")),
+        applied_revision_id=_optional_str(
+            payload.get("applied_revision_id")
+        ),
+        accepted_memory_id=_optional_str(payload.get("accepted_memory_id")),
+        error=_optional_str(payload.get("error")),
+        metadata=_dict(payload.get("metadata")),
+    )
+
+
+def governed_skill_snapshot(value: object) -> GovernedSkill:
+    payload = _mapping(value)
+    return GovernedSkill(
+        profile_id=str(payload.get("profile_id") or "default"),
+        scope=str(payload.get("scope") or "project"),
+        name=str(payload.get("name") or ""),
+        version=str(payload.get("version") or ""),
+        digest=str(payload.get("digest") or ""),
+        source=str(payload.get("source") or ""),
+        trust=str(payload.get("trust") or ""),
+        status=str(payload.get("status") or "unknown"),
+        active_revision_id=str(payload.get("active_revision_id") or ""),
+        view_count=_int(payload.get("view_count")),
+        use_count=_int(payload.get("use_count")),
+        success_count=_int(payload.get("success_count")),
+        patch_count=_int(payload.get("patch_count")),
+        created_at=str(payload.get("created_at") or ""),
+        updated_at=str(payload.get("updated_at") or ""),
+    )
+
+
+def governed_skill_revision_snapshot(value: object) -> GovernedSkillRevision:
+    payload = _mapping(value)
+    return GovernedSkillRevision(
+        id=str(payload.get("id") or ""),
+        profile_id=str(payload.get("profile_id") or "default"),
+        scope=str(payload.get("scope") or "project"),
+        name=str(payload.get("name") or ""),
+        version=str(payload.get("version") or ""),
+        digest=str(payload.get("digest") or ""),
+        source=str(payload.get("source") or ""),
+        trust=str(payload.get("trust") or ""),
+        created_at=str(payload.get("created_at") or ""),
+        proposal_id=_optional_str(payload.get("proposal_id")),
+    )
+
+
 def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResult:
     """Build one detached public snapshot from a completed runtime turn."""
     state = runtime.state
@@ -314,6 +391,9 @@ __all__ = [
     "RunResult",
     "context_report_snapshot",
     "cost_snapshot",
+    "governed_skill_snapshot",
+    "governed_skill_revision_snapshot",
+    "learning_proposal_snapshot",
     "memory_proposal_snapshot",
     "observation_snapshot",
     "plan_result_from_runtime",

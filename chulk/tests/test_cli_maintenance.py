@@ -48,6 +48,7 @@ def test_init_creates_safe_project_scaffolding_and_is_idempotent(tmp_path, capsy
             "!.chulk/",
             ".chulk/*",
             "!.chulk/mcp.json",
+            "!.chulk/skills.lock",
             "!.chulk/skills/",
             "!.chulk/skills/**",
             "traces/",
@@ -73,6 +74,7 @@ def test_init_migrates_blanket_chulk_ignore_to_narrow_policy(tmp_path, capsys):
 
     assert exit_code == 0
     assert _check_ignore(project_root, ".chulk/mcp.json") is False
+    assert _check_ignore(project_root, ".chulk/skills.lock") is False
     assert _check_ignore(project_root, ".chulk/skills/reviewer/SKILL.md") is False
     assert _check_ignore(project_root, ".chulk/store.sqlite") is True
     assert _check_ignore(project_root, ".chulk/traces/session.jsonl") is True

@@ -140,6 +140,128 @@ def test_public_api_exports_capitalized_aliases():
     assert callable(Skills.pin)
 
 
+def test_governed_skill_usage_requires_host_confirmed_success(tmp_path):
+    write_skill(
+        tmp_path,
+        "review",
+        """\
+---
+schema_version: 1
+name: review
+version: 1.0.0
+description: Review workflow.
+source: project
+trust: reviewed
+---
+# Review
+
+Review carefully.
+""",
+    )
+    facade = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLMClient(
+            [json.dumps({"type": "final_answer", "content": "reviewed"})]
+        ),
+        tools=[],
+    )
+
+    result = facade.run_result("/review inspect this")
+    used = facade.runtime.skill_lifecycle_store.get_skill("review")
+
+    assert used.use_count == 1
+    assert used.success_count == 0
+    viewed = facade.list_governed_skills()
+    assert viewed[0].view_count == 1
+    revisions = facade.list_skill_revisions("review")
+    assert revisions[0].id == viewed[0].active_revision_id
+    assert revisions[0].version == "1.0.0"
+
+    confirmed = facade.confirm_skill_success(turn_id=result.turn_id)
+    repeated = facade.confirm_skill_success(turn_id=result.turn_id)
+
+    assert confirmed[0].success_count == 1
+    assert repeated[0].success_count == 1
+    assert (tmp_path / ".chulk" / "skills.lock").is_file()
+
+
+def test_public_learning_review_uses_restricted_proposal_flow(tmp_path):
+    client = FakeLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "done"}),
+            json.dumps(
+                {
+                    "decision": "propose",
+                    "rationale": "The preference is durable.",
+                    "proposals": [
+                        {
+                            "kind": "memory_create",
+                            "rationale": "Explicit preference.",
+                            "content": "User prefers concise answers.",
+                            "confidence": 1.0,
+                            "verification_steps": [],
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+    facade = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=client,
+        tools=[],
+        skills=[],
+    )
+    result = facade.run_result("Remember my preference.")
+
+    review = facade.review_learning(turn_id=result.turn_id)
+
+    assert review.skipped is False
+    assert len(review.proposals) == 1
+    assert review.proposals[0].kind == "memory_create"
+    assert review.proposals[0].status == "pending"
+    assert facade.get_learning_proposal(review.proposals[0].id) == review.proposals[0]
+    assert facade.runtime.memory_store.list_memories() == []
+    assert len(client.requests) == 2
+    assert "no authority" in client.requests[1][0]["content"]
+
+
+def test_public_learning_auto_approval_requires_constructor_opt_in(tmp_path):
+    client = FakeLLMClient(
+        [
+            json.dumps({"type": "final_answer", "content": "done"}),
+            json.dumps(
+                {
+                    "decision": "propose",
+                    "rationale": "The preference is durable.",
+                    "proposals": [
+                        {
+                            "kind": "memory_create",
+                            "rationale": "Explicit preference.",
+                            "content": "User prefers concise answers.",
+                            "confidence": 1.0,
+                            "verification_steps": [],
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+    facade = Agent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=client,
+        tools=[],
+        skills=[],
+        automatic_learning_approval=True,
+    )
+    result = facade.run_result("Remember my preference.")
+
+    review = facade.review_learning(turn_id=result.turn_id)
+
+    assert review.proposals[0].status == "approved"
+    assert len(facade.runtime.memory_store.list_memories()) == 1
+
+
 def test_lowercase_factories_return_public_facades(tmp_path):
     sync_agent = agent(
         config=AgentConfig(project_root=tmp_path / "sync"),

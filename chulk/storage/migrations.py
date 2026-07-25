@@ -519,6 +519,153 @@ def _migrate_to_session_search(conn: sqlite3.Connection) -> None:
         return
 
 
+def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
+    """Create governed skill revisions, usage, and learning proposals."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS skill_packages (
+            profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            source TEXT NOT NULL,
+            trust TEXT NOT NULL,
+            status TEXT NOT NULL,
+            active_revision_id TEXT NOT NULL,
+            view_count INTEGER NOT NULL DEFAULT 0,
+            use_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            patch_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (profile_id, scope, name),
+            CHECK (scope IN ('project', 'profile')),
+            CHECK (status IN ('active', 'stale', 'archived', 'pinned')),
+            CHECK (
+                view_count >= 0 AND use_count >= 0
+                AND success_count >= 0 AND patch_count >= 0
+            )
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS skill_package_revisions (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            source TEXT NOT NULL,
+            trust TEXT NOT NULL,
+            package_json TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            proposal_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (profile_id, scope, name, digest),
+            CHECK (scope IN ('project', 'profile'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_skill_revisions_lookup
+        ON skill_package_revisions(profile_id, scope, name, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS skill_usage_events (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            skill_version TEXT NOT NULL,
+            skill_digest TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source_event_id TEXT NOT NULL,
+            host_confirmed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            UNIQUE (profile_id, scope, skill_name, source_event_id, kind),
+            CHECK (scope IN ('project', 'profile')),
+            CHECK (kind IN ('view', 'use', 'success', 'patch')),
+            CHECK (host_confirmed IN (0, 1))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learning_proposals (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            target_name TEXT,
+            rationale TEXT NOT NULL,
+            evidence_turn_ids_json TEXT NOT NULL DEFAULT '[]',
+            source_trace TEXT,
+            content TEXT,
+            diff TEXT,
+            required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL,
+            verification_steps_json TEXT NOT NULL DEFAULT '[]',
+            reviewer_model TEXT,
+            cost TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            applied_revision_id TEXT,
+            accepted_memory_id TEXT,
+            error TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            CHECK (
+                kind IN (
+                    'memory_create', 'memory_update', 'skill_create',
+                    'skill_patch', 'skill_archive'
+                )
+            ),
+            CHECK (status IN ('pending', 'approved', 'rejected', 'failed')),
+            CHECK (confidence >= 0.0 AND confidence <= 1.0)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_learning_proposals_profile_status
+        ON learning_proposals(profile_id, status, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learning_review_runs (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            reviewer_model TEXT,
+            status TEXT NOT NULL,
+            proposal_count INTEGER NOT NULL,
+            token_count INTEGER NOT NULL,
+            cost_amount TEXT NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT,
+            CHECK (status IN ('reserved', 'completed', 'failed')),
+            CHECK (proposal_count >= 0),
+            CHECK (token_count >= 0)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_learning_review_runs_profile_created
+        ON learning_review_runs(profile_id, created_at)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -569,6 +716,7 @@ SQLITE_MIGRATIONS = (
         _migrate_to_usage_recovery_checkpoints,
     ),
     SQLiteMigration(10, "profile-session-search", _migrate_to_session_search),
+    SQLiteMigration(11, "skill-lifecycle-and-learning", _migrate_to_skill_lifecycle),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

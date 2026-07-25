@@ -28,6 +28,7 @@ class TraceEvent:
     MEMORY_SEARCH_COMPLETED = "memory_search_completed"
     SKILL_SELECTION_STARTED = "skill_selection_started"
     SKILL_SELECTION_COMPLETED = "skill_selection_completed"
+    LEARNING_PROPOSAL_CHANGED = "learning_proposal_changed"
     CONTEXT_SUMMARY_CREATED = "context_summary_created"
     MODEL_REQUEST_STARTED = "model_request_started"
     BUDGET_RESERVED = "budget_reserved"
