@@ -493,6 +493,32 @@ def _migrate_to_usage_recovery_checkpoints(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "conversation_model_requests", "accounting_json", "TEXT")
 
 
+def _migrate_to_session_search(conn: sqlite3.Connection) -> None:
+    """Create the optional cross-session message index when FTS5 is available."""
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_conversation_messages_search_window
+        ON conversation_messages(conversation_id, ordinal, role)
+        """
+    )
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
+            USING fts5(
+                message_id UNINDEXED,
+                conversation_id UNINDEXED,
+                role UNINDEXED,
+                content
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        # FTS5 is optional. SQLiteSessionStore activates the bounded LIKE
+        # fallback and can rebuild the index when FTS later becomes available.
+        return
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -542,6 +568,7 @@ SQLITE_MIGRATIONS = (
         "usage-recovery-checkpoints",
         _migrate_to_usage_recovery_checkpoints,
     ),
+    SQLiteMigration(10, "profile-session-search", _migrate_to_session_search),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

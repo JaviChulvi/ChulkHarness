@@ -31,11 +31,27 @@ class SQLiteSessionStore:
 
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
+        self.fts_enabled = False
         self.initialize()
 
     def initialize(self) -> None:
         """Create or migrate the shared memory and session database."""
         initialize_sqlite_database(self.db_path)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.fts_enabled = _ensure_session_fts(conn)
+            if self.fts_enabled:
+                _backfill_session_fts(conn)
+
+    def rebuild_search_index(self) -> int:
+        """Deterministically rebuild eligible session messages for search."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.fts_enabled = _ensure_session_fts(conn)
+            if not self.fts_enabled:
+                return 0
+            conn.execute("DELETE FROM session_messages_fts")
+            return _backfill_session_fts(conn)
 
     def create_conversation(
         self,
@@ -208,6 +224,7 @@ class SQLiteSessionStore:
                 message_key=key,
                 metadata=metadata,
                 created_at=now,
+                search_enabled=self.fts_enabled,
             )
             _touch_conversation(conn, conversation_id, now)
 
@@ -265,6 +282,7 @@ class SQLiteSessionStore:
                 message_key=message_key,
                 metadata=metadata,
                 created_at=now,
+                search_enabled=self.fts_enabled,
             )
             _save_turn_snapshot(conn, conversation_id, turn, now)
         return True
@@ -740,6 +758,7 @@ class SQLiteSessionStore:
                         "observation_index": observation_index,
                     },
                     created_at=now,
+                    search_enabled=self.fts_enabled,
                 )
             observation_insert = conn.execute(
                 """
@@ -772,6 +791,7 @@ class SQLiteSessionStore:
                     "observation_index": observation_index,
                 },
                 created_at=now,
+                search_enabled=self.fts_enabled,
             )
             if (
                 observation_insert.rowcount == 1
@@ -997,10 +1017,12 @@ def _insert_message(
     message_key: str,
     metadata: dict[str, Any] | None,
     created_at: str,
+    search_enabled: bool,
 ) -> None:
     """Insert one idempotent message using the caller's transaction."""
     next_ordinal = _next_message_ordinal(conn, conversation_id)
-    conn.execute(
+    message_id = str(uuid4())
+    cursor = conn.execute(
         """
         INSERT INTO conversation_messages (
             id, conversation_id, turn_id, role, content, ordinal, message_key, created_at, metadata
@@ -1009,7 +1031,7 @@ def _insert_message(
         ON CONFLICT(message_key) DO NOTHING
         """,
         (
-            str(uuid4()),
+            message_id,
             conversation_id,
             turn_id,
             role,
@@ -1020,6 +1042,16 @@ def _insert_message(
             json.dumps(metadata or {}, sort_keys=True),
         ),
     )
+    if cursor.rowcount == 1:
+        _replace_session_fts(
+            conn,
+            enabled=search_enabled,
+            message_id=message_id,
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            metadata=metadata or {},
+        )
 
 
 def _valid_turn_snapshot(turn: dict[str, Any], *, expected_turn_id: str) -> bool:
@@ -1127,6 +1159,105 @@ def _prompt_source_ordinal(
 
 def _message_is_prompt_excluded(metadata: Any) -> bool:
     return _safe_json_dict(metadata).get("prompt_excluded") is True
+
+
+def _message_is_search_eligible(role: str, metadata: Any) -> bool:
+    if role not in {"user", "assistant"}:
+        return False
+    values = _safe_json_dict(metadata)
+    if any(
+        values.get(key) is True
+        for key in (
+            "internal",
+            "prompt_excluded",
+            "sensitive",
+            "contains_secrets",
+            "external_content",
+        )
+    ):
+        return False
+    return values.get("content_class") != "sensitive"
+
+
+def _ensure_session_fts(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
+            USING fts5(
+                message_id UNINDEXED,
+                conversation_id UNINDEXED,
+                role UNINDEXED,
+                content
+            )
+            """
+        )
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _backfill_session_fts(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        SELECT messages.id, messages.conversation_id, messages.role,
+               messages.content, messages.metadata
+        FROM conversation_messages AS messages
+        LEFT JOIN session_messages_fts AS search
+          ON search.message_id = messages.id
+        WHERE search.message_id IS NULL
+        ORDER BY messages.conversation_id, messages.ordinal, messages.id
+        """
+    ).fetchall()
+    inserted = 0
+    for row in rows:
+        if not _message_is_search_eligible(str(row["role"]), row["metadata"]):
+            continue
+        conn.execute(
+            """
+            INSERT INTO session_messages_fts (
+                message_id, conversation_id, role, content
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["conversation_id"],
+                row["role"],
+                row["content"],
+            ),
+        )
+        inserted += 1
+    return inserted
+
+
+def _replace_session_fts(
+    conn: sqlite3.Connection,
+    *,
+    enabled: bool,
+    message_id: str,
+    conversation_id: str,
+    role: str,
+    content: str,
+    metadata: dict[str, Any],
+) -> None:
+    if not enabled:
+        return
+    conn.execute(
+        "DELETE FROM session_messages_fts WHERE message_id = ?",
+        (message_id,),
+    )
+    if not _message_is_search_eligible(role, metadata):
+        return
+    conn.execute(
+        """
+        INSERT INTO session_messages_fts (
+            message_id, conversation_id, role, content
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (message_id, conversation_id, role, content),
+    )
 
 
 def _touch_conversation(conn: sqlite3.Connection, conversation_id: str, updated_at: str) -> None:
