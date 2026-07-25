@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ class ModelUsageAccounting:
         self.max_output_tokens = max_output_tokens
         self.trace_path = str(trace_path) if trace_path is not None else None
         self._reservations: dict[tuple[str, int], BudgetReservation] = {}
+        self.reconcile_persisted_model_requests()
         self.store.release_expired()
 
     def reserve_model_request(
@@ -120,54 +122,162 @@ class ModelUsageAccounting:
         """Commit actual provider attempts and atomically close their allowance."""
         reservation = self._reservation(turn_id, request_index)
         attempts = _attempt_values(fallback_attempts)
+        provider, model, model_profile_id = _result_identity(
+            self.client,
+            cost,
+        )
+        meter = _meter_for_profile(self.client, model_profile_id)
+        occurred_at = self.store.checkpoint_model_response(
+            reservation.id,
+            request_index=request_index,
+            purpose=purpose,
+            usage=usage.to_dict() if usage is not None else None,
+            cost=cost.to_dict() if cost is not None else None,
+            fallback_attempts=tuple(
+                _checkpoint_attempt(self.client, attempt)
+                for attempt in attempts
+            ),
+            provider=provider,
+            model=model,
+            model_profile_id=model_profile_id,
+            credential_ref=meter.credential_ref if meter is not None else None,
+            trace_path=self.trace_path,
+        )
+        entries = self._response_entries(
+            reservation=reservation,
+            purpose=purpose,
+            usage=usage,
+            cost=cost,
+            attempts=attempts,
+            provider=provider,
+            model=model,
+            model_profile_id=model_profile_id,
+            credential_ref=meter.credential_ref if meter is not None else None,
+            occurred_at=occurred_at,
+            trace_path=self.trace_path,
+        )
+        committed = self.store.commit(reservation.id, entries)
+        self._reservations.pop((turn_id, request_index), None)
+        return committed
+
+    def reconcile_persisted_model_requests(self) -> tuple[UsageEntry, ...]:
+        """Commit provider results checkpointed before an interrupted ledger write."""
+        recovered: list[UsageEntry] = []
+        while records := self.store.recoverable_model_usage(
+            profile_id=self.dimensions.profile_id
+        ):
+            for record in records:
+                reservation = record.reservation
+                attempts = _attempt_values(record.fallback_attempts)
+                entries = self._response_entries(
+                    reservation=reservation,
+                    purpose=record.purpose,
+                    usage=usage_from_dict(
+                        dict(record.usage) if record.usage is not None else None
+                    ),
+                    cost=cost_from_dict(
+                        dict(record.cost) if record.cost is not None else None
+                    ),
+                    attempts=attempts,
+                    provider=record.provider,
+                    model=record.model,
+                    model_profile_id=record.model_profile_id,
+                    credential_ref=record.credential_ref,
+                    occurred_at=record.occurred_at,
+                    trace_path=record.trace_path,
+                    recovered=True,
+                )
+                recovered.extend(self.store.commit(reservation.id, entries))
+        return tuple(recovered)
+
+    def _response_entries(
+        self,
+        *,
+        reservation: BudgetReservation,
+        purpose: str,
+        usage: LLMUsage | None,
+        cost: LLMCost | None,
+        attempts: tuple[object, ...],
+        provider: str | None,
+        model: str | None,
+        model_profile_id: str | None,
+        credential_ref: str | None,
+        occurred_at: datetime | None,
+        trace_path: str | None,
+        recovered: bool = False,
+    ) -> tuple[UsageEntry, ...]:
         entries: list[UsageEntry] = []
         if attempts:
             for index, attempt in enumerate(attempts, start=1):
+                attempt_profile_id = _optional_text(
+                    _attempt_value(attempt, "model_profile_id")
+                )
+                attempt_meter = _meter_for_profile(
+                    self.client,
+                    attempt_profile_id,
+                )
                 entries.append(
                     self._entry(
                         source_event_id=f"{reservation.source_event_id}:attempt:{index}",
                         purpose=purpose,
-                        turn_id=turn_id,
+                        dimensions=reservation.dimensions,
                         usage=_attempt_usage(attempt),
                         cost=_attempt_cost(attempt),
-                        provider=_optional_text(getattr(attempt, "provider", None)),
-                        model=_optional_text(getattr(attempt, "model", None)),
-                        model_profile_id=_optional_text(
-                            getattr(attempt, "model_profile_id", None)
+                        provider=_optional_text(
+                            _attempt_value(attempt, "provider")
+                        ),
+                        model=_optional_text(_attempt_value(attempt, "model")),
+                        model_profile_id=attempt_profile_id,
+                        credential_ref=_optional_text(
+                            _attempt_value(attempt, "credential_ref")
+                        )
+                        or (
+                            attempt_meter.credential_ref
+                            if attempt_meter is not None
+                            else None
                         ),
                         model_calls=1,
                         metadata={
                             "request_event_id": reservation.source_event_id,
                             "attempt": index,
-                            "success": bool(getattr(attempt, "success", False)),
-                            "error_code": _optional_text(
-                                getattr(attempt, "error_code", None)
+                            "success": bool(
+                                _attempt_value(attempt, "success")
                             ),
+                            "error_code": _optional_text(
+                                _attempt_value(attempt, "error_code")
+                            ),
+                            "recovered": recovered,
                         },
+                        occurred_at=(
+                            occurred_at + timedelta(microseconds=index - 1)
+                            if occurred_at is not None
+                            else None
+                        ),
+                        trace_path=trace_path,
                     )
                 )
         else:
-            provider, model, model_profile_id = _result_identity(
-                self.client,
-                cost,
-            )
             entries.append(
                 self._entry(
                     source_event_id=f"{reservation.source_event_id}:result",
                     purpose=purpose,
-                    turn_id=turn_id,
+                    dimensions=reservation.dimensions,
                     usage=usage,
                     cost=cost,
                     provider=provider,
                     model=model,
                     model_profile_id=model_profile_id,
+                    credential_ref=credential_ref,
                     model_calls=1,
-                    metadata={"request_event_id": reservation.source_event_id},
+                    metadata={
+                        "request_event_id": reservation.source_event_id,
+                        "recovered": recovered,
+                    },
+                    occurred_at=occurred_at,
+                    trace_path=trace_path,
                 )
             )
-        committed = self.store.commit(reservation.id, entries)
-        self._reservations.pop((turn_id, request_index), None)
-        return committed
+        return tuple(entries)
 
     def release_model_request(
         self,
@@ -205,16 +315,22 @@ class ModelUsageAccounting:
         *,
         source_event_id: str,
         purpose: str,
-        turn_id: str,
+        dimensions: UsageDimensions,
         usage: LLMUsage | None,
         cost: LLMCost | None,
         provider: str | None,
         model: str | None,
         model_profile_id: str | None,
+        credential_ref: str | None,
         model_calls: int,
         metadata: dict[str, Any],
+        occurred_at: datetime | None = None,
+        trace_path: str | None = None,
     ) -> UsageEntry:
-        now = datetime.now(timezone.utc)
+        now = occurred_at or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("model usage timestamp must be timezone-aware")
+        now = now.astimezone(timezone.utc)
         exact_cost = _exact_cost(cost)
         units = {
             "model_calls": Decimal(model_calls),
@@ -235,7 +351,7 @@ class ModelUsageAccounting:
             id=str(uuid4()),
             resource_kind=ResourceKind.MODEL,
             source_event_id=source_event_id,
-            dimensions=self._dimensions(turn_id),
+            dimensions=dimensions,
             occurred_at=now,
             billing_period=now.strftime("%Y-%m"),
             purpose=purpose,
@@ -243,11 +359,12 @@ class ModelUsageAccounting:
             cost=exact_cost,
             provider=provider or (meter.provider if meter is not None else None),
             model=model or (meter.model if meter is not None else None),
-            credential_ref=meter.credential_ref if meter is not None else None,
+            credential_ref=credential_ref
+            or (meter.credential_ref if meter is not None else None),
             model_profile_id=model_profile_id
             or (meter.model_profile_id if meter is not None else None),
             usage_estimated=usage.estimated if usage is not None else False,
-            trace_path=self.trace_path,
+            trace_path=trace_path,
             metadata=metadata,
         )
 
@@ -351,8 +468,14 @@ def _attempt_values(value: object) -> tuple[object, ...]:
     return tuple(value)
 
 
+def _attempt_value(attempt: object, name: str) -> object:
+    if isinstance(attempt, Mapping):
+        return attempt.get(name)
+    return getattr(attempt, name, None)
+
+
 def _attempt_usage(attempt: object) -> LLMUsage | None:
-    value = getattr(attempt, "usage", None)
+    value = _attempt_value(attempt, "usage")
     if isinstance(value, LLMUsage):
         return value
     if isinstance(value, dict):
@@ -361,12 +484,34 @@ def _attempt_usage(attempt: object) -> LLMUsage | None:
 
 
 def _attempt_cost(attempt: object) -> LLMCost | None:
-    value = getattr(attempt, "cost", None)
+    value = _attempt_value(attempt, "cost")
     if isinstance(value, LLMCost):
         return value
     if isinstance(value, dict):
         return cost_from_dict(value)
     return None
+
+
+def _checkpoint_attempt(
+    client: LLMClient,
+    attempt: object,
+) -> dict[str, object]:
+    model_profile_id = _optional_text(
+        _attempt_value(attempt, "model_profile_id")
+    )
+    meter = _meter_for_profile(client, model_profile_id)
+    usage = _attempt_usage(attempt)
+    cost = _attempt_cost(attempt)
+    return {
+        "provider": _optional_text(_attempt_value(attempt, "provider")),
+        "model": _optional_text(_attempt_value(attempt, "model")),
+        "success": bool(_attempt_value(attempt, "success")),
+        "error_code": _optional_text(_attempt_value(attempt, "error_code")),
+        "model_profile_id": model_profile_id,
+        "credential_ref": meter.credential_ref if meter is not None else None,
+        "usage": usage.to_dict() if usage is not None else None,
+        "cost": cost.to_dict() if cost is not None else None,
+    }
 
 
 def _result_identity(

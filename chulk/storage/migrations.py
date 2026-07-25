@@ -488,6 +488,11 @@ def _migrate_to_usage_ledger(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_usage_recovery_checkpoints(conn: sqlite3.Connection) -> None:
+    """Attach a private accounting checkpoint to persisted model requests."""
+    _ensure_column(conn, "conversation_model_requests", "accounting_json", "TEXT")
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -532,6 +537,11 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(6, "adapter-update-ledger", _migrate_to_adapter_update_ledger),
     SQLiteMigration(7, "memory-namespaces", _migrate_to_memory_namespaces),
     SQLiteMigration(8, "usage-ledger-and-reservations", _migrate_to_usage_ledger),
+    SQLiteMigration(
+        9,
+        "usage-recovery-checkpoints",
+        _migrate_to_usage_recovery_checkpoints,
+    ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

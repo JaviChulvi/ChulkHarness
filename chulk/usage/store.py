@@ -18,6 +18,7 @@ from chulk.usage.models import (
     BudgetReservation,
     BudgetScope,
     ExactCost,
+    PersistedModelUsage,
     ReservationState,
     ResourceKind,
     RunBudget,
@@ -336,6 +337,125 @@ class SQLiteUsageStore:
                 parameters,
             ).fetchall()
         return tuple(_row_to_reservation(row) for row in rows)
+
+    def checkpoint_model_response(
+        self,
+        reservation_id: str,
+        *,
+        request_index: int,
+        purpose: str,
+        usage: dict[str, object] | None,
+        cost: dict[str, object] | None,
+        fallback_attempts: tuple[dict[str, object], ...],
+        provider: str | None,
+        model: str | None,
+        model_profile_id: str | None,
+        credential_ref: str | None,
+        trace_path: str | None,
+    ) -> datetime | None:
+        """Persist the accounting facts before closing their reservation."""
+        if request_index < 1:
+            raise ValueError("model request index must be positive")
+        clean_purpose = purpose.strip()
+        if not clean_purpose:
+            raise ValueError("model usage purpose cannot be empty")
+        now = self.clock()
+        if now.tzinfo is None:
+            raise ValueError("usage store clock must return a timezone-aware datetime")
+        checkpoint = {
+            "purpose": clean_purpose,
+            "usage": usage,
+            "cost": cost,
+            "fallback_attempts": list(fallback_attempts),
+            "provider": provider,
+            "model": model,
+            "model_profile_id": model_profile_id,
+            "credential_ref": credential_ref,
+            "trace_path": trace_path,
+        }
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            reservation_row = conn.execute(
+                "SELECT * FROM usage_reservations WHERE id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if reservation_row is None:
+                raise KeyError(
+                    f"usage reservation {reservation_id!r} does not exist"
+                )
+            reservation = _row_to_reservation(reservation_row)
+            if (
+                reservation.dimensions.conversation_id is None
+                or reservation.dimensions.turn_id is None
+            ):
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE conversation_model_requests
+                SET usage_json = ?,
+                    cost_json = ?,
+                    accounting_json = ?,
+                    response_created_at = COALESCE(response_created_at, ?)
+                WHERE conversation_id = ?
+                  AND turn_id = ?
+                  AND request_index = ?
+                """,
+                (
+                    json.dumps(usage, sort_keys=True) if usage is not None else None,
+                    json.dumps(cost, sort_keys=True) if cost is not None else None,
+                    json.dumps(checkpoint, sort_keys=True),
+                    now.isoformat(),
+                    reservation.dimensions.conversation_id,
+                    reservation.dimensions.turn_id,
+                    request_index,
+                ),
+            )
+        return now if cursor.rowcount == 1 else None
+
+    def recoverable_model_usage(
+        self,
+        *,
+        profile_id: str,
+        limit: int = 10_000,
+    ) -> tuple[PersistedModelUsage, ...]:
+        """Load active model holds whose provider result is already durable."""
+        clean_profile_id = profile_id.strip()
+        if not clean_profile_id:
+            raise ValueError("usage recovery profile_id cannot be empty")
+        clean_limit = max(1, min(limit, 10_000))
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT reservations.*,
+                       requests.request_index AS recovery_request_index,
+                       requests.request_json AS recovery_request_json,
+                       requests.usage_json AS recovery_usage_json,
+                       requests.cost_json AS recovery_cost_json,
+                       requests.accounting_json AS recovery_accounting_json,
+                       requests.response_created_at AS recovery_occurred_at
+                FROM usage_reservations AS reservations
+                JOIN conversation_model_requests AS requests
+                  ON requests.conversation_id = reservations.conversation_id
+                 AND requests.turn_id = reservations.turn_id
+                 AND reservations.source_event_id = (
+                     'model:' || requests.conversation_id || ':' ||
+                     requests.turn_id || ':' || requests.request_index
+                 )
+                WHERE reservations.state = ?
+                  AND reservations.resource_kind = ?
+                  AND reservations.profile_id = ?
+                  AND requests.response_created_at IS NOT NULL
+                ORDER BY reservations.created_at, reservations.id
+                LIMIT ?
+                """,
+                (
+                    ReservationState.ACTIVE.value,
+                    ResourceKind.MODEL.value,
+                    clean_profile_id,
+                    clean_limit,
+                ),
+            ).fetchall()
+        return tuple(_row_to_persisted_model_usage(row) for row in rows)
 
     def release_expired(self) -> int:
         """Release expired active reservations and return the affected count."""
@@ -708,6 +828,86 @@ def _dimensions_from_row(row: sqlite3.Row) -> UsageDimensions:
     )
 
 
+def _row_to_persisted_model_usage(row: sqlite3.Row) -> PersistedModelUsage:
+    accounting = _json_object(row["recovery_accounting_json"])
+    request = _json_object(row["recovery_request_json"])
+    usage = _mapping_or_none(accounting.get("usage")) or _json_object_or_none(
+        row["recovery_usage_json"]
+    )
+    cost = _mapping_or_none(accounting.get("cost")) or _json_object_or_none(
+        row["recovery_cost_json"]
+    )
+    raw_attempts = accounting.get("fallback_attempts")
+    attempts = (
+        tuple(value for value in raw_attempts if isinstance(value, dict))
+        if isinstance(raw_attempts, list)
+        else ()
+    )
+    occurred_at = datetime.fromisoformat(str(row["recovery_occurred_at"]))
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+    raw_purpose = accounting.get("purpose")
+    if isinstance(raw_purpose, str) and raw_purpose.strip():
+        purpose = raw_purpose
+    else:
+        request_purpose = request.get("purpose")
+        context_report = request.get("context_report")
+        context_purpose = (
+            context_report.get("purpose")
+            if isinstance(context_report, dict)
+            else None
+        )
+        purpose = (
+            _clean_string(request_purpose)
+            or _clean_string(context_purpose)
+            or "agent_action"
+        )
+    return PersistedModelUsage(
+        reservation=_row_to_reservation(row),
+        request_index=int(row["recovery_request_index"]),
+        purpose=purpose,
+        occurred_at=occurred_at,
+        usage=usage,
+        cost=cost,
+        fallback_attempts=attempts,
+        provider=_optional_string(accounting.get("provider")),
+        model=_optional_string(accounting.get("model")),
+        model_profile_id=_optional_string(accounting.get("model_profile_id")),
+        credential_ref=_optional_string(accounting.get("credential_ref")),
+        trace_path=_optional_string(accounting.get("trace_path")),
+    )
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _json_object_or_none(value: object) -> dict[str, object] | None:
+    payload = _json_object(value)
+    return payload or None
+
+
+def _mapping_or_none(value: object) -> dict[str, object] | None:
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _clean_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    clean = value.strip()
+    return clean or None
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -791,7 +991,9 @@ def _decode_cursor(value: str) -> tuple[str, str]:
         )
         occurred_at = str(payload["occurred_at"])
         entry_id = str(payload["id"])
-        datetime.fromisoformat(occurred_at)
+        parsed_at = datetime.fromisoformat(occurred_at)
+        if parsed_at.tzinfo is None:
+            raise ValueError("usage cursor timestamp must be timezone-aware")
     except (
         binascii.Error,
         KeyError,

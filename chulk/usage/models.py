@@ -434,6 +434,46 @@ class BudgetReservation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PersistedModelUsage:
+    """Private provider-result checkpoint used to reconcile an active hold."""
+
+    reservation: BudgetReservation
+    request_index: int
+    purpose: str
+    occurred_at: datetime
+    usage: Mapping[str, Any] | None = None
+    cost: Mapping[str, Any] | None = None
+    fallback_attempts: tuple[Mapping[str, Any], ...] = ()
+    provider: str | None = None
+    model: str | None = None
+    model_profile_id: str | None = None
+    credential_ref: str | None = None
+    trace_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.request_index < 1:
+            raise ValueError("persisted model request index must be positive")
+        if not self.purpose.strip():
+            raise ValueError("persisted model usage purpose cannot be empty")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("persisted model usage timestamp must be timezone-aware")
+        object.__setattr__(
+            self,
+            "occurred_at",
+            self.occurred_at.astimezone(timezone.utc),
+        )
+        if self.usage is not None:
+            object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
+        if self.cost is not None:
+            object.__setattr__(self, "cost", MappingProxyType(dict(self.cost)))
+        object.__setattr__(
+            self,
+            "fallback_attempts",
+            tuple(MappingProxyType(dict(value)) for value in self.fallback_attempts),
+        )
+
+
 class BudgetExceededError(ChulkError):
     """Raised before work starts when a shared budget has no remaining allowance."""
 

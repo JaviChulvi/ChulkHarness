@@ -210,6 +210,65 @@ def test_transport_failure_releases_the_request_allowance(tmp_path: Path) -> Non
     assert reservations[0].state is ReservationState.RELEASED
 
 
+def test_checkpoint_reconciles_an_interrupted_ledger_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    original_commit = SQLiteUsageStore.commit
+
+    def interrupt_commit(self, reservation_id, entries):
+        del self, reservation_id, entries
+        raise RuntimeError("simulated crash before ledger commit")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_commit)
+    first = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "checkpointed"}]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        first.run_turn("hello")
+
+    conversation_id = first.state.conversation_id
+    reservations = SQLiteUsageStore(config.store_path).list_reservations()
+    assert len(reservations) == 1
+    assert reservations[0].state is ReservationState.ACTIVE
+    assert SQLiteUsageStore(config.store_path).list_entries() == ()
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
+    resumed = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=conversation_id,
+    )
+
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    reservations = SQLiteUsageStore(config.store_path).list_reservations()
+    assert len(entries) == 1
+    assert entries[0].metadata["recovered"] is True
+    assert entries[0].units["model_calls"] == 1
+    assert entries[0].units["total_tokens"] > 0
+    assert reservations[0].state is ReservationState.COMMITTED
+
+    reopened = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=conversation_id,
+    )
+    assert len(SQLiteUsageStore(config.store_path).list_entries()) == 1
+
+    reopened.close()
+    resumed.close()
+    first.close()
+
+
 def test_fallback_attempts_are_attributed_without_double_counting(
     tmp_path: Path,
 ) -> None:
@@ -237,3 +296,53 @@ def test_fallback_attempts_are_attributed_without_double_counting(
     assert sum(entry.units["model_calls"] for entry in entries) == 2
     assert sum(entry.units["total_tokens"] for entry in entries) > 0
     assert all(":attempt:" in entry.source_event_id for entry in entries)
+
+
+def test_checkpoint_recovers_each_fallback_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    success = OpenAIScriptedClient(
+        [{"type": "final_answer", "content": "checkpointed fallback"}]
+    )
+    success.provider = "openai"
+    success.model = "gpt-4.1"
+    success.model_profile_id = "secondary"
+    original_commit = SQLiteUsageStore.commit
+
+    def interrupt_commit(self, reservation_id, entries):
+        del self, reservation_id, entries
+        raise RuntimeError("simulated fallback accounting crash")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_commit)
+    first = create_agent(
+        config,
+        llm_client=FallbackChain(
+            providers=[AccountedFailureClient(), success],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="fallback accounting crash"):
+        first.run_turn("hello")
+
+    monkeypatch.setattr(SQLiteUsageStore, "commit", original_commit)
+    resumed = create_agent(
+        config,
+        llm_client=OpenAIScriptedClient(
+            [{"type": "final_answer", "content": "unused"}]
+        ),
+        conversation_id=first.state.conversation_id,
+    )
+
+    entries = SQLiteUsageStore(config.store_path).list_entries()
+    assert [entry.model_profile_id for entry in entries] == [
+        "primary",
+        "secondary",
+    ]
+    assert all(entry.metadata["recovered"] is True for entry in entries)
+    assert sum(entry.units["model_calls"] for entry in entries) == 2
+    assert all(":attempt:" in entry.source_event_id for entry in entries)
+
+    resumed.close()
+    first.close()
