@@ -3,7 +3,7 @@
 import asyncio
 from decimal import Decimal
 import json
-from chulk.core import Agent, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
+from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
 from chulk.llm import (
@@ -1075,6 +1075,106 @@ def test_agent_injects_relevant_skill_without_loading_unrelated_skills(tmp_path)
     assert skill_registry.get_skill("memory").loaded_content is None
     assert "skill_selection_completed" in trace_text
     assert "shell" in trace_text
+
+
+def test_agent_traces_explainable_skill_version_digest_and_omissions(tmp_path):
+    skills_dir = tmp_path / "skills"
+    for name, description in (
+        ("review", "Review Python code."),
+        ("other", "Unrelated workflow."),
+    ):
+        skill_dir = skills_dir / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"""\
+---
+schema_version: 1
+name: {name}
+version: 2.1.0
+description: {description}
+---
+# {name.title()}
+""",
+            encoding="utf-8",
+        )
+    skill_registry = SkillRegistry(skills_dir)
+    skill_registry.load_metadata()
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "test-session")
+    llm = RecordingLLMClient(
+        [json.dumps({"type": "final_answer", "content": "reviewed"})]
+    )
+    agent = Agent(llm, skill_registry=skill_registry, trace_logger=trace_logger)
+
+    agent.run_turn("/review inspect this")
+
+    events = [
+        json.loads(line)
+        for line in trace_logger.path.read_text(encoding="utf-8").splitlines()
+    ]
+    payload = next(
+        event["payload"]
+        for event in events
+        if event["type"] == "skill_selection_completed"
+    )
+    selected = payload["skills"][0]
+    decisions = {
+        decision["skill_name"]: decision for decision in payload["decisions"]
+    }
+
+    assert payload["explicit_skill_names"] == ["review"]
+    assert selected["name"] == "review"
+    assert selected["stage"] == "explicit"
+    assert selected["reason"] == "explicit"
+    assert selected["version"] == "2.1.0"
+    assert selected["digest"].startswith("sha256:")
+    assert selected["loaded_resources"] == ["SKILL.md"]
+    assert decisions["review"]["status"] == "selected"
+    assert decisions["other"]["reason"] == "no_keyword_match"
+
+
+def test_pending_plan_does_not_restore_skill_after_capability_is_removed(tmp_path):
+    skill_dir = tmp_path / "skills" / "network"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """\
+---
+schema_version: 1
+name: network
+version: 1.0.0
+description: Network workflow.
+required_capabilities: [network]
+---
+# Network
+""",
+        encoding="utf-8",
+    )
+    skill_registry = SkillRegistry(tmp_path / "skills")
+    skill_registry.load_metadata()
+    skill_registry.configure_environment(capabilities=set())
+    plan = Plan(
+        summary="Use the previous context.",
+        steps=[PlanStep(id="1", title="Inspect", description="Inspect safely.")],
+    )
+    turn = TurnState(
+        user_message="plan this",
+        turn_id="turn-pending",
+        loaded_skill_names=["network"],
+    )
+    turn.wait_for_plan_approval(plan)
+    state = AgentState(
+        turns=[turn],
+        active_plan=plan,
+        pending_plan_turn_id=turn.turn_id,
+    )
+
+    agent = Agent(
+        RecordingLLMClient([]),
+        state=state,
+        skill_registry=skill_registry,
+    )
+
+    assert agent._selected_skills == []
+    assert skill_registry.get_skill("network").loaded_content is None
 
 
 def test_agent_traces_full_model_request_with_redaction(tmp_path):
