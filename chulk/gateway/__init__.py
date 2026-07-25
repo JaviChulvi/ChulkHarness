@@ -28,6 +28,11 @@ from chulk.gateway.models import (
     TrustLevel,
 )
 from chulk.gateway.protocol import ChannelAdapter
+from chulk.gateway.routing import (
+    GatewayRoute,
+    PairingChallenge,
+    SQLiteGatewayRouter,
+)
 
 
 __all__ = [
@@ -40,6 +45,7 @@ __all__ = [
     "DeliveryTarget",
     "ExecutionClaim",
     "GatewayAdapterStatus",
+    "GatewayRoute",
     "InboundEnvelope",
     "InboundPart",
     "InboxRecord",
@@ -48,9 +54,11 @@ __all__ = [
     "MediaReference",
     "OutboundEnvelope",
     "OutboxRecord",
+    "PairingChallenge",
     "ReactionPart",
     "ReplyPart",
     "SQLiteGatewayLedger",
+    "SQLiteGatewayRouter",
     "TextPart",
     "TrustLevel",
     "UNCERTAIN_EXECUTION_MESSAGE",
