@@ -209,6 +209,49 @@ async def test_backpressure_leaves_transport_event_unacknowledged(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_runtime_does_not_claim_work_for_an_unconfigured_adapter(tmp_path) -> None:
+    calls: list[str] = []
+
+    async def execute(
+        _profile_id: str,
+        envelope: InboundEnvelope,
+    ) -> tuple[OutboundEnvelope, ...]:
+        calls.append(envelope.event_id)
+        return (
+            OutboundEnvelope(
+                profile_id="work",
+                conversation_id="conversation",
+                target=DeliveryTarget("fake", "primary", envelope.destination_id),
+                text="done",
+            ),
+        )
+
+    runtime, ledger, adapter = _runtime(tmp_path, execute)
+    foreign = InboundEnvelope(
+        event_id="foreign",
+        idempotency_key="other:primary:foreign",
+        identity=ChannelIdentity("other", "primary", "user-7"),
+        destination_id="chat-8",
+        parts=(TextPart("foreign"),),
+        scope=ChannelScope.DIRECT,
+        authentication=AuthenticationState.AUTHENTICATED,
+        trust=TrustLevel.TRUSTED,
+    )
+    ledger.ingest(foreign, profile_id="work")
+    await runtime.accept(adapter, _envelope("local"))
+
+    assert await runtime.run_once() == (1, 1)
+    assert calls == ["local"]
+    foreign_record = ledger.find_inbox(
+        adapter="other",
+        account_id="primary",
+        idempotency_key=foreign.idempotency_key,
+    )
+    assert foreign_record is not None
+    assert foreign_record.state == "queued"
+
+
+@pytest.mark.asyncio
 async def test_active_cancellation_reaches_executor_and_terminal_state(tmp_path) -> None:
     started = asyncio.Event()
 

@@ -36,6 +36,8 @@ def run_gateway_command(
         if command == "start":
             if adapter != "telegram":
                 raise ValueError("only the telegram adapter is currently available")
+            if account_id != "primary":
+                raise ValueError("the Telegram gateway currently uses account 'primary'")
             return start_func()
         if command == "status":
             statuses = [
@@ -117,7 +119,7 @@ def run_gateway_command(
             )
             return 0
         raise ValueError(f"unknown gateway command: {command}")
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (LookupError, OSError, RuntimeError, ValueError) as exc:
         if json_output:
             output_func(
                 _json(

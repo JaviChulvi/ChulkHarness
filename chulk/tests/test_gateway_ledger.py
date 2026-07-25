@@ -83,6 +83,25 @@ def test_adapter_lease_has_one_live_owner_and_owned_cursor(tmp_path) -> None:
     assert ledger.stop_adapter("telegram", "primary", first.instance_token)
 
 
+def test_cooperative_stop_prevents_further_lease_renewal(tmp_path) -> None:
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    status = ledger.start_adapter(
+        "telegram",
+        "primary",
+        now=NOW,
+        lease_seconds=10,
+    )
+    assert status.instance_token is not None
+    assert ledger.request_adapter_stop("telegram", "primary")
+    assert not ledger.renew_adapter(
+        "telegram",
+        "primary",
+        status.instance_token,
+        now=NOW + timedelta(seconds=1),
+        lease_seconds=10,
+    )
+
+
 def test_ingest_is_idempotent_and_round_trips_envelope(tmp_path) -> None:
     ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
     envelope = _inbound("1")
@@ -95,6 +114,10 @@ def test_ingest_is_idempotent_and_round_trips_envelope(tmp_path) -> None:
     assert duplicate.record.id == first.record.id
     assert duplicate.record.profile_id == "work"
     assert duplicate.record.envelope == envelope
+
+    collision = _inbound("1", destination_id="different")
+    with pytest.raises(ValueError, match="idempotency key collision"):
+        ledger.ingest(collision, profile_id="work")
 
 
 def test_execution_claims_preserve_fifo_and_enforce_concurrency_limits(tmp_path) -> None:
@@ -207,6 +230,59 @@ def test_outbox_delivery_is_retryable_and_records_attempt_checkpoints(tmp_path) 
     assert completed is not None
     assert completed.state == "delivered"
     assert completed.checkpoint == "complete"
+
+
+def test_transport_acceptance_is_not_a_final_delivery_checkpoint(tmp_path) -> None:
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    inbox = ledger.ingest(_inbound("1"), profile_id="work").record
+    execution = ledger.claim_execution(global_limit=1, profile_limit=1, now=NOW)
+    assert execution is not None
+    response = _outbound(inbox.id)
+    assert ledger.complete_execution(
+        inbox.id,
+        execution.execution_token,
+        (response,),
+    )
+    delivery = ledger.claim_delivery(now=NOW)
+    assert delivery is not None
+    assert delivery.delivery_token is not None
+
+    assert ledger.record_delivery(
+        delivery.id,
+        delivery.delivery_token,
+        DeliveryReceipt(
+            envelope_id=delivery.id,
+            state=DeliveryState.ACCEPTED,
+            attempt=1,
+        ),
+        now=NOW,
+    )
+    assert not ledger.inbox_complete(inbox.id)
+    assert ledger.claim_delivery(now=NOW + timedelta(milliseconds=500)) is None
+    assert ledger.claim_delivery(now=NOW + timedelta(seconds=1)) is not None
+
+
+def test_backpressure_counts_executed_work_with_pending_delivery(tmp_path) -> None:
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    inbox = ledger.ingest(
+        _inbound("1"),
+        profile_id="work",
+        max_pending=1,
+    ).record
+    execution = ledger.claim_execution(global_limit=1, profile_limit=1)
+    assert execution is not None
+    assert ledger.complete_execution(
+        inbox.id,
+        execution.execution_token,
+        (_outbound(inbox.id),),
+    )
+
+    with pytest.raises(RuntimeError, match="pending limit"):
+        ledger.ingest(
+            _inbound("2", destination_id="chat-10"),
+            profile_id="work",
+            max_pending=1,
+        )
 
 
 def test_cancellation_is_durable_for_queued_and_active_work(tmp_path) -> None:

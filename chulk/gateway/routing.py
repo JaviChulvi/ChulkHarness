@@ -68,6 +68,8 @@ class SQLiteGatewayRouter:
         thread = _optional(thread_id)
         if not principal and not destination:
             raise ValueError("a route requires a principal_id or destination_id")
+        if thread and not destination:
+            raise ValueError("a thread route requires a destination_id")
         observed = _utc_now()
         route_id = uuid4().hex
         with sqlite_connection(self.db_path) as conn:

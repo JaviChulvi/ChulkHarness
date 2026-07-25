@@ -156,15 +156,17 @@ def adopt_legacy_telegram_state(
                 inserted_outbox = control.execute(
                     """
                     INSERT OR IGNORE INTO gateway_outbox (
-                        id, inbox_id, profile_id, sequence, envelope_json,
+                        id, inbox_id, profile_id, adapter, account_id,
+                        sequence, envelope_json,
                         state, attempt_count, last_error, created_at,
                         updated_at, delivered_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, 'telegram', ?, ?, ?, ?, 0, ?, ?, ?, ?)
                     """,
                     (
                         outbound.envelope_id,
                         inbox_id,
                         profile_id,
+                        account_id,
                         sequence,
                         _bounded_json(_outbound_to_dict(outbound)),
                         "delivered" if delivered else "pending",

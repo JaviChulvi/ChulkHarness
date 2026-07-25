@@ -304,13 +304,33 @@ class SQLiteGatewayLedger:
                 ),
             ).fetchone()
             if existing is not None:
+                if (
+                    str(existing["event_id"]) != envelope.event_id
+                    or str(existing["principal_id"])
+                    != envelope.identity.principal_id
+                    or str(existing["destination_id"]) != envelope.destination_id
+                    or (
+                        str(existing["thread_id"])
+                        if existing["thread_id"] is not None
+                        else None
+                    )
+                    != envelope.thread_id
+                ):
+                    raise ValueError(
+                        "idempotency key collision does not match the stored event"
+                    )
                 return IngestResult(_row_to_inbox(existing), False)
             if max_pending is not None:
                 pending = int(
                     conn.execute(
                         """
-                        SELECT COUNT(*) FROM gateway_inbox
-                        WHERE state IN ('queued', 'processing')
+                        SELECT COUNT(*) FROM gateway_inbox AS inbox
+                        WHERE inbox.state IN ('queued', 'processing')
+                           OR EXISTS (
+                               SELECT 1 FROM gateway_outbox AS outbox
+                               WHERE outbox.inbox_id = inbox.id
+                                 AND outbox.state IN ('pending', 'delivering')
+                           )
                         """
                     ).fetchone()[0]
                 )
@@ -380,6 +400,7 @@ class SQLiteGatewayLedger:
         global_limit: int,
         profile_limit: int,
         profile_id: str | None = None,
+        adapter_keys: tuple[tuple[str, str], ...] | None = None,
         lease_seconds: int = 300,
         now: datetime | None = None,
     ) -> ExecutionClaim | None:
@@ -416,6 +437,17 @@ class SQLiteGatewayLedger:
             parameters: tuple[object, ...] = (
                 (selected_profile,) if selected_profile is not None else ()
             )
+            adapter_clause = ""
+            if adapter_keys is not None:
+                if not adapter_keys:
+                    return None
+                adapter_clause = "AND (" + " OR ".join(
+                    "(candidate.adapter = ? AND candidate.account_id = ?)"
+                    for _item in adapter_keys
+                ) + ")"
+                parameters += tuple(
+                    value for item in adapter_keys for value in item
+                )
             row = conn.execute(
                 f"""
                 SELECT candidate.*
@@ -423,6 +455,7 @@ class SQLiteGatewayLedger:
                 WHERE candidate.state = 'queued'
                   AND candidate.cancellation_requested = 0
                   {profile_clause}
+                  {adapter_clause}
                   AND NOT EXISTS (
                     SELECT 1 FROM gateway_inbox AS active
                     WHERE active.conversation_key = candidate.conversation_key
@@ -528,17 +561,24 @@ class SQLiteGatewayLedger:
             for sequence, response in enumerate(responses):
                 if response.profile_id != profile_id:
                     raise ValueError("outbound profile_id must match the inbox owner")
+                if response.sequence != sequence:
+                    raise ValueError(
+                        "outbound sequence values must be contiguous and start at zero"
+                    )
                 conn.execute(
                     """
                     INSERT INTO gateway_outbox (
-                        id, inbox_id, profile_id, sequence, envelope_json,
+                        id, inbox_id, profile_id, adapter, account_id,
+                        sequence, envelope_json,
                         state, checkpoint, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                     """,
                     (
                         response.envelope_id,
                         inbox_id,
                         profile_id,
+                        response.target.adapter,
+                        response.target.account_id,
                         sequence,
                         _bounded_json(_outbound_to_dict(response)),
                         response.checkpoint,
@@ -732,6 +772,7 @@ class SQLiteGatewayLedger:
     def claim_delivery(
         self,
         *,
+        adapter_keys: tuple[tuple[str, str], ...] | None = None,
         lease_seconds: int = 120,
         now: datetime | None = None,
     ) -> OutboxRecord | None:
@@ -740,10 +781,23 @@ class SQLiteGatewayLedger:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
         token = uuid4().hex
+        adapter_clause = ""
+        parameters: tuple[object, ...] = (
+            _encode(observed),
+            _encode(observed),
+        )
+        if adapter_keys is not None:
+            if not adapter_keys:
+                return None
+            adapter_clause = "AND (" + " OR ".join(
+                "(candidate.adapter = ? AND candidate.account_id = ?)"
+                for _item in adapter_keys
+            ) + ")"
+            parameters += tuple(value for item in adapter_keys for value in item)
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """
+                f"""
                 SELECT candidate.*
                 FROM gateway_outbox AS candidate
                 WHERE (
@@ -759,6 +813,7 @@ class SQLiteGatewayLedger:
                         AND candidate.delivery_lease_until <= ?
                     )
                 )
+                {adapter_clause}
                 AND NOT EXISTS (
                     SELECT 1 FROM gateway_outbox AS earlier
                     WHERE earlier.inbox_id = candidate.inbox_id
@@ -768,7 +823,7 @@ class SQLiteGatewayLedger:
                 ORDER BY candidate.created_at, candidate.sequence, candidate.id
                 LIMIT 1
                 """,
-                (_encode(observed), _encode(observed)),
+                parameters,
             ).fetchone()
             if row is None:
                 return None
@@ -809,10 +864,19 @@ class SQLiteGatewayLedger:
         if receipt.envelope_id != outbox_id:
             raise ValueError("receipt envelope_id must match the outbox record")
         observed = _observed(now)
-        if receipt.state in {DeliveryState.ACCEPTED, DeliveryState.DELIVERED}:
+        if receipt.state is DeliveryState.DELIVERED:
             state = "delivered"
             next_attempt_at = None
             delivered_at = _encode(observed)
+        elif receipt.state is DeliveryState.ACCEPTED:
+            state = "pending"
+            delay = (
+                receipt.retry_after_seconds
+                if receipt.retry_after_seconds is not None
+                else 1.0
+            )
+            next_attempt_at = _encode(observed + timedelta(seconds=delay))
+            delivered_at = None
         elif receipt.state is DeliveryState.RETRYABLE:
             state = "pending"
             delay = receipt.retry_after_seconds or 0
@@ -1134,14 +1198,17 @@ def _insert_uncertain_outbox(
     conn.execute(
         """
         INSERT INTO gateway_outbox (
-            id, inbox_id, profile_id, sequence, envelope_json,
+            id, inbox_id, profile_id, adapter, account_id,
+            sequence, envelope_json,
             state, created_at, updated_at
-        ) VALUES (?, ?, ?, 0, ?, 'pending', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, 0, ?, 'pending', ?, ?)
         """,
         (
             outbound.envelope_id,
             inbox_row["id"],
             inbox_row["profile_id"],
+            outbound.target.adapter,
+            outbound.target.account_id,
             _bounded_json(_outbound_to_dict(outbound)),
             _encode(observed),
             _encode(observed),

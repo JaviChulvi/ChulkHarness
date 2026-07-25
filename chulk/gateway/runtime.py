@@ -135,6 +135,7 @@ class GatewayRuntime:
                 self.ledger.claim_execution,
                 global_limit=self.limits.global_concurrency,
                 profile_limit=self.limits.profile_concurrency,
+                adapter_keys=tuple(self._adapters),
                 lease_seconds=self.limits.execution_lease_seconds,
             )
             if claim is None:
@@ -152,6 +153,7 @@ class GatewayRuntime:
         while True:
             record = await asyncio.to_thread(
                 self.ledger.claim_delivery,
+                adapter_keys=tuple(self._adapters),
                 lease_seconds=self.limits.delivery_lease_seconds,
             )
             if record is None:

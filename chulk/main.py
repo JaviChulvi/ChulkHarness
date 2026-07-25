@@ -648,7 +648,11 @@ def main(
                 ledger=SQLiteGatewayLedger(control_path),
                 router=SQLiteGatewayRouter(control_path),
                 profile_store=profile_factory.profile_store,
-                start_func=lambda: run_telegram_gateway(config),
+                start_func=lambda: run_telegram_gateway(
+                    config,
+                    control_db_path=control_path,
+                    profile_runtime_factory=profile_factory,
+                ),
                 adapter=getattr(args, "adapter", "telegram"),
                 account_id=getattr(args, "account", "primary"),
                 route_command=getattr(args, "route_command", None),

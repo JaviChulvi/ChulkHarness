@@ -193,6 +193,8 @@ def _add_gateway_control_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             inbox_id TEXT NOT NULL,
             profile_id TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
             sequence INTEGER NOT NULL,
             envelope_json TEXT NOT NULL,
             state TEXT NOT NULL DEFAULT 'pending',
@@ -212,7 +214,7 @@ def _add_gateway_control_schema(conn: sqlite3.Connection) -> None:
             CHECK (state IN ('pending', 'delivering', 'delivered', 'failed'))
         );
         CREATE INDEX idx_gateway_outbox_delivery
-        ON gateway_outbox(state, next_attempt_at, created_at, id);
+        ON gateway_outbox(adapter, account_id, state, next_attempt_at, created_at, id);
         CREATE INDEX idx_gateway_outbox_profile
         ON gateway_outbox(profile_id, state, created_at, id);
 
