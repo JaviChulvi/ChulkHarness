@@ -22,6 +22,10 @@ DEFAULT_ALLOWED_ORIGINS = (
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+class RequestBodyTooLargeError(ValueError):
+    """Raised while streaming a body beyond the configured maximum."""
+
+
 class ControlTokenStore:
     """Generate and rotate one owner-readable local control credential."""
 
@@ -134,15 +138,21 @@ class ControlSecurityMiddleware:
         token_store: ControlTokenStore,
         allowed_origins: Iterable[str] = DEFAULT_ALLOWED_ORIGINS,
         max_body_bytes: int = 1_000_000,
+        max_concurrent_requests: int = 32,
+        request_timeout_seconds: float = 30.0,
         rate_limiter: SlidingWindowRateLimiter | None = None,
         audit_log: ControlAuditLog | None = None,
     ) -> None:
         if max_body_bytes < 1:
             raise ValueError("max_body_bytes must be greater than zero")
+        if max_concurrent_requests < 1 or request_timeout_seconds <= 0:
+            raise ValueError("request execution limits must be positive")
         self.app = app
         self.token_store = token_store
         self.allowed_origins = tuple(origin.rstrip("/") for origin in allowed_origins)
         self.max_body_bytes = max_body_bytes
+        self.request_timeout_seconds = request_timeout_seconds
+        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
         self.rate_limiter = rate_limiter or SlidingWindowRateLimiter()
         self.audit_log = audit_log
 
@@ -203,15 +213,39 @@ class ControlSecurityMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, audit_send)
+            if (
+                scope["type"] == "http"
+                and not str(scope.get("path", "")).endswith("/events")
+            ):
+                try:
+                    await asyncio.wait_for(
+                        self._call_with_slot(scope, receive, audit_send),
+                        timeout=self.request_timeout_seconds,
+                    )
+                except TimeoutError:
+                    if status == 500:
+                        await self._reject(
+                            scope,
+                            receive,
+                            audit_send,
+                            504,
+                            "request_timeout",
+                        )
+            else:
+                await self.app(scope, receive, audit_send)
         finally:
             if self.audit_log is not None:
-                self.audit_log.write(
+                await asyncio.to_thread(
+                    self.audit_log.write,
                     method=scope.get("method", "WEBSOCKET"),
                     path=scope.get("path", ""),
                     status=status,
                     client=client_name,
                 )
+
+    async def _call_with_slot(self, scope, receive, send) -> None:
+        async with self._request_slots:
+            await self.app(scope, receive, send)
 
     def _bounded_receive(self, receive):
         received = 0
@@ -222,7 +256,9 @@ class ControlSecurityMiddleware:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_body_bytes:
-                    raise ValueError("request body exceeds configured limit")
+                    raise RequestBodyTooLargeError(
+                        "request body exceeds configured limit"
+                    )
             return message
 
         return bounded
@@ -277,5 +313,6 @@ __all__ = [
     "ControlSecurityMiddleware",
     "ControlTokenStore",
     "DEFAULT_ALLOWED_ORIGINS",
+    "RequestBodyTooLargeError",
     "SlidingWindowRateLimiter",
 ]

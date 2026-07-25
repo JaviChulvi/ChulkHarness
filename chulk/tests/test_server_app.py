@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -14,7 +15,9 @@ from chulk.llm import LLMClient
 from chulk.profiles import ProfileRuntimeFactory, SQLiteProfileStore
 from chulk.runtime import create_agent
 from chulk.server import ConversationDispatcher, create_control_app
+from chulk.events import AgentEvent, ModelDeltaPayload
 from chulk.server.security import ControlTokenStore, SlidingWindowRateLimiter
+from chulk.tools.permissions import PermissionRequest, ToolPermissionLevel
 
 
 class ServerLLM(LLMClient):
@@ -103,6 +106,11 @@ def test_http_api_requires_auth_origin_and_browser_csrf(tmp_path) -> None:
             json={},
         )
         assert response.status_code == 201
+    audit = (
+        tmp_path / ".chulk" / "control-audit.jsonl"
+    ).read_text(encoding="utf-8")
+    assert tokens.load_or_create() not in audit
+    assert "request body" not in audit
 
 
 def test_http_api_creates_conversation_and_queues_idempotent_message(tmp_path) -> None:
@@ -132,9 +140,103 @@ def test_http_api_creates_conversation_and_queues_idempotent_message(tmp_path) -
         assert first.json()["command"]["id"] == replay.json()["command"]["id"]
         schema = client.get("/v1/schema", headers=_auth(tokens)).json()
         serialized = json.dumps(schema)
+        assert schema["openapi"] == "3.1.0"
         assert "raw_traces" in serialized
         assert "trace_path" not in serialized
         assert "credential_refs" not in serialized
+
+
+def test_operator_routes_are_bounded_and_do_not_expose_raw_traces(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/profiles/default/conversations",
+            headers=_auth(tokens),
+            json={},
+        )
+        conversation_id = created.json()["conversation"]["id"]
+
+        conversations = client.get(
+            "/v1/profiles/default/conversations?limit=10",
+            headers=_auth(tokens),
+        )
+        traces = client.get(
+            "/v1/profiles/default/traces",
+            headers=_auth(tokens),
+        )
+        artifacts = client.get(
+            f"/v1/profiles/default/conversations/{conversation_id}/artifacts",
+            headers=_auth(tokens),
+        )
+        proposals = client.get(
+            "/v1/profiles/default/proposals",
+            headers=_auth(tokens),
+        )
+        usage = client.get(
+            "/v1/profiles/default/usage?limit=10",
+            headers=_auth(tokens),
+        )
+
+        assert conversations.json()["conversations"][0]["id"] == conversation_id
+        assert traces.json()["traces"][0]["conversation_id"] == conversation_id
+        assert "trace_path" not in json.dumps(traces.json())
+        assert artifacts.json()["artifacts"] == []
+        assert proposals.json()["proposals"] == []
+        assert usage.json()["entries"] == []
+        assert client.get(
+            "/v1/profiles/default/jobs",
+            headers=_auth(tokens),
+        ).status_code == 400
+
+
+def test_permission_endpoint_is_owned_and_idempotent(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/profiles/default/conversations",
+            headers=_auth(tokens),
+            json={},
+        )
+        conversation_id = created.json()["conversation"]["id"]
+        broker = app.state.dispatcher.permissions("default", conversation_id)
+        pending = broker.create(
+            PermissionRequest(
+                tool_name="shell",
+                permission_level=ToolPermissionLevel.SHELL,
+                arguments={"command": "printf hello"},
+                requires_confirmation=True,
+                policy_name="workspace-write",
+                reason="shell approval",
+            )
+        )
+        url = (
+            f"/v1/profiles/default/conversations/{conversation_id}"
+            f"/permissions/{pending.id}"
+        )
+        first = client.post(
+            url,
+            headers=_auth(tokens),
+            json={"decision": "allow", "idempotency_key": "decision-1"},
+        )
+        replay = client.post(
+            url,
+            headers=_auth(tokens),
+            json={"decision": "allow", "idempotency_key": "decision-1"},
+        )
+        conflict = client.post(
+            url,
+            headers=_auth(tokens),
+            json={"decision": "deny", "idempotency_key": "decision-2"},
+        )
+
+        assert first.status_code == replay.status_code == 200
+        assert first.json()["permission"]["status"] == "allowed"
+        assert conflict.status_code == 409
+        assert client.post(
+            url.replace("/default/", "/missing/"),
+            headers=_auth(tokens),
+            json={"decision": "allow", "idempotency_key": "other"},
+        ).status_code == 404
 
 
 def test_http_api_rejects_malformed_and_oversized_requests(tmp_path) -> None:
@@ -204,3 +306,91 @@ def test_websocket_gateway_uses_authenticated_shared_dispatch(tmp_path) -> None:
             assert completed["type"] == "message.completed"
             assert completed["text"] == "answer hello websocket"
             assert completed["conversation_id"]
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_orders_events_and_resumes_from_last_event_id(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    dispatcher = app.state.dispatcher
+    conversation = await dispatcher.create_conversation("default")
+    conversation_id = conversation["id"]
+    journal = dispatcher.journal("default", conversation_id)
+    first = journal.append(
+        AgentEvent(
+            name="model.delta",
+            profile_id="default",
+            conversation_id=conversation_id,
+            payload=ModelDeltaPayload("one"),
+        )
+    )
+    journal.append(
+        AgentEvent(
+            name="model.delta",
+            profile_id="default",
+            conversation_id=conversation_id,
+            payload=ModelDeltaPayload("two"),
+        )
+    )
+
+    messages = await _asgi_sse_request(
+        app,
+        (
+            f"/v1/profiles/default/conversations/{conversation_id}/events"
+        ),
+        token=tokens.load_or_create(),
+        last_event_id=first.event_id,
+    )
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    ).decode()
+
+    assert f"id: {first.event_id}" not in body
+    assert '"text":"two"' in body
+    assert "event: model.delta" in body
+    await dispatcher.close()
+
+
+async def _asgi_sse_request(
+    app,
+    path: str,
+    *,
+    token: str,
+    last_event_id: str | None = None,
+) -> list[dict]:
+    body_sent = asyncio.Event()
+    first_receive = True
+    messages: list[dict] = []
+    headers = [(b"authorization", f"Bearer {token}".encode())]
+    if last_event_id is not None:
+        headers.append((b"last-event-id", last_event_id.encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8765),
+    }
+
+    async def receive():
+        nonlocal first_receive
+        if first_receive:
+            first_receive = False
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await body_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            body_sent.set()
+
+    await app(scope, receive, send)
+    return messages

@@ -246,9 +246,9 @@ class ConversationDispatcher:
         cancelled = worker.active_task is not None and not worker.active_task.done()
         if cancelled and worker.active_task is not None:
             worker.active_task.cancel()
-        worker.broker.cancel_pending()
-        self._cancel_queued(worker)
-        return cancelled
+        permission_count = worker.broker.cancel_pending()
+        queued_count = self._cancel_queued(worker)
+        return cancelled or permission_count > 0 or queued_count > 0
 
     def journal(self, profile_id: str, conversation_id: str) -> PublicEventJournal:
         return self._worker(profile_id, conversation_id).journal
@@ -549,7 +549,7 @@ class ConversationDispatcher:
             )
         return self.get_command(worker.profile_id, worker.conversation_id, command_id)
 
-    def _cancel_queued(self, worker: _ConversationWorker) -> None:
+    def _cancel_queued(self, worker: _ConversationWorker) -> int:
         now = _utc_now()
         with sqlite_connection(self._store_path(worker.profile_id)) as conn:
             rows = conn.execute(
@@ -579,6 +579,7 @@ class ConversationDispatcher:
                         command_id,
                     )
                 )
+        return len(rows)
 
     def _store_path(self, profile_id: str) -> Path:
         return self.runtime_factory.resolve(profile_id).config.store_path

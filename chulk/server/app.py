@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 import json
 from typing import Any
+from uuid import uuid4
 
 from chulk.config import Config
 from chulk.profiles import ProfileNotFoundError, ProfileRuntimeFactory
@@ -23,6 +24,7 @@ from chulk.server.models import (
     ConversationMessageRequest,
     PermissionDecisionRequest,
 )
+from chulk.server.operators import OperatorService, integer_query, parse_timestamp
 from chulk.server.permissions import (
     PermissionDecisionConflictError,
     PermissionRequestNotFoundError,
@@ -31,6 +33,7 @@ from chulk.server.security import (
     ControlAuditLog,
     ControlSecurityMiddleware,
     ControlTokenStore,
+    RequestBodyTooLargeError,
 )
 from chulk.sessions import SessionNotFoundError
 
@@ -77,6 +80,7 @@ def create_control_app(
         raise ValueError("sse_heartbeat_seconds must be greater than zero")
     runtime_factory = ProfileRuntimeFactory(config)
     controller = dispatcher or ConversationDispatcher(runtime_factory)
+    operators = OperatorService(runtime_factory)
     credentials = token_store or ControlTokenStore(
         config.runtime_dir / "control.token"
     )
@@ -95,6 +99,15 @@ def create_control_app(
         assert isinstance(exc, ValueError)
         error = ApiError("invalid_request", str(exc), 400)
         return JSONResponse(error.to_dict(), status_code=400)
+
+    async def body_limit_handler(_request: Any, exc: Exception):
+        assert isinstance(exc, RequestBodyTooLargeError)
+        error = ApiError("request_too_large", str(exc), 413)
+        return JSONResponse(error.to_dict(), status_code=413)
+
+    async def not_found_handler(_request: Any, exc: Exception):
+        error = ApiError("not_found", str(exc), 404)
+        return JSONResponse(error.to_dict(), status_code=404)
 
     async def profiles(_request):
         items = [
@@ -123,6 +136,16 @@ def create_control_app(
         except SessionNotFoundError as exc:
             raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
         return _json({"conversation": value}, status_code=201)
+
+    async def list_conversations(request):
+        try:
+            value = operators.conversations(
+                request.path_params["profile_id"],
+                limit=_limit(request.query_params.get("limit")),
+            )
+        except ProfileNotFoundError as exc:
+            raise ApiProblem(404, "profile_not_found", str(exc)) from exc
+        return _json(value)
 
     async def send_message(request):
         body = ConversationMessageRequest.from_dict(await _json_body(request))
@@ -185,11 +208,29 @@ def create_control_app(
                     return
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
-                records = journal.list(
-                    conversation_id,
-                    after_id=last_id,
-                    limit=250,
-                ) if last_id else journal.list(conversation_id, limit=250)
+                try:
+                    records = (
+                        journal.list(
+                            conversation_id,
+                            after_id=last_id,
+                            limit=250,
+                        )
+                        if last_id
+                        else journal.list(conversation_id, limit=250)
+                    )
+                except PublicEventCursorExpiredError:
+                    yield _sse(
+                        "stream.reset",
+                        uuid4().hex,
+                        {
+                            "schema_version": API_SCHEMA_VERSION,
+                            "error": {
+                                "code": "event_cursor_expired",
+                                "message": "resume cursor left the retained journal",
+                            },
+                        },
+                    )
+                    return
                 if not records and elapsed >= sse_heartbeat_seconds:
                     yield b": heartbeat\n\n"
                     elapsed = 0.0
@@ -255,12 +296,120 @@ def create_control_app(
             )
         except PermissionRequestNotFoundError as exc:
             raise ApiProblem(404, "permission_not_found", str(exc)) from exc
+        except (ProfileNotFoundError, SessionNotFoundError) as exc:
+            raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
         except PermissionDecisionConflictError as exc:
             raise ApiProblem(409, "permission_conflict", str(exc)) from exc
         return _json({"permission": result.to_dict()})
 
     async def schema(_request):
         return _json(_schema())
+
+    async def jobs(request):
+        adapter = _required_query(request.query_params.get("adapter"), "adapter")
+        destination_id = _required_query(
+            request.query_params.get("destination_id"),
+            "destination_id",
+        )
+        return _json(
+            operators.jobs(
+                request.path_params["profile_id"],
+                adapter=adapter,
+                destination_id=destination_id,
+            )
+        )
+
+    async def proposals(request):
+        status = request.query_params.get("status", "pending")
+        if status == "all":
+            status = None
+        return _json(
+            operators.proposals(
+                request.path_params["profile_id"],
+                status=status,
+                limit=_limit(request.query_params.get("limit")),
+            )
+        )
+
+    async def decide_proposal(request):
+        body = await _json_body(request)
+        if not isinstance(body, Mapping):
+            raise ValueError("request body must be an object")
+        action = body.get("action")
+        if not isinstance(action, str):
+            raise ValueError("action must be approve or reject")
+        try:
+            result = operators.decide_proposal(
+                request.path_params["profile_id"],
+                request.path_params["proposal_id"],
+                action=action,
+            )
+        except KeyError as exc:
+            raise ApiProblem(404, "proposal_not_found", str(exc)) from exc
+        return _json({"proposal": result})
+
+    async def usage(request):
+        return _json(
+            operators.usage(
+                request.path_params["profile_id"],
+                start=parse_timestamp(
+                    request.query_params.get("start"),
+                    field="start",
+                ),
+                end=parse_timestamp(
+                    request.query_params.get("end"),
+                    field="end",
+                ),
+                resource_kind=request.query_params.get("resource_kind"),
+                channel=request.query_params.get("channel"),
+                conversation_id=request.query_params.get("conversation_id"),
+                limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
+            )
+        )
+
+    async def traces(request):
+        return _json(
+            operators.traces(
+                request.path_params["profile_id"],
+                limit=_limit(request.query_params.get("limit")),
+            )
+        )
+
+    async def artifacts(request):
+        profile_id, conversation_id = _conversation_params(request)
+        try:
+            result = operators.artifacts(profile_id, conversation_id)
+        except SessionNotFoundError as exc:
+            raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
+        return _json(result)
+
+    async def read_artifact(request):
+        profile_id, conversation_id = _conversation_params(request)
+        try:
+            result = operators.read_artifact(
+                profile_id,
+                conversation_id,
+                request.path_params["artifact_id"],
+                mode=request.query_params.get("mode", "head_tail"),
+                offset=integer_query(
+                    request.query_params.get("offset"),
+                    field="offset",
+                    default=0,
+                    minimum=0,
+                    maximum=64 * 1024 * 1024,
+                ),
+                max_bytes=integer_query(
+                    request.query_params.get("max_bytes"),
+                    field="max_bytes",
+                    default=8_192,
+                    minimum=1,
+                    maximum=65_536,
+                ),
+            )
+        except SessionNotFoundError as exc:
+            raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
+        return _json({"artifact": result})
 
     async def gateway_websocket(websocket):
         from chulk.server.gateway_ws import serve_gateway_websocket
@@ -273,6 +422,11 @@ def create_control_app(
             "/v1/profiles/{profile_id:str}/conversations",
             create_conversation,
             methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/conversations",
+            list_conversations,
+            methods=["GET"],
         ),
         Route(
             "/v1/profiles/{profile_id:str}/conversations/{conversation_id:str}/messages",
@@ -314,7 +468,43 @@ def create_control_app(
             decide_permission,
             methods=["POST"],
         ),
+        Route(
+            "/v1/profiles/{profile_id:str}/jobs",
+            jobs,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/proposals",
+            proposals,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/proposals/{proposal_id:str}",
+            decide_proposal,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/usage",
+            usage,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/traces",
+            traces,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/conversations/{conversation_id:str}/artifacts",
+            artifacts,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/conversations/{conversation_id:str}/artifacts/{artifact_id:str}",
+            read_artifact,
+            methods=["GET"],
+        ),
         Route("/v1/schema", schema, methods=["GET"]),
+        Route("/v1/openapi.json", schema, methods=["GET"]),
         WebSocketRoute("/v1/gateway/ws", gateway_websocket),
     ]
     app = Starlette(
@@ -322,6 +512,9 @@ def create_control_app(
         lifespan=lifespan,
         exception_handlers={
             ApiProblem: problem_handler,
+            RequestBodyTooLargeError: body_limit_handler,
+            ProfileNotFoundError: not_found_handler,
+            SessionNotFoundError: not_found_handler,
             ValueError: value_handler,
         },
     )
@@ -367,6 +560,15 @@ def _limit(value: str | None) -> int:
     return limit
 
 
+def _required_query(value: str | None, field: str) -> str:
+    normalized = value.strip() if isinstance(value, str) else ""
+    if not normalized:
+        raise ValueError(f"{field} query parameter is required")
+    if len(normalized) > 256 or "\x00" in normalized:
+        raise ValueError(f"{field} query parameter is invalid")
+    return normalized
+
+
 def _json(value: Mapping[str, Any], *, status_code: int = 200):
     from starlette.responses import JSONResponse
 
@@ -383,24 +585,86 @@ def _sse(name: str, event_id: str, value: Mapping[str, Any]) -> bytes:
 
 def _schema() -> dict[str, Any]:
     return {
-        "name": "Chulk local control API",
-        "version": API_SCHEMA_VERSION,
-        "authentication": "bearer",
-        "event_contract": "AgentEvent",
-        "routes": (
-            "GET /v1/profiles",
-            "POST /v1/profiles/{profile_id}/conversations",
-            "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/messages",
-            "GET /v1/profiles/{profile_id}/conversations/{conversation_id}/commands/{command_id}",
-            "GET /v1/profiles/{profile_id}/conversations/{conversation_id}/events",
-            "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/cancel",
-            "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/turns/{turn_id}/plan/approve",
-            "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/turns/{turn_id}/plan/reject",
-            "GET /v1/profiles/{profile_id}/conversations/{conversation_id}/permissions",
-            "POST /v1/profiles/{profile_id}/conversations/{conversation_id}/permissions/{permission_request_id}",
-            "WEBSOCKET /v1/gateway/ws",
-        ),
-        "excluded": ("raw_traces", "credentials", "prompt_dumps"),
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Chulk local control API",
+            "version": str(API_SCHEMA_VERSION),
+        },
+        "paths": {
+            "/v1/profiles": {"get": {"operationId": "listProfiles"}},
+            "/v1/profiles/{profile_id}/conversations": {
+                "get": {"operationId": "listConversations"},
+                "post": {"operationId": "createConversation"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/messages": {
+                "post": {"operationId": "sendMessage"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/commands/{command_id}": {
+                "get": {"operationId": "getCommand"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/events": {
+                "get": {"operationId": "streamEvents"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/cancel": {
+                "post": {"operationId": "cancelConversation"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/turns/{turn_id}/plan/approve": {
+                "post": {"operationId": "approvePlan"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/turns/{turn_id}/plan/reject": {
+                "post": {"operationId": "rejectPlan"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/permissions": {
+                "get": {"operationId": "listPermissions"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/permissions/{permission_request_id}": {
+                "post": {"operationId": "decidePermission"}
+            },
+            "/v1/profiles/{profile_id}/jobs": {
+                "get": {"operationId": "listJobs"}
+            },
+            "/v1/profiles/{profile_id}/proposals": {
+                "get": {"operationId": "listProposals"}
+            },
+            "/v1/profiles/{profile_id}/proposals/{proposal_id}": {
+                "post": {"operationId": "decideProposal"}
+            },
+            "/v1/profiles/{profile_id}/usage": {
+                "get": {"operationId": "queryUsage"}
+            },
+            "/v1/profiles/{profile_id}/traces": {
+                "get": {"operationId": "listTraceMetadata"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/artifacts": {
+                "get": {"operationId": "listArtifacts"}
+            },
+            "/v1/profiles/{profile_id}/conversations/{conversation_id}/artifacts/{artifact_id}": {
+                "get": {"operationId": "readArtifact"}
+            },
+        },
+        "components": {
+            "securitySchemes": {
+                "controlToken": {"type": "http", "scheme": "bearer"}
+            },
+            "schemas": {
+                "AgentEvent": {
+                    "type": "object",
+                    "required": (
+                        "name",
+                        "schema_version",
+                        "conversation_id",
+                        "payload",
+                    ),
+                },
+                "ApiError": {
+                    "type": "object",
+                    "required": ("schema_version", "error"),
+                },
+            },
+        },
+        "security": ({"controlToken": ()},),
+        "x-chulk-websocket-path": "/v1/gateway/ws",
+        "x-chulk-excluded": ("raw_traces", "credentials", "prompt_dumps"),
     }
 
 

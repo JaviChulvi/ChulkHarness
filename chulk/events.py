@@ -184,7 +184,7 @@ class AgentEvent:
 
     def to_dict(self) -> dict[str, Any]:
         payload = (
-            dict(self.payload.data)
+            plain_data(self.payload.data)
             if isinstance(self.payload, SerializedEventPayload)
             else redact_data(plain_data(self.payload))
         )
