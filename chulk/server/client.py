@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime
 import json
 from typing import Any
@@ -53,6 +53,189 @@ class ControlApiClient:
 
     def list_profiles(self) -> dict[str, Any]:
         return self._get("/v1/profiles")
+
+    def list_conversations(
+        self,
+        profile_id: str,
+        *,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/v1/profiles/{_segment(profile_id)}/conversations",
+            limit=limit,
+        )
+
+    def create_conversation(
+        self,
+        profile_id: str,
+        *,
+        conversation_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v1/profiles/{_segment(profile_id)}/conversations",
+            {
+                **(
+                    {"conversation_id": conversation_id}
+                    if conversation_id is not None
+                    else {}
+                ),
+                **({"metadata": dict(metadata)} if metadata is not None else {}),
+            },
+        )
+
+    def send_message(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        message: str,
+        *,
+        mode: str = "run",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/messages",
+            {
+                "message": message,
+                "mode": mode,
+                "idempotency_key": idempotency_key or uuid4().hex,
+            },
+        )
+
+    def get_command(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/commands/{_segment(command_id)}"
+        )
+
+    def list_events(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        *,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one retained event page for reconnect and deterministic UIs."""
+        return self._get(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/events",
+            after=after,
+            follow="false",
+        )
+
+    def iter_events(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        *,
+        after: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield the authenticated SSE stream, resuming after a retained id."""
+        path = (
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/events"
+        )
+        request = Request(
+            f"{self.base_url}{path}",
+            method="GET",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {self.token}",
+                **({"Last-Event-ID": after} if after is not None else {}),
+            },
+        )
+        try:
+            with self._opener(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
+                yield from _iter_sse(response)
+        except HTTPError as exc:
+            payload = _decode_error(exc.read(), status=exc.code)
+            raise ControlApiError(
+                exc.code,
+                payload["code"],
+                payload["message"],
+                details=payload.get("details"),
+            ) from exc
+        except URLError as exc:
+            raise ControlApiError(
+                0,
+                "connection_error",
+                f"control API event stream failed: {exc.reason}",
+            ) from exc
+
+    def cancel_conversation(
+        self,
+        profile_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/cancel",
+            {},
+        )
+
+    def decide_plan(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        turn_id: str,
+        *,
+        action: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if action not in {"approve", "reject"}:
+            raise ValueError("plan action must be approve or reject")
+        return self._post(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/turns/{_segment(turn_id)}/plan/{action}",
+            {"idempotency_key": idempotency_key or uuid4().hex},
+        )
+
+    def list_permissions(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        *,
+        status: str | None = "pending",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/permissions",
+            status=status,
+            limit=limit,
+        )
+
+    def decide_permission(
+        self,
+        profile_id: str,
+        conversation_id: str,
+        permission_request_id: str,
+        *,
+        decision: str,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if decision not in {"allow", "deny"}:
+            raise ValueError("permission decision must be allow or deny")
+        return self._post(
+            f"/v1/profiles/{_segment(profile_id)}/conversations/"
+            f"{_segment(conversation_id)}/permissions/"
+            f"{_segment(permission_request_id)}",
+            {
+                "decision": decision,
+                "idempotency_key": idempotency_key or uuid4().hex,
+                **({"reason": reason} if reason is not None else {}),
+            },
+        )
 
     def list_goals(
         self,
@@ -446,6 +629,65 @@ def _decode_error(raw: bytes, *, status: int) -> dict[str, Any]:
             else {}
         ),
     }
+
+
+def _iter_sse(response: Any) -> Iterator[dict[str, Any]]:
+    event_name = "message"
+    event_id: str | None = None
+    data_lines: list[str] = []
+    data_bytes = 0
+    for raw_line in response:
+        if not isinstance(raw_line, bytes):
+            raise ControlApiError(
+                200,
+                "invalid_event_stream",
+                "control API event stream yielded a non-byte line",
+            )
+        line = raw_line.decode("utf-8").rstrip("\r\n")
+        if not line:
+            if data_lines:
+                try:
+                    value = json.loads("\n".join(data_lines))
+                except json.JSONDecodeError as exc:
+                    raise ControlApiError(
+                        200,
+                        "invalid_event_stream",
+                        "control API event stream contains invalid JSON",
+                    ) from exc
+                if not isinstance(value, dict):
+                    raise ControlApiError(
+                        200,
+                        "invalid_event_stream",
+                        "control API event payload must be an object",
+                    )
+                yield {
+                    "id": event_id,
+                    "event": event_name,
+                    "data": value,
+                }
+            event_name = "message"
+            event_id = None
+            data_lines = []
+            data_bytes = 0
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event_name = value
+        elif field == "id":
+            event_id = value
+        elif field == "data":
+            data_bytes += len(raw_line)
+            if data_bytes > 1_000_000:
+                raise ControlApiError(
+                    200,
+                    "event_too_large",
+                    "control API event exceeds the client safety limit",
+                )
+            data_lines.append(value)
 
 
 __all__ = ["ControlApiClient", "ControlApiError"]

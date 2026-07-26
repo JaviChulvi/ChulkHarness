@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_session_parser(subparsers)
     _add_gateway_parser(subparsers)
     _add_server_parser(subparsers)
+    _add_tui_parser(subparsers)
     _add_trace_parser(subparsers)
     return parser
 
@@ -262,6 +264,40 @@ def _add_server_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Rotate the owner-local control credential.",
     )
     rotate.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_tui_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "tui",
+        help="Open the keyboard-first operator control room.",
+    )
+    parser.add_argument(
+        "--url",
+        default="http://127.0.0.1:8765",
+        help="Control server URL (default: http://127.0.0.1:8765).",
+    )
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        help="Owner control token file (default: runtime control.token).",
+    )
+    parser.add_argument(
+        "--refresh-seconds",
+        type=float,
+        default=2.0,
+        help="Control-plane refresh interval (default: 2 seconds).",
+    )
+    parser.add_argument(
+        "--profile",
+        metavar="ID",
+        default=argparse.SUPPRESS,
+        help="Operate one agent profile.",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Use a high-contrast monochrome interface.",
+    )
 
 
 def _add_plugins_parser(

@@ -236,6 +236,20 @@ class _Response:
         return json.dumps(self.payload).encode()
 
 
+class _StreamResponse:
+    def __init__(self, lines: list[bytes]) -> None:
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
 def test_control_api_client_shapes_authenticated_operator_requests() -> None:
     requests: list[tuple[Request, float]] = []
 
@@ -275,6 +289,94 @@ def test_control_api_client_shapes_authenticated_operator_requests() -> None:
         "action": "pause",
         "revision": 7,
     }
+
+
+def test_control_api_client_shapes_conversation_and_attention_requests() -> None:
+    requests: list[Request] = []
+
+    def opener(request: Request, *, timeout: float):
+        assert timeout == 30.0
+        requests.append(request)
+        return _Response({"schema_version": 1, "ok": True})
+
+    client = ControlApiClient(
+        "http://127.0.0.1:8765",
+        "secret-token",
+        opener=opener,
+    )
+    client.send_message(
+        "operations",
+        "conversation/one",
+        "Check deployment",
+        mode="plan",
+        idempotency_key="message-key",
+    )
+    client.decide_permission(
+        "operations",
+        "conversation/one",
+        "permission/one",
+        decision="allow",
+        idempotency_key="decision-key",
+    )
+
+    message, permission = requests
+    assert message.full_url.endswith(
+        "/v1/profiles/operations/conversations/conversation%2Fone/messages"
+    )
+    assert json.loads(message.data or b"{}") == {
+        "message": "Check deployment",
+        "mode": "plan",
+        "idempotency_key": "message-key",
+    }
+    assert permission.full_url.endswith(
+        "/v1/profiles/operations/conversations/conversation%2Fone/"
+        "permissions/permission%2Fone"
+    )
+    assert json.loads(permission.data or b"{}") == {
+        "decision": "allow",
+        "idempotency_key": "decision-key",
+    }
+
+
+def test_control_api_client_resumes_and_decodes_sse_events() -> None:
+    requests: list[Request] = []
+
+    def opener(request: Request, *, timeout: float):
+        requests.append(request)
+        return _StreamResponse(
+            [
+                b": heartbeat\n",
+                b"\n",
+                b"id: event-2\n",
+                b"event: model.delta\n",
+                b'data: {"id":"event-2","event":{"name":"model.delta"}}\n',
+                b"\n",
+            ]
+        )
+
+    client = ControlApiClient(
+        "http://127.0.0.1:8765",
+        "secret-token",
+        opener=opener,
+    )
+
+    events = list(
+        client.iter_events(
+            "default",
+            "conversation-1",
+            after="event-1",
+        )
+    )
+
+    assert requests[0].get_header("Last-event-id") == "event-1"
+    assert requests[0].get_header("Accept") == "text/event-stream"
+    assert events == [
+        {
+            "id": "event-2",
+            "event": "model.delta",
+            "data": {"id": "event-2", "event": {"name": "model.delta"}},
+        }
+    ]
 
 
 def test_control_api_client_decodes_stable_api_errors() -> None:
