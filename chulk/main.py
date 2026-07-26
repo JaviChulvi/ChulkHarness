@@ -718,6 +718,22 @@ def main(
                 ),
                 path=getattr(args, "path", None),
                 approved_by=getattr(args, "approved_by", None),
+                plugin_name=getattr(args, "plugin_name", None),
+                repository_url=getattr(args, "repository_url", None),
+                commit_sha=getattr(args, "commit", None),
+                allowed_git_hosts=tuple(
+                    getattr(args, "allowed_git_hosts", ())
+                ),
+                approve_authority_changes=bool(
+                    getattr(args, "approve_authority_changes", False)
+                ),
+                reason=getattr(args, "reason", None),
+                revoked_by=getattr(args, "revoked_by", None),
+                catalog_path=getattr(args, "catalog_path", None),
+                query=getattr(args, "query", None),
+                category=getattr(args, "category", None),
+                version=getattr(args, "version", None),
+                limit=int(getattr(args, "limit", 50)),
                 acknowledge_host_authority=bool(
                     getattr(
                         args,
@@ -725,8 +741,11 @@ def main(
                         False,
                     )
                 ),
-                granted_capabilities=tuple(
-                    getattr(args, "granted_capabilities", ())
+                granted_capabilities=(
+                    tuple(args.granted_capabilities)
+                    if getattr(args, "granted_capabilities", None)
+                    is not None
+                    else None
                 ),
                 json_output=bool(
                     getattr(args, "json_output", False)

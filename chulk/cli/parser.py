@@ -305,7 +305,7 @@ def _add_plugins_parser(
 ) -> None:
     parser = subparsers.add_parser(
         "plugins",
-        help="Inspect, register, list, or audit local plugins.",
+        help="Inspect and govern reviewed plugin lifecycle operations.",
     )
     plugin_subparsers = parser.add_subparsers(
         dest="plugin_command",
@@ -338,6 +338,59 @@ def _add_plugins_parser(
     )
     register.add_argument("--json", action="store_true", dest="json_output")
 
+    install = plugin_subparsers.add_parser(
+        "install",
+        help="Quarantine and install an exact directory or prebuilt wheel.",
+    )
+    _add_plugin_review_options(install)
+
+    update = plugin_subparsers.add_parser(
+        "update",
+        help="Inspect and transactionally apply a reviewed plugin update.",
+    )
+    _add_plugin_review_options(update)
+    update.add_argument(
+        "--approve-authority-changes",
+        action="store_true",
+        help="Approve the displayed capability and authority diff.",
+    )
+
+    plan_update = plugin_subparsers.add_parser(
+        "plan-update",
+        help="Show the exact candidate and authority diff without enabling it.",
+    )
+    plan_update.add_argument("path")
+    plan_update.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+    )
+
+    uninstall = plugin_subparsers.add_parser(
+        "uninstall",
+        help="Disable a plugin while retaining recoverable metadata.",
+    )
+    uninstall.add_argument("plugin_name")
+    uninstall.add_argument("--approved-by", required=True)
+    uninstall.add_argument("--json", action="store_true", dest="json_output")
+
+    rollback = plugin_subparsers.add_parser(
+        "rollback",
+        help="Restore the newest exact recoverable plugin state.",
+    )
+    rollback.add_argument("plugin_name")
+    rollback.add_argument("--approved-by", required=True)
+    rollback.add_argument("--json", action="store_true", dest="json_output")
+
+    revoke = plugin_subparsers.add_parser(
+        "revoke",
+        help="Revoke an installed digest and fail closed at startup.",
+    )
+    revoke.add_argument("plugin_name")
+    revoke.add_argument("--reason", required=True)
+    revoke.add_argument("--revoked-by", required=True)
+    revoke.add_argument("--json", action="store_true", dest="json_output")
+
     list_parser = plugin_subparsers.add_parser(
         "list",
         help="List reviewed profile-local registrations.",
@@ -349,6 +402,70 @@ def _add_plugins_parser(
         help="Verify exact locks and packages without importing code.",
     )
     audit.add_argument("--json", action="store_true", dest="json_output")
+
+    catalog_search = plugin_subparsers.add_parser(
+        "catalog-search",
+        help="Search an explicit metadata-only reviewed catalog.",
+    )
+    catalog_search.add_argument("catalog_path")
+    catalog_search.add_argument("query")
+    catalog_search.add_argument("--category")
+    catalog_search.add_argument("--limit", type=int, default=50)
+    catalog_search.add_argument(
+        "--allow-git-host",
+        action="append",
+        required=True,
+        dest="allowed_git_hosts",
+    )
+    catalog_search.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+    )
+
+    catalog_inspect = plugin_subparsers.add_parser(
+        "catalog-inspect",
+        help="Inspect one metadata-only reviewed catalog entry.",
+    )
+    catalog_inspect.add_argument("catalog_path")
+    catalog_inspect.add_argument("plugin_name")
+    catalog_inspect.add_argument("--version")
+    catalog_inspect.add_argument(
+        "--allow-git-host",
+        action="append",
+        required=True,
+        dest="allowed_git_hosts",
+    )
+    catalog_inspect.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+    )
+
+
+def _add_plugin_review_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("path")
+    parser.add_argument("--approved-by", required=True)
+    parser.add_argument(
+        "--acknowledge-host-authority",
+        action="store_true",
+        help="Acknowledge that importing Python code has host-process authority.",
+    )
+    parser.add_argument(
+        "--grant-capability",
+        action="append",
+        default=None,
+        dest="granted_capabilities",
+    )
+    parser.add_argument("--repository-url")
+    parser.add_argument("--commit")
+    parser.add_argument(
+        "--allow-git-host",
+        action="append",
+        default=[],
+        dest="allowed_git_hosts",
+    )
+    parser.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_usage_parser(subparsers: argparse._SubParsersAction) -> None:

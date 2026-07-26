@@ -40,7 +40,9 @@ from chulk.plugins import (
     PluginAuditReport,
     PluginCategory,
     PluginInspection,
+    PluginLifecycleReceipt,
     PluginLockEntry,
+    PluginUpdatePlan,
 )
 from chulk.results import (
     GovernedSkill,
@@ -953,6 +955,126 @@ class Agent:
             serialized=True,
         )
 
+    def install_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLifecycleReceipt:
+        """Quarantine and install an exact directory or prebuilt wheel."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "install_plugin",
+            lambda: registry.install(
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+            ),
+            serialized=True,
+        )
+
+    def plan_plugin_update(
+        self,
+        path: Path | str,
+    ) -> PluginUpdatePlan:
+        """Return a static update and authority diff without enabling it."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "plan_plugin_update",
+            lambda: registry.plan_update(path),
+        )
+
+    def update_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] | None = None,
+        approve_authority_changes: bool = False,
+    ) -> PluginLifecycleReceipt:
+        """Apply one reviewed update with rollback boundaries."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "update_plugin",
+            lambda: registry.update(
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+                approve_authority_changes=approve_authority_changes,
+            ),
+            serialized=True,
+        )
+
+    def uninstall_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        """Disable a plugin while retaining exact recovery metadata."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "uninstall_plugin",
+            lambda: registry.uninstall(
+                plugin_name,
+                approved_by=approved_by,
+            ),
+            serialized=True,
+        )
+
+    def rollback_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        """Restore the newest valid plugin recovery point."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "rollback_plugin",
+            lambda: registry.rollback(
+                plugin_name,
+                approved_by=approved_by,
+            ),
+            serialized=True,
+        )
+
+    def revoke_plugin(
+        self,
+        plugin_name: str,
+        *,
+        reason: str,
+        revoked_by: str,
+    ) -> PluginLifecycleReceipt:
+        """Revoke one exact installed digest and fail closed at startup."""
+        registry = self.runtime.plugin_registry
+        if registry is None:
+            raise RuntimeError("plugin registry is not configured")
+        return self._invoke(
+            "revoke_plugin",
+            lambda: registry.revoke(
+                plugin_name,
+                reason=reason,
+                revoked_by=revoked_by,
+            ),
+            serialized=True,
+        )
+
     def list_plugins(self) -> tuple[PluginLockEntry, ...]:
         """List reviewed plugin registrations without importing them."""
         registry = self.runtime.plugin_registry
@@ -1408,6 +1530,87 @@ class AsyncAgent:
             approved_by=approved_by,
             acknowledge_host_authority=acknowledge_host_authority,
             granted_capabilities=granted_capabilities,
+        )
+
+    async def install_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLifecycleReceipt:
+        return await asyncio.to_thread(
+            self._agent.install_plugin,
+            path,
+            approved_by=approved_by,
+            acknowledge_host_authority=acknowledge_host_authority,
+            granted_capabilities=granted_capabilities,
+        )
+
+    async def plan_plugin_update(
+        self,
+        path: Path | str,
+    ) -> PluginUpdatePlan:
+        return await asyncio.to_thread(
+            self._agent.plan_plugin_update,
+            path,
+        )
+
+    async def update_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] | None = None,
+        approve_authority_changes: bool = False,
+    ) -> PluginLifecycleReceipt:
+        return await asyncio.to_thread(
+            self._agent.update_plugin,
+            path,
+            approved_by=approved_by,
+            acknowledge_host_authority=acknowledge_host_authority,
+            granted_capabilities=granted_capabilities,
+            approve_authority_changes=approve_authority_changes,
+        )
+
+    async def uninstall_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        return await asyncio.to_thread(
+            self._agent.uninstall_plugin,
+            plugin_name,
+            approved_by=approved_by,
+        )
+
+    async def rollback_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        return await asyncio.to_thread(
+            self._agent.rollback_plugin,
+            plugin_name,
+            approved_by=approved_by,
+        )
+
+    async def revoke_plugin(
+        self,
+        plugin_name: str,
+        *,
+        reason: str,
+        revoked_by: str,
+    ) -> PluginLifecycleReceipt:
+        return await asyncio.to_thread(
+            self._agent.revoke_plugin,
+            plugin_name,
+            reason=reason,
+            revoked_by=revoked_by,
         )
 
     async def list_plugins(self) -> tuple[PluginLockEntry, ...]:
