@@ -81,6 +81,9 @@ tui = [
 discord = [
   "discord.py>=2.5,<3",
 ]
+browser = [
+  "playwright>=1.49,<2",
+]
 
 [project.scripts]
 chulk = "chulk.main:main"
