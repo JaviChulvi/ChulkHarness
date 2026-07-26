@@ -41,6 +41,7 @@ from chulk.server.operators import (
 from chulk.server.permissions import (
     PermissionDecisionConflictError,
     PermissionRequestNotFoundError,
+    list_profile_permissions,
 )
 from chulk.server.security import (
     ControlAuditLog,
@@ -100,6 +101,7 @@ def create_control_app(
     credentials.load_or_create()
     router = SQLiteGatewayRouter(config.runtime_dir / "control.sqlite")
     webchat_root = Path(__file__).with_name("webchat")
+    dashboard_root = Path(__file__).with_name("dashboard")
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -210,6 +212,31 @@ def create_control_app(
             raise ApiProblem(404, "asset_not_found", "webchat asset not found")
         return FileResponse(
             webchat_root / name,
+            media_type=media_type,
+            headers=_webchat_headers(
+                cache_control="public, max-age=300",
+                content_security=False,
+            ),
+        )
+
+    async def dashboard(_request):
+        return FileResponse(
+            dashboard_root / "index.html",
+            media_type="text/html",
+            headers=_webchat_headers(cache_control="no-store"),
+        )
+
+    async def dashboard_asset(request):
+        name = request.path_params["name"]
+        assets = {
+            "dashboard.css": "text/css",
+            "dashboard.js": "text/javascript",
+        }
+        media_type = assets.get(name)
+        if media_type is None:
+            raise ApiProblem(404, "asset_not_found", "dashboard asset not found")
+        return FileResponse(
+            dashboard_root / name,
             media_type=media_type,
             headers=_webchat_headers(
                 cache_control="public, max-age=300",
@@ -398,6 +425,17 @@ def create_control_app(
             )
         except (ProfileNotFoundError, SessionNotFoundError) as exc:
             raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
+        return _json({"permissions": [item.to_dict() for item in items]})
+
+    async def profile_permissions(request):
+        profile_id = request.path_params["profile_id"]
+        resolved = runtime_factory.resolve(profile_id)
+        items = list_profile_permissions(
+            resolved.config.store_path,
+            profile_id=profile_id,
+            status=request.query_params.get("status"),
+            limit=_limit(request.query_params.get("limit")),
+        )
         return _json({"permissions": [item.to_dict() for item in items]})
 
     async def decide_permission(request):
@@ -700,6 +738,13 @@ def create_control_app(
         await serve_gateway_websocket(websocket, dispatcher=controller)
 
     routes = [
+        Route("/dashboard", dashboard, methods=["GET"]),
+        Route("/dashboard/", dashboard, methods=["GET"]),
+        Route(
+            "/dashboard/assets/{name:str}",
+            dashboard_asset,
+            methods=["GET"],
+        ),
         Route("/webchat", webchat, methods=["GET"]),
         Route("/webchat/", webchat, methods=["GET"]),
         Route(
@@ -758,6 +803,11 @@ def create_control_app(
         Route(
             "/v1/profiles/{profile_id:str}/conversations/{conversation_id:str}/permissions",
             list_permissions,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/permissions",
+            profile_permissions,
             methods=["GET"],
         ),
         Route(
@@ -898,7 +948,7 @@ def create_control_app(
         allowed_origins=allowed_origins,
         max_body_bytes=max_body_bytes,
         audit_log=ControlAuditLog(config.runtime_dir / "control-audit.jsonl"),
-        public_get_prefixes=("/webchat",),
+        public_get_prefixes=("/webchat", "/dashboard"),
     )
     return app
 
@@ -1009,6 +1059,9 @@ def _schema() -> dict[str, Any]:
             },
             "/v1/profiles/{profile_id}/conversations/{conversation_id}/permissions": {
                 "get": {"operationId": "listPermissions"}
+            },
+            "/v1/profiles/{profile_id}/permissions": {
+                "get": {"operationId": "listProfilePermissions"}
             },
             "/v1/profiles/{profile_id}/conversations/{conversation_id}/permissions/{permission_request_id}": {
                 "post": {"operationId": "decidePermission"}

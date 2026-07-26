@@ -379,6 +379,26 @@ def test_control_api_client_resumes_and_decodes_sse_events() -> None:
     ]
 
 
+def test_control_api_client_shapes_profile_permission_inbox_request() -> None:
+    requests: list[Request] = []
+
+    def opener(request: Request, *, timeout: float):
+        requests.append(request)
+        return _Response({"permissions": []})
+
+    client = ControlApiClient(
+        "http://127.0.0.1:8765",
+        "secret-token",
+        opener=opener,
+    )
+
+    client.list_profile_permissions("operations/team", status="pending", limit=25)
+
+    assert requests[0].full_url.endswith(
+        "/v1/profiles/operations%2Fteam/permissions?status=pending&limit=25"
+    )
+
+
 def test_control_api_client_decodes_stable_api_errors() -> None:
     def opener(_request: Request, *, timeout: float):
         assert timeout == 30.0

@@ -395,6 +395,40 @@ class PermissionBroker:
         )
 
 
+def list_profile_permissions(
+    db_path: Path | str,
+    *,
+    profile_id: str,
+    status: str | None = None,
+    limit: int = 100,
+) -> tuple[PendingPermission, ...]:
+    """List a bounded profile-owned inbox without crossing conversation scope."""
+    clean_profile_id = profile_id.strip()
+    if not clean_profile_id:
+        raise ValueError("profile id cannot be empty")
+    if limit < 1 or limit > 1_000:
+        raise ValueError("limit must be between 1 and 1000")
+    parameters: list[Any] = [clean_profile_id]
+    clause = ""
+    if status is not None:
+        clause = " AND status = ?"
+        parameters.append(status)
+    parameters.append(limit)
+    resolved_path = Path(db_path).expanduser().resolve()
+    initialize_sqlite_database(resolved_path)
+    with sqlite_connection(resolved_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM permission_requests
+            WHERE profile_id = ?{clause}
+            ORDER BY created_at, id
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+    return tuple(_row(row) for row in rows)
+
+
 def _bounded_preview(arguments: Mapping[str, Any], *, max_chars: int) -> dict[str, Any]:
     redacted = redact_data(dict(arguments))
     if not isinstance(redacted, dict):
@@ -473,4 +507,5 @@ __all__ = [
     "PermissionBroker",
     "PermissionDecisionConflictError",
     "PermissionRequestNotFoundError",
+    "list_profile_permissions",
 ]

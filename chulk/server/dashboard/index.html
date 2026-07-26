@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Chulk operations board</title>
+    <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+    <script src="/dashboard/assets/dashboard.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to operations</a>
+    <header class="masthead">
+      <a class="wordmark" href="/dashboard" aria-label="Chulk operations home">
+        <span class="mark" aria-hidden="true">C</span>
+        <span><strong>CHULK</strong><small>operations board</small></span>
+      </a>
+      <div class="header-controls" id="header-controls" hidden>
+        <label for="profile">Authority</label>
+        <select id="profile"></select>
+        <button class="quiet" id="refresh" type="button">Refresh</button>
+      </div>
+      <div class="connection" id="connection" data-state="locked" role="status">
+        <span aria-hidden="true"></span>
+        <b id="connection-label">Locked</b>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <section class="unlock" id="unlock" aria-labelledby="unlock-title">
+        <div>
+          <p class="kicker">Owner-local surface</p>
+          <h1 id="unlock-title">See the whole harness.<br><em>Touch only what you mean.</em></h1>
+          <p class="lede">
+            Authenticate with the local control token. The dashboard reveals
+            bounded summaries first; raw credentials and trace bodies stay out.
+          </p>
+        </div>
+        <form id="unlock-form">
+          <label for="token">Control token</label>
+          <input id="token" type="password" autocomplete="off" spellcheck="false" required>
+          <button type="submit">Open operations board</button>
+          <p id="unlock-error" class="error" role="alert"></p>
+        </form>
+      </section>
+
+      <div id="board" hidden>
+        <section class="briefing" aria-labelledby="briefing-title">
+          <div>
+            <p class="kicker">Live briefing</p>
+            <h1 id="briefing-title">Profile <span id="profile-name">—</span></h1>
+            <p id="briefing-copy">Loading profile-owned work.</p>
+          </div>
+          <dl class="metrics" aria-label="Current totals">
+            <div><dt>Attention</dt><dd id="metric-attention">0</dd></div>
+            <div><dt>Active work</dt><dd id="metric-work">0</dd></div>
+            <div><dt>Conversations</dt><dd id="metric-conversations">0</dd></div>
+            <div><dt>Evidence</dt><dd id="metric-evidence">0</dd></div>
+          </dl>
+        </section>
+
+        <nav class="section-nav" aria-label="Dashboard sections">
+          <a href="#attention">Attention</a>
+          <a href="#work">Work graph</a>
+          <a href="#channels">Channels</a>
+          <a href="#usage">Usage</a>
+          <a href="#evidence">Evidence</a>
+        </nav>
+
+        <section class="board-grid">
+          <article class="panel attention-panel" id="attention">
+            <header>
+              <div><p class="kicker">Decision queue</p><h2>Attention</h2></div>
+              <span class="count" id="attention-count">0</span>
+            </header>
+            <div class="stack" id="attention-list"></div>
+          </article>
+
+          <article class="panel work-panel" id="work">
+            <header>
+              <div><p class="kicker">Durable execution</p><h2>Work graph</h2></div>
+              <div class="tabs" role="tablist" aria-label="Work type">
+                <button type="button" role="tab" data-work-tab="goals" aria-selected="true">Goals</button>
+                <button type="button" role="tab" data-work-tab="tasks">Tasks</button>
+                <button type="button" role="tab" data-work-tab="jobs">Jobs</button>
+              </div>
+            </header>
+            <div class="stack" id="work-list"></div>
+          </article>
+
+          <article class="panel channels-panel" id="channels">
+            <header><div><p class="kicker">Ingress and dialogue</p><h2>Channels</h2></div></header>
+            <div class="split">
+              <section><h3>Recent conversations</h3><div class="compact-list" id="conversation-list"></div></section>
+              <section><h3>Authenticated routes</h3><div class="compact-list" id="route-list"></div></section>
+            </div>
+          </article>
+
+          <article class="panel usage-panel" id="usage">
+            <header><div><p class="kicker">Exact ledger</p><h2>Usage & cost</h2></div></header>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Resource</th><th>Units</th><th>Cost</th><th>Pricing</th></tr></thead>
+                <tbody id="usage-list"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel evidence-panel" id="evidence">
+            <header>
+              <div><p class="kicker">Inspect before reveal</p><h2>Evidence</h2></div>
+              <p class="hint">Artifact bodies load only on explicit request.</p>
+            </header>
+            <div class="evidence-layout">
+              <div class="compact-list" id="trace-list"></div>
+              <div class="artifact-drawer" id="artifact-drawer">
+                <p>Select a trace to inspect its bounded artifact inventory.</p>
+              </div>
+            </div>
+          </article>
+        </section>
+      </div>
+    </main>
+
+    <dialog id="preview-dialog" aria-labelledby="preview-title">
+      <header><h2 id="preview-title">Artifact preview</h2><button type="button" id="close-preview" aria-label="Close preview">×</button></header>
+      <pre id="preview-content"></pre>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <footer><span>Loopback-first · bounded views · explicit mutations</span><span id="updated-at">Not connected</span></footer>
+  </body>
+</html>

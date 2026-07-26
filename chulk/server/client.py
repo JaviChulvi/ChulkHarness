@@ -214,6 +214,19 @@ class ControlApiClient:
             limit=limit,
         )
 
+    def list_profile_permissions(
+        self,
+        profile_id: str,
+        *,
+        status: str | None = "pending",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/v1/profiles/{_segment(profile_id)}/permissions",
+            status=status,
+            limit=limit,
+        )
+
     def decide_permission(
         self,
         profile_id: str,
