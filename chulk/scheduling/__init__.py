@@ -1,6 +1,76 @@
-"""Durable scheduled-job primitives."""
+"""Public automation contracts and runtime services."""
 
-from chulk.scheduling.models import ScheduledJob
-from chulk.scheduling.store import SQLiteScheduleStore
+from chulk.scheduling.models import (
+    AutomationDeliveryState,
+    AutomationDeliveryAttempt,
+    AutomationJobEvent,
+    AutomationJobStatus,
+    AutomationRetryPolicy,
+    AutomationRun,
+    AutomationRunReason,
+    AutomationRunStatus,
+    AutomationTrigger,
+    AmbiguousTimePolicy,
+    MisfirePolicy,
+    NonexistentTimePolicy,
+    RecurrenceKind,
+    RecurrenceSpec,
+    ScheduledJob,
+    TriggerEnvelope,
+    TriggerKind,
+    TriggerTrust,
+)
+from chulk.scheduling.recurrence import DueOccurrences, RecurrenceCalculator
+from chulk.scheduling.runtime import (
+    AutomationDelivery,
+    AutomationExecutionResult,
+    AutomationRunner,
+    AutomationRunnerFactory,
+    AutomationSupervisor,
+    AutomationSupervisorHandle,
+    RuntimeAutomationRunner,
+    runtime_automation_runner_factory,
+)
+from chulk.scheduling.store import (
+    AutomationConflictError,
+    AutomationNotFoundError,
+    DEFAULT_AUTOMATION_LEASE_SECONDS,
+    SQLiteScheduleStore,
+)
+from chulk.scheduling.triggers import AutomationCompletionBridge
 
-__all__ = ["SQLiteScheduleStore", "ScheduledJob"]
+__all__ = [
+    "AutomationConflictError",
+    "AutomationCompletionBridge",
+    "AutomationDelivery",
+    "AutomationDeliveryAttempt",
+    "AutomationDeliveryState",
+    "AutomationExecutionResult",
+    "AutomationJobEvent",
+    "AutomationJobStatus",
+    "AutomationNotFoundError",
+    "AutomationRetryPolicy",
+    "AutomationRun",
+    "AutomationRunReason",
+    "AutomationRunStatus",
+    "AutomationRunner",
+    "AutomationRunnerFactory",
+    "AutomationSupervisor",
+    "AutomationSupervisorHandle",
+    "AutomationTrigger",
+    "AmbiguousTimePolicy",
+    "DEFAULT_AUTOMATION_LEASE_SECONDS",
+    "DueOccurrences",
+    "MisfirePolicy",
+    "NonexistentTimePolicy",
+    "RecurrenceCalculator",
+    "RecurrenceKind",
+    "RecurrenceSpec",
+    "RuntimeAutomationRunner",
+    "SQLiteScheduleStore",
+    "ScheduledJob",
+    "TriggerEnvelope",
+    "TriggerKind",
+    "TriggerTrust",
+    "runtime_automation_runner_factory",
+]

@@ -23,7 +23,9 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "croniter>=6,<7",
   "packaging>=24,<27",
+  "python-dateutil>=2.9,<3",
   "PyYAML>=6.0.2,<7",
   "tzdata>=2025.2; platform_system == 'Windows'",
 ]
@@ -46,6 +48,8 @@ dev = [
   "mypy>=1.11",
   "setuptools>=77",
   "types-PyYAML>=6.0.12",
+  "types-croniter>=6.0.0",
+  "types-python-dateutil>=2.9.0",
   "starlette>=0.46,<1",
   "uvicorn>=0.34,<1",
 ]

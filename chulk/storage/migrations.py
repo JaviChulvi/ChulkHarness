@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
+from uuid import uuid4
 
 
 @dataclass(frozen=True, slots=True)
@@ -1022,6 +1024,297 @@ def _migrate_to_child_task_graph(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_automation_engine(conn: sqlite3.Connection) -> None:
+    """Create profile-owned automation definitions, runs, controls, and triggers."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS automation_jobs (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            destination_id TEXT NOT NULL,
+            thread_id TEXT,
+            prompt TEXT NOT NULL,
+            recurrence_json TEXT NOT NULL,
+            next_run_at TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            run_count INTEGER NOT NULL DEFAULT 0,
+            max_runs INTEGER,
+            budget_json TEXT NOT NULL,
+            retry_json TEXT NOT NULL,
+            requires_approval INTEGER NOT NULL DEFAULT 0,
+            approved_at TEXT,
+            claim_token TEXT,
+            lease_until TEXT,
+            active_run_id TEXT,
+            last_run_at TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (revision >= 0),
+            CHECK (run_count >= 0),
+            CHECK (max_runs IS NULL OR max_runs > 0),
+            CHECK (requires_approval IN (0, 1)),
+            CHECK (
+                (claim_token IS NULL AND lease_until IS NULL AND active_run_id IS NULL)
+                OR
+                (claim_token IS NOT NULL AND lease_until IS NOT NULL AND active_run_id IS NOT NULL)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_jobs_due
+        ON automation_jobs(profile_id, status, next_run_at);
+        CREATE INDEX IF NOT EXISTS idx_automation_jobs_destination
+        ON automation_jobs(profile_id, adapter, account_id, destination_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            occurrence_at TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            claim_token TEXT,
+            worker_id TEXT,
+            lease_until TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            trace_id TEXT,
+            usage_json TEXT NOT NULL DEFAULT '{}',
+            cost_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+            delivery_state TEXT NOT NULL DEFAULT 'none',
+            delivery_error TEXT,
+            trigger_event_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES automation_jobs(id) ON DELETE CASCADE,
+            CHECK (attempt > 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_job
+        ON automation_runs(profile_id, job_id, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_status
+        ON automation_runs(profile_id, status, lease_until);
+
+        CREATE TABLE IF NOT EXISTS automation_delivery_attempts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_delivery_attempts
+        ON automation_delivery_attempts(profile_id, run_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS automation_run_requests (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            occurrence_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            trigger_event_id TEXT,
+            idempotency_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES automation_jobs(id) ON DELETE CASCADE,
+            UNIQUE (profile_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_run_requests_pending
+        ON automation_run_requests(profile_id, status, available_at, created_at);
+
+        CREATE TABLE IF NOT EXISTS automation_job_events (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            actor TEXT NOT NULL,
+            run_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES automation_jobs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_job_events
+        ON automation_job_events(profile_id, job_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS automation_control_actions (
+            profile_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            result_revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (profile_id, idempotency_key),
+            FOREIGN KEY (job_id) REFERENCES automation_jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS automation_triggers (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source_resource_id TEXT,
+            secret_digest TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES automation_jobs(id) ON DELETE CASCADE,
+            CHECK (enabled IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_triggers_source
+        ON automation_triggers(profile_id, kind, source_resource_id, enabled);
+
+        CREATE TABLE IF NOT EXISTS automation_trigger_events (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            trigger_id TEXT NOT NULL,
+            source_event_id TEXT,
+            trust TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (trigger_id) REFERENCES automation_triggers(id) ON DELETE CASCADE,
+            UNIQUE (profile_id, trigger_id, source_event_id)
+        );
+        """
+    )
+    if not _table_exists(conn, "scheduled_jobs"):
+        return
+    legacy_rows = conn.execute(
+        """
+        SELECT * FROM scheduled_jobs
+        WHERE id NOT IN (SELECT id FROM automation_jobs)
+        """
+    ).fetchall()
+    now = datetime.now(timezone.utc)
+    for row in legacy_rows:
+        next_run = datetime.fromisoformat(str(row["next_run_at"])).astimezone(
+            timezone.utc
+        )
+        scheduled_for = datetime.fromisoformat(
+            str(row["scheduled_for"] or row["next_run_at"])
+        ).astimezone(timezone.utc)
+        interval = (
+            int(row["interval_seconds"])
+            if row["interval_seconds"] is not None
+            else None
+        )
+        legacy_status = str(row["status"])
+        running = legacy_status == "running"
+        if running and interval is not None:
+            elapsed = max(0.0, (now - scheduled_for).total_seconds())
+            steps = int(elapsed // interval) + 1
+            next_run = scheduled_for + timedelta(seconds=interval * steps)
+            scheduled_for = next_run
+            status = "active"
+        elif running:
+            status = "completed"
+        else:
+            status = legacy_status
+        recurrence = {
+            "kind": "interval" if interval is not None else "once",
+            "timezone": "UTC",
+            "interval_seconds": interval,
+            "cron": None,
+            "rrule": None,
+            "starts_at": None,
+            "ends_at": None,
+            "misfire_policy": "run_once",
+            "nonexistent_time_policy": "shift_forward",
+            "ambiguous_time_policy": "earliest",
+            "misfire_grace_seconds": 60,
+            "max_catch_up": 1,
+            "jitter_seconds": 0,
+        }
+        budget = {
+            "scope": "job",
+            "max_model_calls": None,
+            "max_tool_calls": None,
+            "max_tokens": None,
+            "max_cost": None,
+            "deadline": None,
+            "unknown_cost_policy": "fail_closed",
+        }
+        retry = {
+            "max_attempts": 3,
+            "initial_backoff_seconds": 60,
+            "max_backoff_seconds": 3600,
+            "multiplier": 2.0,
+        }
+        created_at = str(row["created_at"])
+        updated_at = str(row["updated_at"])
+        conn.execute(
+            """
+            INSERT INTO automation_jobs (
+                id, profile_id, adapter, account_id, destination_id, thread_id,
+                prompt, recurrence_json, next_run_at, scheduled_for, status,
+                revision, run_count, max_runs, budget_json, retry_json,
+                requires_approval, approved_at, last_run_at, last_error,
+                created_at, updated_at
+            ) VALUES (?, 'default', ?, 'primary', ?, NULL, ?, ?, ?, ?, ?, 0, 0,
+                      NULL, ?, ?, 0, NULL, ?, ?, ?, ?)
+            """,
+            (
+                str(row["id"]),
+                str(row["adapter"]),
+                str(row["destination_id"]),
+                str(row["prompt"]),
+                json.dumps(recurrence, sort_keys=True, separators=(",", ":")),
+                next_run.isoformat(),
+                scheduled_for.isoformat(),
+                status,
+                json.dumps(budget, sort_keys=True, separators=(",", ":")),
+                json.dumps(retry, sort_keys=True, separators=(",", ":")),
+                row["last_run_at"],
+                row["last_error"],
+                created_at,
+                updated_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO automation_job_events (
+                id, job_id, profile_id, action, revision, actor, metadata_json,
+                created_at
+            ) VALUES (?, ?, 'default', 'legacy_migrated', 0, 'migration', '{}', ?)
+            """,
+            (uuid4().hex, str(row["id"]), updated_at),
+        )
+        if running:
+            run_id = uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO automation_runs (
+                    id, job_id, profile_id, occurrence_at, reason, status,
+                    attempt, result_json, usage_json, cost_json,
+                    artifact_refs_json, delivery_state, error, created_at,
+                    updated_at, finished_at
+                ) VALUES (?, ?, 'default', ?, 'scheduled', 'unknown', 1,
+                          '{}', '{}', '{}', '[]', 'none',
+                          'legacy running occurrence had unknown outcome',
+                          ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    str(row["id"]),
+                    str(row["scheduled_for"] or row["next_run_at"]),
+                    updated_at,
+                    updated_at,
+                    updated_at,
+                ),
+            )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -1078,6 +1371,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(14, "idempotent-control-decisions", _migrate_to_control_decisions),
     SQLiteMigration(15, "durable-goals", _migrate_to_durable_goals),
     SQLiteMigration(16, "child-task-graph", _migrate_to_child_task_graph),
+    SQLiteMigration(17, "automation-engine", _migrate_to_automation_engine),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

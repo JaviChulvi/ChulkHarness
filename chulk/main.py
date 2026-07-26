@@ -806,6 +806,34 @@ def main(
                 output_func=output_func,
                 error_func=error_func,
             )
+        if args.command == "automation":
+            from chulk.cli.automations import run_automation_command
+            from chulk.scheduling import SQLiteScheduleStore
+
+            return run_automation_command(
+                args.automation_command,
+                store=SQLiteScheduleStore(
+                    config.store_path,
+                    profile_id=profile.id,
+                ),
+                job_id=getattr(args, "job_id", None),
+                expected_revision=getattr(args, "revision", None),
+                idempotency_key=getattr(args, "idempotency_key", None),
+                status=getattr(args, "status", None),
+                limit=getattr(args, "limit", 100),
+                actor=getattr(args, "actor", "cli"),
+                prompt=getattr(args, "prompt", None),
+                run_at=getattr(args, "run_at", None),
+                timezone_name=getattr(args, "timezone", "UTC"),
+                interval_seconds=getattr(args, "interval_seconds", None),
+                cron=getattr(args, "cron", None),
+                rrule=getattr(args, "rrule", None),
+                trigger_kind=getattr(args, "kind", None),
+                source_resource_id=getattr(args, "source", None),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         if args.command == "session":
             return run_session_command(
                 args.session_command,

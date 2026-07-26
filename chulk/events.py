@@ -45,6 +45,10 @@ class EventName(str, Enum):
     CHILD_TASK_CREATED = "child_task.created"
     CHILD_TASK_STATE_CHANGED = "child_task.state.changed"
     CHILD_TASK_DELIVERY_CHANGED = "child_task.delivery.changed"
+    AUTOMATION_JOB_CREATED = "automation.job.created"
+    AUTOMATION_JOB_STATE_CHANGED = "automation.job.state.changed"
+    AUTOMATION_RUN_STATE_CHANGED = "automation.run.state.changed"
+    AUTOMATION_TRIGGER_RECEIVED = "automation.trigger.received"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
 
@@ -148,6 +152,16 @@ class ChildTaskChangedPayload(ExtensiblePayload):
 
 
 @dataclass(frozen=True)
+class AutomationChangedPayload(ExtensiblePayload):
+    job_id: str
+    status: str
+    revision: int
+    action: str
+    run_id: str | None = None
+    trigger_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RunCompletedPayload(ExtensiblePayload):
     result: RunResult
 
@@ -185,6 +199,7 @@ EventPayload: TypeAlias = (
     | PlanPayload
     | GoalChangedPayload
     | ChildTaskChangedPayload
+    | AutomationChangedPayload
     | RunCompletedPayload
     | RunFailedPayload
     | SerializedEventPayload
@@ -258,6 +273,7 @@ class AgentEvent:
 
 
 __all__ = [
+    "AutomationChangedPayload",
     "EVENT_SCHEMA_VERSION",
     "SUPPORTED_EVENT_SCHEMA_VERSIONS",
     "AgentEvent",

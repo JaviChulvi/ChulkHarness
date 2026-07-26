@@ -28,7 +28,7 @@ from chulk.gateway import (
 )
 from chulk.llm.lifecycle import aclose_resources
 from chulk.profiles import ProfileRuntimeFactory
-from chulk.scheduling import SQLiteScheduleStore
+from chulk.scheduling import AutomationDeliveryState, SQLiteScheduleStore
 from chulk.scheduling.tools import format_jobs, scheduled_job_tools
 from chulk.sessions import SQLiteSessionStore
 from chulk.telegram.client import (
@@ -53,6 +53,7 @@ from chulk.telegram.media import (
 from chulk.tools import PermissionDecision, PermissionRequest
 from chulk.tools.permissions import PermissionDecisionRecord
 from chulk.tools.web_search import tavily_search_tool
+from chulk.usage import RunBudget, UsageDimensions
 
 
 LOGGER = logging.getLogger(__name__)
@@ -108,7 +109,11 @@ class TelegramAgentBot:
         self.client = client
         self.session_store = session_store or SQLiteSessionStore(config.store_path)
         self.schedule_store = (
-            schedule_store or SQLiteScheduleStore(config.store_path)
+            schedule_store
+            or SQLiteScheduleStore(
+                config.store_path,
+                profile_id=config.profile_id,
+            )
             if telegram_config.scheduling_enabled
             else None
         )
@@ -632,8 +637,16 @@ class TelegramAgentBot:
         profile_id: str,
         chat_id: int,
         conversation_id: str | None,
+        *,
+        run_budget: RunBudget | None = None,
+        automation_job_id: str | None = None,
+        automation_run_id: str | None = None,
     ) -> TelegramAgent:
-        runtime_config = self._config_for_profile(profile_id)
+        runtime_config = (
+            self._profile_runtime_factory.resolve(profile_id).config
+            if self._profile_runtime_factory is not None
+            else self._config_for_profile(profile_id)
+        )
         schedule_store = self._schedule_store_for(profile_id)
         tool_specs: list[object] = [
             Tools.calculator,
@@ -665,6 +678,13 @@ class TelegramAgentBot:
                     max_results=self.telegram_config.web_search_max_results,
                 )
             )
+        conversation_metadata: dict[str, object] = {
+            TELEGRAM_CHAT_METADATA_KEY: chat_id,
+        }
+        if automation_job_id is not None:
+            conversation_metadata["automation_job_id"] = automation_job_id
+        if automation_run_id is not None:
+            conversation_metadata["automation_run_id"] = automation_run_id
         return AsyncAgent(
             config=runtime_config,
             memory_namespace=(
@@ -687,7 +707,20 @@ class TelegramAgentBot:
             ),
             permission_callback=_telegram_permission_callback,
             conversation_id=conversation_id,
-            conversation_metadata={TELEGRAM_CHAT_METADATA_KEY: chat_id},
+            conversation_metadata=conversation_metadata,
+            run_budget=run_budget,
+            usage_dimensions=(
+                UsageDimensions(
+                    profile_id=profile_id,
+                    channel="telegram",
+                    job_id=automation_job_id,
+                )
+                if automation_job_id is not None
+                else UsageDimensions(
+                    profile_id=profile_id,
+                    channel="telegram",
+                )
+            ),
         )
 
     def _config_for_profile(self, profile_id: str) -> Config:
@@ -716,7 +749,10 @@ class TelegramAgentBot:
         cached = self._schedule_stores.get(profile_id)
         if cached is not None:
             return cached
-        store = SQLiteScheduleStore(self._config_for_profile(profile_id).store_path)
+        store = SQLiteScheduleStore(
+            self._config_for_profile(profile_id).store_path,
+            profile_id=profile_id,
+        )
         self._schedule_stores[profile_id] = store
         return store
 
@@ -787,10 +823,24 @@ class TelegramAgentBot:
             renewal_task = asyncio.create_task(
                 self._renew_schedule_lease(store, job.id, job.claim_token)
             )
+            automation_agent: TelegramAgent | None = None
+            close_automation_agent = False
             try:
                 chat_id = int(job.destination_id)
+                if self._custom_agent_factory is None:
+                    automation_agent = self._default_agent_factory_for_profile(
+                        profile_id,
+                        chat_id,
+                        None,
+                        run_budget=job.budget,
+                        automation_job_id=job.id,
+                        automation_run_id=job.active_run_id,
+                    )
+                    close_automation_agent = True
+                else:
+                    automation_agent = self._agent_for_chat(profile_id, chat_id)
                 async with self._chat_lock(chat_id):
-                    response = await self._agent_for_chat(profile_id, chat_id).run(
+                    response = await automation_agent.run(
                         job.prompt,
                         extension_metadata={
                             "source": "telegram_schedule",
@@ -799,7 +849,13 @@ class TelegramAgentBot:
                         },
                     )
                 await self._send(chat_id, response)
-                completed = await asyncio.to_thread(store.complete, job.id, job.claim_token)
+                completed = await asyncio.to_thread(
+                    store.complete,
+                    job.id,
+                    job.claim_token,
+                    result={"summary": response},
+                    delivery_state=AutomationDeliveryState.DELIVERED,
+                )
                 if not completed:
                     LOGGER.warning("Scheduled Telegram job completion lost its claim")
             except Exception as exc:
@@ -811,6 +867,9 @@ class TelegramAgentBot:
                     type(exc).__name__,
                 )
             finally:
+                if close_automation_agent and automation_agent is not None:
+                    with suppress(Exception):
+                        await automation_agent.close()
                 renewal_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await renewal_task

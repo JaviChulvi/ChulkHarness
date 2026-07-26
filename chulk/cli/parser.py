@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_usage_parser(subparsers)
     _add_goal_parser(subparsers)
     _add_child_parser(subparsers)
+    _add_automation_parser(subparsers)
     _add_session_parser(subparsers)
     _add_gateway_parser(subparsers)
     _add_server_parser(subparsers)
@@ -536,6 +537,69 @@ def _add_child_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     deliveries.add_argument("--limit", type=int, default=100)
     deliveries.add_argument("--json", action="store_true", dest="json_output")
+
+
+def _add_automation_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "automation",
+        help="Inspect and control profile-owned automation.",
+    )
+    commands = parser.add_subparsers(dest="automation_command", required=True)
+    list_parser = commands.add_parser("list", help="List automation definitions.")
+    list_parser.add_argument(
+        "--status",
+        choices=(
+            "pending_approval",
+            "active",
+            "running",
+            "paused",
+            "completed",
+            "cancelled",
+            "expired",
+        ),
+    )
+    list_parser.add_argument("--limit", type=int, default=100)
+    list_parser.add_argument("--json", action="store_true", dest="json_output")
+    for name in ("inspect", "history", "triggers"):
+        command = commands.add_parser(name)
+        command.add_argument("job_id")
+        command.add_argument("--limit", type=int, default=100)
+        command.add_argument("--json", action="store_true", dest="json_output")
+    for name in ("pause", "resume", "approve", "run-now", "cancel"):
+        command = commands.add_parser(name)
+        command.add_argument("job_id")
+        command.add_argument("--revision", type=int, required=True)
+        command.add_argument("--idempotency-key")
+        command.add_argument("--actor", default="cli")
+        command.add_argument("--json", action="store_true", dest="json_output")
+    update = commands.add_parser("update")
+    update.add_argument("job_id")
+    update.add_argument("--revision", type=int, required=True)
+    update.add_argument("--idempotency-key")
+    update.add_argument("--actor", default="cli")
+    update.add_argument("--prompt")
+    update.add_argument("--run-at")
+    update.add_argument("--timezone", default="UTC")
+    recurrence = update.add_mutually_exclusive_group()
+    recurrence.add_argument("--interval-seconds", type=int)
+    recurrence.add_argument("--cron")
+    recurrence.add_argument("--rrule")
+    update.add_argument("--json", action="store_true", dest="json_output")
+    recover = commands.add_parser("recover")
+    recover.add_argument("--actor", default="cli-recovery")
+    recover.add_argument("--json", action="store_true", dest="json_output")
+    webhook = commands.add_parser("webhook")
+    webhook.add_argument("job_id")
+    webhook.add_argument("--json", action="store_true", dest="json_output")
+    completion = commands.add_parser("completion-trigger")
+    completion.add_argument("job_id")
+    completion.add_argument(
+        "--kind",
+        required=True,
+        choices=("job_completion", "goal_completion", "child_completion"),
+    )
+    completion.add_argument("--source", required=True)
+    completion.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_goal_mutation_options(parser: argparse.ArgumentParser) -> None:

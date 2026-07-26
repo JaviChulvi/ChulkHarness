@@ -51,42 +51,98 @@ class OperatorService:
         self,
         profile_id: str,
         *,
-        adapter: str,
-        destination_id: str,
+        adapter: str | None = None,
+        destination_id: str | None = None,
     ) -> dict[str, Any]:
         resolved = self.runtime_factory.resolve(profile_id)
         jobs = SQLiteScheduleStore(resolved.config.store_path).list(
             adapter=adapter,
             destination_id=destination_id,
         )
+        values = []
+        for item in jobs:
+            value = item.to_dict()
+            value["prompt_preview"] = item.prompt[:500]
+            value["prompt_truncated"] = len(item.prompt) > 500
+            value.pop("prompt", None)
+            values.append(value)
+        return {"jobs": values, "next_cursor": None}
+
+    def automation_job(self, profile_id: str, job_id: str) -> dict[str, Any]:
+        store = self._automation_store(profile_id)
         return {
-            "jobs": [
-                {
-                    "id": item.id,
-                    "adapter": item.adapter,
-                    "destination_id": item.destination_id,
-                    "prompt_preview": item.prompt[:500],
-                    "prompt_truncated": len(item.prompt) > 500,
-                    "next_run_at": item.next_run_at.isoformat(),
-                    "interval_seconds": item.interval_seconds,
-                    "status": item.status,
-                    "scheduled_for": item.scheduled_for.isoformat(),
-                    "lease_until": (
-                        item.lease_until.isoformat()
-                        if item.lease_until is not None
-                        else None
-                    ),
-                    "last_run_at": (
-                        item.last_run_at.isoformat()
-                        if item.last_run_at is not None
-                        else None
-                    ),
-                    "last_error": item.last_error,
-                }
-                for item in jobs
-            ],
-            "next_cursor": None,
+            "job": store.get(job_id).to_dict(),
+            "runs": [item.to_dict() for item in store.runs(job_id)],
+            "triggers": [item.to_dict() for item in store.triggers(job_id)],
         }
+
+    def control_automation(
+        self,
+        profile_id: str,
+        job_id: str,
+        *,
+        action: str,
+        revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        store = self._automation_store(profile_id)
+        operations = {
+            "pause": store.pause,
+            "resume": store.resume,
+            "approve": store.approve,
+            "run_now": store.run_now,
+        }
+        if action == "cancel":
+            changed = store.cancel(
+                job_id,
+                expected_revision=revision,
+                idempotency_key=idempotency_key,
+                actor="control-server",
+            )
+            if not changed:
+                raise ValueError("automation is already terminal")
+            job = store.get(job_id)
+        else:
+            try:
+                operation = operations[action]
+            except KeyError as exc:
+                raise ValueError(
+                    "automation action must be pause, resume, approve, run_now, or cancel"
+                ) from exc
+            job = operation(
+                job_id,
+                expected_revision=revision,
+                idempotency_key=idempotency_key,
+                actor="control-server",
+            )
+        return job.to_dict()
+
+    def create_automation_webhook(
+        self,
+        profile_id: str,
+        job_id: str,
+    ) -> dict[str, Any]:
+        trigger, credential = self._automation_store(profile_id).create_webhook_trigger(
+            job_id
+        )
+        return {"trigger": trigger.to_dict(), "credential": credential}
+
+    def ingest_automation_webhook(
+        self,
+        profile_id: str,
+        trigger_id: str,
+        *,
+        credential: str,
+        event_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        envelope = self._automation_store(profile_id).ingest_webhook(
+            trigger_id,
+            token=credential,
+            event_id=event_id,
+            payload=payload,
+        )
+        return envelope.to_dict()
 
     def proposals(
         self,
@@ -245,6 +301,13 @@ class OperatorService:
             ),
             lifecycle_store=lifecycle_store,
             lifecycle_manager=manager,
+        )
+
+    def _automation_store(self, profile_id: str) -> SQLiteScheduleStore:
+        resolved = self.runtime_factory.resolve(profile_id)
+        return SQLiteScheduleStore(
+            resolved.config.store_path,
+            profile_id=profile_id,
         )
 
 
