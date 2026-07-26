@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 import sys
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 import bootstrap  # noqa: F401
 from chulk import AgentConfig
 from chulk.llm import LLMClient
-from chulk.testing import ScriptedLLMClient
+from chulk.testing import ScriptedLLMClient, ScriptedResponse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -113,7 +114,7 @@ def live_config(
 
 def scripted_or_live(
     name: str,
-    responses: list[object],
+    responses: Iterable[ScriptedResponse],
     *,
     permission_profile: str = "read-only",
 ) -> tuple[AgentConfig, LLMClient | None, str]:

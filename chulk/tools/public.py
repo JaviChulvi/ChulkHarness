@@ -8,7 +8,7 @@ from enum import Enum
 import inspect
 import json
 from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints, overload
 
 from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
 from chulk.tools.artifacts import read_trace_artifact_tool
@@ -46,6 +46,38 @@ class ToolRef:
 
     def to_tool(self, context: Any) -> Tool:
         return self.factory(context)
+
+
+@overload
+def tool(
+    fn: Callable[..., Any],
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ,
+    requires_confirmation: bool = False,
+    output_schema: dict[str, Any] | None = None,
+    output_policy: ToolOutputPolicy | None = None,
+    timeout_seconds: float | None = None,
+    retry_policy: ToolRetryPolicy | None = None,
+    idempotent: bool = False,
+) -> Tool: ...
+
+
+@overload
+def tool(
+    fn: None = None,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    permission_level: ToolPermissionLevel | str = ToolPermissionLevel.READ,
+    requires_confirmation: bool = False,
+    output_schema: dict[str, Any] | None = None,
+    output_policy: ToolOutputPolicy | None = None,
+    timeout_seconds: float | None = None,
+    retry_policy: ToolRetryPolicy | None = None,
+    idempotent: bool = False,
+) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
 def tool(

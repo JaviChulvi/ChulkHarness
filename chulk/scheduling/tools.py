@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import cast
 from zoneinfo import ZoneInfo
 
 from chulk.scheduling.models import (
@@ -111,51 +110,39 @@ def scheduled_job_tools(
         return f"Cancelled scheduled task {clean_id[:8]}."
 
     return [
-        cast(
-            Tool,
-            tool(
-                schedule_task,
-                name="schedule_task",
-                description=(
-                    "Schedule a prompt for later delivery. run_at must be an ISO-8601 "
-                    f"date/time in {timezone_name} unless it includes an offset; "
-                    "choose at most one recurrence: interval_seconds (minimum 60), "
-                    "a five-field cron expression, or an RFC 5545 RRULE."
-                ),
-                permission_level=ToolPermissionLevel.WRITE,
-                idempotent=False,
+        tool(
+            schedule_task,
+            name="schedule_task",
+            description=(
+                "Schedule a prompt for later delivery. run_at must be an ISO-8601 "
+                f"date/time in {timezone_name} unless it includes an offset; "
+                "choose at most one recurrence: interval_seconds (minimum 60), "
+                "a five-field cron expression, or an RFC 5545 RRULE."
+            ),
+            permission_level=ToolPermissionLevel.WRITE,
+            idempotent=False,
+        ),
+        tool(
+            current_time,
+            name="current_time",
+            description=(
+                "Return the current date, time, and configured timezone before resolving "
+                "relative schedule requests such as tomorrow or next Monday."
             ),
         ),
-        cast(
-            Tool,
-            tool(
-                current_time,
-                name="current_time",
-                description=(
-                    "Return the current date, time, and configured timezone before resolving "
-                    "relative schedule requests such as tomorrow or next Monday."
-                ),
-            ),
+        tool(
+            list_scheduled_tasks,
+            name="list_scheduled_tasks",
+            description="List active scheduled tasks for this chat.",
         ),
-        cast(
-            Tool,
-            tool(
-                list_scheduled_tasks,
-                name="list_scheduled_tasks",
-                description="List active scheduled tasks for this chat.",
+        tool(
+            cancel_scheduled_task,
+            name="cancel_scheduled_task",
+            description=(
+                "Cancel a scheduled task by its full id or displayed 8-character prefix."
             ),
-        ),
-        cast(
-            Tool,
-            tool(
-                cancel_scheduled_task,
-                name="cancel_scheduled_task",
-                description=(
-                    "Cancel a scheduled task by its full id or displayed 8-character prefix."
-                ),
-                permission_level=ToolPermissionLevel.WRITE,
-                idempotent=True,
-            ),
+            permission_level=ToolPermissionLevel.WRITE,
+            idempotent=True,
         ),
     ]
 

@@ -68,8 +68,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,providers,mcp]"
 
-      - name: Typecheck package and external consumer
-        run: python -m mypy chulk typing_tests
+      - name: Typecheck package, examples, and external consumer
+        run: python -m mypy chulk examples typing_tests
 
       - name: Verify documentation contract
         run: python scripts/check_docs.py
