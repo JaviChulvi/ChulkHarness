@@ -687,6 +687,21 @@ def create_agent(
     agent.session_store = session_store
     agent.session_recorder = session_recorder
     agent.session_search_service = session_search_service
+    agent.run_store = (
+        resolved_services.runs
+        if resolved_services is not None
+        else None
+    )
+    agent.approval_store = (
+        resolved_services.approvals
+        if resolved_services is not None
+        else None
+    )
+    agent.public_event_sink = (
+        resolved_services.events
+        if resolved_services is not None
+        else None
+    )
     if learning_proposals is not None:
         learning_proposals.event_callback = agent._trace
     return agent

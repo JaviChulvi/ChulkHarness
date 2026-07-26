@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
+from chulk.events import AgentEvent
 from chulk.hosting.scope import ExecutionScope
 
 
@@ -112,7 +113,7 @@ class SkillService(Protocol):
 
 
 @runtime_checkable
-class TraceService(Protocol):
+class TraceSink(Protocol):
     path: Any
     artifact_store: Any
 
@@ -132,7 +133,7 @@ class TraceService(Protocol):
 
 
 @runtime_checkable
-class ArtifactService(Protocol):
+class ArtifactStore(Protocol):
     def write(self, label: str, content: str) -> Any: ...
 
     def read(self, artifact_id: str, **kwargs: Any) -> Any: ...
@@ -154,7 +155,7 @@ class UsageService(Protocol):
 
 
 @runtime_checkable
-class AuditService(Protocol):
+class AuditSink(Protocol):
     def record(
         self,
         event_type: str,
@@ -162,6 +163,13 @@ class AuditService(Protocol):
         *,
         scope: ExecutionScope,
     ) -> None: ...
+
+
+@runtime_checkable
+class EventSink(Protocol):
+    """Host-owned destination for redacted public event envelopes."""
+
+    def emit(self, event: AgentEvent) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +206,7 @@ class AsyncSessionService(Protocol):
 
 
 @runtime_checkable
-class AsyncTraceService(Protocol):
+class AsyncTraceSink(Protocol):
     async def log(
         self,
         event_type: str,
@@ -206,6 +214,29 @@ class AsyncTraceService(Protocol):
         *,
         turn_id: str | None = None,
     ) -> None: ...
+
+
+@runtime_checkable
+class AsyncArtifactStore(Protocol):
+    async def write(self, label: str, content: str) -> Any: ...
+
+    async def read(self, artifact_id: str, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class AsyncAuditSink(Protocol):
+    async def record(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        scope: ExecutionScope,
+    ) -> None: ...
+
+
+@runtime_checkable
+class AsyncEventSink(Protocol):
+    async def emit(self, event: AgentEvent) -> None: ...
 
 
 @runtime_checkable
@@ -235,6 +266,9 @@ class RuntimeServices:
     content: ServiceBinding[Any]
     media: ServiceBinding[Any]
     tool_policy: ServiceBinding[Any]
+    runs: ServiceBinding[Any]
+    approvals: ServiceBinding[Any]
+    events: ServiceBinding[Any]
 
     def resolve(self, scope: ExecutionScope) -> "ResolvedRuntimeServices":
         values: dict[str, Any] = {}
@@ -290,6 +324,9 @@ class AsyncRuntimeServices:
     content: ServiceBinding[Any]
     media: ServiceBinding[Any]
     tool_policy: ServiceBinding[Any]
+    runs: ServiceBinding[Any]
+    approvals: ServiceBinding[Any]
+    events: ServiceBinding[Any]
 
     def resolve(self, scope: ExecutionScope) -> "ResolvedRuntimeServices":
         return RuntimeServices(
@@ -305,6 +342,9 @@ class AsyncRuntimeServices:
             content=self.content,
             media=self.media,
             tool_policy=self.tool_policy,
+            runs=self.runs,
+            approvals=self.approvals,
+            events=self.events,
         ).resolve(scope)
 
 
@@ -322,4 +362,14 @@ class ResolvedRuntimeServices:
     content: Any
     media: Any
     tool_policy: Any
+    runs: Any
+    approvals: Any
+    events: Any
     owned_resources: tuple[object, ...]
+
+
+# Compatibility names retained for applications using the phase-A API.
+TraceService = TraceSink
+ArtifactService = ArtifactStore
+AuditService = AuditSink
+AsyncTraceService = AsyncTraceSink

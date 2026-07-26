@@ -1250,13 +1250,15 @@ class Agent:
         channel = RunEventChannel()
         caller_on_event = kwargs.pop("on_event", None)
         attempted_turn_id: str | None = None
+        last_event_id: str | None = None
 
         def on_event(event: AgentEvent) -> None:
-            nonlocal attempted_turn_id
+            nonlocal attempted_turn_id, last_event_id
             if event.name == EventName.RUN_STARTED.value:
                 attempted_turn_id = event.turn_id
             if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
+                last_event_id = event.event_id
             if caller_on_event is not None:
                 caller_on_event(event)
 
@@ -1264,18 +1266,31 @@ class Agent:
             try:
                 result = self.run_result(message, on_event=on_event, **kwargs)
             except Exception as exc:
-                terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
+                terminalized = _terminalized_failure_event(
+                    self.runtime,
+                    attempted_turn_id,
+                    causation_id=last_event_id,
+                )
                 event = terminalized or failure_event(
                     exc,
                     conversation_id=self.conversation_id,
                     turn_id=attempted_turn_id,
                     profile_id=self.runtime.profile_id,
+                    execution_scope=self.runtime.execution_scope,
+                    causation_id=last_event_id,
                 )
                 channel.finish(event)
                 if terminalized is None:
                     _notify_event_callback_safely(caller_on_event, event)
             else:
-                channel.finish(terminal_event(result, profile_id=self.runtime.profile_id))
+                channel.finish(
+                    terminal_event(
+                        result,
+                        profile_id=self.runtime.profile_id,
+                        execution_scope=self.runtime.execution_scope,
+                        causation_id=last_event_id,
+                    )
+                )
 
         worker = threading.Thread(target=work, name="chulk-run-events")
         worker.start()
@@ -1739,13 +1754,15 @@ class AsyncAgent:
         channel = RunEventChannel()
         caller_on_event = kwargs.pop("on_event", None)
         attempted_turn_id: str | None = None
+        last_event_id: str | None = None
 
         def on_event(event: AgentEvent) -> None:
-            nonlocal attempted_turn_id
+            nonlocal attempted_turn_id, last_event_id
             if event.name == EventName.RUN_STARTED.value:
                 attempted_turn_id = event.turn_id
             if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
+                last_event_id = event.event_id
             if caller_on_event is not None:
                 caller_on_event(event)
 
@@ -1755,18 +1772,31 @@ class AsyncAgent:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                terminalized = _terminalized_failure_event(self.runtime, attempted_turn_id)
+                terminalized = _terminalized_failure_event(
+                    self.runtime,
+                    attempted_turn_id,
+                    causation_id=last_event_id,
+                )
                 event = terminalized or failure_event(
                     exc,
                     conversation_id=self.conversation_id,
                     turn_id=attempted_turn_id,
                     profile_id=self.runtime.profile_id,
+                    execution_scope=self.runtime.execution_scope,
+                    causation_id=last_event_id,
                 )
                 channel.finish(event)
                 if terminalized is None:
                     _notify_event_callback_safely(caller_on_event, event)
             else:
-                channel.finish(terminal_event(result, profile_id=self.runtime.profile_id))
+                channel.finish(
+                    terminal_event(
+                        result,
+                        profile_id=self.runtime.profile_id,
+                        execution_scope=self.runtime.execution_scope,
+                        causation_id=last_event_id,
+                    )
+                )
 
         worker = asyncio.create_task(work())
         try:
@@ -1816,7 +1846,12 @@ def _notify_event_callback_safely(callback: EventCallback | None, event: AgentEv
         return
 
 
-def _terminalized_failure_event(runtime: CoreAgent, attempted_turn_id: str | None) -> AgentEvent | None:
+def _terminalized_failure_event(
+    runtime: CoreAgent,
+    attempted_turn_id: str | None,
+    *,
+    causation_id: str | None = None,
+) -> AgentEvent | None:
     if attempted_turn_id is None:
         return None
     result = run_result_from_runtime(runtime)
@@ -1824,7 +1859,12 @@ def _terminalized_failure_event(runtime: CoreAgent, attempted_turn_id: str | Non
         result.turn_id == attempted_turn_id
         and result.status in {RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.CANCELLED}
     ):
-        return terminal_event(result, profile_id=runtime.profile_id)
+        return terminal_event(
+            result,
+            profile_id=runtime.profile_id,
+            execution_scope=runtime.execution_scope,
+            causation_id=causation_id,
+        )
     return None
 
 
@@ -1868,6 +1908,9 @@ class AsyncHostedRuntime(AsyncAgent):
             content=services.content,
             media=services.media,
             tool_policy=services.tool_policy,
+            runs=services.runs,
+            approvals=services.approvals,
+            events=services.events,
         )
         super().__init__(
             services=sync_boundary,

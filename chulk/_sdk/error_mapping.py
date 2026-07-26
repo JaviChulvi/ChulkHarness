@@ -17,6 +17,7 @@ from chulk.errors import (
     ToolExecutionError,
     TraceError,
 )
+from chulk.core.signals import DurableApprovalPaused
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.mcp.config import MCPConfigError
 from chulk.memory.security import MemorySecretError
@@ -38,6 +39,8 @@ def map_public_error(
     operation: str | None = None,
 ) -> ChulkError:
     """Return the documented public error corresponding to an internal failure."""
+    if isinstance(exc, DurableApprovalPaused):
+        return exc  # type: ignore[return-value]
     if isinstance(exc, ChulkError):
         return exc
 

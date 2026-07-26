@@ -15,9 +15,12 @@ with Agent(config=config, llm=client) as agent:
             print(event.payload.result.content)
 ```
 
-`AgentEvent` contains `name`, an ISO-8601 `timestamp`, `schema_version` (currently
-`1`), `conversation_id`, an optional `turn_id`, a typed `payload`, and read-only
-`extensions`. Dotted lowercase names are the compatibility-stable catalog:
+`AgentEvent` schema v3 contains `event_id`, `name`, an ISO-8601 `timestamp`,
+`conversation_id`, optional turn/run/step IDs, an `ExecutionScope`,
+correlation, causation, source-event and idempotency IDs, a typed `payload`,
+and read-only `extensions`. Readers continue to accept schema v1 and v2;
+legacy envelopes receive a deterministic `legacy_...` event ID. Dotted
+lowercase names are the compatibility-stable catalog:
 
 | Event | Payload | Meaning |
 |---|---|---|
@@ -36,12 +39,17 @@ with Agent(config=config, llm=client) as agent:
 | `plan.approved` | `PlanPayload` | A pending plan was approved. |
 | `run.completed` | `RunCompletedPayload` | The terminal structured result is available. |
 | `run.failed` | `RunFailedPayload` | The run failed before a normal result. |
+| durable `run.*` transitions | `RunLifecyclePayload` | Queue, pause, resume, retry, cancellation, unknown, and dead-letter state. |
+| durable `step.*` transitions | `StepLifecyclePayload` | Step attempts and committed checkpoints. |
+| durable `effect.*` transitions | `EffectLifecyclePayload` or `ReconciliationPayload` | Effect intent, dispatch, outcome, retry, and operator reconciliation. |
+| durable `approval.*` transitions | `ApprovalLifecyclePayload` | Request, decision, consumption, invalidation, and expiry. |
+| `delivery.*` transitions | `DeliveryPayload` | Application delivery lifecycle. |
 
 Unknown future trace events are excluded until Chulk explicitly adds a public
 projection. Permission payloads deliberately omit raw tool arguments.
 
 Hosted runtime events include the redacted execution scope and its canonical
-key in envelope extensions. Tool completion and permission payload extensions
+key in the envelope. Tool completion and permission payload extensions
 include tool/schema identity, policy versions, and digests, but never resolved
 credential values.
 
@@ -57,6 +65,11 @@ reuse the public `Usage` and `Cost` snapshots, while plan events carry `Plan`.
 
 Constructor and per-run `on_event` callbacks receive the same public envelope.
 `on_delta` remains supported and is driven by `model.delta` events.
+
+Durable transitions are first committed to `RunStore` as append-only
+`RunEvent` records. `RunEventPublisher` projects them to schema-v3 envelopes
+using the durable event ID and sequence, chaining each event to its predecessor.
+Application sinks can therefore deduplicate and reconstruct deterministically.
 
 ```python
 async for event in agent.run_events_async("Explain the change"):

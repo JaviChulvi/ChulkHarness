@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Callable
 
 from chulk._sdk.results import cost_snapshot, plan_snapshot, run_result_from_runtime, usage_snapshot
@@ -23,6 +24,7 @@ from chulk.events import (
     RunStartedPayload,
     ToolCallPayload,
 )
+from chulk.hosting.scope import ExecutionScope
 
 
 EventCallback = Callable[[AgentEvent], None]
@@ -38,6 +40,7 @@ class EventDispatcher:
         self._on_event = on_event
         self.active_on_event: EventCallback | None = None
         self.active_on_delta: DeltaCallback | None = None
+        self._previous_event_ids: dict[str, str] = {}
         runtime.event_callback = self.dispatch
 
     def dispatch(self, event_type: str, payload: dict) -> None:
@@ -46,6 +49,15 @@ class EventDispatcher:
         event = project_event(self.runtime, event_type, payload)
         if event is None:
             return
+        correlation_id = event.correlation_id or event.turn_id or event.run_id
+        if correlation_id is not None:
+            previous = self._previous_event_ids.get(correlation_id)
+            if previous is not None and event.causation_id is None:
+                event = replace(event, causation_id=previous)
+            self._previous_event_ids[correlation_id] = event.event_id
+        public_sink = getattr(self.runtime, "public_event_sink", None)
+        if public_sink is not None:
+            public_sink.emit(event)
         if self._on_event is not None:
             self._on_event(event)
         if self.active_on_event is not None:
@@ -381,7 +393,13 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
     return None
 
 
-def terminal_event(result: Any, *, profile_id: str | None = None) -> AgentEvent:
+def terminal_event(
+    result: Any,
+    *,
+    profile_id: str | None = None,
+    execution_scope: ExecutionScope | None = None,
+    causation_id: str | None = None,
+) -> AgentEvent:
     """Create the exact in-band terminal event for a generator run result."""
     payload: RunFailedPayload | RunCompletedPayload
     if getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
@@ -399,6 +417,8 @@ def terminal_event(result: Any, *, profile_id: str | None = None) -> AgentEvent:
         payload,
         {"source": "run_events"},
         profile_id=profile_id,
+        execution_scope=execution_scope,
+        causation_id=causation_id,
     )
 
 
@@ -408,6 +428,8 @@ def failure_event(
     conversation_id: str,
     turn_id: str | None,
     profile_id: str | None = None,
+    execution_scope: ExecutionScope | None = None,
+    causation_id: str | None = None,
 ) -> AgentEvent:
     payload = error.to_dict() if hasattr(error, "to_dict") else {"category": "run", "message": str(error)}
     return _event(
@@ -417,6 +439,8 @@ def failure_event(
         RunFailedPayload(payload),
         {"source": "run_events"},
         profile_id=profile_id,
+        execution_scope=execution_scope,
+        causation_id=causation_id,
     )
 
 
@@ -428,13 +452,31 @@ def _event(
     extensions: dict[str, Any],
     *,
     profile_id: str | None = None,
+    execution_scope: ExecutionScope | None = None,
+    causation_id: str | None = None,
 ) -> AgentEvent:
+    scope_value = extensions.get("execution_scope")
+    resolved_scope = execution_scope or (
+        ExecutionScope.from_dict(dict(scope_value))
+        if isinstance(scope_value, Mapping)
+        else None
+    )
     return AgentEvent(
         name=name.value,
         conversation_id=conversation_id,
         turn_id=turn_id,
         profile_id=profile_id,
         payload=payload,
+        execution_scope=resolved_scope,
+        correlation_id=turn_id or (
+            resolved_scope.run_id if resolved_scope is not None else None
+        ),
+        causation_id=causation_id,
+        source_event_id=(
+            resolved_scope.trigger_id
+            if resolved_scope is not None
+            else None
+        ),
         extensions=extensions,
     )
 

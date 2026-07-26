@@ -49,3 +49,17 @@ Hosted mode adds a prior application-authorization layer based on
 include tool/schema versions, policy versions, schema digests, and an exact
 argument digest. Credential resolution happens only after host authorization
 and Chulk permission/approval succeed. See [hosted runtime](hosting.md).
+
+For restart-safe execution, `DurableHostedExecutor` and
+`AsyncDurableHostedExecutor` route an `ASK` decision through
+`DurableApprovalService` or `AsyncDurableApprovalService` instead of waiting
+in-process. The effect-linked approval and checkpoint are committed before the
+worker lease and optional budget reservation are released. A different process
+may decide it, but resume rechecks scope, grants, credentials, tool and schema
+versions, the arguments digest, and the policy version before consuming the
+approval once. Credentials are resolved only after that durable approval has
+been consumed. Denied, expired, cancelled, revoked-authority, and
+unavailable-integration outcomes are explicit and do not execute the tool.
+
+`ImmediateApprovalAdapter` is the local ergonomic adapter over this same
+ledger; it does not introduce a second approval engine.

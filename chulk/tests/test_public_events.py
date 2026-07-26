@@ -73,19 +73,34 @@ def test_event_envelope_and_catalog_are_stable(tmp_path):
         "model.delta",
         "run.completed",
     ]
-    assert all(event.schema_version == EVENT_SCHEMA_VERSION == 2 for event in events)
+    assert all(event.schema_version == EVENT_SCHEMA_VERSION == 3 for event in events)
     assert all(event.profile_id == "default" for event in events)
     assert all(event.conversation_id == facade.conversation_id for event in events)
     assert all(event.turn_id == events[0].turn_id for event in events)
     assert all(event.timestamp.endswith("+00:00") for event in events)
     assert all(event.name in {name.value for name in EventName} for event in events)
+    assert len({event.event_id for event in events}) == len(events)
+    assert all(event.run_id == facade.execution_scope.run_id for event in events)
+    assert events[0].causation_id is None
+    assert all(
+        event.causation_id == previous.event_id
+        for previous, event in zip(events, events[1:])
+    )
     assert all(set(event.to_dict()) == {
+        "event_id",
         "name",
         "timestamp",
         "schema_version",
         "conversation_id",
         "turn_id",
         "profile_id",
+        "execution_scope",
+        "run_id",
+        "step_id",
+        "correlation_id",
+        "causation_id",
+        "source_event_id",
+        "idempotency_key",
         "payload",
         "extensions",
     } for event in events)
@@ -127,6 +142,49 @@ def test_event_reader_preserves_schema_v2_profile_ownership():
 
     assert event.profile_id == "work"
     assert event.to_dict()["profile_id"] == "work"
+    assert event.event_id.startswith("legacy_")
+
+
+def test_event_reader_preserves_schema_v3_identity_and_causation():
+    event = AgentEvent.from_dict(
+        {
+            "event_id": "event-2",
+            "name": "step.started",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "schema_version": 3,
+            "profile_id": "work",
+            "conversation_id": "conversation",
+            "turn_id": "turn",
+            "execution_scope": {
+                "tenant_id": "tenant",
+                "workspace_id": "workspace",
+                "actor_id": "operator",
+                "agent_id": "agent",
+                "agent_version": "1.0.0",
+                "run_id": "run-1",
+                "conversation_id": "conversation",
+                "trigger_id": "trigger-1",
+                "channel_id": None,
+                "parent_run_id": None,
+                "grants": ["tools:read"],
+            },
+            "run_id": "run-1",
+            "step_id": "step-1",
+            "correlation_id": "turn",
+            "causation_id": "event-1",
+            "source_event_id": "trigger-1",
+            "idempotency_key": "transition-1",
+            "payload": {"status": "running"},
+            "extensions": {},
+        }
+    )
+
+    assert event.event_id == "event-2"
+    assert event.execution_scope is not None
+    assert event.execution_scope.tenant_id == "tenant"
+    assert event.run_id == "run-1"
+    assert event.step_id == "step-1"
+    assert event.causation_id == "event-1"
 
 
 def test_projection_excludes_unknown_internal_events(tmp_path):

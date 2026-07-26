@@ -13,11 +13,17 @@ The supported top-level names are governed by `chulk.__all__`. They are
 **public-stable** unless explicitly classified as provisional below. Stable
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
-`chulk.results`, `chulk.skills`, `chulk.tools`, and `chulk.testing`.
+`chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
+`chulk.tools`, and `chulk.testing`.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
 
 `chulk.hosting.reference` is a documented example and contract-test fixture,
 not a durable production service implementation.
+
+The SQLite and async SQLite run/approval stores are **public-provisional**
+reference adapters. The store protocols, immutable records, transition enums,
+and durable execution/approval coordinators are public-stable. Other concrete
+SQLite implementations remain internal.
 
 `AgentHandle`, `AsyncAgentHandle`, `ChatAgent`, `AsyncChatAgent`, and their
 lowercase compatibility factories are **public-provisional** for the current

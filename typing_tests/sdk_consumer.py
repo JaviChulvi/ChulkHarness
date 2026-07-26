@@ -8,6 +8,9 @@ from chulk import (
     Agent,
     AgentCompiler,
     AgentConfig,
+    ApprovalStore,
+    ApprovalSubmission,
+    ApprovalValidation,
     AgentDefinition,
     AgentDefinitionRuntime,
     Capabilities,
@@ -18,6 +21,8 @@ from chulk import (
     ContextReport,
     Cost,
     ExecutionScope,
+    DurableHostedExecutor,
+    DurableRunStatus,
     HostedRuntime,
     MemoryError,
     MemoryMode,
@@ -46,10 +51,14 @@ from chulk import (
     Tools,
     TraceError,
     RunCompletedPayload,
+    RunRecord,
+    RunStore,
+    RunSubmission,
     RunResult,
     RunStatus,
     RuntimeProfile,
     SkillActivationRecord,
+    StepDefinition,
     Usage,
     VersionedReference,
 )
@@ -166,6 +175,32 @@ hosted_identity: ToolIdentity = ToolIdentity.from_schemas(
     input_schema={"type": "object", "properties": {}},
 )
 assert HostedRuntime is not None
+assert DurableHostedExecutor is not None
+
+durable_submission: RunSubmission = RunSubmission(
+    idempotency_key="trigger",
+    input_digest="sha256:input",
+    definition_digest="sha256:definition",
+    steps=(StepDefinition(id="agent", name="Agent turn"),),
+)
+
+
+def consume_durable_run(
+    store: RunStore,
+    scope: ExecutionScope,
+) -> DurableRunStatus:
+    record: RunRecord = store.get(scope, scope.run_id)
+    return record.status
+
+
+def consume_approval_contracts(
+    store: ApprovalStore,
+    scope: ExecutionScope,
+    submission: ApprovalSubmission,
+    validation: ApprovalValidation,
+) -> str:
+    _ = (scope, submission, validation)
+    return type(store).__name__
 
 
 def consume_proposal(proposal: MemoryProposal) -> str:
