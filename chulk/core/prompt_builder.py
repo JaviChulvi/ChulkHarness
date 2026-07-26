@@ -10,6 +10,7 @@ from chulk.core.prompts import (
     format_action_protocol_for_prompt,
     format_conversation_summary_for_prompt,
     format_context_sections_for_prompt,
+    format_external_content_rules_for_prompt,
     format_memories_for_prompt,
     format_planning_for_prompt,
     format_prompt_metadata_for_prompt,
@@ -266,6 +267,20 @@ def build_agent_prompt(
                 "Tool-call rules",
                 format_tool_call_rules(max_tool_calls_per_turn),
                 {"max_tool_calls_per_turn": max_tool_calls_per_turn},
+            )
+        )
+    external_tool_names = [
+        tool.name
+        for tool in action_tools
+        if bool(getattr(tool, "metadata", {}).get("external_content"))
+    ]
+    if external_tool_names:
+        system_parts.append(
+            (
+                "external_tool_safety",
+                "External tool trust boundary",
+                format_external_content_rules_for_prompt(external_tool_names),
+                {"tool_names": external_tool_names, "trust": "untrusted"},
             )
         )
     system_parts.append(
