@@ -46,6 +46,7 @@ _MANIFEST_FIELDS = frozenset(
         "dependencies",
         "python_dependencies",
         "migrations",
+        "instructions",
     }
 )
 _PLUGIN_NAME_PATTERN = re.compile(
@@ -307,6 +308,15 @@ def _manifest_from_mapping(values: dict[str, Any]) -> PluginManifest:
             )
         )
     )
+    instructions = tuple(
+        dict.fromkeys(
+            _resource_path(item, "instructions item", suffix=".md")
+            for item in _sequence(
+                data.pop("instructions", ()),
+                "instructions",
+            )
+        )
+    )
     return PluginManifest(
         schema_version=schema_version,
         name=name,
@@ -324,6 +334,7 @@ def _manifest_from_mapping(values: dict[str, Any]) -> PluginManifest:
         dependencies=dependencies,
         python_dependencies=python_dependencies,
         migrations=migrations,
+        instructions=instructions,
     )
 
 

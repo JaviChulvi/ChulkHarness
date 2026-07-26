@@ -71,6 +71,11 @@ def inspect_plugin_directory(path: Path | str) -> PluginInspection:
             resolve_plugin_resource(root, migration)
         except PluginManifestError as exc:
             raise PluginInspectionError(str(exc)) from exc
+    for instruction in manifest.instructions:
+        try:
+            resolve_plugin_resource(root, instruction)
+        except PluginManifestError as exc:
+            raise PluginInspectionError(str(exc)) from exc
     _validate_entry_point_modules(root, manifest.entry_points)
     files, total_bytes = _package_files(root)
     digest = _digest_files(root, files)

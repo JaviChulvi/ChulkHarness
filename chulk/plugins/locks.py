@@ -29,7 +29,7 @@ _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOP_LEVEL_FIELDS = frozenset(
     {"schema_version", "profile_id", "plugins"}
 )
-_ENTRY_FIELDS = frozenset(
+_ENTRY_FIELDS_V1 = frozenset(
     {
         "name",
         "version",
@@ -41,6 +41,9 @@ _ENTRY_FIELDS = frozenset(
         "review",
         "installed_at",
     }
+)
+_ENTRY_FIELDS = _ENTRY_FIELDS_V1 | frozenset(
+    {"source_reference", "artifact_digest"}
 )
 _REVIEW_FIELDS = frozenset(
     {
@@ -89,7 +92,10 @@ class PluginLockFile:
             raise PluginLockError(
                 "plugin lock contains unsupported top-level fields"
             )
-        if payload["schema_version"] != PLUGIN_LOCK_SCHEMA_VERSION:
+        if payload["schema_version"] not in {
+            1,
+            PLUGIN_LOCK_SCHEMA_VERSION,
+        }:
             raise PluginLockError("unsupported plugin lock schema version")
         if payload["profile_id"] != self.profile_id:
             raise PluginLockError(
@@ -172,7 +178,8 @@ class PluginLockFile:
 
 
 def _entry_from_dict(value: dict[str, Any]) -> PluginLockEntry:
-    if set(value) != _ENTRY_FIELDS:
+    fields = frozenset(value)
+    if fields not in {_ENTRY_FIELDS_V1, _ENTRY_FIELDS}:
         raise PluginLockError("plugin lock entry has unsupported fields")
     raw_manifest = value["manifest"]
     raw_review = value["review"]
@@ -227,6 +234,8 @@ def _entry_from_dict(value: dict[str, Any]) -> PluginLockEntry:
                 granted_capabilities=tuple(capabilities),
             ),
             installed_at=value["installed_at"],
+            source_reference=value.get("source_reference", ""),
+            artifact_digest=value.get("artifact_digest", ""),
         )
     except (PluginManifestError, ValueError) as exc:
         raise PluginLockError(f"invalid plugin lock entry: {exc}") from exc
@@ -241,8 +250,6 @@ def _validate_entry(entry: PluginLockEntry) -> None:
         raise PluginLockError("plugin lock version does not match manifest")
     if not _DIGEST_PATTERN.fullmatch(entry.digest):
         raise PluginLockError("plugin lock digest is invalid")
-    if entry.source_kind is not PluginSourceKind.LOCAL_DIRECTORY:
-        raise PluginLockError("unsupported plugin source kind")
     source_text = str(entry.source_path)
     if (
         not entry.source_path.is_absolute()
@@ -252,6 +259,16 @@ def _validate_entry(entry: PluginLockEntry) -> None:
         raise PluginLockError(
             "local plugin source path must be canonical and absolute"
         )
+    if (
+        "\x00" in entry.source_reference
+        or len(entry.source_reference) > 2_000
+    ):
+        raise PluginLockError("plugin source reference is invalid")
+    if (
+        entry.artifact_digest
+        and not _DIGEST_PATTERN.fullmatch(entry.artifact_digest)
+    ):
+        raise PluginLockError("plugin artifact digest is invalid")
     approved_by = entry.review.approved_by
     if (
         not approved_by.strip()

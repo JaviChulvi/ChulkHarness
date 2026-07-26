@@ -23,6 +23,8 @@ from chulk import (
     PlanStatus,
     PlanStep,
     PlanStepStatus,
+    PluginLifecycleReceipt,
+    PluginUpdatePlan,
     SafetyError,
     Skills,
     Tool,
@@ -139,3 +141,10 @@ def consume_proposal(proposal: MemoryProposal) -> str:
 
 def consume_attempts(call: ToolCall) -> tuple[ToolAttempt, ...]:
     return call.attempts
+
+
+def consume_plugin_lifecycle(
+    receipt: PluginLifecycleReceipt,
+    plan: PluginUpdatePlan,
+) -> tuple[str, bool]:
+    return receipt.action.value, plan.requires_reapproval

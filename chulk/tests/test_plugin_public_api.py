@@ -91,6 +91,33 @@ def test_sync_facade_registers_audits_and_loads_reviewed_plugins(tmp_path):
     facade.close()
 
 
+def test_sync_facade_exposes_managed_install_uninstall_and_rollback(
+    tmp_path,
+):
+    package = write_plugin(tmp_path / "source")
+    facade = build_agent(tmp_path)
+
+    installed = facade.install_plugin(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+    )
+    uninstalled = facade.uninstall_plugin(
+        "sample-plugin",
+        approved_by="operator",
+    )
+    restored = facade.rollback_plugin(
+        "sample-plugin",
+        approved_by="operator",
+    )
+
+    assert installed.action.value == "install"
+    assert uninstalled.action.value == "uninstall"
+    assert restored.action.value == "rollback"
+    assert facade.audit_plugins().ok is True
+    facade.close()
+
+
 @pytest.mark.asyncio
 async def test_async_facade_has_plugin_operation_parity(tmp_path):
     package = write_plugin(tmp_path)
@@ -116,6 +143,36 @@ async def test_async_facade_has_plugin_operation_parity(tmp_path):
     assert inspected.compatible is True
     assert listed == (registered,)
     assert report.verified_plugins == ("sample-plugin",)
+    await facade.close()
+
+
+@pytest.mark.asyncio
+async def test_async_facade_has_managed_lifecycle_parity(tmp_path):
+    package = write_plugin(tmp_path / "source")
+    facade = AsyncAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLMClient(),
+        tools=[],
+        skills=[],
+    )
+
+    installed = await facade.install_plugin(
+        package,
+        approved_by="operator",
+        acknowledge_host_authority=True,
+    )
+    disabled = await facade.uninstall_plugin(
+        "sample-plugin",
+        approved_by="operator",
+    )
+    restored = await facade.rollback_plugin(
+        "sample-plugin",
+        approved_by="operator",
+    )
+
+    assert installed.action.value == "install"
+    assert disabled.action.value == "uninstall"
+    assert restored.action.value == "rollback"
     await facade.close()
 
 
