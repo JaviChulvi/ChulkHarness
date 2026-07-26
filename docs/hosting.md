@@ -5,7 +5,7 @@ persistence, tenancy, authorization, credentials, audit, and resource
 lifecycle. Hosted mode is explicit and fail-closed: it never fills a missing
 service with SQLite or a local directory.
 
-The credential-free [reference application](../examples/hosted_runtime/app.py)
+The credential-free [reference application](../examples/hosted_runtime/hosted_app.py)
 runs sync and async agents with tenant-aware in-memory services, a versioned
 read-only tool, and host-owned event collection. It asserts that the configured
 project root stays empty.

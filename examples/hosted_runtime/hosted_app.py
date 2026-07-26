@@ -1,4 +1,4 @@
-"""Credential-free sync and async hosted-runtime embedding."""
+"""Run credential-free sync and async hosted-runtime embedding."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 from chulk import (
     AgentConfig,
+    AgentEvent,
     AsyncHostedRuntime,
     ExecutionScope,
     HostedRuntime,
@@ -65,7 +66,7 @@ def script() -> ScriptedLLMClient:
 
 
 def run_sync(root: Path, hub: InMemoryServiceHub) -> str:
-    events = []
+    events: list[AgentEvent] = []
     with HostedRuntime(
         config=AgentConfig(project_root=root),
         llm=script(),
