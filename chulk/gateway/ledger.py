@@ -401,6 +401,7 @@ class SQLiteGatewayLedger:
         profile_limit: int,
         profile_id: str | None = None,
         adapter_keys: tuple[tuple[str, str], ...] | None = None,
+        queued_before: datetime | None = None,
         lease_seconds: int = 300,
         now: datetime | None = None,
     ) -> ExecutionClaim | None:
@@ -410,6 +411,13 @@ class SQLiteGatewayLedger:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
+        if queued_before is not None and queued_before.tzinfo is None:
+            raise ValueError("queued_before must include a timezone")
+        queue_cutoff = (
+            queued_before.astimezone(timezone.utc)
+            if queued_before is not None
+            else None
+        )
         token = uuid4().hex
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -437,6 +445,10 @@ class SQLiteGatewayLedger:
             parameters: tuple[object, ...] = (
                 (selected_profile,) if selected_profile is not None else ()
             )
+            cutoff_clause = ""
+            if queue_cutoff is not None:
+                cutoff_clause = "AND candidate.created_at <= ?"
+                parameters += (_encode(queue_cutoff),)
             adapter_clause = ""
             if adapter_keys is not None:
                 if not adapter_keys:
@@ -455,6 +467,7 @@ class SQLiteGatewayLedger:
                 WHERE candidate.state = 'queued'
                   AND candidate.cancellation_requested = 0
                   {profile_clause}
+                  {cutoff_clause}
                   {adapter_clause}
                   AND NOT EXISTS (
                     SELECT 1 FROM gateway_inbox AS active
