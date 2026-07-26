@@ -1,6 +1,7 @@
 """Optional local control-server contracts."""
 
 from chulk.server.app import ServerDependencyError, create_control_app
+from chulk.server.client import ControlApiClient, ControlApiError
 from chulk.server.journal import (
     PublicEventCursorExpiredError,
     PublicEventJournal,
@@ -22,10 +23,13 @@ from chulk.server.dispatcher import (
 from chulk.server.models import (
     API_SCHEMA_VERSION,
     ApiError,
+    AutomationActionRequest,
     ConversationCreateRequest,
     ConversationMessageRequest,
+    OperatorActionRequest,
     PermissionDecisionRequest,
     PlanDecisionRequest,
+    ProposalDecisionRequest,
 )
 from chulk.server.lifecycle import (
     ControlServerLedger,
@@ -43,6 +47,7 @@ from chulk.server.permissions import (
 __all__ = [
     "API_SCHEMA_VERSION",
     "ApiError",
+    "AutomationActionRequest",
     "ConversationCreateRequest",
     "ConversationBackpressureError",
     "ConversationCommand",
@@ -50,13 +55,17 @@ __all__ = [
     "ConversationDispatcher",
     "ControlDecisionConflictError",
     "ConversationMessageRequest",
+    "ControlApiClient",
+    "ControlApiError",
     "ControlServerLedger",
     "ControlServerStatus",
     "GATEWAY_PROTOCOL_VERSION",
     "GatewayHello",
     "GatewayMessage",
+    "OperatorActionRequest",
     "PermissionDecisionRequest",
     "PlanDecisionRequest",
+    "ProposalDecisionRequest",
     "PendingPermission",
     "PermissionBroker",
     "PermissionDecisionConflictError",

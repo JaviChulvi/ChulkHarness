@@ -120,6 +120,83 @@ class PlanDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorActionRequest:
+    """Revision-safe mutation requested through an operator resource route."""
+
+    action: str
+    revision: int
+    step_id: str | None = None
+    instruction: str | None = None
+    reason: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: object) -> OperatorActionRequest:
+        body = _object(value)
+        revision = body.get("revision")
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+        ):
+            raise ValueError("revision must be a non-negative integer")
+        return cls(
+            action=_required_text(body.get("action"), "action", max_chars=64),
+            revision=revision,
+            step_id=_optional_text(body.get("step_id"), "step_id", max_chars=128),
+            instruction=_optional_text(
+                body.get("instruction"),
+                "instruction",
+                max_chars=20_000,
+            ),
+            reason=_optional_text(body.get("reason"), "reason", max_chars=2_000),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationActionRequest:
+    """Idempotent revision-safe automation mutation."""
+
+    action: str
+    revision: int
+    idempotency_key: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> AutomationActionRequest:
+        body = _object(value)
+        revision = body.get("revision")
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+        ):
+            raise ValueError("revision must be a non-negative integer")
+        return cls(
+            action=_required_text(body.get("action"), "action", max_chars=64),
+            revision=revision,
+            idempotency_key=_required_text(
+                body.get("idempotency_key"),
+                "idempotency_key",
+                max_chars=256,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalDecisionRequest:
+    """Explicit approval or rejection of a governed learning proposal."""
+
+    action: Literal["approve", "reject"]
+
+    @classmethod
+    def from_dict(cls, value: object) -> ProposalDecisionRequest:
+        body = _object(value)
+        action = body.get("action")
+        if action not in {"approve", "reject"}:
+            raise ValueError("action must be approve or reject")
+        return cls(action=action)
+
+
+@dataclass(frozen=True, slots=True)
 class GatewayPairingRequest:
     adapter: str
     account_id: str
@@ -182,11 +259,14 @@ class ApiError:
 __all__ = [
     "API_SCHEMA_VERSION",
     "ApiError",
+    "AutomationActionRequest",
     "ConversationCreateRequest",
     "ConversationMessageRequest",
     "GatewayPairingRequest",
     "MessageMode",
+    "OperatorActionRequest",
     "PermissionAnswer",
     "PermissionDecisionRequest",
     "PlanDecisionRequest",
+    "ProposalDecisionRequest",
 ]

@@ -23,13 +23,21 @@ from chulk.server.journal import PublicEventCursorExpiredError
 from chulk.server.models import (
     API_SCHEMA_VERSION,
     ApiError,
+    AutomationActionRequest,
     ConversationCreateRequest,
     ConversationMessageRequest,
     GatewayPairingRequest,
+    OperatorActionRequest,
     PermissionDecisionRequest,
     PlanDecisionRequest,
+    ProposalDecisionRequest,
 )
-from chulk.server.operators import OperatorService, integer_query, parse_timestamp
+from chulk.server.operators import (
+    OperatorService,
+    boolean_query,
+    integer_query,
+    parse_timestamp,
+)
 from chulk.server.permissions import (
     PermissionDecisionConflictError,
     PermissionRequestNotFoundError,
@@ -402,17 +410,95 @@ def create_control_app(
     async def schema(_request):
         return _json(_schema())
 
-    async def jobs(request):
-        adapter = _required_query(request.query_params.get("adapter"), "adapter")
-        destination_id = _required_query(
-            request.query_params.get("destination_id"),
-            "destination_id",
+    async def goals(request):
+        return _json(
+            operators.goals(
+                request.path_params["profile_id"],
+                status=request.query_params.get("status"),
+                limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
+            )
         )
+
+    async def goal(request):
+        try:
+            value = operators.goal(
+                request.path_params["profile_id"],
+                request.path_params["goal_id"],
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "goal_not_found", str(exc)) from exc
+        return _json(value)
+
+    async def control_goal(request):
+        body = OperatorActionRequest.from_dict(await _json_body(request))
+        try:
+            value = operators.control_goal(
+                request.path_params["profile_id"],
+                request.path_params["goal_id"],
+                action=body.action,
+                revision=body.revision,
+                step_id=body.step_id,
+                instruction=body.instruction,
+                reason=body.reason,
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "goal_not_found", str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiProblem(409, "goal_conflict", str(exc)) from exc
+        return _json({"goal": value})
+
+    async def child_tasks(request):
+        return _json(
+            operators.child_tasks(
+                request.path_params["profile_id"],
+                status=request.query_params.get("status"),
+                goal_id=request.query_params.get("goal_id"),
+                parent_task_id=request.query_params.get("parent_task_id"),
+                limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
+            )
+        )
+
+    async def child_task(request):
+        try:
+            value = operators.child_task(
+                request.path_params["profile_id"],
+                request.path_params["task_id"],
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "child_task_not_found", str(exc)) from exc
+        return _json(value)
+
+    async def control_child_task(request):
+        body = OperatorActionRequest.from_dict(await _json_body(request))
+        try:
+            value = operators.control_child_task(
+                request.path_params["profile_id"],
+                request.path_params["task_id"],
+                action=body.action,
+                revision=body.revision,
+                reason=body.reason,
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "child_task_not_found", str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiProblem(409, "child_task_conflict", str(exc)) from exc
+        return _json({"task": value})
+
+    async def jobs(request):
         return _json(
             operators.jobs(
                 request.path_params["profile_id"],
-                adapter=adapter,
-                destination_id=destination_id,
+                adapter=request.query_params.get("adapter"),
+                destination_id=request.query_params.get("destination_id"),
+                status=request.query_params.get("status"),
+                limit=_limit(request.query_params.get("limit")),
+                include_terminal=boolean_query(
+                    request.query_params.get("include_terminal"),
+                    field="include_terminal",
+                ),
+                cursor=request.query_params.get("cursor"),
             )
         )
 
@@ -427,25 +513,14 @@ def create_control_app(
         return _json(value)
 
     async def control_automation(request):
-        body = await _json_body(request)
-        if not isinstance(body, Mapping):
-            raise ValueError("request body must be an object")
-        action = body.get("action")
-        revision = body.get("revision")
-        idempotency_key = body.get("idempotency_key")
-        if not isinstance(action, str):
-            raise ValueError("action is required")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            raise ValueError("revision must be a non-negative integer")
-        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
-            raise ValueError("idempotency_key is required")
+        body = AutomationActionRequest.from_dict(await _json_body(request))
         try:
             value = operators.control_automation(
                 request.path_params["profile_id"],
                 request.path_params["job_id"],
-                action=action,
-                revision=revision,
-                idempotency_key=idempotency_key,
+                action=body.action,
+                revision=body.revision,
+                idempotency_key=body.idempotency_key,
             )
         except LookupError as exc:
             raise ApiProblem(404, "automation_not_found", str(exc)) from exc
@@ -499,25 +574,31 @@ def create_control_app(
                 request.path_params["profile_id"],
                 status=status,
                 limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
             )
         )
 
     async def decide_proposal(request):
-        body = await _json_body(request)
-        if not isinstance(body, Mapping):
-            raise ValueError("request body must be an object")
-        action = body.get("action")
-        if not isinstance(action, str):
-            raise ValueError("action must be approve or reject")
+        body = ProposalDecisionRequest.from_dict(await _json_body(request))
         try:
             result = operators.decide_proposal(
                 request.path_params["profile_id"],
                 request.path_params["proposal_id"],
-                action=action,
+                action=body.action,
             )
         except KeyError as exc:
             raise ApiProblem(404, "proposal_not_found", str(exc)) from exc
         return _json({"proposal": result})
+
+    async def proposal(request):
+        try:
+            value = operators.proposal(
+                request.path_params["profile_id"],
+                request.path_params["proposal_id"],
+            )
+        except KeyError as exc:
+            raise ApiProblem(404, "proposal_not_found", str(exc)) from exc
+        return _json({"proposal": value})
 
     async def usage(request):
         return _json(
@@ -534,6 +615,10 @@ def create_control_app(
                 resource_kind=request.query_params.get("resource_kind"),
                 channel=request.query_params.get("channel"),
                 conversation_id=request.query_params.get("conversation_id"),
+                goal_id=request.query_params.get("goal_id"),
+                job_id=request.query_params.get("job_id"),
+                child_task_id=request.query_params.get("child_task_id"),
+                group_by=request.query_params.get("group_by"),
                 limit=_limit(request.query_params.get("limit")),
                 cursor=request.query_params.get("cursor"),
             )
@@ -544,13 +629,29 @@ def create_control_app(
             operators.traces(
                 request.path_params["profile_id"],
                 limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
             )
         )
+
+    async def trace(request):
+        try:
+            value = operators.trace(
+                request.path_params["profile_id"],
+                request.path_params["conversation_id"],
+            )
+        except SessionNotFoundError as exc:
+            raise ApiProblem(404, "trace_not_found", str(exc)) from exc
+        return _json(value)
 
     async def artifacts(request):
         profile_id, conversation_id = _conversation_params(request)
         try:
-            result = operators.artifacts(profile_id, conversation_id)
+            result = operators.artifacts(
+                profile_id,
+                conversation_id,
+                limit=_limit(request.query_params.get("limit")),
+                cursor=request.query_params.get("cursor"),
+            )
         except SessionNotFoundError as exc:
             raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
         return _json(result)
@@ -654,6 +755,36 @@ def create_control_app(
             methods=["POST"],
         ),
         Route(
+            "/v1/profiles/{profile_id:str}/goals",
+            goals,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/goals/{goal_id:str}",
+            goal,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/goals/{goal_id:str}/actions",
+            control_goal,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/tasks",
+            child_tasks,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/tasks/{task_id:str}",
+            child_task,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/tasks/{task_id:str}/actions",
+            control_child_task,
+            methods=["POST"],
+        ),
+        Route(
             "/v1/profiles/{profile_id:str}/jobs",
             jobs,
             methods=["GET"],
@@ -684,7 +815,27 @@ def create_control_app(
             methods=["GET"],
         ),
         Route(
+            "/v1/profiles/{profile_id:str}/learning/proposals",
+            proposals,
+            methods=["GET"],
+        ),
+        Route(
             "/v1/profiles/{profile_id:str}/proposals/{proposal_id:str}",
+            proposal,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/learning/proposals/{proposal_id:str}",
+            proposal,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/proposals/{proposal_id:str}",
+            decide_proposal,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/learning/proposals/{proposal_id:str}",
             decide_proposal,
             methods=["POST"],
         ),
@@ -696,6 +847,11 @@ def create_control_app(
         Route(
             "/v1/profiles/{profile_id:str}/traces",
             traces,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/traces/{conversation_id:str}",
+            trace,
             methods=["GET"],
         ),
         Route(
@@ -766,15 +922,6 @@ def _limit(value: str | None) -> int:
     if limit < 1 or limit > 1_000:
         raise ValueError("limit must be between 1 and 1000")
     return limit
-
-
-def _required_query(value: str | None, field: str) -> str:
-    normalized = value.strip() if isinstance(value, str) else ""
-    if not normalized:
-        raise ValueError(f"{field} query parameter is required")
-    if len(normalized) > 256 or "\x00" in normalized:
-        raise ValueError(f"{field} query parameter is invalid")
-    return normalized
 
 
 def _json(value: Mapping[str, Any], *, status_code: int = 200):
@@ -855,6 +1002,24 @@ def _schema() -> dict[str, Any]:
             "/v1/profiles/{profile_id}/conversations/{conversation_id}/permissions/{permission_request_id}": {
                 "post": {"operationId": "decidePermission"}
             },
+            "/v1/profiles/{profile_id}/goals": {
+                "get": {"operationId": "listGoals"}
+            },
+            "/v1/profiles/{profile_id}/goals/{goal_id}": {
+                "get": {"operationId": "getGoal"}
+            },
+            "/v1/profiles/{profile_id}/goals/{goal_id}/actions": {
+                "post": {"operationId": "controlGoal"}
+            },
+            "/v1/profiles/{profile_id}/tasks": {
+                "get": {"operationId": "listChildTasks"}
+            },
+            "/v1/profiles/{profile_id}/tasks/{task_id}": {
+                "get": {"operationId": "getChildTask"}
+            },
+            "/v1/profiles/{profile_id}/tasks/{task_id}/actions": {
+                "post": {"operationId": "controlChildTask"}
+            },
             "/v1/profiles/{profile_id}/jobs": {
                 "get": {"operationId": "listJobs"}
             },
@@ -874,13 +1039,24 @@ def _schema() -> dict[str, Any]:
                 "get": {"operationId": "listProposals"}
             },
             "/v1/profiles/{profile_id}/proposals/{proposal_id}": {
+                "get": {"operationId": "getProposal"},
                 "post": {"operationId": "decideProposal"}
+            },
+            "/v1/profiles/{profile_id}/learning/proposals": {
+                "get": {"operationId": "listLearningProposals"}
+            },
+            "/v1/profiles/{profile_id}/learning/proposals/{proposal_id}": {
+                "get": {"operationId": "getLearningProposal"},
+                "post": {"operationId": "decideLearningProposal"}
             },
             "/v1/profiles/{profile_id}/usage": {
                 "get": {"operationId": "queryUsage"}
             },
             "/v1/profiles/{profile_id}/traces": {
                 "get": {"operationId": "listTraceMetadata"}
+            },
+            "/v1/profiles/{profile_id}/traces/{conversation_id}": {
+                "get": {"operationId": "getTraceSummary"}
             },
             "/v1/profiles/{profile_id}/conversations/{conversation_id}/artifacts": {
                 "get": {"operationId": "listArtifacts"}

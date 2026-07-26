@@ -975,6 +975,8 @@ def _group_key(entry: UsageEntry, group_by: UsageGroupBy) -> str:
         return entry.dimensions.profile_id
     if group_by is UsageGroupBy.CHANNEL:
         return entry.dimensions.channel or "unknown"
+    if group_by is UsageGroupBy.CONVERSATION:
+        return entry.dimensions.conversation_id or "none"
     if group_by is UsageGroupBy.GOAL:
         return entry.dimensions.goal_id or "none"
     if group_by is UsageGroupBy.JOB:

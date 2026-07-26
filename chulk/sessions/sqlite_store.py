@@ -117,7 +117,7 @@ class SQLiteSessionStore:
 
     def list_conversations(self, limit: int = 20) -> list[ConversationRecord]:
         """Return recently updated conversations."""
-        clean_limit = max(1, min(limit, 100))
+        clean_limit = max(1, min(limit, 1_000))
         with self._connect() as conn:
             rows = conn.execute(
                 _conversation_select_sql("ORDER BY conversations.updated_at DESC LIMIT ?"),

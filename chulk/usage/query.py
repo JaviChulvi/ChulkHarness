@@ -100,6 +100,10 @@ class UsageLedger:
         end: datetime | None = None,
         resource_kind: ResourceKind | None = None,
         channel: str | None = None,
+        conversation_id: str | None = None,
+        goal_id: str | None = None,
+        job_id: str | None = None,
+        child_task_id: str | None = None,
         limit: int = MAX_EXPORT_ENTRIES,
     ) -> tuple[UsageAggregate, ...]:
         return self.store.aggregate(
@@ -109,6 +113,10 @@ class UsageLedger:
                 end=end,
                 resource_kind=resource_kind,
                 channel=channel,
+                conversation_id=conversation_id,
+                goal_id=goal_id,
+                job_id=job_id,
+                child_task_id=child_task_id,
                 limit=limit,
             ),
             group_by=group_by,

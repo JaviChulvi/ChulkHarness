@@ -784,6 +784,7 @@ class ChildTaskStore:
         self,
         *,
         status: ChildDeliveryStatus | str | None = None,
+        task_id: str | None = None,
         limit: int = 100,
     ) -> tuple[ChildCompletionDelivery, ...]:
         if not 1 <= limit <= 1000:
@@ -793,6 +794,9 @@ class ChildTaskStore:
         if status is not None:
             clauses.append("status = ?")
             values.append(ChildDeliveryStatus(status).value)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            values.append(task_id)
         values.append(limit)
         with sqlite_connection(self.db_path) as conn:
             rows = conn.execute(

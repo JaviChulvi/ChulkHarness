@@ -452,6 +452,37 @@ def test_usage_grouping_preserves_decimal_totals_and_unknown_cost(
     assert not groups[1].cost.pricing_known
 
 
+def test_usage_grouping_supports_conversation_and_dimension_filters(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "store.sqlite"
+    store = SQLiteUsageStore(db_path, clock=lambda: NOW)
+    store.ingest(
+        _entry(
+            "conversation-one",
+            dimensions=_dimensions(conversation_id="conversation-1"),
+        )
+    )
+    store.ingest(
+        _entry(
+            "conversation-two",
+            dimensions=_dimensions(
+                conversation_id="conversation-2",
+                turn_id="turn-2",
+            ),
+        )
+    )
+    ledger = UsageLedger(db_path, profile_id="work")
+
+    groups = ledger.group(
+        UsageGroupBy.CONVERSATION,
+        conversation_id="conversation-2",
+    )
+
+    assert [group.key for group in groups] == ["conversation-2"]
+    assert groups[0].entry_count == 1
+
+
 def test_bounded_exports_exclude_credential_references(
     tmp_path: Path,
 ) -> None:

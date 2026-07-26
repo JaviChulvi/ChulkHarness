@@ -115,6 +115,7 @@ from chulk.execution import (
     WorkspacePolicyError,
     WorkspacePersistence,
 )
+from chulk.server import ControlApiClient, ControlApiError
 from chulk.events import (
     EVENT_SCHEMA_VERSION,
     SUPPORTED_EVENT_SCHEMA_VERSIONS,
@@ -434,6 +435,8 @@ __all__ = [
     "CompletionConsumer",
     "CommandExecutionRequest",
     "ContainmentStatus",
+    "ControlApiClient",
+    "ControlApiError",
     "ContextBudget",
     "ContextReport",
     "ContextSection",
