@@ -554,6 +554,48 @@ async def test_sse_stream_orders_events_and_resumes_from_last_event_id(tmp_path)
     await dispatcher.close()
 
 
+def test_event_endpoint_supports_bounded_reconnect_pages(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/profiles/default/conversations",
+            headers=_auth(tokens),
+            json={},
+        )
+        conversation_id = created.json()["conversation"]["id"]
+        first = app.state.dispatcher.journal(
+            "default",
+            conversation_id,
+        ).append(
+            AgentEvent(
+                name="model.delta",
+                profile_id="default",
+                conversation_id=conversation_id,
+                payload=ModelDeltaPayload("bounded"),
+            )
+        )
+
+        page = client.get(
+            f"/v1/profiles/default/conversations/{conversation_id}/events"
+            "?follow=false",
+            headers=_auth(tokens),
+        )
+        resumed = client.get(
+            f"/v1/profiles/default/conversations/{conversation_id}/events"
+            f"?follow=false&after={first.event_id}",
+            headers=_auth(tokens),
+        )
+
+        assert page.status_code == 200
+        assert page.json()["events"][0]["id"] == first.event_id
+        assert page.json()["next_cursor"] == first.event_id
+        assert resumed.json() == {
+            "schema_version": 1,
+            "events": [],
+            "next_cursor": first.event_id,
+        }
+
+
 async def _asgi_sse_request(
     app,
     path: str,

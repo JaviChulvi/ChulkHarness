@@ -273,10 +273,6 @@ def create_control_app(
         return _json({"command": command.to_dict()})
 
     async def conversation_events(request):
-        try:
-            from starlette.responses import StreamingResponse
-        except ImportError as exc:
-            raise ServerDependencyError from exc
         profile_id, conversation_id = _conversation_params(request)
         try:
             await controller.get_conversation(profile_id, conversation_id)
@@ -289,6 +285,21 @@ def create_control_app(
             raise ApiProblem(409, "event_cursor_expired", str(exc)) from exc
         except (ProfileNotFoundError, SessionNotFoundError) as exc:
             raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
+
+        if request.query_params.get("follow", "true").lower() == "false":
+            return _json(
+                {
+                    "events": [record.to_dict() for record in initial],
+                    "next_cursor": (
+                        initial[-1].event_id if initial else cursor
+                    ),
+                }
+            )
+
+        try:
+            from starlette.responses import StreamingResponse
+        except ImportError as exc:
+            raise ServerDependencyError from exc
 
         async def stream() -> AsyncIterator[bytes]:
             records = initial

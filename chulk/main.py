@@ -652,6 +652,18 @@ def main(
                 output_func=output_func,
                 error_func=error_func,
             )
+        if args.command == "tui":
+            from chulk.cli.tui import run_tui_command
+
+            return run_tui_command(
+                config=base_config,
+                profile_id=profile.id,
+                url=args.url,
+                token_file=getattr(args, "token_file", None),
+                refresh_seconds=args.refresh_seconds,
+                no_color=bool(getattr(args, "no_color", False)),
+                error_func=error_func,
+            )
         if args.command == "gateway":
             from chulk.telegram.main import run_telegram_gateway
 
