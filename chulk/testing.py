@@ -4,13 +4,45 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timedelta, timezone
+import inspect
 import json
 from threading import Lock
 from types import MappingProxyType
 from typing import Any
 
 from chulk.core.actions import AgentAction
+from chulk.approvals import (
+    ApprovalDecision,
+    ApprovalStatus,
+    ApprovalSubmission,
+    ApprovalValidation,
+    AsyncDurableApprovalService,
+    DurableApprovalService,
+)
+from chulk.events import AgentEvent, RunLifecyclePayload
+from chulk.gateway import (
+    AuthenticationState,
+    ChannelIdentity,
+    ChannelScope,
+    DeliveryReceipt,
+    DeliveryState,
+    DeliveryTarget,
+    GatewayRunTarget,
+    InboundEnvelope,
+    OutboundEnvelope,
+    TextPart,
+    TrustLevel,
+)
+from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
 from chulk.llm.base import LLMClient, LLMError, LLMStreamChunk
+from chulk.runs import (
+    EffectStatus,
+    ReconciliationDecision,
+    RunStatus,
+    RunSubmission,
+    StepDefinition,
+)
 
 
 ScriptedResponse = str | Mapping[str, Any] | AgentAction
@@ -104,6 +136,542 @@ class ScriptedLLMClient(LLMClient):
         yield LLMStreamChunk(type="completed", usage=response.usage, cost=response.cost)
 
 
+class HostedContractError(AssertionError):
+    """Raised when an application-owned hosted service violates the SDK contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class HostedContractReport:
+    """Names of the portable hosted-runtime checks that completed."""
+
+    checks: tuple[str, ...]
+
+    @property
+    def passed(self) -> bool:
+        return bool(self.checks)
+
+
+def assert_hosted_services_contract(
+    services: RuntimeServices,
+    *,
+    first_scope: ExecutionScope,
+    second_scope: ExecutionScope,
+) -> HostedContractReport:
+    """Exercise the minimum sync isolation and lifecycle service contract."""
+    _contract_scopes(first_scope, second_scope)
+    first = services.resolve(first_scope)
+    second = services.resolve(second_scope)
+    checks: list[str] = []
+    conversation_id = first_scope.conversation_id or "contract-conversation"
+    first.sessions.store.create_conversation(
+        conversation_id,
+        provider="contract",
+        model="contract",
+    )
+    _must_reject(
+        lambda: second.sessions.store.get_conversation(conversation_id),
+        "sessions allowed a cross-scope read",
+    )
+    checks.append("session_isolation")
+
+    artifact = first.artifacts.write("contract", "private")
+    _must_reject(
+        lambda: second.artifacts.read(artifact.artifact_id),
+        "artifacts allowed a cross-scope read",
+    )
+    checks.append("artifact_isolation")
+
+    first.runs.submit(
+        first_scope,
+        _contract_submission(),
+        actor="contract",
+    )
+    _must_reject(
+        lambda: second.runs.get(second_scope, first_scope.run_id),
+        "durable runs allowed a cross-scope read",
+    )
+    checks.append("run_isolation")
+
+    event = _contract_event(first_scope)
+    first.events.emit(event)
+    _must_reject(
+        lambda: second.events.emit(event),
+        "event sink accepted another scope",
+    )
+    checks.append("event_isolation")
+    return HostedContractReport(tuple(checks))
+
+
+async def assert_async_hosted_services_contract(
+    services: AsyncRuntimeServices,
+    *,
+    first_scope: ExecutionScope,
+    second_scope: ExecutionScope,
+) -> HostedContractReport:
+    """Exercise native async run, approval, and event service boundaries."""
+    _contract_scopes(first_scope, second_scope)
+    first = await services.resolve_async(first_scope)
+    second = await services.resolve_async(second_scope)
+    checks: list[str] = []
+    await first.runs.submit(
+        first_scope,
+        _contract_submission(),
+        actor="contract",
+    )
+    await _must_reject_async(
+        lambda: second.runs.get(second_scope, first_scope.run_id),
+        "async durable runs allowed a cross-scope read",
+    )
+    checks.append("async_run_isolation")
+
+    emit = first.events.emit(_contract_event(first_scope))
+    _require(inspect.isawaitable(emit), "async event sink did not return an awaitable")
+    await emit
+    await _must_reject_async(
+        lambda: second.events.emit(_contract_event(first_scope)),
+        "async event sink accepted another scope",
+    )
+    checks.append("async_event_isolation")
+
+    first_approvals = await first.approvals.list(
+        first_scope,
+        run_id=first_scope.run_id,
+    )
+    second_approvals = await second.approvals.list(
+        second_scope,
+        run_id=second_scope.run_id,
+    )
+    _require(
+        first_approvals == second_approvals == (),
+        "async approval stores did not start isolated",
+    )
+    checks.append("async_approval_isolation")
+    return HostedContractReport(tuple(checks))
+
+
+def assert_durable_execution_contract(
+    runs: Any,
+    approvals: Any,
+    *,
+    scope: ExecutionScope,
+) -> HostedContractReport:
+    """Exercise duplicate, unknown-effect, reconciliation, and approval rules."""
+    first = runs.submit(scope, _contract_submission(), actor="contract")
+    duplicate = runs.submit(scope, _contract_submission(), actor="contract")
+    _require(first.id == duplicate.id, "duplicate trigger created another run")
+    claim = runs.claim(scope, worker_id="contract-worker-a")
+    _require(claim is not None, "durable run could not be claimed")
+    runs.start_step(scope, claim, "contract")
+    effect = runs.begin_effect(
+        scope,
+        claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    repeated = runs.begin_effect(
+        scope,
+        claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    _require(effect.id == repeated.id, "logical effect was not idempotent")
+    runs.mark_effect_started(scope, claim, effect.id)
+    unknown = runs.mark_effect_unknown(
+        scope,
+        claim,
+        effect.id,
+        reason="contract transport disconnected after dispatch",
+    )
+    _require(unknown.status is EffectStatus.UNKNOWN, "effect did not become unknown")
+    _require(
+        runs.get(scope, scope.run_id).status is RunStatus.UNKNOWN,
+        "unknown effect did not stop its run",
+    )
+    reconciled = runs.reconcile_effect(
+        scope,
+        effect.id,
+        decision=ReconciliationDecision.RETRY,
+        actor="contract-operator",
+        reason="contract target confirms no write",
+    )
+    _require(
+        reconciled.effect.status is EffectStatus.INTENDED,
+        "reconciliation did not make the logical effect retryable",
+    )
+    retry_claim = runs.claim(scope, worker_id="contract-worker-b")
+    _require(retry_claim is not None, "reconciled run could not be reclaimed")
+    runs.start_step(scope, retry_claim, "contract")
+    retry_effect = runs.begin_effect(
+        scope,
+        retry_claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    _require(retry_effect.id == effect.id, "reconciliation duplicated the effect")
+    runs.mark_effect_started(scope, retry_claim, effect.id)
+    runs.complete_effect(
+        scope,
+        retry_claim,
+        effect.id,
+        result_digest="sha256:contract-result",
+    )
+    runs.complete_step(
+        scope,
+        retry_claim,
+        "contract",
+        result={"status": "completed"},
+    )
+
+    approval_scope = scope.child(run_id=f"{scope.run_id}-approval")
+    runs.submit(
+        approval_scope,
+        _contract_submission(idempotency_key="hosted-contract-approval"),
+        actor="contract",
+    )
+    approval_claim = runs.claim(
+        approval_scope,
+        worker_id="contract-worker-a",
+    )
+    _require(approval_claim is not None, "approval run could not be claimed")
+    runs.start_step(approval_scope, approval_claim, "contract")
+    coordinator = DurableApprovalService(approvals, runs)
+    paused = coordinator.request(
+        approval_scope,
+        approval_claim,
+        _contract_approval(),
+    )
+    _require(
+        paused.run.status is RunStatus.WAITING_FOR_APPROVAL,
+        "approval did not release the worker",
+    )
+    DurableApprovalService(approvals, runs).decide(
+        approval_scope,
+        paused.approval.id,
+        ApprovalDecision.APPROVE,
+        decided_by="contract-operator",
+        reason="contract approval",
+        idempotency_key="hosted-contract-decision",
+    )
+    resumed = DurableApprovalService(approvals, runs).resume(
+        approval_scope,
+        paused.approval.id,
+        _contract_approval_validation(approval_scope),
+        actor="contract-worker-b",
+    )
+    _require(resumed.resumed, "approved run did not resume")
+    _require(
+        resumed.approval.status is ApprovalStatus.CONSUMED,
+        "approval was not consumed exactly once",
+    )
+    sequences = [
+        event.sequence
+        for event in runs.events(scope, scope.run_id)
+    ]
+    _require(
+        sequences == list(range(1, len(sequences) + 1)),
+        "durable event sequence is not deterministic",
+    )
+    return HostedContractReport(
+        (
+            "duplicate_run",
+            "idempotent_effect",
+            "unknown_effect",
+            "effect_reconciliation",
+            "cross_process_approval",
+            "event_ordering",
+        )
+    )
+
+
+async def assert_async_durable_execution_contract(
+    runs: Any,
+    approvals: Any,
+    *,
+    scope: ExecutionScope,
+) -> HostedContractReport:
+    """Native async equivalent of :func:`assert_durable_execution_contract`."""
+    first = await runs.submit(scope, _contract_submission(), actor="contract")
+    duplicate = await runs.submit(scope, _contract_submission(), actor="contract")
+    _require(first.id == duplicate.id, "async duplicate trigger created another run")
+    claim = await runs.claim(scope, worker_id="contract-worker-a")
+    _require(claim is not None, "async durable run could not be claimed")
+    await runs.start_step(scope, claim, "contract")
+    effect = await runs.begin_effect(
+        scope,
+        claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    repeated = await runs.begin_effect(
+        scope,
+        claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    _require(effect.id == repeated.id, "async logical effect was not idempotent")
+    await runs.mark_effect_started(scope, claim, effect.id)
+    unknown = await runs.mark_effect_unknown(
+        scope,
+        claim,
+        effect.id,
+        reason="contract transport disconnected after dispatch",
+    )
+    _require(unknown.status is EffectStatus.UNKNOWN, "async effect did not become unknown")
+    await runs.reconcile_effect(
+        scope,
+        effect.id,
+        decision=ReconciliationDecision.RETRY,
+        actor="contract-operator",
+        reason="contract target confirms no write",
+    )
+    retry_claim = await runs.claim(scope, worker_id="contract-worker-b")
+    _require(retry_claim is not None, "async reconciled run could not be reclaimed")
+    await runs.start_step(scope, retry_claim, "contract")
+    retry_effect = await runs.begin_effect(
+        scope,
+        retry_claim,
+        "contract",
+        logical_key="contract:external-write",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+    )
+    _require(retry_effect.id == effect.id, "async reconciliation duplicated the effect")
+    await runs.mark_effect_started(scope, retry_claim, effect.id)
+    await runs.complete_effect(
+        scope,
+        retry_claim,
+        effect.id,
+        result_digest="sha256:contract-result",
+    )
+    await runs.complete_step(
+        scope,
+        retry_claim,
+        "contract",
+        result={"status": "completed"},
+    )
+
+    approval_scope = scope.child(run_id=f"{scope.run_id}-approval")
+    await runs.submit(
+        approval_scope,
+        _contract_submission(idempotency_key="hosted-contract-approval"),
+        actor="contract",
+    )
+    approval_claim = await runs.claim(
+        approval_scope,
+        worker_id="contract-worker-a",
+    )
+    _require(approval_claim is not None, "async approval run could not be claimed")
+    await runs.start_step(approval_scope, approval_claim, "contract")
+    coordinator = AsyncDurableApprovalService(approvals, runs)
+    paused = await coordinator.request(
+        approval_scope,
+        approval_claim,
+        _contract_approval(),
+    )
+    await AsyncDurableApprovalService(approvals, runs).decide(
+        approval_scope,
+        paused.approval.id,
+        ApprovalDecision.APPROVE,
+        decided_by="contract-operator",
+        reason="contract approval",
+        idempotency_key="hosted-contract-decision",
+    )
+    resumed = await AsyncDurableApprovalService(approvals, runs).resume(
+        approval_scope,
+        paused.approval.id,
+        _contract_approval_validation(approval_scope),
+        actor="contract-worker-b",
+    )
+    _require(resumed.resumed, "async approved run did not resume")
+    sequences = [
+        event.sequence
+        for event in await runs.events(scope, scope.run_id)
+    ]
+    _require(
+        sequences == list(range(1, len(sequences) + 1)),
+        "async durable event sequence is not deterministic",
+    )
+    return HostedContractReport(
+        (
+            "async_duplicate_run",
+            "async_idempotent_effect",
+            "async_effect_reconciliation",
+            "async_cross_process_approval",
+            "async_event_ordering",
+        )
+    )
+
+
+def assert_gateway_store_contract(
+    store: Any,
+    *,
+    target: GatewayRunTarget,
+) -> HostedContractReport:
+    """Exercise portable inbox, outbox, stale-claim, and reconciliation rules."""
+    envelope = _contract_envelope()
+    first = store.ingest(
+        envelope,
+        profile_id="contract",
+        run_target=target,
+    )
+    duplicate = store.ingest(
+        envelope,
+        profile_id="contract",
+        run_target=target,
+    )
+    _require(first.created, "gateway did not create the first inbox record")
+    _require(not duplicate.created, "gateway did not deduplicate the inbox record")
+    _require(
+        duplicate.record.id == first.record.id,
+        "duplicate gateway input changed ownership",
+    )
+    claim = store.claim_execution(global_limit=1, profile_limit=1)
+    _require(claim is not None, "gateway did not claim queued input")
+    outbound = _contract_outbound(first.record.id)
+    _require(
+        store.complete_execution(
+            first.record.id,
+            claim.execution_token,
+            (outbound,),
+        ),
+        "gateway rejected its active execution claim",
+    )
+    _require(
+        not store.complete_execution(
+            first.record.id,
+            "stale-worker",
+            (outbound,),
+        ),
+        "gateway accepted a stale execution claim",
+    )
+    delivery = store.claim_delivery()
+    _require(delivery is not None, "gateway did not claim durable delivery")
+    _require(
+        store.record_delivery(
+            delivery.id,
+            delivery.delivery_token,
+            DeliveryReceipt(
+                envelope_id=delivery.id,
+                state=DeliveryState.UNKNOWN,
+                attempt=delivery.attempt_count,
+            ),
+        ),
+        "gateway rejected its active delivery claim",
+    )
+    _require(
+        store.claim_delivery() is None,
+        "gateway blindly resent an ambiguous provider outcome",
+    )
+    _require(
+        store.reconcile_delivery(
+            delivery.id,
+            DeliveryReceipt(
+                envelope_id=delivery.id,
+                state=DeliveryState.DELIVERED,
+                attempt=delivery.attempt_count,
+            ),
+        ),
+        "gateway could not reconcile an ambiguous provider outcome",
+    )
+    return HostedContractReport(
+        (
+            "inbox_deduplication",
+            "stale_claim_rejection",
+            "durable_outbox",
+            "delivery_reconciliation",
+        )
+    )
+
+
+async def assert_async_gateway_store_contract(
+    store: Any,
+    *,
+    target: GatewayRunTarget,
+) -> HostedContractReport:
+    """Native async equivalent of :func:`assert_gateway_store_contract`."""
+    envelope = _contract_envelope()
+    first = await store.ingest(
+        envelope,
+        profile_id="contract",
+        run_target=target,
+    )
+    duplicate = await store.ingest(
+        envelope,
+        profile_id="contract",
+        run_target=target,
+    )
+    _require(first.created and not duplicate.created, "async inbox deduplication failed")
+    claim = await store.claim_execution(global_limit=1, profile_limit=1)
+    _require(claim is not None, "async gateway did not claim queued input")
+    outbound = _contract_outbound(first.record.id)
+    _require(
+        await store.complete_execution(
+            first.record.id,
+            claim.execution_token,
+            (outbound,),
+        ),
+        "async gateway rejected its active execution claim",
+    )
+    delivery = await store.claim_delivery()
+    _require(delivery is not None, "async gateway did not claim durable delivery")
+    _require(
+        await store.record_delivery(
+            delivery.id,
+            delivery.delivery_token,
+            DeliveryReceipt(
+                envelope_id=delivery.id,
+                state=DeliveryState.UNKNOWN,
+                attempt=delivery.attempt_count,
+            ),
+        ),
+        "async gateway rejected its active delivery claim",
+    )
+    _require(
+        await store.claim_delivery() is None,
+        "async gateway blindly resent an ambiguous provider outcome",
+    )
+    _require(
+        await store.reconcile_delivery(
+            delivery.id,
+            DeliveryReceipt(
+                envelope_id=delivery.id,
+                state=DeliveryState.DELIVERED,
+                attempt=delivery.attempt_count,
+            ),
+        ),
+        "async gateway reconciliation failed",
+    )
+    return HostedContractReport(
+        (
+            "async_inbox_deduplication",
+            "async_durable_outbox",
+            "async_delivery_reconciliation",
+        )
+    )
+
+
 def _serialize_response(response: ScriptedResponse) -> str:
     if isinstance(response, str):
         return response
@@ -114,4 +682,121 @@ def _serialize_response(response: ScriptedResponse) -> str:
     raise TypeError("Scripted responses must be strings, mappings, or AgentAction dataclasses")
 
 
-__all__ = ["ScriptedLLMClient"]
+def _contract_scopes(
+    first_scope: ExecutionScope,
+    second_scope: ExecutionScope,
+) -> None:
+    _require(
+        first_scope.tenant_id != second_scope.tenant_id
+        or first_scope.workspace_id != second_scope.workspace_id,
+        "contract scopes must cross a tenant or workspace boundary",
+    )
+
+
+def _contract_submission(
+    *,
+    idempotency_key: str = "hosted-contract-run",
+) -> RunSubmission:
+    return RunSubmission(
+        idempotency_key=idempotency_key,
+        input_digest="sha256:hosted-contract-input",
+        definition_digest="sha256:hosted-contract-definition",
+        steps=(StepDefinition(id="contract", name="Contract step"),),
+    )
+
+
+def _contract_approval() -> ApprovalSubmission:
+    return ApprovalSubmission(
+        step_id="contract",
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+        policy_version="contract-policy-1",
+        preview={"record_id": "contract-record"},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+
+def _contract_approval_validation(
+    scope: ExecutionScope,
+) -> ApprovalValidation:
+    return ApprovalValidation(
+        scope=scope,
+        tool_name="contract_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:contract-arguments",
+        policy_version="contract-policy-1",
+    )
+
+
+def _contract_event(scope: ExecutionScope) -> AgentEvent:
+    return AgentEvent(
+        name="run.queued",
+        conversation_id=scope.conversation_id or scope.run_id,
+        execution_scope=scope,
+        payload=RunLifecyclePayload(
+            status="queued",
+            action="contract",
+        ),
+    )
+
+
+def _contract_envelope() -> InboundEnvelope:
+    return InboundEnvelope(
+        event_id="hosted-contract-event",
+        idempotency_key="hosted-contract-event",
+        identity=ChannelIdentity("contract", "primary", "actor"),
+        destination_id="destination",
+        parts=(TextPart("contract input"),),
+        scope=ChannelScope.DIRECT,
+        authentication=AuthenticationState.AUTHENTICATED,
+        trust=TrustLevel.TRUSTED,
+    )
+
+
+def _contract_outbound(inbox_id: str) -> OutboundEnvelope:
+    return OutboundEnvelope(
+        envelope_id=f"contract-reply-{inbox_id}",
+        profile_id="contract",
+        conversation_id="contract-conversation",
+        target=DeliveryTarget("contract", "primary", "destination"),
+        text="contract output",
+    )
+
+
+def _must_reject(call: Any, message: str) -> None:
+    try:
+        call()
+    except (KeyError, LookupError, PermissionError, ValueError):
+        return
+    raise HostedContractError(message)
+
+
+async def _must_reject_async(call: Any, message: str) -> None:
+    try:
+        result = call()
+        if inspect.isawaitable(result):
+            await result
+    except (KeyError, LookupError, PermissionError, ValueError):
+        return
+    raise HostedContractError(message)
+
+
+def _require(condition: object, message: str) -> None:
+    if not condition:
+        raise HostedContractError(message)
+
+
+__all__ = [
+    "HostedContractError",
+    "HostedContractReport",
+    "ScriptedLLMClient",
+    "assert_async_durable_execution_contract",
+    "assert_async_gateway_store_contract",
+    "assert_async_hosted_services_contract",
+    "assert_durable_execution_contract",
+    "assert_gateway_store_contract",
+    "assert_hosted_services_contract",
+]

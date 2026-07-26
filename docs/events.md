@@ -43,7 +43,8 @@ lowercase names are the compatibility-stable catalog:
 | durable `step.*` transitions | `StepLifecyclePayload` | Step attempts and committed checkpoints. |
 | durable `effect.*` transitions | `EffectLifecyclePayload` or `ReconciliationPayload` | Effect intent, dispatch, outcome, retry, and operator reconciliation. |
 | durable `approval.*` transitions | `ApprovalLifecyclePayload` | Request, decision, consumption, invalidation, and expiry. |
-| `delivery.*` transitions | `DeliveryPayload` | Application delivery lifecycle. |
+| `delivery.started`, `delivery.completed`, `delivery.failed` | `DeliveryPayload` | An outbound delivery was claimed and reached a known outcome. |
+| `delivery.unknown`, `delivery.reconciled`, `delivery.dead_lettered` | `DeliveryPayload` | An ambiguous outcome awaits evidence, was reconciled, or became terminal. |
 
 Unknown future trace events are excluded until Chulk explicitly adds a public
 projection. Permission payloads deliberately omit raw tool arguments.
@@ -70,6 +71,9 @@ Durable transitions are first committed to `RunStore` as append-only
 `RunEvent` records. `RunEventPublisher` projects them to schema-v3 envelopes
 using the durable event ID and sequence, chaining each event to its predecessor.
 Application sinks can therefore deduplicate and reconstruct deterministically.
+`AsyncRunEventPublisher` awaits async sinks directly. Hosted gateway events use
+the same scope, source-event, correlation, and idempotency fields as their
+durable run.
 
 ```python
 async for event in agent.run_events_async("Explain the change"):

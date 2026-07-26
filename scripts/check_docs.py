@@ -11,10 +11,16 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DOCS = ROOT / "docs"
 TOPICS = (
     "quickstart.md",
     "sdk.md",
+    "hosting.md",
+    "gateway.md",
+    "scheduling.md",
+    "authoring.md",
     "configuration.md",
     "providers.md",
     "tools.md",
@@ -27,6 +33,7 @@ TOPICS = (
     "safety.md",
     "sdk-errors.md",
     "release-policy.md",
+    "telegram.md",
 )
 LINK_SOURCES = tuple(DOCS / name for name in ("index.md", *TOPICS)) + (
     ROOT / "README.md",
@@ -77,9 +84,20 @@ def check_public_policy() -> None:
         _require(label in policy, f"release policy is missing the {label} label")
     _require("chulk.__all__" in policy, "release policy must govern all top-level public exports")
     _require(bool(chulk.__all__), "chulk.__all__ must declare the top-level public surface")
+    expected_testing_exports = [
+        "HostedContractError",
+        "HostedContractReport",
+        "ScriptedLLMClient",
+        "assert_async_durable_execution_contract",
+        "assert_async_gateway_store_contract",
+        "assert_async_hosted_services_contract",
+        "assert_durable_execution_contract",
+        "assert_gateway_store_contract",
+        "assert_hosted_services_contract",
+    ]
     _require(
-        testing.__all__ == ["ScriptedLLMClient"],
-        "chulk.testing must expose only ScriptedLLMClient",
+        testing.__all__ == expected_testing_exports,
+        "chulk.testing exports do not match the documented test utilities",
     )
     _require(
         "ScriptedLLMClient" not in chulk.__all__,

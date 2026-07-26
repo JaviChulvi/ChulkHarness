@@ -63,9 +63,19 @@ def test_scripted_client_reports_exhaustion_as_non_retryable_provider_error() ->
     assert raised.value.retryable is False
 
 
-def test_testing_module_does_not_widen_top_level_exports() -> None:
+def test_testing_module_exports_only_documented_test_utilities() -> None:
     import chulk
     import chulk.testing as testing
 
-    assert testing.__all__ == ["ScriptedLLMClient"]
+    assert testing.__all__ == [
+        "HostedContractError",
+        "HostedContractReport",
+        "ScriptedLLMClient",
+        "assert_async_durable_execution_contract",
+        "assert_async_gateway_store_contract",
+        "assert_async_hosted_services_contract",
+        "assert_durable_execution_contract",
+        "assert_gateway_store_contract",
+        "assert_hosted_services_contract",
+    ]
     assert "ScriptedLLMClient" not in chulk.__all__

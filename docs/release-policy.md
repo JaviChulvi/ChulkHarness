@@ -16,6 +16,8 @@ advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
 `chulk.tools`, and `chulk.testing`.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
+The `assert_*_contract` functions in `chulk.testing` are public-stable
+compatibility gates for third-party hosted services and gateway stores.
 
 `chulk.hosting.reference` is a documented example and contract-test fixture,
 not a durable production service implementation.
@@ -24,6 +26,10 @@ The SQLite and async SQLite run/approval stores are **public-provisional**
 reference adapters. The store protocols, immutable records, transition enums,
 and durable execution/approval coordinators are public-stable. Other concrete
 SQLite implementations remain internal.
+
+Gateway and scheduling protocols, run-target records, and hosted
+definition/run submitters are public-stable. The SQLite gateway ledger remains
+a public-provisional reference adapter.
 
 `AgentHandle`, `AsyncAgentHandle`, `ChatAgent`, `AsyncChatAgent`, and their
 lowercase compatibility factories are **public-provisional** for the current

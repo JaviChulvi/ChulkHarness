@@ -17,6 +17,8 @@ Choose the path that matches what you are doing:
 - [Quickstart](quickstart.md): install to first deterministic result.
 - [SDK](sdk.md): facades, lifecycle, results, exceptions, and async boundaries.
 - [Hosted runtime](hosting.md): service injection, execution scope, and tool policy.
+- [Hosted gateway](gateway.md): durable ingress, definition routing, delivery, and reconciliation.
+- [Hosted scheduling](scheduling.md): definition-pinned durable occurrences.
 - [Portable authoring](authoring.md): immutable definitions, constrained compilation, publication, and revocation.
 - [Configuration](configuration.md): precedence, paths, and host ownership.
 - [Providers](providers.md): injected, scripted, hosted, and local clients.

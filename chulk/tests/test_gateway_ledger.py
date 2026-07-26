@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
+from chulk import ExecutionScope
 from chulk.gateway import (
     AuthenticationState,
     ChannelIdentity,
@@ -13,12 +15,15 @@ from chulk.gateway import (
     DeliveryReceipt,
     DeliveryState,
     DeliveryTarget,
+    GatewayRunTarget,
     InboundEnvelope,
     OutboundEnvelope,
     SQLiteGatewayLedger,
     TextPart,
     TrustLevel,
 )
+from chulk.profiles.store import CONTROL_MIGRATIONS
+from chulk.storage import initialize_sqlite_database, sqlite_connection
 
 
 NOW = datetime(2026, 7, 25, 10, tzinfo=timezone.utc)
@@ -118,6 +123,104 @@ def test_ingest_is_idempotent_and_round_trips_envelope(tmp_path) -> None:
     collision = _inbound("1", destination_id="different")
     with pytest.raises(ValueError, match="idempotency key collision"):
         ledger.ingest(collision, profile_id="work")
+
+
+def test_ingest_binds_one_scope_and_published_definition(tmp_path) -> None:
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    envelope = _inbound("hosted")
+    scope = ExecutionScope(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        actor_id="actor-a",
+        agent_id="support",
+        agent_version="1.0.0",
+        run_id="run-hosted",
+    )
+    target = GatewayRunTarget(
+        scope=scope,
+        definition_id="support",
+        definition_version="1.0.0",
+        definition_digest="sha256:definition",
+    )
+
+    first = ledger.ingest(envelope, profile_id="work", run_target=target)
+    duplicate = ledger.ingest(envelope, profile_id="work", run_target=target)
+
+    assert first.record.run_target == target
+    assert not duplicate.created
+    with pytest.raises(ValueError, match="different hosted run"):
+        ledger.ingest(
+            envelope,
+            profile_id="work",
+            run_target=GatewayRunTarget(
+                scope=scope,
+                definition_id="support",
+                definition_version="1.0.0",
+                definition_digest="sha256:changed",
+            ),
+        )
+
+
+def test_hosted_gateway_migration_preserves_v4_inbox_rows(tmp_path) -> None:
+    path = tmp_path / "control.sqlite"
+    envelope = _inbound("legacy")
+    part = envelope.parts[0]
+    assert isinstance(part, TextPart)
+    encoded = json.dumps(
+        {
+            "event_id": envelope.event_id,
+            "idempotency_key": envelope.idempotency_key,
+            "identity": {
+                "adapter": envelope.identity.adapter,
+                "account_id": envelope.identity.account_id,
+                "principal_id": envelope.identity.principal_id,
+            },
+            "destination_id": envelope.destination_id,
+            "parts": [
+                {
+                    "kind": "text",
+                    "text": part.text,
+                    "external_content": True,
+                }
+            ],
+            "scope": envelope.scope.value,
+            "authentication": envelope.authentication.value,
+            "trust": envelope.trust.value,
+            "thread_id": envelope.thread_id,
+            "received_at": envelope.received_at,
+            "external_content": envelope.external_content,
+            "extensions": {},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    initialize_sqlite_database(path, migrations=CONTROL_MIGRATIONS[:4])
+    with sqlite_connection(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO gateway_inbox (
+                id, profile_id, adapter, account_id, event_id,
+                idempotency_key, conversation_key, principal_id,
+                destination_id, thread_id, envelope_json, state,
+                created_at, updated_at
+            ) VALUES (
+                'legacy-inbox', 'work', 'telegram', 'primary', 'legacy',
+                'telegram:primary:legacy', 'legacy-conversation', 'user-7',
+                'chat-9', NULL, ?, 'queued', ?, ?
+            )
+            """,
+            (encoded, NOW.isoformat(), NOW.isoformat()),
+        )
+
+    ledger = SQLiteGatewayLedger(path)
+    stored = ledger.get_inbox("legacy-inbox")
+
+    assert stored is not None
+    assert stored.envelope == envelope
+    assert stored.run_target is None
+    assert stored.dead_lettered_at is None
+    with sqlite_connection(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_execution_claims_preserve_fifo_and_enforce_concurrency_limits(tmp_path) -> None:
@@ -292,8 +395,23 @@ def test_transport_acceptance_is_not_a_final_delivery_checkpoint(tmp_path) -> No
         now=NOW,
     )
     assert not ledger.inbox_complete(inbox.id)
-    assert ledger.claim_delivery(now=NOW + timedelta(milliseconds=500)) is None
-    assert ledger.claim_delivery(now=NOW + timedelta(seconds=1)) is not None
+    ambiguous = ledger.get_outbox(delivery.id)
+    assert ambiguous is not None
+    assert ambiguous.state == DeliveryState.UNKNOWN.value
+    assert ambiguous.reconciliation_required
+    assert ledger.claim_delivery(now=NOW + timedelta(days=1)) is None
+
+    assert ledger.reconcile_delivery(
+        delivery.id,
+        DeliveryReceipt(
+            envelope_id=delivery.id,
+            state=DeliveryState.DELIVERED,
+            attempt=1,
+            adapter_message_id="provider-42",
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+    assert ledger.inbox_complete(inbox.id)
 
 
 def test_backpressure_counts_executed_work_with_pending_delivery(tmp_path) -> None:

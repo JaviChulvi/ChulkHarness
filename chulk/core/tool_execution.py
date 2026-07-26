@@ -25,6 +25,8 @@ from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResu
 from chulk.tools.policy import (
     DataClassification,
     ToolAuthorization,
+    ToolConcurrency,
+    ToolEffect,
     ToolIdentity,
     ToolPolicy,
     ToolPolicyHooks,
@@ -421,6 +423,39 @@ class ToolExecutor:
                 await asyncio.sleep(retry_policy.backoff_seconds)
         assert result is not None
         return self._versioned_result(tool, result, attempts)
+
+    async def execute_batch_async(
+        self,
+        calls: list[tuple[str, dict[str, Any]]],
+        turn: TurnState,
+    ) -> tuple[ToolResult, ...]:
+        """Run only an entirely independent read batch concurrently.
+
+        Result order always follows input order. Any mutating, unknown-effect,
+        or serial tool makes the complete batch execute serially so dependent
+        calls cannot overtake one another.
+        """
+        if not calls:
+            return ()
+        parallel = all(
+            _parallel_safe(self._registered_tool(name))
+            for name, _arguments in calls
+        )
+        if not parallel:
+            return tuple(
+                [
+                    await self.execute_async(name, arguments, turn)
+                    for name, arguments in calls
+                ]
+            )
+        return tuple(
+            await asyncio.gather(
+                *(
+                    self.execute_async(name, arguments, turn)
+                    for name, arguments in calls
+                )
+            )
+        )
 
     def _authorization_result(
         self,
@@ -1216,6 +1251,16 @@ class ToolExecutor:
             tool_policy=request.tool_policy,
             arguments_digest=request.arguments_digest,
         )
+
+
+def _parallel_safe(tool: Any) -> bool:
+    if tool is None:
+        return False
+    policy = tool.resolved_policy()
+    return (
+        policy.effect is ToolEffect.READ
+        and policy.concurrency is ToolConcurrency.PARALLEL_SAFE
+    )
 
 
 def _attempt_policy(tool, retry_policy) -> tuple[int, bool]:

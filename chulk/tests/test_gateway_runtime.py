@@ -16,6 +16,8 @@ from chulk.gateway import (
     DeliveryTarget,
     GatewayBackpressureError,
     GatewayLimits,
+    GatewayPoisonEventError,
+    GatewayRunTarget,
     GatewayRuntime,
     InboundEnvelope,
     OutboundEnvelope,
@@ -24,6 +26,7 @@ from chulk.gateway import (
     TextPart,
     TrustLevel,
 )
+from chulk import ExecutionScope
 
 
 def _envelope(
@@ -328,3 +331,274 @@ async def test_stop_command_cancels_earlier_conversation_work_before_fifo(
     assert stop is not None and stop.state == "queued"
     assert await runtime.run_once() == (1, 1)
     assert adapter.delivered == ["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_hosted_ingress_binds_definition_and_submits_before_ack(
+    tmp_path,
+) -> None:
+    calls: list[str] = []
+    submitted: dict[str, str] = {}
+    events = []
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    router = SQLiteGatewayRouter(tmp_path / "control.sqlite")
+    router.add_route(
+        adapter="fake",
+        account_id="primary",
+        principal_id="user-7",
+        profile_id="work",
+    )
+    adapter = FakeAdapter()
+    scope = ExecutionScope(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        actor_id="user-7",
+        agent_id="support",
+        agent_version="1.0.0",
+        run_id="run-hosted",
+    )
+    target = GatewayRunTarget(
+        scope=scope,
+        definition_id="support",
+        definition_version="1.0.0",
+        definition_digest="sha256:definition",
+    )
+
+    class Resolver:
+        async def resolve(self, route, envelope):
+            calls.append("resolve")
+            return target
+
+    class Submitter:
+        async def submit(self, selected, envelope, *, idempotency_key):
+            calls.append("submit")
+            assert selected == target
+            assert adapter.acknowledged == []
+            assert ledger.find_inbox(
+                adapter="fake",
+                account_id="primary",
+                idempotency_key=idempotency_key,
+            ) is not None
+            return submitted.setdefault(idempotency_key, selected.scope.run_id)
+
+    class Sink:
+        async def emit(self, event):
+            events.append(event)
+
+    async def execute(profile_id, envelope):
+        return (
+            OutboundEnvelope(
+                profile_id=profile_id,
+                conversation_id="conversation-1",
+                target=DeliveryTarget(
+                    "fake",
+                    "primary",
+                    envelope.destination_id,
+                ),
+                text="hosted response",
+            ),
+        )
+
+    runtime = GatewayRuntime(
+        ledger=ledger,
+        router=router,
+        adapters=(adapter,),
+        executor=execute,
+        scope_resolver=Resolver(),
+        run_submitter=Submitter(),
+        event_sink=Sink(),
+    )
+    envelope = _envelope("hosted")
+
+    assert await runtime.accept(adapter, envelope)
+    assert calls == ["resolve", "submit"]
+    assert adapter.acknowledged == ["hosted"]
+    stored = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key=envelope.idempotency_key,
+    )
+    assert stored is not None
+    assert stored.run_target == target
+    assert await runtime.run_once() == (1, 1)
+    assert [event.name for event in events] == [
+        "delivery.started",
+        "delivery.completed",
+    ]
+    assert all(event.execution_scope == scope for event in events)
+    assert all(event.source_event_id == envelope.event_id for event in events)
+
+
+@pytest.mark.asyncio
+async def test_invalid_hosted_target_is_visible_dead_letter_before_execution(
+    tmp_path,
+) -> None:
+    async def execute(_profile_id, _envelope):
+        raise AssertionError("poison input must not execute")
+
+    class Resolver:
+        async def resolve(self, route, envelope):
+            raise GatewayPoisonEventError("published definition is revoked")
+
+    class Submitter:
+        async def submit(self, target, envelope, *, idempotency_key):
+            raise AssertionError("poison input must not submit a run")
+
+    runtime, ledger, adapter = _runtime(tmp_path, execute)
+    runtime.scope_resolver = Resolver()
+    runtime.run_submitter = Submitter()
+    envelope = _envelope("poison")
+
+    assert not await runtime.accept(adapter, envelope)
+    stored = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key=envelope.idempotency_key,
+    )
+    assert stored is not None
+    assert stored.state == "dead_letter"
+    assert stored.last_error == "published definition is revoked"
+    assert adapter.acknowledged == ["poison"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_run_submission_is_dead_lettered_and_acknowledged(
+    tmp_path,
+) -> None:
+    async def execute(_profile_id, _envelope):
+        raise AssertionError("invalid submission must not execute")
+
+    scope = ExecutionScope(
+        tenant_id="tenant-a",
+        workspace_id="workspace-a",
+        actor_id="user-7",
+        agent_id="support",
+        agent_version="1.0.0",
+        run_id="run-hosted",
+    )
+    target = GatewayRunTarget(
+        scope=scope,
+        definition_id="support",
+        definition_version="1.0.0",
+        definition_digest="sha256:definition",
+    )
+
+    class Resolver:
+        async def resolve(self, route, envelope):
+            return target
+
+    class Submitter:
+        async def submit(self, selected, envelope, *, idempotency_key):
+            return "different-run"
+
+    runtime, ledger, adapter = _runtime(tmp_path, execute)
+    runtime.scope_resolver = Resolver()
+    runtime.run_submitter = Submitter()
+    envelope = _envelope("invalid-submission")
+
+    assert not await runtime.accept(adapter, envelope)
+    assert adapter.acknowledged == ["invalid-submission"]
+    stored = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key=envelope.idempotency_key,
+    )
+    assert stored is not None
+    assert stored.state == DeliveryState.DEAD_LETTER.value
+    assert stored.last_error == (
+        "gateway submitter returned a different durable run id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delivery_exhaustion_dead_letters_and_unknown_reconciles(
+    tmp_path,
+) -> None:
+    class ResilientAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+            self.accept_first = False
+
+        async def deliver(self, envelope):
+            self.attempts += 1
+            state = (
+                DeliveryState.ACCEPTED
+                if self.accept_first
+                else DeliveryState.RETRYABLE
+            )
+            return DeliveryReceipt(
+                envelope_id=envelope.envelope_id,
+                state=state,
+                attempt=self.attempts,
+                retry_after_seconds=0,
+                error_message="provider timeout",
+            )
+
+        async def reconcile(self, envelope, *, checkpoint, attempt):
+            return DeliveryReceipt(
+                envelope_id=envelope.envelope_id,
+                state=DeliveryState.DELIVERED,
+                attempt=attempt,
+                adapter_message_id="provider-42",
+            )
+
+    async def execute(profile_id, envelope):
+        return (
+            OutboundEnvelope(
+                profile_id=profile_id,
+                conversation_id="conversation",
+                target=DeliveryTarget("fake", "primary", envelope.destination_id),
+                text="answer",
+            ),
+        )
+
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    router = SQLiteGatewayRouter(tmp_path / "control.sqlite")
+    router.add_route(
+        adapter="fake",
+        account_id="primary",
+        principal_id="user-7",
+        profile_id="work",
+    )
+    adapter = ResilientAdapter()
+    runtime = GatewayRuntime(
+        ledger=ledger,
+        router=router,
+        adapters=(adapter,),
+        executor=execute,
+        limits=GatewayLimits(
+            max_delivery_attempts=2,
+            idle_delay_seconds=0.01,
+        ),
+        delivery_retry_delay_seconds=0,
+    )
+    await runtime.accept(adapter, _envelope("exhaust"))
+    assert await runtime.run_once() == (1, 2)
+    exhausted_inbox = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key="fake:primary:exhaust",
+    )
+    assert exhausted_inbox is not None
+    exhausted = ledger.list_outbox(exhausted_inbox.id)[0]
+    assert exhausted.state == DeliveryState.DEAD_LETTER.value
+    assert exhausted.attempt_count == 2
+
+    adapter.accept_first = True
+    adapter.attempts = 0
+    await runtime.accept(adapter, _envelope("unknown", destination="chat-10"))
+    assert await runtime.run_once() == (1, 1)
+    unknown_inbox = ledger.find_inbox(
+        adapter="fake",
+        account_id="primary",
+        idempotency_key="fake:primary:unknown",
+    )
+    assert unknown_inbox is not None
+    unknown = ledger.list_outbox(unknown_inbox.id)[0]
+    assert unknown.state == DeliveryState.UNKNOWN.value
+
+    assert await runtime.reconcile_available() == 1
+    resolved = ledger.get_outbox(unknown.id)
+    assert resolved is not None
+    assert resolved.state == DeliveryState.DELIVERED.value

@@ -8,7 +8,10 @@ service with SQLite or a local directory.
 The credential-free [reference application](../examples/hosted_runtime/hosted_app.py)
 runs sync and async agents with tenant-aware in-memory services, a versioned
 read-only tool, and host-owned event collection. It asserts that the configured
-project root stays empty.
+project root stays empty. The companion
+[resilience contract](../examples/hosted_runtime/resilience_contract.py)
+checks isolation, duplicate runs and effects, cross-process approval,
+reconciliation, event ordering, and gateway delivery.
 
 ## Execution scope
 
@@ -77,6 +80,14 @@ scope and default to runtime ownership; pass
 and review services. An explicit bundle is complete: invalid bindings and
 factories that return no resource fail during construction, before model or tool
 work.
+
+Async hosts may use `AsyncServiceBinding.host(...)`,
+`AsyncServiceBinding.runtime(...)`, or `AsyncServiceBinding.scoped(...)`.
+Await native async factories with `await AsyncHostedRuntime.create(...)`.
+Factories and runtime-owned `aclose()` methods run on the caller event loop;
+synchronous compatibility bindings are isolated from it. Direct
+`AsyncHostedRuntime(...)` construction remains available when every binding is
+synchronous.
 
 The protocols exported from `chulk.hosting` do not expose SQLite paths or
 filesystem implementation types. The in-memory objects under
@@ -149,9 +160,12 @@ once; a restart between consumption and run release safely finishes the
 resume. Denial, expiry, cancellation, revoked authority, and unavailable
 credentials return typed outcomes.
 
-`ImmediateApprovalAdapter` is available to local/control-plane integrations
-that resolve the decision immediately while recording the same durable
-request, decision, and consumption trail.
+`ImmediateApprovalAdapter` is available to local integrations that resolve the
+decision immediately while recording the same durable request, decision, and
+consumption trail. `DurablePermissionBroker` adapts the existing control-server
+inbox to the same run-scoped ledger. A hosted run that bypasses
+`DurableHostedExecutor` is denied rather than falling back to an in-process
+wait.
 
 ## Events, audit, traces, and artifacts
 
@@ -205,9 +219,12 @@ execution. They are omitted from context serialization, prompts, definitions,
 events, traces, results, and errors.
 
 Mutating and unknown-effect tools default to serial execution. A tool may
-declare `parallel_safe` only with a read effect. Retry eligibility follows an
-explicit idempotency strategy; the legacy `idempotent=True` flag remains
-compatible.
+declare `parallel_safe` only with a read effect.
+The async tool-batch path runs concurrently only when every selected tool is
+both read-only and parallel-safe; any mutating or serial tool makes the whole
+batch deterministic and serial. Results retain input order.
+Retry eligibility follows an explicit idempotency strategy; the legacy
+`idempotent=True` flag remains compatible.
 
 Async tool authorization and credential hooks are awaited directly by
 `AsyncHostedRuntime`. Sync construction rejects awaitable hooks rather than
@@ -215,4 +232,6 @@ opening a nested event loop.
 
 See [SDK errors](sdk-errors.md) for the stable public failure categories,
 [permissions](permissions.md) for the existing coarse local policy, and
-[events](events.md) for the public event contract.
+[events](events.md) for the public event contract. Third-party stores can run
+the reusable contract functions in `chulk.testing`; see
+[hosted gateway](gateway.md#contract-gate).

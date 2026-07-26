@@ -12,8 +12,16 @@ import threading
 from typing import Any
 from uuid import uuid4
 
+from chulk.approvals import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalStore,
+    DurableApprovalService,
+)
 from chulk.events import AgentEvent, EventName, PermissionPayload
+from chulk.hosting import ExecutionScope
 from chulk.redaction import redact_data
+from chulk.runs import RunStore
 from chulk.server.journal import PublicEventJournal
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 from chulk.tools.permissions import (
@@ -37,6 +45,83 @@ class PermissionRequestNotFoundError(LookupError):
 
 class PermissionDecisionConflictError(RuntimeError):
     """Raised when an idempotency key is reused for a different decision."""
+
+
+class DurablePermissionBroker:
+    """Control-plane inbox over restart-safe hosted approval state."""
+
+    def __init__(
+        self,
+        approvals: ApprovalStore,
+        runs: RunStore,
+        *,
+        scope: ExecutionScope,
+    ) -> None:
+        self.approvals = approvals
+        self.scope = scope
+        self.service = DurableApprovalService(approvals, runs)
+
+    def callback(
+        self,
+        _request: PermissionRequest,
+        _record: PermissionDecisionRecord,
+    ) -> PermissionDecision:
+        """Fail closed when a hosted run bypasses the durable executor."""
+        return PermissionDecision.DENY
+
+    def list(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> tuple[ApprovalRequest, ...]:
+        return self.approvals.list(
+            self.scope,
+            run_id=self.scope.run_id,
+            status=status,
+            limit=limit,
+        )
+
+    def decide(
+        self,
+        request_id: str,
+        decision: PermissionDecision | str,
+        *,
+        idempotency_key: str,
+        reason: str | None = None,
+    ) -> ApprovalRequest:
+        normalized = _normalize_answer(decision)
+        return self.service.decide(
+            self.scope,
+            request_id,
+            (
+                ApprovalDecision.APPROVE
+                if normalized is PermissionDecision.ALLOW
+                else ApprovalDecision.DENY
+            ),
+            decided_by=self.scope.actor_id or "control-server-operator",
+            reason=reason or "resolved through the control server",
+            idempotency_key=idempotency_key,
+        )
+
+    def cancel_pending(
+        self,
+        *,
+        reason: str = "hosted execution cancelled",
+    ) -> int:
+        pending = self.approvals.list(
+            self.scope,
+            run_id=self.scope.run_id,
+            status="pending",
+            limit=1_000,
+        )
+        for approval in pending:
+            self.approvals.cancel(
+                self.scope,
+                approval.id,
+                reason=reason,
+            )
+        return len(pending)
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +598,7 @@ def _decode(value: str) -> datetime:
 __all__ = [
     "DEFAULT_ARGUMENT_PREVIEW_CHARS",
     "DEFAULT_PERMISSION_TTL_SECONDS",
+    "DurablePermissionBroker",
     "PendingPermission",
     "PermissionBroker",
     "PermissionDecisionConflictError",
