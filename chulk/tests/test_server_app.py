@@ -283,10 +283,12 @@ def test_operator_routes_are_bounded_and_do_not_expose_raw_traces(tmp_path) -> N
         assert artifacts.json()["artifacts"] == []
         assert proposals.json()["proposals"] == []
         assert usage.json()["entries"] == []
-        assert client.get(
+        jobs = client.get(
             "/v1/profiles/default/jobs",
             headers=_auth(tokens),
-        ).status_code == 400
+        )
+        assert jobs.status_code == 200
+        assert jobs.json()["jobs"] == []
 
 
 def test_automation_control_and_authenticated_webhook_routes(tmp_path) -> None:

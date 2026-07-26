@@ -51,6 +51,7 @@ class UsageGroupBy(StrEnum):
     TOOL_SERVICE = "tool_service"
     PROFILE = "profile"
     CHANNEL = "channel"
+    CONVERSATION = "conversation"
     GOAL = "goal"
     JOB = "job"
     CHILD_TASK = "child_task"
