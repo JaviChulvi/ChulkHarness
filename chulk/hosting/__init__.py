@@ -9,6 +9,7 @@ from chulk.hosting.services import (
     AsyncEventSink,
     AsyncMemoryService,
     AsyncRuntimeServices,
+    AsyncServiceBinding,
     AsyncSessionService,
     AsyncTraceSink,
     AsyncTraceService,
@@ -29,6 +30,7 @@ from chulk.hosting.services import (
     UsageService,
 )
 from chulk.hosting.sinks import (
+    AsyncInMemoryEventSink,
     CallbackEventSink,
     InMemoryAuditSink,
     InMemoryEventSink,
@@ -41,8 +43,10 @@ __all__ = [
     "AsyncArtifactStore",
     "AsyncAuditSink",
     "AsyncEventSink",
+    "AsyncInMemoryEventSink",
     "AsyncMemoryService",
     "AsyncRuntimeServices",
+    "AsyncServiceBinding",
     "AsyncSessionService",
     "AsyncTraceSink",
     "AsyncTraceService",

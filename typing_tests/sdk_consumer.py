@@ -21,6 +21,12 @@ from chulk import (
     ContextReport,
     Cost,
     ExecutionScope,
+    GatewayRunSubmitter,
+    GatewayRunTarget,
+    GatewayScopeResolver,
+    GatewayStore,
+    HostedScheduledOccurrence,
+    HostedScheduleRunSubmitter,
     DurableHostedExecutor,
     DurableRunStatus,
     HostedRuntime,
@@ -176,6 +182,12 @@ hosted_identity: ToolIdentity = ToolIdentity.from_schemas(
 )
 assert HostedRuntime is not None
 assert DurableHostedExecutor is not None
+assert GatewayStore is not None
+assert GatewayScopeResolver is not None
+assert GatewayRunSubmitter is not None
+assert GatewayRunTarget is not None
+assert HostedScheduledOccurrence is not None
+assert HostedScheduleRunSubmitter is not None
 
 durable_submission: RunSubmission = RunSubmission(
     idempotency_key="trigger",

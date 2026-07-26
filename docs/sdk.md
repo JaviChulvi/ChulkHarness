@@ -99,6 +99,25 @@ should cancel and await tasks, then close the agent. A synchronous Python worker
 thread cannot be force-killed, so custom clients and tools need cooperative
 cancellation and I/O timeouts.
 
+Native async hosted factories are resolved with
+`await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are
+closed with their `aclose()` method on the active event loop. The direct
+constructor remains the compatibility path for synchronous service bindings.
+
+Application-owned service and gateway implementations can run the published
+offline gates in `chulk.testing`:
+
+- `assert_hosted_services_contract` and
+  `assert_async_hosted_services_contract`;
+- `assert_durable_execution_contract` and
+  `assert_async_durable_execution_contract`; and
+- `assert_gateway_store_contract` and
+  `assert_async_gateway_store_contract`.
+
+They check scope isolation, duplicate triggers and logical effects, approval
+restart behavior, unknown-effect reconciliation, deterministic event order,
+durable outbox ownership, and ambiguous delivery reconciliation.
+
 See [events](events.md) for generator cleanup and ordering,
 [configuration](configuration.md) for runtime ownership, and the
 [release policy](release-policy.md) before importing advanced modules.

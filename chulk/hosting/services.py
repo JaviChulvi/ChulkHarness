@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Awaitable, Generic, Protocol, TypeVar, runtime_checkable
 
 from chulk.events import AgentEvent
 from chulk.hosting.scope import ExecutionScope
@@ -55,6 +56,47 @@ class ServiceBinding(Generic[T]):
         resource = self.value if self.factory is None else self.factory(scope)
         if resource is None:
             raise ValueError("hosted service factory returned no resource")
+        return resource
+
+
+@dataclass(frozen=True, slots=True)
+class AsyncServiceBinding(Generic[T]):
+    """Native async service value or scope-bound factory."""
+
+    value: T | None = None
+    factory: Callable[[ExecutionScope], Awaitable[T]] | None = None
+    ownership: ResourceOwnership = ResourceOwnership.HOST
+
+    def __post_init__(self) -> None:
+        if (self.value is None) == (self.factory is None):
+            raise ValueError(
+                "async service binding requires exactly one value or factory"
+            )
+        object.__setattr__(self, "ownership", ResourceOwnership(self.ownership))
+
+    @classmethod
+    def host(cls, value: T) -> "AsyncServiceBinding[T]":
+        return cls(value=value, ownership=ResourceOwnership.HOST)
+
+    @classmethod
+    def runtime(cls, value: T) -> "AsyncServiceBinding[T]":
+        return cls(value=value, ownership=ResourceOwnership.RUNTIME)
+
+    @classmethod
+    def scoped(
+        cls,
+        factory: Callable[[ExecutionScope], Awaitable[T]],
+        *,
+        ownership: ResourceOwnership = ResourceOwnership.RUNTIME,
+    ) -> "AsyncServiceBinding[T]":
+        return cls(factory=factory, ownership=ownership)
+
+    async def resolve(self, scope: ExecutionScope) -> T:
+        resource = self.value
+        if self.factory is not None:
+            resource = await self.factory(scope)
+        if resource is None:
+            raise ValueError("async hosted service factory returned no resource")
         return resource
 
 
@@ -312,40 +354,79 @@ class AsyncRuntimeServices:
     async implementations rather than relying on event-loop-blocking adapters.
     """
 
-    memory: ServiceBinding[Any]
-    sessions: ServiceBinding[Any]
-    skills: ServiceBinding[Any]
-    traces: ServiceBinding[Any]
-    artifacts: ServiceBinding[Any]
-    usage: ServiceBinding[Any]
-    audit: ServiceBinding[Any]
-    execution: ServiceBinding[Any]
-    plugins: ServiceBinding[Any]
-    content: ServiceBinding[Any]
-    media: ServiceBinding[Any]
-    tool_policy: ServiceBinding[Any]
-    runs: ServiceBinding[Any]
-    approvals: ServiceBinding[Any]
-    events: ServiceBinding[Any]
+    memory: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    sessions: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    skills: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    traces: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    artifacts: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    usage: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    audit: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    execution: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    plugins: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    content: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    media: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    tool_policy: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    runs: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    approvals: ServiceBinding[Any] | AsyncServiceBinding[Any]
+    events: ServiceBinding[Any] | AsyncServiceBinding[Any]
+
+    def as_sync_services(self) -> RuntimeServices:
+        """Return the compatibility bundle when every binding is synchronous."""
+        bindings: dict[str, ServiceBinding[Any]] = {}
+        for name in self.__dataclass_fields__:
+            binding = getattr(self, name)
+            if not isinstance(binding, ServiceBinding):
+                raise ValueError(
+                    "native async service bindings require "
+                    "await AsyncHostedRuntime.create(...)"
+                )
+            bindings[name] = binding
+        return RuntimeServices(**bindings)
 
     def resolve(self, scope: ExecutionScope) -> "ResolvedRuntimeServices":
-        return RuntimeServices(
-            memory=self.memory,
-            sessions=self.sessions,
-            skills=self.skills,
-            traces=self.traces,
-            artifacts=self.artifacts,
-            usage=self.usage,
-            audit=self.audit,
-            execution=self.execution,
-            plugins=self.plugins,
-            content=self.content,
-            media=self.media,
-            tool_policy=self.tool_policy,
-            runs=self.runs,
-            approvals=self.approvals,
-            events=self.events,
-        ).resolve(scope)
+        return self.as_sync_services().resolve(scope)
+
+    async def resolve_async(
+        self,
+        scope: ExecutionScope,
+    ) -> "ResolvedRuntimeServices":
+        values: dict[str, Any] = {}
+        owned: list[object] = []
+        owned_ids: set[int] = set()
+        try:
+            for name in self.__dataclass_fields__:
+                binding = getattr(self, name)
+                try:
+                    if isinstance(binding, AsyncServiceBinding):
+                        resource = await binding.resolve(scope)
+                    elif isinstance(binding, ServiceBinding):
+                        resource = await asyncio.to_thread(
+                            binding.resolve,
+                            scope,
+                        )
+                    else:
+                        raise TypeError(
+                            f"hosted service {name} must be a service binding"
+                        )
+                except Exception as exc:
+                    raise ValueError(
+                        f"hosted service {name} could not be resolved "
+                        f"({type(exc).__name__})"
+                    ) from exc
+                values[name] = resource
+                if (
+                    binding.ownership is ResourceOwnership.RUNTIME
+                    and id(resource) not in owned_ids
+                ):
+                    owned.append(resource)
+                    owned_ids.add(id(resource))
+        except BaseException:
+            await _aclose_resources(reversed(owned))
+            raise
+        return ResolvedRuntimeServices(
+            **values,
+            owned_resources=tuple(owned),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +447,30 @@ class ResolvedRuntimeServices:
     approvals: Any
     events: Any
     owned_resources: tuple[object, ...]
+
+    def host_bindings(self) -> RuntimeServices:
+        """Create a non-owning bundle for the synchronous compatibility core."""
+        return RuntimeServices(
+            **{
+                name: ServiceBinding.host(getattr(self, name))
+                for name in RuntimeServices.__dataclass_fields__
+            }
+        )
+
+    async def aclose_owned(self) -> None:
+        """Close only runtime-owned resources through native async methods."""
+        await _aclose_resources(reversed(self.owned_resources))
+
+
+async def _aclose_resources(resources: Any) -> None:
+    for resource in resources:
+        aclose = getattr(resource, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            continue
+        close = getattr(resource, "close", None)
+        if callable(close):
+            await asyncio.to_thread(close)
 
 
 # Compatibility names retained for applications using the phase-A API.

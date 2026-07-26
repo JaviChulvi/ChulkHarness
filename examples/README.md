@@ -9,6 +9,7 @@ Run them from the repository root:
 python examples/00_sdk_quickstart.py
 python examples/repo_review_bot/app.py
 python examples/hosted_runtime/hosted_app.py
+python examples/hosted_runtime/resilience_contract.py
 python examples/portable_agent/portable_agent.py
 ```
 
@@ -67,6 +68,7 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `00_sdk_quickstart.py` is deterministic by default and supports explicit live-provider opt-in.
 - `repo_review_bot/app.py` is a complete deterministic, read-only embedded application with a scrubbed trace walkthrough.
 - `hosted_runtime/hosted_app.py` proves sync and async tenant-scoped embedding with in-memory services and zero local runtime files.
+- `hosted_runtime/resilience_contract.py` runs the reusable isolation, durable effect/approval, and gateway recovery gates without credentials or external infrastructure.
 - `portable_agent/portable_agent.py` compiles, reviews, publishes, and runs one immutable definition without credentials or local runtime files.
 - `01_basic_agent.py` creates an agent and returns a plain string.
 - `02_agent_config.py` builds an agent with explicit `AgentConfig` paths.

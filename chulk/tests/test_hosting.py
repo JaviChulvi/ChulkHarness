@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from chulk import (
     AgentConfig,
     AsyncHostedRuntime,
+    AsyncServiceBinding,
     ConfigurationError,
     ExecutionScope,
     ExecutionScopeError,
@@ -391,6 +393,106 @@ async def test_async_host_policy_authorizes_before_credentials_and_hides_secrets
     )
     assert secret not in serialized
     await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_host_events_are_awaited_on_the_running_loop(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    class AsyncSink:
+        def __init__(self) -> None:
+            self.events = []
+            self.loop_ids: list[int] = []
+
+        async def emit(self, event) -> None:
+            await asyncio.sleep(0)
+            self.loop_ids.append(id(asyncio.get_running_loop()))
+            self.events.append(event)
+
+    sink = AsyncSink()
+    services = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["events"] = ServiceBinding.host(sink)
+    agent = AsyncHostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("async events")]),
+        tools=[],
+        skills=[],
+        services=type(services)(**fields),
+        execution_scope=_scope(),
+    )
+
+    assert await agent.run("hello") == "async events"
+    assert sink.events
+    assert set(sink.loop_ids) == {id(loop)}
+    assert all(event.execution_scope is not None for event in sink.events)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_factory_and_owned_cleanup_are_native(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    calls: list[tuple[str, int]] = []
+
+    class OwnedSink:
+        def __init__(self) -> None:
+            self.events = []
+            self.closed = False
+
+        async def emit(self, event) -> None:
+            calls.append(("emit", id(asyncio.get_running_loop())))
+            self.events.append(event)
+
+        async def aclose(self) -> None:
+            calls.append(("close", id(asyncio.get_running_loop())))
+            self.closed = True
+
+    sink = OwnedSink()
+
+    async def create_sink(scope):
+        calls.append(("factory", id(asyncio.get_running_loop())))
+        return sink
+
+    services = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["events"] = AsyncServiceBinding.scoped(create_sink)
+    native_services = type(services)(**fields)
+
+    with pytest.raises(ValueError, match="AsyncHostedRuntime.create"):
+        AsyncHostedRuntime(
+            config=AgentConfig(project_root=tmp_path),
+            llm=FakeLLM([_final()]),
+            tools=[],
+            skills=[],
+            services=native_services,
+            execution_scope=_scope(),
+        )
+
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("native")]),
+        tools=[],
+        skills=[],
+        services=native_services,
+        execution_scope=_scope(),
+    )
+    assert await agent.run("hello") == "native"
+    await agent.close()
+
+    assert sink.events
+    assert sink.closed
+    assert calls[0] == ("factory", id(loop))
+    assert {loop_id for _name, loop_id in calls} == {id(loop)}
 
 
 def test_tool_registry_rejects_schema_identity_mismatch() -> None:

@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from chulk import ExecutionScope
+from chulk.approvals import (
+    ApprovalStatus,
+    ApprovalSubmission,
+    DurableApprovalService,
+    SQLiteApprovalStore,
+)
+from chulk.runs import RunSubmission, SQLiteRunStore, StepDefinition
 from chulk.server import (
+    DurablePermissionBroker,
     PermissionBroker,
     PermissionDecisionConflictError,
     PublicEventJournal,
@@ -214,3 +224,67 @@ def test_profile_permission_inbox_spans_owned_conversations(tmp_path) -> None:
         "conversation-1",
         "conversation-2",
     ]
+
+
+def test_control_broker_decides_the_durable_hosted_approval_inbox(
+    tmp_path,
+) -> None:
+    path = tmp_path / "hosted.sqlite"
+    scope = ExecutionScope(
+        tenant_id="tenant-a",
+        workspace_id="support",
+        actor_id="operator-a",
+        agent_id="support-agent",
+        agent_version="2.0.0",
+        run_id="run-1",
+        conversation_id="conversation-1",
+    )
+    runs = SQLiteRunStore(path)
+    approvals = SQLiteApprovalStore(path)
+    runs.submit(
+        scope,
+        RunSubmission(
+            idempotency_key="message-1",
+            input_digest="sha256:input",
+            definition_digest="sha256:definition",
+            steps=(StepDefinition(id="write", name="Write ticket"),),
+        ),
+    )
+    claim = runs.claim(scope, worker_id="worker-a")
+    assert claim is not None
+    runs.start_step(scope, claim, "write")
+    paused = DurableApprovalService(approvals, runs).request(
+        scope,
+        claim,
+        ApprovalSubmission(
+            step_id="write",
+            tool_name="update_ticket",
+            tool_version="2.1.0",
+            schema_version="3",
+            arguments_digest="sha256:arguments",
+            policy_version="policy-4",
+            preview={"ticket_id": "42"},
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        ),
+    )
+    broker = DurablePermissionBroker(approvals, runs, scope=scope)
+
+    assert broker.list(status="pending") == (paused.approval,)
+    assert broker.callback(_request(), _record()) is PermissionDecision.DENY
+    decided = broker.decide(
+        paused.approval.id,
+        "allow",
+        idempotency_key="control-decision-1",
+        reason="operator verified the write",
+    )
+    duplicate = broker.decide(
+        paused.approval.id,
+        "allow",
+        idempotency_key="control-decision-1",
+        reason="operator verified the write",
+    )
+
+    assert decided == duplicate
+    assert decided.status is ApprovalStatus.APPROVED
+    assert decided.decided_by == "operator-a"
+    assert broker.list(status="pending") == ()

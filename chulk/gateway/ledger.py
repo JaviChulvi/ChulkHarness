@@ -27,6 +27,8 @@ from chulk.gateway.models import (
     TextPart,
     TrustLevel,
 )
+from chulk.gateway.stores import GatewayRunTarget
+from chulk.hosting.scope import ExecutionScope
 from chulk.profiles.store import CONTROL_MIGRATIONS
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
@@ -66,6 +68,8 @@ class InboxRecord:
     cancellation_requested: bool
     last_error: str | None
     created_at: datetime
+    run_target: GatewayRunTarget | None = None
+    dead_lettered_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,8 @@ class OutboxRecord:
     delivery_lease_until: datetime | None
     next_attempt_at: datetime | None
     last_error: str | None
+    reconciliation_required: bool = False
+    dead_lettered_at: datetime | None = None
 
 
 class SQLiteGatewayLedger:
@@ -278,6 +284,7 @@ class SQLiteGatewayLedger:
         profile_id: str,
         conversation_key: str | None = None,
         max_pending: int | None = None,
+        run_target: GatewayRunTarget | None = None,
     ) -> IngestResult:
         """Durably accept an envelope before its transport acknowledgement."""
         profile_id = _required(profile_id, "profile_id")
@@ -319,6 +326,7 @@ class SQLiteGatewayLedger:
                     raise ValueError(
                         "idempotency key collision does not match the stored event"
                     )
+                _validate_stored_run_target(existing, run_target)
                 return IngestResult(_row_to_inbox(existing), False)
             if max_pending is not None:
                 pending = int(
@@ -344,8 +352,13 @@ class SQLiteGatewayLedger:
                     id, profile_id, adapter, account_id, event_id,
                     idempotency_key, conversation_key, principal_id,
                     destination_id, thread_id, envelope_json, state,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                    created_at, updated_at, execution_scope_json,
+                    agent_definition_id, agent_definition_version,
+                    agent_definition_digest, run_id
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
+                    ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     record_id,
@@ -361,6 +374,27 @@ class SQLiteGatewayLedger:
                     encoded,
                     _encode(observed),
                     _encode(observed),
+                    (
+                        json.dumps(
+                            run_target.scope.to_dict(),
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                        if run_target is not None
+                        else None
+                    ),
+                    run_target.definition_id if run_target is not None else None,
+                    (
+                        run_target.definition_version
+                        if run_target is not None
+                        else None
+                    ),
+                    (
+                        run_target.definition_digest
+                        if run_target is not None
+                        else None
+                    ),
+                    run_target.scope.run_id if run_target is not None else None,
                 ),
             )
             row = _inbox_row(conn, record_id)
@@ -686,6 +720,57 @@ class SQLiteGatewayLedger:
             )
         return cursor.rowcount == 1
 
+    def dead_letter_execution(
+        self,
+        inbox_id: str,
+        execution_token: str,
+        *,
+        error: str,
+    ) -> bool:
+        """Stop a poison input before execution and expose a terminal outcome."""
+        if not execution_token:
+            raise ValueError("execution_token is required")
+        observed = _utc_now()
+        with sqlite_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE gateway_inbox
+                SET state = 'uncertain', execution_token = NULL,
+                    execution_lease_until = NULL, last_error = ?,
+                    dead_lettered_at = ?, updated_at = ?
+                WHERE id = ? AND state = 'processing'
+                  AND execution_token = ?
+                """,
+                (
+                    error[:500],
+                    _encode(observed),
+                    _encode(observed),
+                    inbox_id,
+                    execution_token,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def dead_letter_inbox(self, inbox_id: str, *, error: str) -> bool:
+        """Persist a poison input as terminal before any execution claim."""
+        observed = _utc_now()
+        with sqlite_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE gateway_inbox
+                SET state = 'uncertain', last_error = ?,
+                    dead_lettered_at = ?, updated_at = ?
+                WHERE id = ? AND state = 'queued'
+                """,
+                (
+                    error[:500],
+                    _encode(observed),
+                    _encode(observed),
+                    inbox_id,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def request_cancellation(self, inbox_id: str) -> bool:
         """Cancel queued work or signal the owner of an active execution."""
         observed = _utc_now()
@@ -865,6 +950,7 @@ class SQLiteGatewayLedger:
                     )
                 )
                 {adapter_clause}
+                AND candidate.reconciliation_required = 0
                 AND NOT EXISTS (
                     SELECT 1 FROM gateway_outbox AS earlier
                     WHERE earlier.inbox_id = candidate.inbox_id
@@ -919,24 +1005,36 @@ class SQLiteGatewayLedger:
             state = "delivered"
             next_attempt_at = None
             delivered_at = _encode(observed)
-        elif receipt.state is DeliveryState.ACCEPTED:
+            reconciliation_required = 0
+            dead_lettered_at = None
+        elif receipt.state in {
+            DeliveryState.ACCEPTED,
+            DeliveryState.UNKNOWN,
+        }:
             state = "pending"
-            delay = (
-                receipt.retry_after_seconds
-                if receipt.retry_after_seconds is not None
-                else 1.0
-            )
-            next_attempt_at = _encode(observed + timedelta(seconds=delay))
+            next_attempt_at = None
             delivered_at = None
+            reconciliation_required = 1
+            dead_lettered_at = None
         elif receipt.state is DeliveryState.RETRYABLE:
             state = "pending"
             delay = receipt.retry_after_seconds or 0
             next_attempt_at = _encode(observed + timedelta(seconds=delay))
             delivered_at = None
+            reconciliation_required = 0
+            dead_lettered_at = None
+        elif receipt.state is DeliveryState.DEAD_LETTER:
+            state = "failed"
+            next_attempt_at = None
+            delivered_at = None
+            reconciliation_required = 0
+            dead_lettered_at = _encode(observed)
         else:
             state = "failed"
             next_attempt_at = None
             delivered_at = None
+            reconciliation_required = 0
+            dead_lettered_at = None
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _outbox_row(conn, outbox_id)
@@ -969,7 +1067,9 @@ class SQLiteGatewayLedger:
                 UPDATE gateway_outbox
                 SET state = ?, checkpoint = ?, delivery_token = NULL,
                     delivery_lease_until = NULL, next_attempt_at = ?,
-                    last_error = ?, delivered_at = ?, updated_at = ?
+                    last_error = ?, delivered_at = ?,
+                    reconciliation_required = ?, dead_lettered_at = ?,
+                    updated_at = ?
                 WHERE id = ? AND state = 'delivering' AND delivery_token = ?
                 """,
                 (
@@ -982,12 +1082,126 @@ class SQLiteGatewayLedger:
                         else None
                     ),
                     delivered_at,
+                    reconciliation_required,
+                    dead_lettered_at,
                     _encode(observed),
                     outbox_id,
                     delivery_token,
                 ),
             )
         return cursor.rowcount == 1
+
+    def reconcile_delivery(
+        self,
+        outbox_id: str,
+        receipt: DeliveryReceipt,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Resolve an ambiguous provider outcome without blindly resending."""
+        if receipt.envelope_id != outbox_id:
+            raise ValueError("receipt envelope_id must match the outbox record")
+        if receipt.state in {
+            DeliveryState.ACCEPTED,
+            DeliveryState.UNKNOWN,
+        }:
+            raise ValueError("delivery reconciliation requires a terminal or retry outcome")
+        observed = _observed(now)
+        if receipt.state is DeliveryState.DELIVERED:
+            state = "delivered"
+            next_attempt_at = None
+            delivered_at = _encode(observed)
+            dead_lettered_at = None
+        elif receipt.state is DeliveryState.RETRYABLE:
+            state = "pending"
+            delay = receipt.retry_after_seconds or 0
+            next_attempt_at = _encode(observed + timedelta(seconds=delay))
+            delivered_at = None
+            dead_lettered_at = None
+        elif receipt.state is DeliveryState.DEAD_LETTER:
+            state = "failed"
+            next_attempt_at = None
+            delivered_at = None
+            dead_lettered_at = _encode(observed)
+        else:
+            state = "failed"
+            next_attempt_at = None
+            delivered_at = None
+            dead_lettered_at = None
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _outbox_row(conn, outbox_id)
+            if (
+                row is None
+                or row["state"] != "pending"
+                or not bool(row["reconciliation_required"])
+            ):
+                return False
+            attempt = int(row["attempt_count"])
+            if receipt.attempt != attempt:
+                raise ValueError(
+                    "receipt attempt must match the ambiguous delivery attempt"
+                )
+            conn.execute(
+                """
+                INSERT INTO gateway_delivery_events (
+                    id, outbox_id, attempt, state, receipt_json, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid4().hex,
+                    outbox_id,
+                    attempt,
+                    receipt.state.value,
+                    _bounded_json(_receipt_to_dict(receipt)),
+                    receipt.recorded_at,
+                ),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE gateway_outbox
+                SET state = ?, checkpoint = ?, next_attempt_at = ?,
+                    last_error = ?, delivered_at = ?,
+                    reconciliation_required = 0, dead_lettered_at = ?,
+                    updated_at = ?
+                WHERE id = ? AND state = 'pending'
+                  AND reconciliation_required = 1
+                """,
+                (
+                    state,
+                    receipt.checkpoint,
+                    next_attempt_at,
+                    (
+                        (receipt.error_message or receipt.error_code or "")[:500]
+                        if state != "delivered"
+                        else None
+                    ),
+                    delivered_at,
+                    dead_lettered_at,
+                    _encode(observed),
+                    outbox_id,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def list_reconciliation_required(
+        self,
+        *,
+        limit: int = 100,
+    ) -> tuple[OutboxRecord, ...]:
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM gateway_outbox
+                WHERE state = 'pending' AND reconciliation_required = 1
+                ORDER BY created_at, sequence, id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(_row_to_outbox(row) for row in rows)
 
     def get_outbox(self, outbox_id: str) -> OutboxRecord | None:
         with sqlite_connection(self.db_path) as conn:
@@ -1308,12 +1522,17 @@ def _row_to_adapter_status(row: sqlite3.Row) -> GatewayAdapterStatus:
 
 
 def _row_to_inbox(row: sqlite3.Row) -> InboxRecord:
+    run_target = _stored_run_target(row)
     return InboxRecord(
         id=str(row["id"]),
         profile_id=str(row["profile_id"]),
         envelope=_inbound_from_dict(json.loads(str(row["envelope_json"]))),
         conversation_key=str(row["conversation_key"]),
-        state=str(row["state"]),
+        state=(
+            "dead_letter"
+            if row["dead_lettered_at"] is not None
+            else str(row["state"])
+        ),
         execution_token=(
             str(row["execution_token"]) if row["execution_token"] is not None else None
         ),
@@ -1321,16 +1540,25 @@ def _row_to_inbox(row: sqlite3.Row) -> InboxRecord:
         cancellation_requested=bool(row["cancellation_requested"]),
         last_error=str(row["last_error"]) if row["last_error"] is not None else None,
         created_at=_decode(str(row["created_at"])),
+        run_target=run_target,
+        dead_lettered_at=_optional_datetime(row["dead_lettered_at"]),
     )
 
 
 def _row_to_outbox(row: sqlite3.Row) -> OutboxRecord:
+    reconciliation_required = bool(row["reconciliation_required"])
+    dead_lettered_at = _optional_datetime(row["dead_lettered_at"])
+    state = str(row["state"])
+    if dead_lettered_at is not None:
+        state = DeliveryState.DEAD_LETTER.value
+    elif reconciliation_required:
+        state = DeliveryState.UNKNOWN.value
     return OutboxRecord(
         id=str(row["id"]),
         inbox_id=str(row["inbox_id"]),
         profile_id=str(row["profile_id"]),
         envelope=_outbound_from_dict(json.loads(str(row["envelope_json"]))),
-        state=str(row["state"]),
+        state=state,
         attempt_count=int(row["attempt_count"]),
         checkpoint=str(row["checkpoint"]) if row["checkpoint"] is not None else None,
         delivery_token=(
@@ -1339,7 +1567,35 @@ def _row_to_outbox(row: sqlite3.Row) -> OutboxRecord:
         delivery_lease_until=_optional_datetime(row["delivery_lease_until"]),
         next_attempt_at=_optional_datetime(row["next_attempt_at"]),
         last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+        reconciliation_required=reconciliation_required,
+        dead_lettered_at=dead_lettered_at,
     )
+
+
+def _stored_run_target(row: sqlite3.Row) -> GatewayRunTarget | None:
+    encoded_scope = row["execution_scope_json"]
+    if encoded_scope is None:
+        return None
+    decoded = json.loads(str(encoded_scope))
+    if not isinstance(decoded, dict):
+        raise ValueError("stored gateway execution scope is invalid")
+    return GatewayRunTarget(
+        scope=ExecutionScope.from_dict(decoded),
+        definition_id=str(row["agent_definition_id"]),
+        definition_version=str(row["agent_definition_version"]),
+        definition_digest=str(row["agent_definition_digest"]),
+    )
+
+
+def _validate_stored_run_target(
+    row: sqlite3.Row,
+    requested: GatewayRunTarget | None,
+) -> None:
+    stored = _stored_run_target(row)
+    if stored != requested:
+        raise ValueError(
+            "gateway idempotency key is already bound to a different hosted run"
+        )
 
 
 def _observed(value: datetime | None) -> datetime:

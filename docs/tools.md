@@ -195,3 +195,9 @@ are resolved only after both layers allow the exact call and are available only
 from `ToolContext.credentials`. Secret-classified output is withheld before it
 can reach an observation, event, trace, or result. See the
 [hosted runtime guide](hosting.md) for the complete contract and hooks.
+
+For transports that return several independent calls, the async batch path
+permits concurrency only when every tool declares both `ToolEffect.READ` and
+`ToolConcurrency.PARALLEL_SAFE`. The presence of one write, unknown effect, or
+serial policy makes the complete batch serial. Returned results always preserve
+the model call order.

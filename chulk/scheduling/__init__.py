@@ -20,6 +20,11 @@ from chulk.scheduling.models import (
     TriggerKind,
     TriggerTrust,
 )
+from chulk.scheduling.hosted import (
+    AsyncHostedScheduleRunSubmitter,
+    HostedScheduledOccurrence,
+    HostedScheduleRunSubmitter,
+)
 from chulk.scheduling.recurrence import DueOccurrences, RecurrenceCalculator
 from chulk.scheduling.runtime import (
     AutomationDelivery,
@@ -58,9 +63,12 @@ __all__ = [
     "AutomationSupervisor",
     "AutomationSupervisorHandle",
     "AutomationTrigger",
+    "AsyncHostedScheduleRunSubmitter",
     "AmbiguousTimePolicy",
     "DEFAULT_AUTOMATION_LEASE_SECONDS",
     "DueOccurrences",
+    "HostedScheduledOccurrence",
+    "HostedScheduleRunSubmitter",
     "MisfirePolicy",
     "NonexistentTimePolicy",
     "RecurrenceCalculator",

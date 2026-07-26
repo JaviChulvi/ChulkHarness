@@ -41,6 +41,8 @@ class DeliveryState(str, Enum):
     DELIVERED = "delivered"
     RETRYABLE = "retryable"
     FAILED = "failed"
+    UNKNOWN = "unknown"
+    DEAD_LETTER = "dead_letter"
 
 
 @dataclass(frozen=True, slots=True)

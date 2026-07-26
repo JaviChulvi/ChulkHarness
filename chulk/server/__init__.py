@@ -38,6 +38,7 @@ from chulk.server.lifecycle import (
     serve_control_server,
 )
 from chulk.server.permissions import (
+    DurablePermissionBroker,
     PendingPermission,
     PermissionBroker,
     PermissionDecisionConflictError,
@@ -63,6 +64,7 @@ __all__ = [
     "GATEWAY_PROTOCOL_VERSION",
     "GatewayHello",
     "GatewayMessage",
+    "DurablePermissionBroker",
     "OperatorActionRequest",
     "PermissionDecisionRequest",
     "PlanDecisionRequest",

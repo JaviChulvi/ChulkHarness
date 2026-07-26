@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from chulk.approvals import ApprovalConflictError, ApprovalNotFoundError
 from chulk.config import Config
 from chulk.gateway import SQLiteGatewayRouter
 from chulk.profiles import ProfileNotFoundError, ProfileRuntimeFactory
@@ -448,11 +449,11 @@ def create_control_app(
                 idempotency_key=body.idempotency_key,
                 reason=body.reason,
             )
-        except PermissionRequestNotFoundError as exc:
+        except (ApprovalNotFoundError, PermissionRequestNotFoundError) as exc:
             raise ApiProblem(404, "permission_not_found", str(exc)) from exc
         except (ProfileNotFoundError, SessionNotFoundError) as exc:
             raise ApiProblem(404, "conversation_not_found", str(exc)) from exc
-        except PermissionDecisionConflictError as exc:
+        except (ApprovalConflictError, PermissionDecisionConflictError) as exc:
             raise ApiProblem(409, "permission_conflict", str(exc)) from exc
         return _json({"permission": result.to_dict()})
 

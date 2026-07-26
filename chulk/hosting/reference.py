@@ -24,7 +24,11 @@ from chulk.hosting.services import (
     SessionRuntimeServices,
     SkillRuntimeServices,
 )
-from chulk.hosting.sinks import InMemoryEventSink, safe_audit_payload
+from chulk.hosting.sinks import (
+    AsyncInMemoryEventSink,
+    InMemoryEventSink,
+    safe_audit_payload,
+)
 from chulk.media import MediaProcessorRegistry
 from chulk.plugins import PluginAuditReport
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
@@ -74,6 +78,7 @@ class InMemoryServiceHub:
         self._runs: dict[str, InMemoryRunStore] = {}
         self._approvals: dict[str, InMemoryApprovalStore] = {}
         self._events: dict[str, InMemoryEventSink] = {}
+        self._async_events: dict[str, AsyncInMemoryEventSink] = {}
         self._async_runs: dict[str, AsyncInMemoryRunStore] = {}
         self._async_approvals: dict[str, AsyncInMemoryApprovalStore] = {}
 
@@ -210,7 +215,13 @@ class InMemoryServiceHub:
                 async_approvals,
                 ownership=ResourceOwnership.HOST,
             ),
-            events=services.events,
+            events=ServiceBinding.scoped(
+                lambda scope: self._async_events.setdefault(
+                    scope.key,
+                    AsyncInMemoryEventSink(scope),
+                ),
+                ownership=ResourceOwnership.HOST,
+            ),
         )
 
     def trace_events(self, scope: ExecutionScope) -> tuple[dict[str, Any], ...]:
@@ -222,7 +233,7 @@ class InMemoryServiceHub:
         return tuple(audit.events) if audit is not None else ()
 
     def public_events(self, scope: ExecutionScope) -> tuple[Any, ...]:
-        sink = self._events.get(scope.key)
+        sink = self._events.get(scope.key) or self._async_events.get(scope.key)
         return tuple(sink.events) if sink is not None else ()
 
 

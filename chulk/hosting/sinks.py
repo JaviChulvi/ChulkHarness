@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import asyncio
+import inspect
 from typing import Any
 
 from chulk.events import AgentEvent
@@ -26,6 +28,43 @@ class InMemoryEventSink:
             raise ValueError("hosted public event is missing execution_scope")
         self.scope.assert_resumable(event.execution_scope)
         self.events.append(event)
+
+
+class AsyncInMemoryEventSink:
+    """Native async scope-owned public event sink."""
+
+    def __init__(self, scope: ExecutionScope) -> None:
+        self.scope = scope
+        self.events: list[AgentEvent] = []
+
+    async def emit(self, event: AgentEvent) -> None:
+        if event.execution_scope is None:
+            raise ValueError("hosted public event is missing execution_scope")
+        self.scope.assert_resumable(event.execution_scope)
+        self.events.append(event)
+
+
+class BufferedAsyncEventSink:
+    """Sync-facing event buffer drained through a host's async sink."""
+
+    def __init__(self, sink: object) -> None:
+        self.sink = sink
+        self._pending: list[AgentEvent] = []
+
+    def emit(self, event: AgentEvent) -> None:
+        self._pending.append(event)
+
+    async def flush(self) -> None:
+        while self._pending:
+            event = self._pending[0]
+            emit = getattr(self.sink, "emit")
+            if inspect.iscoroutinefunction(emit):
+                await emit(event)
+            else:
+                delivered = await asyncio.to_thread(emit, event)
+                if inspect.isawaitable(delivered):
+                    await delivered
+            self._pending.pop(0)
 
 
 class CallbackEventSink:
@@ -111,6 +150,8 @@ def safe_audit_payload(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "AsyncInMemoryEventSink",
+    "BufferedAsyncEventSink",
     "CallbackEventSink",
     "InMemoryAuditSink",
     "InMemoryEventSink",

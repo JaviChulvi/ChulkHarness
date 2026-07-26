@@ -63,3 +63,6 @@ unavailable-integration outcomes are explicit and do not execute the tool.
 
 `ImmediateApprovalAdapter` is the local ergonomic adapter over this same
 ledger; it does not introduce a second approval engine.
+`DurablePermissionBroker` gives the control server the same durable inbox and
+idempotent decision operations when its agent is hosted. It never blocks the
+server worker while an approval is pending.

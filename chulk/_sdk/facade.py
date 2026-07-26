@@ -34,9 +34,11 @@ from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
 from chulk.hosting import (
     AsyncRuntimeServices,
+    AsyncServiceBinding,
     ExecutionScope,
     RuntimeServices,
 )
+from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
 from chulk.plugins import (
@@ -1834,6 +1836,10 @@ class AsyncAgent:
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            event_buffer = getattr(self.runtime, "async_event_buffer", None)
+            if event_buffer is not None:
+                await event_buffer.flush()
 
 
 def _notify_event_callback_safely(callback: EventCallback | None, event: AgentEvent) -> None:
@@ -1895,28 +1901,65 @@ class AsyncHostedRuntime(AsyncAgent):
         execution_scope: ExecutionScope,
         **kwargs: Any,
     ) -> None:
-        sync_boundary = RuntimeServices(
-            memory=services.memory,
-            sessions=services.sessions,
-            skills=services.skills,
-            traces=services.traces,
-            artifacts=services.artifacts,
-            usage=services.usage,
-            audit=services.audit,
-            execution=services.execution,
-            plugins=services.plugins,
-            content=services.content,
-            media=services.media,
-            tool_policy=services.tool_policy,
-            runs=services.runs,
-            approvals=services.approvals,
-            events=services.events,
-        )
+        if any(
+            isinstance(getattr(services, name), AsyncServiceBinding)
+            for name in services.__dataclass_fields__
+        ):
+            raise ValueError(
+                "native async service bindings require "
+                "await AsyncHostedRuntime.create(...)"
+            )
+        sync_boundary = services.as_sync_services()
         super().__init__(
             services=sync_boundary,
             execution_scope=execution_scope,
             **kwargs,
         )
+        from chulk.hosting.sinks import BufferedAsyncEventSink
+
+        sink = self.runtime.public_event_sink
+        event_buffer = BufferedAsyncEventSink(sink)
+        self.runtime.public_event_sink = event_buffer
+        self.runtime.async_event_buffer = event_buffer
+        self._async_owned_services: ResolvedRuntimeServices | None = None
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        services: AsyncRuntimeServices,
+        execution_scope: ExecutionScope,
+        **kwargs: Any,
+    ) -> "AsyncHostedRuntime":
+        """Resolve async factories without blocking, then construct the runtime."""
+        resolved = await services.resolve_async(execution_scope)
+        bindings = resolved.host_bindings()
+        compatibility = AsyncRuntimeServices(
+            **{
+                name: getattr(bindings, name)
+                for name in bindings.__dataclass_fields__
+            }
+        )
+        try:
+            runtime = cls(
+                services=compatibility,
+                execution_scope=execution_scope,
+                **kwargs,
+            )
+        except BaseException:
+            await resolved.aclose_owned()
+            raise
+        runtime._async_owned_services = resolved
+        return runtime
+
+    async def close(self) -> None:
+        owned = self._async_owned_services
+        try:
+            await super().close()
+        finally:
+            if owned is not None:
+                self._async_owned_services = None
+                await owned.aclose_owned()
 
 
 def _build_handle(

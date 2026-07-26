@@ -196,7 +196,7 @@ Acceptance criteria:
   tests that create no local runtime files.
 - [ ] Await native async persistence, trace, audit, and usage services directly
   throughout the async orchestration path.
-- [ ] Execute independent `parallel_safe` read-only tool batches concurrently
+- [x] Execute independent `parallel_safe` read-only tool batches concurrently
   while preserving deterministic event and result ordering.
 
 ### US-H2: Publish Immutable Agent Definitions And Governed Skills
@@ -221,11 +221,11 @@ Acceptance criteria:
 
 ### US-H4: Finish Gateway Resilience And Hosted Acceptance
 
-- [ ] Put gateway durability behind host-provided stores and add bounded
+- [x] Put gateway durability behind host-provided stores and add bounded
   backpressure, dead-letter, reconciliation, and definition/run routing.
 - [x] Add versioned public event identities and durable host-provided trace and
   artifact correlation.
-- [ ] Complete the restart, duplicate-trigger, uncertain-effect, approval, and
+- [x] Complete the restart, duplicate-trigger, uncertain-effect, approval, and
   gateway contract suite without credentials or infrastructure dependencies.
 
 ## Next: Reliability And SDK Depth

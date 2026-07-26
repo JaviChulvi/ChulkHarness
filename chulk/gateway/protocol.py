@@ -37,4 +37,19 @@ class ChannelAdapter(Protocol):
         ...
 
 
-__all__ = ["ChannelAdapter"]
+@runtime_checkable
+class DeliveryReconciler(Protocol):
+    """Optional adapter capability for ambiguous provider outcomes."""
+
+    async def reconcile(
+        self,
+        envelope: OutboundEnvelope,
+        *,
+        checkpoint: str | None,
+        attempt: int,
+    ) -> DeliveryReceipt:
+        """Resolve a prior attempt without sending the envelope again."""
+        ...
+
+
+__all__ = ["ChannelAdapter", "DeliveryReconciler"]

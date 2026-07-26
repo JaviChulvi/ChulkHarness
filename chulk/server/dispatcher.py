@@ -19,7 +19,7 @@ from chulk.events import AgentEvent, EventName
 from chulk.profiles import ProfileRuntimeFactory
 from chulk.results import RunResult
 from chulk.server.journal import PublicEventJournal
-from chulk.server.permissions import PermissionBroker
+from chulk.server.permissions import DurablePermissionBroker, PermissionBroker
 from chulk.storage import sqlite_connection
 
 
@@ -81,7 +81,7 @@ class _ConversationWorker:
     conversation_id: str
     agent: CoreAgent
     journal: PublicEventJournal
-    broker: PermissionBroker
+    broker: PermissionBroker | DurablePermissionBroker
     queue: asyncio.Queue[str]
     control_lock: asyncio.Lock
     task: asyncio.Task[None] | None = None
@@ -270,7 +270,11 @@ class ConversationDispatcher:
     def journal(self, profile_id: str, conversation_id: str) -> PublicEventJournal:
         return self._worker(profile_id, conversation_id).journal
 
-    def permissions(self, profile_id: str, conversation_id: str) -> PermissionBroker:
+    def permissions(
+        self,
+        profile_id: str,
+        conversation_id: str,
+    ) -> PermissionBroker | DurablePermissionBroker:
         return self._worker(profile_id, conversation_id).broker
 
     async def close(self) -> None:
@@ -327,13 +331,26 @@ class ConversationDispatcher:
             return existing
         path = self._store_path(profile_id)
         journal = PublicEventJournal(path, profile_id=profile_id)
-        broker = PermissionBroker(
-            path,
-            profile_id=profile_id,
-            conversation_id=conversation_id,
-            turn_id=lambda: agent.state.current_turn_id,
-            journal=journal,
-        )
+        if (
+            agent.execution_scope is not None
+            and agent.run_store is not None
+            and agent.approval_store is not None
+        ):
+            broker: PermissionBroker | DurablePermissionBroker = (
+                DurablePermissionBroker(
+                    agent.approval_store,
+                    agent.run_store,
+                    scope=agent.execution_scope,
+                )
+            )
+        else:
+            broker = PermissionBroker(
+                path,
+                profile_id=profile_id,
+                conversation_id=conversation_id,
+                turn_id=lambda: agent.state.current_turn_id,
+                journal=journal,
+            )
         agent.permission_callback = broker.callback
 
         def publish(event: AgentEvent) -> None:

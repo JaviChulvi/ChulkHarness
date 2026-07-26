@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import inspect
 from typing import Any
 
 from chulk.events import (
@@ -15,7 +16,7 @@ from chulk.events import (
     StepLifecyclePayload,
 )
 from chulk.hosting.scope import ExecutionScope
-from chulk.hosting.services import EventSink
+from chulk.hosting.services import AsyncEventSink, EventSink
 from chulk.runs.models import RunEvent
 from chulk.runs.protocols import AsyncRunStore, RunStore
 
@@ -146,7 +147,7 @@ class AsyncRunEventPublisher:
     def __init__(
         self,
         runs: AsyncRunStore,
-        sink: EventSink,
+        sink: EventSink | AsyncEventSink,
         *,
         scope: ExecutionScope,
     ) -> None:
@@ -168,7 +169,9 @@ class AsyncRunEventPublisher:
             previous_event_id=self.last_event_id,
         )
         for event in public:
-            self.sink.emit(event)
+            delivered = self.sink.emit(event)
+            if inspect.isawaitable(delivered):
+                await delivered
             self.sequence = int(event.extensions["durable_sequence"])
             self.last_event_id = event.event_id
         return public

@@ -289,11 +289,36 @@ def _add_control_server_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _add_hosted_gateway_state(conn: sqlite3.Connection) -> None:
+    """Add hosted run identity and bounded delivery outcome metadata."""
+    conn.executescript(
+        """
+        ALTER TABLE gateway_inbox ADD COLUMN execution_scope_json TEXT;
+        ALTER TABLE gateway_inbox ADD COLUMN agent_definition_id TEXT;
+        ALTER TABLE gateway_inbox ADD COLUMN agent_definition_version TEXT;
+        ALTER TABLE gateway_inbox ADD COLUMN agent_definition_digest TEXT;
+        ALTER TABLE gateway_inbox ADD COLUMN run_id TEXT;
+        ALTER TABLE gateway_inbox ADD COLUMN dead_lettered_at TEXT;
+
+        ALTER TABLE gateway_outbox
+        ADD COLUMN reconciliation_required INTEGER NOT NULL DEFAULT 0
+        CHECK (reconciliation_required IN (0, 1));
+        ALTER TABLE gateway_outbox ADD COLUMN dead_lettered_at TEXT;
+
+        CREATE INDEX idx_gateway_inbox_run
+        ON gateway_inbox(run_id);
+        CREATE INDEX idx_gateway_outbox_reconciliation
+        ON gateway_outbox(reconciliation_required, state, created_at, id);
+        """
+    )
+
+
 CONTROL_MIGRATIONS = (
     SQLiteMigration(1, "agent profile control database", _create_control_schema),
     SQLiteMigration(2, "model profiles and provider health", _add_model_profile_schema),
     SQLiteMigration(3, "channel gateway control ledger", _add_gateway_control_schema),
     SQLiteMigration(4, "local control server lifecycle", _add_control_server_schema),
+    SQLiteMigration(5, "hosted gateway run and delivery state", _add_hosted_gateway_state),
 )
 
 
