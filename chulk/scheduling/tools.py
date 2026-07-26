@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from chulk.scheduling.models import ScheduledJob
+from chulk.scheduling.models import (
+    MisfirePolicy,
+    RecurrenceKind,
+    RecurrenceSpec,
+    ScheduledJob,
+)
 from chulk.scheduling.store import SQLiteScheduleStore
 from chulk.tools import Tool, ToolPermissionLevel, tool
 
@@ -21,21 +26,66 @@ def scheduled_job_tools(
     """Bind scheduling operations to one authenticated destination."""
     local_tz = ZoneInfo(timezone_name)
 
-    def schedule_task(prompt: str, run_at: str, interval_seconds: int | None = None) -> str:
+    def schedule_task(
+        prompt: str,
+        run_at: str,
+        interval_seconds: int | None = None,
+        cron: str | None = None,
+        rrule: str | None = None,
+        misfire_policy: str = "run_once",
+        max_catch_up: int = 1,
+        jitter_seconds: int = 0,
+        max_runs: int | None = None,
+        requires_approval: bool = False,
+    ) -> str:
         when = _parse_run_at(run_at, local_tz)
         if when <= datetime.now(timezone.utc):
             raise ValueError("run_at must be in the future")
         if interval_seconds is not None and interval_seconds < 60:
             raise ValueError("interval_seconds must be at least 60")
+        recurrence_fields = sum(
+            value is not None for value in (interval_seconds, cron, rrule)
+        )
+        if recurrence_fields > 1:
+            raise ValueError("choose only one of interval_seconds, cron, or rrule")
+        kind = (
+            RecurrenceKind.INTERVAL
+            if interval_seconds is not None
+            else RecurrenceKind.CRON
+            if cron is not None
+            else RecurrenceKind.RRULE
+            if rrule is not None
+            else RecurrenceKind.ONCE
+        )
+        recurrence = RecurrenceSpec(
+            kind=kind,
+            timezone_name=timezone_name,
+            interval_seconds=interval_seconds,
+            cron=cron,
+            rrule=rrule,
+            misfire_policy=MisfirePolicy(misfire_policy),
+            max_catch_up=max_catch_up,
+            jitter_seconds=jitter_seconds,
+        )
         job = store.create(
             adapter=adapter,
             destination_id=destination_id,
             prompt=prompt,
             next_run_at=when,
-            interval_seconds=interval_seconds,
+            recurrence=recurrence,
+            max_runs=max_runs,
+            requires_approval=requires_approval,
         )
-        recurrence = f", every {interval_seconds}s" if interval_seconds else ""
-        return f"Scheduled {job.id[:8]} for {job.next_run_at.isoformat()}{recurrence}."
+        recurrence_text = (
+            f", {job.recurrence.kind.value} recurrence"
+            if job.recurrence.kind is not RecurrenceKind.ONCE
+            else ""
+        )
+        approval = ", pending approval" if requires_approval else ""
+        return (
+            f"Scheduled {job.id[:8]} for {job.next_run_at.isoformat()}"
+            f"{recurrence_text}{approval}."
+        )
 
     def list_scheduled_tasks() -> str:
         return format_jobs(
@@ -69,7 +119,8 @@ def scheduled_job_tools(
                 description=(
                     "Schedule a prompt for later delivery. run_at must be an ISO-8601 "
                     f"date/time in {timezone_name} unless it includes an offset; "
-                    "interval_seconds makes it recurring and must be at least 60."
+                    "choose at most one recurrence: interval_seconds (minimum 60), "
+                    "a five-field cron expression, or an RFC 5545 RRULE."
                 ),
                 permission_level=ToolPermissionLevel.WRITE,
                 idempotent=False,
@@ -119,11 +170,16 @@ def format_jobs(
     lines = ["Active scheduled tasks:"]
     display_tz = ZoneInfo(timezone_name)
     for job in jobs:
-        interval = job.interval_seconds
-        recurrence = f" every {interval}s" if interval else ""
+        recurrence = ""
+        if job.recurrence.kind is RecurrenceKind.INTERVAL:
+            recurrence = f" every {job.interval_seconds}s"
+        elif job.recurrence.kind is RecurrenceKind.CRON:
+            recurrence = f" cron {job.recurrence.cron}"
+        elif job.recurrence.kind is RecurrenceKind.RRULE:
+            recurrence = f" RRULE {job.recurrence.rrule}"
         lines.append(
             f"- {job.id[:8]} at {job.next_run_at.astimezone(display_tz).isoformat()}"
-            f"{recurrence}: "
+            f"{recurrence} [{job.status.value}]: "
             f"{job.prompt[:120]}"
         )
     return "\n".join(lines)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 
@@ -17,6 +18,7 @@ from chulk.runtime import create_agent
 from chulk.server import ConversationDispatcher, create_control_app
 from chulk.events import AgentEvent, ModelDeltaPayload
 from chulk.server.security import ControlTokenStore, SlidingWindowRateLimiter
+from chulk.scheduling import SQLiteScheduleStore
 from chulk.tools.permissions import PermissionRequest, ToolPermissionLevel
 
 
@@ -285,6 +287,86 @@ def test_operator_routes_are_bounded_and_do_not_expose_raw_traces(tmp_path) -> N
             "/v1/profiles/default/jobs",
             headers=_auth(tokens),
         ).status_code == 400
+
+
+def test_automation_control_and_authenticated_webhook_routes(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    store = SQLiteScheduleStore(config.store_path)
+    job = store.create(
+        adapter="webhook",
+        destination_id="owner",
+        prompt="handle event",
+        next_run_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    with TestClient(app) as client:
+        inspected = client.get(
+            f"/v1/profiles/default/jobs/{job.id}",
+            headers=_auth(tokens),
+        )
+        assert inspected.status_code == 200
+        assert inspected.json()["job"]["id"] == job.id
+
+        paused = client.post(
+            f"/v1/profiles/default/jobs/{job.id}/actions",
+            headers=_auth(tokens),
+            json={
+                "action": "pause",
+                "revision": job.revision,
+                "idempotency_key": "api-pause",
+            },
+        )
+        assert paused.status_code == 200
+        assert paused.json()["job"]["status"] == "paused"
+
+        resumed = store.resume(
+            job.id,
+            expected_revision=paused.json()["job"]["revision"],
+            idempotency_key="test-resume",
+        )
+        webhook = client.post(
+            f"/v1/profiles/default/jobs/{job.id}/webhooks",
+            headers=_auth(tokens),
+            json={},
+        )
+        assert webhook.status_code == 201
+        trigger_id = webhook.json()["trigger"]["id"]
+        credential = webhook.json()["credential"]
+
+        denied = client.post(
+            f"/v1/profiles/default/automation-webhooks/{trigger_id}",
+            headers=_auth(tokens),
+            json={
+                "credential": "wrong",
+                "event_id": "evt-api",
+                "payload": {},
+            },
+        )
+        assert denied.status_code == 401
+        accepted = client.post(
+            f"/v1/profiles/default/automation-webhooks/{trigger_id}",
+            headers=_auth(tokens),
+            json={
+                "credential": credential,
+                "event_id": "evt-api",
+                "payload": {"value": 1},
+            },
+        )
+        assert accepted.status_code == 202
+        replay = client.post(
+            f"/v1/profiles/default/automation-webhooks/{trigger_id}",
+            headers=_auth(tokens),
+            json={
+                "credential": credential,
+                "event_id": "evt-api",
+                "payload": {"value": 2},
+            },
+        )
+        assert (
+            replay.json()["trigger_event"]["id"]
+            == accepted.json()["trigger_event"]["id"]
+        )
+        assert resumed.status.value == "active"
 
 
 def test_permission_endpoint_is_owned_and_idempotent(tmp_path) -> None:

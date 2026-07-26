@@ -416,6 +416,80 @@ def create_control_app(
             )
         )
 
+    async def automation_job(request):
+        try:
+            value = operators.automation_job(
+                request.path_params["profile_id"],
+                request.path_params["job_id"],
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "automation_not_found", str(exc)) from exc
+        return _json(value)
+
+    async def control_automation(request):
+        body = await _json_body(request)
+        if not isinstance(body, Mapping):
+            raise ValueError("request body must be an object")
+        action = body.get("action")
+        revision = body.get("revision")
+        idempotency_key = body.get("idempotency_key")
+        if not isinstance(action, str):
+            raise ValueError("action is required")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("revision must be a non-negative integer")
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        try:
+            value = operators.control_automation(
+                request.path_params["profile_id"],
+                request.path_params["job_id"],
+                action=action,
+                revision=revision,
+                idempotency_key=idempotency_key,
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "automation_not_found", str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiProblem(409, "automation_conflict", str(exc)) from exc
+        return _json({"job": value})
+
+    async def create_automation_webhook(request):
+        try:
+            value = operators.create_automation_webhook(
+                request.path_params["profile_id"],
+                request.path_params["job_id"],
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "automation_not_found", str(exc)) from exc
+        return _json(value, status_code=201)
+
+    async def ingest_automation_webhook(request):
+        body = await _json_body(request)
+        if not isinstance(body, Mapping):
+            raise ValueError("request body must be an object")
+        credential = body.get("credential")
+        event_id = body.get("event_id")
+        payload = body.get("payload", {})
+        if not isinstance(credential, str) or not credential:
+            raise ValueError("credential is required")
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("event_id is required")
+        if not isinstance(payload, Mapping):
+            raise ValueError("payload must be an object")
+        try:
+            value = operators.ingest_automation_webhook(
+                request.path_params["profile_id"],
+                request.path_params["trigger_id"],
+                credential=credential,
+                event_id=event_id,
+                payload=dict(payload),
+            )
+        except LookupError as exc:
+            raise ApiProblem(404, "automation_trigger_not_found", str(exc)) from exc
+        except PermissionError as exc:
+            raise ApiProblem(401, "automation_trigger_unauthorized", str(exc)) from exc
+        return _json({"trigger_event": value}, status_code=202)
+
     async def proposals(request):
         status = request.query_params.get("status", "pending")
         if status == "all":
@@ -583,6 +657,26 @@ def create_control_app(
             "/v1/profiles/{profile_id:str}/jobs",
             jobs,
             methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/jobs/{job_id:str}",
+            automation_job,
+            methods=["GET"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/jobs/{job_id:str}/actions",
+            control_automation,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/jobs/{job_id:str}/webhooks",
+            create_automation_webhook,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/profiles/{profile_id:str}/automation-webhooks/{trigger_id:str}",
+            ingest_automation_webhook,
+            methods=["POST"],
         ),
         Route(
             "/v1/profiles/{profile_id:str}/proposals",
@@ -763,6 +857,18 @@ def _schema() -> dict[str, Any]:
             },
             "/v1/profiles/{profile_id}/jobs": {
                 "get": {"operationId": "listJobs"}
+            },
+            "/v1/profiles/{profile_id}/jobs/{job_id}": {
+                "get": {"operationId": "getAutomationJob"}
+            },
+            "/v1/profiles/{profile_id}/jobs/{job_id}/actions": {
+                "post": {"operationId": "controlAutomationJob"}
+            },
+            "/v1/profiles/{profile_id}/jobs/{job_id}/webhooks": {
+                "post": {"operationId": "createAutomationWebhook"}
+            },
+            "/v1/profiles/{profile_id}/automation-webhooks/{trigger_id}": {
+                "post": {"operationId": "ingestAutomationWebhook"}
             },
             "/v1/profiles/{profile_id}/proposals": {
                 "get": {"operationId": "listProposals"}

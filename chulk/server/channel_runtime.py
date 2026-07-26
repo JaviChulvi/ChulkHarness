@@ -235,7 +235,10 @@ class ChannelConversationExecutor:
                 channel_command=name,
             )
         if name == "jobs":
-            records = SQLiteScheduleStore(config.store_path).list(
+            records = SQLiteScheduleStore(
+                config.store_path,
+                profile_id=profile.id,
+            ).list(
                 adapter=envelope.identity.adapter,
                 destination_id=envelope.destination_id,
             )
