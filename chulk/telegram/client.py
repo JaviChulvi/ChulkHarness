@@ -28,6 +28,10 @@ TELEGRAM_SCHEDULING_COMMANDS: tuple[tuple[str, str], ...] = (
 )
 JsonRequest = Callable[[str, dict[str, object], float], object]
 BinaryRequest = Callable[[str, float, int], bytes]
+UploadRequest = Callable[
+    [str, dict[str, object], str, bytes, str, str, float],
+    object,
+]
 
 
 class TelegramError(RuntimeError):
@@ -65,6 +69,7 @@ class TelegramClient:
         *,
         request_json: JsonRequest | None = None,
         request_binary: BinaryRequest | None = None,
+        request_upload: UploadRequest | None = None,
         request_timeout_seconds: float = 40.0,
     ) -> None:
         if not bot_token.strip():
@@ -72,6 +77,7 @@ class TelegramClient:
         self._api_url = f"{TELEGRAM_API_BASE_URL}/bot{bot_token.strip()}"
         self._request_json = request_json or _request_json
         self._request_binary = request_binary or _request_binary
+        self._request_upload = request_upload or _request_upload
         self._request_timeout_seconds = request_timeout_seconds
         self.next_offset: int | None = None
         self.ignored_updates: tuple[tuple[int, str], ...] = ()
@@ -143,6 +149,51 @@ class TelegramClient:
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         """Show a short-lived activity indicator in one chat."""
         self._call("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def send_attachment(
+        self,
+        chat_id: int,
+        data: bytes,
+        *,
+        mime_type: str,
+        file_name: str,
+        caption: str | None = None,
+    ) -> None:
+        """Upload one already-approved bounded attachment."""
+        if not data:
+            raise TelegramError("Telegram attachment cannot be empty")
+        method, field = (
+            ("sendPhoto", "photo")
+            if mime_type.startswith("image/")
+            else (
+                ("sendAudio", "audio")
+                if mime_type.startswith("audio/")
+                else (
+                    ("sendVideo", "video")
+                    if mime_type.startswith("video/")
+                    else ("sendDocument", "document")
+                )
+            )
+        )
+        payload: dict[str, object] = {"chat_id": chat_id}
+        if caption:
+            payload["caption"] = caption
+        try:
+            response = self._request_upload(
+                f"{self._api_url}/{method}",
+                payload,
+                field,
+                data,
+                file_name,
+                mime_type,
+                self._request_timeout_seconds,
+            )
+        except Exception as exc:
+            if isinstance(exc, TelegramError):
+                raise
+            raise TelegramError("Telegram attachment upload failed") from exc
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            raise TelegramError("Telegram attachment upload failed")
 
     def set_commands(
         self,
@@ -303,3 +354,50 @@ def _request_binary(url: str, timeout: float, max_bytes: int) -> bytes:
     if len(data) > max_bytes:
         raise TelegramError("Telegram attachment exceeds the configured size limit")
     return data
+
+
+def _request_upload(
+    url: str,
+    payload: dict[str, object],
+    field_name: str,
+    data: bytes,
+    file_name: str,
+    mime_type: str,
+    timeout: float,
+) -> object:
+    boundary = f"chulk-{len(data):x}-{abs(hash(file_name)):x}"
+    chunks: list[bytes] = []
+    for key, value in payload.items():
+        chunks.extend(
+            (
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
+                str(value).encode(),
+                b"\r\n",
+            )
+        )
+    safe_name = PurePath(file_name).name.replace('"', "")
+    chunks.extend(
+        (
+            f"--{boundary}\r\n".encode(),
+            (
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{safe_name}"\r\n'
+            ).encode(),
+            f"Content-Type: {mime_type}\r\n\r\n".encode(),
+            data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        )
+    )
+    request = Request(
+        url,
+        data=b"".join(chunks),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise TelegramError("Telegram attachment upload failed") from exc

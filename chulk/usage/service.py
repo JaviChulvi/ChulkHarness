@@ -35,6 +35,17 @@ class ModelMeter:
     credential_ref: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MediaUsageReservation:
+    """Budget holds created before one media processor side effect."""
+
+    primary: BudgetReservation
+    constraints: tuple[BudgetReservation, ...]
+    source_event_id: str
+    dimensions: UsageDimensions
+    cost: ExactCost
+
+
 class ModelUsageAccounting:
     """Reserve before model calls and commit normalized results afterwards."""
 
@@ -443,6 +454,118 @@ class ModelUsageAccounting:
         for constraint in self._tool_constraint_reservations.pop(key, ()):
             self.store.release(constraint.id)
         return self.store.release(reservation.id)
+
+    def reserve_media_transform(
+        self,
+        *,
+        turn_id: str,
+        operation_index: int,
+        content_ref: str,
+        processor: str,
+        provider: str,
+        units: int = 1,
+        pricing_per_unit: Decimal | None = None,
+        network_access: bool = False,
+    ) -> MediaUsageReservation:
+        """Reserve media budget before local or hosted processing begins."""
+        if operation_index < 1 or units < 0:
+            raise ValueError("media usage quantities cannot be negative")
+        source_event_id = (
+            f"{self.conversation_id}:turn:{turn_id}:media:"
+            f"{operation_index}:{content_ref}:{processor}"
+        )
+        cost = (
+            ExactCost(
+                pricing_per_unit * Decimal(units),
+                pricing_known=True,
+                estimated=True,
+            )
+            if pricing_per_unit is not None
+            else ExactCost(
+                Decimal(0) if not network_access else None,
+                pricing_known=not network_access,
+            )
+        )
+        dimensions = self._dimensions(turn_id)
+        reservation = self.store.reserve(
+            idempotency_key=source_event_id,
+            source_event_id=source_event_id,
+            resource_kind=ResourceKind.MEDIA,
+            dimensions=dimensions,
+            budget=self.budget,
+            cost=cost,
+        )
+        try:
+            constraints = self._reserve_constraints(
+                source_event_id=source_event_id,
+                resource_kind=ResourceKind.MEDIA,
+                dimensions=dimensions,
+                cost=cost,
+            )
+        except Exception:
+            self.store.release(reservation.id)
+            raise
+        return MediaUsageReservation(
+            primary=reservation,
+            constraints=constraints,
+            source_event_id=source_event_id,
+            dimensions=dimensions,
+            cost=cost,
+        )
+
+    def commit_media_transform(
+        self,
+        reservation: MediaUsageReservation,
+        *,
+        content_ref: str,
+        processor: str,
+        provider: str,
+        byte_length: int,
+        units: int = 1,
+        unit_name: str = "request",
+        network_access: bool = False,
+        retains_data: bool = False,
+    ) -> tuple[UsageEntry, ...]:
+        """Commit actual media usage against its pre-processing reservation."""
+        if byte_length < 0 or units < 0:
+            raise ValueError("media usage quantities cannot be negative")
+        now = self.store.clock().astimezone(timezone.utc)
+        entry = UsageEntry(
+            id=str(uuid4()),
+            resource_kind=ResourceKind.MEDIA,
+            source_event_id=f"{reservation.source_event_id}:result",
+            dimensions=reservation.dimensions,
+            occurred_at=now,
+            billing_period=now.strftime("%Y-%m"),
+            purpose="media_transform",
+            units={
+                "requests": Decimal(1),
+                "bytes": Decimal(byte_length),
+                unit_name: Decimal(units),
+            },
+            cost=reservation.cost,
+            provider=provider,
+            tool_or_service=processor,
+            trace_path=self.trace_path,
+            metadata={
+                "content_ref": content_ref,
+                "network_access": network_access,
+                "retains_data": retains_data,
+            },
+        )
+        committed = self.store.commit(reservation.primary.id, (entry,))
+        for constraint in reservation.constraints:
+            self.store.commit(constraint.id, (entry,))
+        return committed
+
+    def release_media_transform(
+        self,
+        reservation: MediaUsageReservation,
+    ) -> None:
+        """Release all holds when processing fails before a result exists."""
+        self.store.release(reservation.primary.id)
+        for constraint in reservation.constraints:
+            self.store.release(constraint.id)
 
     def _reserve_constraints(
         self,

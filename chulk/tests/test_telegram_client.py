@@ -57,6 +57,37 @@ def test_send_message_splits_long_responses() -> None:
     assert split_message("abcd\nefgh", limit=5) == ("abcd", "efgh")
 
 
+def test_send_attachment_uses_bounded_typed_upload() -> None:
+    calls: list[tuple] = []
+
+    def upload(*args):
+        calls.append(args)
+        return {"ok": True, "result": {}}
+
+    client = TelegramClient(
+        "secret",
+        request_json=lambda *_args: {"ok": True, "result": {}},
+        request_upload=upload,
+    )
+
+    client.send_attachment(
+        42,
+        b"pdf",
+        mime_type="application/pdf",
+        file_name="../../report.pdf",
+        caption="Here",
+    )
+
+    assert calls[0][0].endswith("/sendDocument")
+    assert calls[0][1] == {"chat_id": 42, "caption": "Here"}
+    assert calls[0][2:6] == (
+        "document",
+        b"pdf",
+        "../../report.pdf",
+        "application/pdf",
+    )
+
+
 def test_get_updates_normalizes_voice_and_photo_attachments() -> None:
     def request(_url: str, _payload: dict[str, object], _timeout: float) -> object:
         return {

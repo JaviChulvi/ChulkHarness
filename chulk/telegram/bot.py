@@ -27,6 +27,16 @@ from chulk.gateway import (
     shared_command_help,
 )
 from chulk.llm.lifecycle import aclose_resources
+from chulk.media import (
+    ContentStore,
+    LocalTextExtractor,
+    MediaInputPart,
+    MediaKind,
+    MediaProcessorRegistry,
+    TextInputPart,
+    UnsupportedMediaError,
+    UserInput,
+)
 from chulk.profiles import ProfileRuntimeFactory
 from chulk.scheduling import AutomationDeliveryState, SQLiteScheduleStore
 from chulk.scheduling.tools import format_jobs, scheduled_job_tools
@@ -47,7 +57,7 @@ from chulk.telegram.ledger import SQLiteAdapterUpdateLedger
 from chulk.telegram.media import (
     TelegramMediaError,
     TelegramMediaProcessor,
-    attachment_context,
+    TelegramMediaProcessorAdapter,
     validate_attachment,
 )
 from chulk.tools import PermissionDecision, PermissionRequest
@@ -71,6 +81,8 @@ class TelegramAgent(Protocol):
     def conversation_id(self) -> str: ...
 
     async def run(self, message: str, **kwargs: object) -> str: ...
+
+    async def run_input(self, user_input: UserInput, **kwargs: object) -> str: ...
 
     async def plan(self, message: str) -> str: ...
 
@@ -118,6 +130,7 @@ class TelegramAgentBot:
             else None
         )
         self._agent_factory = agent_factory or self._default_agent_factory
+        self._content_stores: dict[str, ContentStore] = {}
         self._custom_agent_factory = agent_factory
         self._profile_runtime_factory = profile_runtime_factory
         self._profile_configs: dict[str, Config] = {config.profile_id: config}
@@ -167,6 +180,7 @@ class TelegramAgentBot:
             config=telegram_config,
             ledger=self.gateway_ledger,
             defer_cursor=True,
+            content_resolver=self._resolve_delivery_content,
         )
         self.gateway_runtime = GatewayRuntime(
             ledger=self.gateway_ledger,
@@ -339,18 +353,28 @@ class TelegramAgentBot:
                 async with self._chat_lock(update.chat_id):
                     text = update.text.strip()
                     context_sections: list[TurnContextSection] | None = None
+                    typed_input: UserInput | None = None
                     if update.attachment is not None:
-                        text, context = await self._process_attachment(update)
-                        context_sections = [context]
+                        typed_input = await self._process_attachment(
+                            update,
+                            profile_id=profile_id or self.config.profile_id,
+                        )
+                        text = typed_input.textual_projection()
                     response = await self._dispatch(
                         update.chat_id,
                         text,
                         profile_id=profile_id or self.config.profile_id,
                         context_sections=context_sections,
+                        typed_input=typed_input,
                     )
             except TelegramMediaError as exc:
                 LOGGER.warning("Telegram media request rejected (%s)", type(exc).__name__)
                 response = str(exc)
+            except UnsupportedMediaError:
+                response = (
+                    "Attachment processing is unavailable for this media type "
+                    "and configured model provider."
+                )
             except Exception as exc:
                 LOGGER.error("Telegram agent request failed (%s)", type(exc).__name__)
                 response = "The agent could not complete that request. Check the server logs and try again."
@@ -363,29 +387,18 @@ class TelegramAgentBot:
     async def _process_attachment(
         self,
         update: TelegramUpdate,
-    ) -> tuple[str, TurnContextSection]:
+        *,
+        profile_id: str,
+    ) -> UserInput:
         attachment = update.attachment
         if attachment is None:
             raise TelegramMediaError("No supported attachment was found in this message.")
-        if self._media_processor is None:
-            raise TelegramMediaError(
-                "Attachment processing is unavailable for the configured model provider."
-            )
         attachment = validate_attachment(attachment)
         try:
             data = await asyncio.to_thread(
                 self.client.download_file,
                 attachment.file_id,
                 max_bytes=self.telegram_config.max_attachment_bytes,
-            )
-            extracted = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._media_processor.process,
-                    attachment,
-                    data,
-                    instruction=update.text.strip(),
-                ),
-                timeout=self.config.llm_timeout_seconds,
             )
         except TelegramError as exc:
             if "size limit" in str(exc):
@@ -397,12 +410,22 @@ class TelegramAgentBot:
             ) from exc
         except TelegramMediaError:
             raise
-        except Exception as exc:
-            raise TelegramMediaError(
-                "The configured media provider could not interpret that attachment."
-            ) from exc
         instruction = update.text.strip() or "Respond to the attachment."
-        return instruction, attachment_context(attachment, extracted)
+        item = await asyncio.to_thread(
+            self._content_store_for(profile_id).put,
+            data,
+            kind=_media_kind(attachment.kind),
+            mime_type=attachment.mime_type,
+            file_name=attachment.file_name,
+            provenance=f"telegram:{attachment.file_id}",
+            metadata={"channel": "telegram"},
+        )
+        return UserInput(
+            (
+                TextInputPart(instruction, external_content=True),
+                MediaInputPart(item, caption=update.text.strip() or None),
+            )
+        )
 
     async def close(self) -> None:
         """Close all cached agent runtimes."""
@@ -462,6 +485,7 @@ class TelegramAgentBot:
         *,
         profile_id: str,
         context_sections: list[TurnContextSection] | None = None,
+        typed_input: UserInput | None = None,
     ) -> str:
         runtime_config = self._config_for_profile(profile_id)
         schedule_store = self._schedule_store_for(profile_id)
@@ -583,11 +607,24 @@ class TelegramAgentBot:
             return "Unknown command. Use /help to see available commands."
         if not text:
             return "Send a text message for the agent."
-        return await agent.run(
-            text,
-            context_sections=context_sections,
-            extension_metadata={"source": "telegram", "telegram_chat_id": chat_id},
-        )
+        run_kwargs = {
+            "context_sections": context_sections,
+            "extension_metadata": {
+                "source": "telegram",
+                "telegram_chat_id": chat_id,
+            },
+        }
+        if typed_input is not None:
+            try:
+                return await asyncio.wait_for(
+                    agent.run_input(typed_input, **run_kwargs),
+                    timeout=runtime_config.llm_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise TelegramMediaError(
+                    "The configured media provider could not interpret that attachment."
+                ) from exc
+        return await agent.run(text, **run_kwargs)
 
     def _agent_for_chat(self, profile_id: str, chat_id: int) -> TelegramAgent:
         key = (profile_id, chat_id)
@@ -721,6 +758,8 @@ class TelegramAgentBot:
                     channel="telegram",
                 )
             ),
+            content_store=self._content_store_for(profile_id),
+            media_processors=self._media_processors(),
         )
 
     def _config_for_profile(self, profile_id: str) -> Config:
@@ -755,6 +794,44 @@ class TelegramAgentBot:
         )
         self._schedule_stores[profile_id] = store
         return store
+
+    def _content_store_for(self, profile_id: str) -> ContentStore:
+        cached = self._content_stores.get(profile_id)
+        if cached is not None:
+            return cached
+        config = self._config_for_profile(profile_id)
+        store = ContentStore(
+            config.store_path,
+            config.runtime_dir / "content",
+            profile_id=profile_id,
+            max_content_bytes=self.telegram_config.max_attachment_bytes,
+        )
+        self._content_stores[profile_id] = store
+        return store
+
+    def _media_processors(self) -> MediaProcessorRegistry:
+        processors: list[object] = [LocalTextExtractor()]
+        if self._media_processor is not None:
+            processors.append(
+                TelegramMediaProcessorAdapter(
+                    self._media_processor,
+                    provider=self.config.llm_provider,
+                    max_bytes=self.telegram_config.max_attachment_bytes,
+                )
+            )
+        return MediaProcessorRegistry(tuple(processors))  # type: ignore[arg-type]
+
+    def _resolve_delivery_content(
+        self,
+        profile_id: str,
+        content_ref: str,
+        size_bytes: int,
+    ) -> bytes:
+        return self._content_store_for(profile_id).read(
+            content_ref,
+            profile_id=profile_id,
+            max_bytes=max(1, size_bytes),
+        )
 
     async def _send(self, chat_id: int, text: str) -> None:
         await asyncio.to_thread(self.client.send_message, chat_id, text)
@@ -891,6 +968,16 @@ class TelegramAgentBot:
             if not renewed:
                 LOGGER.warning("Scheduled Telegram job lease renewal lost its claim")
                 return
+
+
+def _media_kind(kind: str) -> MediaKind:
+    if kind in {"voice", "audio"}:
+        return MediaKind.AUDIO
+    if kind == "video":
+        return MediaKind.VIDEO
+    if kind == "image":
+        return MediaKind.IMAGE
+    return MediaKind.DOCUMENT
 
 
 def _telegram_update_from_envelope(envelope: InboundEnvelope) -> TelegramUpdate:

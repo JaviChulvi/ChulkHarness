@@ -992,6 +992,7 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         context_sections=[_context_section_from_dict(item) for item in _safe_dict_list(payload.get("context_sections"))],
         prompt_profile=payload.get("prompt_profile"),
         locale=payload.get("locale"),
+        input_parts=_safe_dict_list(payload.get("input_parts")),
         extension_metadata=_safe_json_object(payload.get("extension_metadata")),
         tool_context_metadata=_safe_json_object(payload.get("tool_context_metadata")),
         loaded_memory_ids=_safe_string_list(payload.get("loaded_memory_ids")),
@@ -1062,6 +1063,7 @@ def _context_section_from_dict(payload: dict[str, Any]) -> TurnContextSection:
         source=payload.get("source"),
         content=str(payload.get("content") or ""),
         metadata=_safe_json_object(payload.get("metadata")),
+        persist_content=bool(payload.get("persist_content", True)),
     )
 
 

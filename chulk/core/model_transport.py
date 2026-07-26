@@ -35,6 +35,7 @@ from chulk.llm.capabilities import (
 from chulk.llm.tools import PlanningToolAvailability, provider_action_tools
 from chulk.mcp import MCPServerConfig
 from chulk.memory import ConversationMemory, MemoryRecord
+from chulk.media import ModelRequest, UserInput
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import Tool, ToolRegistry
 
@@ -223,8 +224,16 @@ class ModelTransport:
             request_kwargs["max_output_tokens"] = self.max_output_tokens
         try:
             result = call_with_supported_kwargs(
-                self.llm_client.complete_action,
-                messages,
+                self.llm_client.complete_action_request,
+                ModelRequest(
+                    messages=tuple(messages),
+                    user_input=(
+                        turn.model_input
+                        if isinstance(turn.model_input, UserInput)
+                        else None
+                    ),
+                    purpose="agent_action",
+                ),
                 **request_kwargs,
             )
         except LLMActionError as exc:
@@ -284,8 +293,16 @@ class ModelTransport:
             request_kwargs["max_output_tokens"] = self.max_output_tokens
         try:
             result = await call_async_with_supported_kwargs(
-                self.llm_client.acomplete_action,
-                messages,
+                self.llm_client.acomplete_action_request,
+                ModelRequest(
+                    messages=tuple(messages),
+                    user_input=(
+                        turn.model_input
+                        if isinstance(turn.model_input, UserInput)
+                        else None
+                    ),
+                    purpose="agent_action",
+                ),
                 **request_kwargs,
             )
         except LLMActionError as exc:
