@@ -142,34 +142,35 @@ class PermissionBroker:
             max_chars=self.argument_preview_chars,
         )
         digest = _argument_digest(request.arguments)
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO permission_requests (
-                    id, profile_id, conversation_id, turn_id, tool_name,
-                    permission_level, policy_name, reason,
-                    argument_preview_json, argument_sha256, status,
-                    created_at, expires_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    self.profile_id,
-                    self.conversation_id,
-                    self._turn_id(),
-                    request.tool_name,
-                    request.permission_level.value,
-                    request.policy_name,
-                    request.reason,
-                    json.dumps(preview, separators=(",", ":"), sort_keys=True),
-                    digest,
-                    _encode(now),
-                    _encode(expires_at),
-                    _encode(now),
-                ),
-            )
-        pending = self.get(request_id)
-        self._publish(pending, EventName.PERMISSION_REQUESTED)
+        with self._condition:
+            with sqlite_connection(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO permission_requests (
+                        id, profile_id, conversation_id, turn_id, tool_name,
+                        permission_level, policy_name, reason,
+                        argument_preview_json, argument_sha256, status,
+                        created_at, expires_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        self.profile_id,
+                        self.conversation_id,
+                        self._turn_id(),
+                        request.tool_name,
+                        request.permission_level.value,
+                        request.policy_name,
+                        request.reason,
+                        json.dumps(preview, separators=(",", ":"), sort_keys=True),
+                        digest,
+                        _encode(now),
+                        _encode(expires_at),
+                        _encode(now),
+                    ),
+                )
+            pending = self.get(request_id)
+            self._publish(pending, EventName.PERMISSION_REQUESTED)
         return pending
 
     def wait(self, request_id: str) -> PendingPermission:
@@ -194,77 +195,82 @@ class PermissionBroker:
         normalized = _normalize_answer(decision)
         status = "allowed" if normalized is PermissionDecision.ALLOW else "denied"
         now = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                SELECT * FROM permission_requests
-                WHERE id = ? AND profile_id = ? AND conversation_id = ?
-                """,
-                (request_id, self.profile_id, self.conversation_id),
-            ).fetchone()
-            if row is None:
-                raise PermissionRequestNotFoundError(
-                    "permission request does not belong to this conversation"
-                )
-            existing_key = row["decision_key"]
-            if existing_key is not None:
-                if str(existing_key) != idempotency_key or row["decision"] != normalized.value:
-                    raise PermissionDecisionConflictError(
-                        "permission request already has a different decision"
+        with self._condition:
+            with sqlite_connection(self.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT * FROM permission_requests
+                    WHERE id = ? AND profile_id = ? AND conversation_id = ?
+                    """,
+                    (request_id, self.profile_id, self.conversation_id),
+                ).fetchone()
+                if row is None:
+                    raise PermissionRequestNotFoundError(
+                        "permission request does not belong to this conversation"
                     )
-                return _row(row)
-            duplicate = conn.execute(
-                """
-                SELECT id FROM permission_requests
-                WHERE profile_id = ? AND decision_key = ?
-                """,
-                (self.profile_id, idempotency_key),
-            ).fetchone()
-            if duplicate is not None:
-                raise PermissionDecisionConflictError(
-                    "idempotency key was already used for another permission request"
-                )
-            if str(row["status"]) != "pending":
-                raise PermissionDecisionConflictError(
-                    f"permission request is already {row['status']}"
-                )
-            if _decode(str(row["expires_at"])) <= now:
+                existing_key = row["decision_key"]
+                if existing_key is not None:
+                    if (
+                        str(existing_key) != idempotency_key
+                        or row["decision"] != normalized.value
+                    ):
+                        raise PermissionDecisionConflictError(
+                            "permission request already has a different decision"
+                        )
+                    return _row(row)
+                duplicate = conn.execute(
+                    """
+                    SELECT id FROM permission_requests
+                    WHERE profile_id = ? AND decision_key = ?
+                    """,
+                    (self.profile_id, idempotency_key),
+                ).fetchone()
+                if duplicate is not None:
+                    raise PermissionDecisionConflictError(
+                        "idempotency key was already used for another permission request"
+                    )
+                if str(row["status"]) != "pending":
+                    raise PermissionDecisionConflictError(
+                        f"permission request is already {row['status']}"
+                    )
+                if _decode(str(row["expires_at"])) <= now:
+                    conn.execute(
+                        """
+                        UPDATE permission_requests
+                        SET status = 'expired', updated_at = ?
+                        WHERE id = ? AND status = 'pending'
+                        """,
+                        (_encode(now), request_id),
+                    )
+                    raise PermissionDecisionConflictError(
+                        "permission request has expired"
+                    )
                 conn.execute(
                     """
                     UPDATE permission_requests
-                    SET status = 'expired', updated_at = ?
+                    SET status = ?, decision = ?, decision_reason = ?,
+                        decision_key = ?, decided_at = ?, updated_at = ?
                     WHERE id = ? AND status = 'pending'
                     """,
-                    (_encode(now), request_id),
+                    (
+                        status,
+                        normalized.value,
+                        reason,
+                        idempotency_key,
+                        _encode(now),
+                        _encode(now),
+                        request_id,
+                    ),
                 )
-                raise PermissionDecisionConflictError("permission request has expired")
-            conn.execute(
-                """
-                UPDATE permission_requests
-                SET status = ?, decision = ?, decision_reason = ?,
-                    decision_key = ?, decided_at = ?, updated_at = ?
-                WHERE id = ? AND status = 'pending'
-                """,
-                (
-                    status,
-                    normalized.value,
-                    reason,
-                    idempotency_key,
-                    _encode(now),
-                    _encode(now),
-                    request_id,
-                ),
-            )
-            updated = conn.execute(
-                "SELECT * FROM permission_requests WHERE id = ?",
-                (request_id,),
-            ).fetchone()
-        assert updated is not None
-        result = _row(updated)
-        with self._condition:
+                updated = conn.execute(
+                    "SELECT * FROM permission_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+            assert updated is not None
+            result = _row(updated)
+            self._publish(result, EventName.PERMISSION_RESOLVED)
             self._condition.notify_all()
-        self._publish(result, EventName.PERMISSION_RESOLVED)
         return result
 
     def get(self, request_id: str) -> PendingPermission:
@@ -321,52 +327,56 @@ class PermissionBroker:
     def cancel_pending(self, *, reason: str = "conversation cancelled") -> int:
         """Deny outstanding requests and wake blocked tool callbacks."""
         now = _encode(_utc_now())
-        with sqlite_connection(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT id FROM permission_requests
-                WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
-                """,
-                (self.profile_id, self.conversation_id),
-            ).fetchall()
-            conn.execute(
-                """
-                UPDATE permission_requests
-                SET status = 'denied', decision = 'deny', decision_reason = ?,
-                    decided_at = ?, updated_at = ?
-                WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
-                """,
-                (
-                    reason,
-                    now,
-                    now,
-                    self.profile_id,
-                    self.conversation_id,
-                ),
-            )
         with self._condition:
+            with sqlite_connection(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM permission_requests
+                    WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
+                    """,
+                    (self.profile_id, self.conversation_id),
+                ).fetchall()
+                conn.execute(
+                    """
+                    UPDATE permission_requests
+                    SET status = 'denied', decision = 'deny', decision_reason = ?,
+                        decided_at = ?, updated_at = ?
+                    WHERE profile_id = ? AND conversation_id = ? AND status = 'pending'
+                    """,
+                    (
+                        reason,
+                        now,
+                        now,
+                        self.profile_id,
+                        self.conversation_id,
+                    ),
+                )
+            for row in rows:
+                self._publish(
+                    self.get(str(row["id"])),
+                    EventName.PERMISSION_RESOLVED,
+                )
             self._condition.notify_all()
-        for row in rows:
-            self._publish(self.get(str(row["id"])), EventName.PERMISSION_RESOLVED)
         return len(rows)
 
     def _expire(self, request_id: str) -> PendingPermission:
         now = _encode(_utc_now())
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute(
-                """
-                UPDATE permission_requests
-                SET status = 'expired', decision_reason = 'permission request expired',
-                    updated_at = ?
-                WHERE id = ? AND profile_id = ? AND conversation_id = ?
-                  AND status = 'pending'
-                """,
-                (now, request_id, self.profile_id, self.conversation_id),
-            )
-        result = self.get(request_id)
         with self._condition:
+            with sqlite_connection(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE permission_requests
+                    SET status = 'expired',
+                        decision_reason = 'permission request expired',
+                        updated_at = ?
+                    WHERE id = ? AND profile_id = ? AND conversation_id = ?
+                      AND status = 'pending'
+                    """,
+                    (now, request_id, self.profile_id, self.conversation_id),
+                )
+            result = self.get(request_id)
+            self._publish(result, EventName.PERMISSION_RESOLVED)
             self._condition.notify_all()
-        self._publish(result, EventName.PERMISSION_RESOLVED)
         return result
 
     def _publish(self, pending: PendingPermission, name: EventName) -> None:

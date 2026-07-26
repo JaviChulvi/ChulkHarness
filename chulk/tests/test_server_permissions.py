@@ -97,6 +97,68 @@ def test_permission_broker_waits_for_one_idempotent_api_decision(tmp_path) -> No
     ]
 
 
+def test_permission_broker_publishes_request_before_concurrent_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    broker = _broker(tmp_path)
+    journal = broker.journal
+    assert journal is not None
+    original_append = journal.append
+    request_publish_started = threading.Event()
+    release_request_publish = threading.Event()
+    decision_finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def delayed_append(event):
+        if event.name == "permission.requested":
+            request_publish_started.set()
+            if not release_request_publish.wait(timeout=2):
+                raise AssertionError("request event publication was not released")
+        return original_append(event)
+
+    def create_request() -> None:
+        try:
+            broker.create(_request())
+        except BaseException as exc:
+            errors.append(exc)
+
+    def decide_request(request_id: str) -> None:
+        try:
+            broker.decide(
+                request_id,
+                "allow",
+                idempotency_key="decision-concurrent",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            decision_finished.set()
+
+    monkeypatch.setattr(journal, "append", delayed_append)
+    creator = threading.Thread(target=create_request)
+    creator.start()
+    assert request_publish_started.wait(timeout=2)
+
+    pending = broker.list(status="pending")
+    assert len(pending) == 1
+    decider = threading.Thread(target=decide_request, args=(pending[0].id,))
+    decider.start()
+    decision_was_blocked = not decision_finished.wait(timeout=0.1)
+    release_request_publish.set()
+    creator.join(timeout=2)
+    decider.join(timeout=2)
+
+    assert decision_was_blocked
+    assert not creator.is_alive()
+    assert not decider.is_alive()
+    assert errors == []
+    assert [item.event.name for item in journal.list("conversation-1")] == [
+        "permission.requested",
+        "permission.resolved",
+    ]
+
+
 def test_permission_broker_rejects_conflicting_and_late_decisions(tmp_path) -> None:
     broker = _broker(tmp_path)
     pending = broker.create(_request())
