@@ -181,3 +181,17 @@ Application dependencies injected through `ToolContext` are host-owned, but
 their methods can still produce side effects. Keep secrets out of `metadata`,
 enforce tenant scope inside the dependency, and return only the data the model
 needs. See [permissions](permissions.md) and [safety](safety.md).
+
+## Hosted tool contracts
+
+Hosted applications can add semantic `ToolIdentity` and `ToolPolicy` contracts
+for required grants, risk, effects, approval, concurrency, idempotency, dry-run
+and compensation support, and input/output classification. Chulk derives safe
+version `1.0.0` identity and schema digests for simple existing tools. Explicit
+identity/schema mismatches fail registration.
+
+Host authorization runs before the ordinary permission profile. Credentials
+are resolved only after both layers allow the exact call and are available only
+from `ToolContext.credentials`. Secret-classified output is withheld before it
+can reach an observation, event, trace, or result. See the
+[hosted runtime guide](hosting.md) for the complete contract and hooks.

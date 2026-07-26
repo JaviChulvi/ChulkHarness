@@ -1,6 +1,6 @@
 # Chulk Roadmap
 
-Last reconciled: 2026-07-16
+Last reconciled: 2026-07-26
 
 This file is the ordered implementation roadmap for ChulkHarness. It contains
 active user stories and intentionally deferred product directions. Completed
@@ -172,6 +172,61 @@ Acceptance criteria:
   accounting, cancellation, request dependency cleanup, and sync/async parity.
 - [x] Pass focused service/reducer tests and the complete repository test and
   static-validation suite.
+
+## Now: Hosted Application Runtime
+
+### US-H1: Establish The Hosted Runtime Boundary
+
+As an application host, I want to supply every runtime service and one immutable
+authority scope so that Chulk can run without local databases or directories and
+can authorize tools before credentials or side effects.
+
+Acceptance criteria:
+
+- [x] Add complete sync and async hosted service containers with explicit
+  resource ownership and scope-bound factories; keep omitted services as the
+  backward-compatible local mode.
+- [x] Add immutable execution scopes with canonical keys, non-escalating child
+  scopes, cross-tenant isolation, persisted resume verification, tool-context
+  propagation, and public event attribution.
+- [x] Add versioned tool and schema identity, implementation and argument
+  digests, policy metadata, host authorization/credential/effect/redaction
+  hooks, secret-output withholding, and compatibility defaults.
+- [x] Add credential-free sync/async in-memory embedding examples and contract
+  tests that create no local runtime files.
+- [ ] Await native async persistence, trace, audit, and usage services directly
+  throughout the async orchestration path.
+- [ ] Execute independent `parallel_safe` read-only tool batches concurrently
+  while preserving deterministic event and result ordering.
+
+### US-H2: Publish Immutable Agent Definitions And Governed Skills
+
+- [ ] Add immutable agent-definition revisions and resolve every run to one
+  exact published revision.
+- [ ] Add host-backed skill publication, evaluation, rollback, and revocation
+  while reusing the existing skill lifecycle owner.
+- [ ] Add public builder, validator, capability-diff, and dry-run authoring
+  helpers.
+
+### US-H3: Make Hosted Execution Durable And Controllable
+
+- [ ] Add durable run and step state, leases, optimistic revisions, heartbeat,
+  cancellation, steering, wait/resume, and unknown-effect reconciliation.
+- [ ] Replace blocking approvals with durable externally resolvable approval
+  records.
+- [ ] Add retry policies and transaction boundaries across provider, tool,
+  approval, and host-service failures.
+- [ ] Extend durable parent/child orchestration with scoped definitions,
+  budgets, progress, and bounded fan-out.
+
+### US-H4: Finish Gateway Resilience And Hosted Acceptance
+
+- [ ] Put gateway durability behind host-provided stores and add bounded
+  backpressure, dead-letter, reconciliation, and definition/run routing.
+- [ ] Add versioned public event identities and durable host-provided trace and
+  artifact correlation.
+- [ ] Complete the restart, duplicate-trigger, uncertain-effect, approval, and
+  gateway contract suite without credentials or infrastructure dependencies.
 
 ## Next: Reliability And SDK Depth
 

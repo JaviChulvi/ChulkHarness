@@ -55,6 +55,9 @@ class PermissionRequest:
     reason: str = ""
     capability_category: str | None = None
     capability_enabled: bool = True
+    tool_identity: dict[str, Any] | None = None
+    tool_policy: dict[str, Any] | None = None
+    arguments_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +71,9 @@ class PermissionRequest:
                 "category": self.capability_category,
                 "enabled": self.capability_enabled,
             },
+            "tool_identity": self.tool_identity,
+            "tool_policy": self.tool_policy,
+            "arguments_digest": self.arguments_digest,
         }
 
 
@@ -83,6 +89,9 @@ class PermissionDecisionRecord:
     requires_confirmation: bool = False
     capability_category: str | None = None
     capability_enabled: bool = True
+    tool_identity: dict[str, Any] | None = None
+    tool_policy: dict[str, Any] | None = None
+    arguments_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +105,9 @@ class PermissionDecisionRecord:
                 "category": self.capability_category,
                 "enabled": self.capability_enabled,
             },
+            "tool_identity": self.tool_identity,
+            "tool_policy": self.tool_policy,
+            "arguments_digest": self.arguments_digest,
         }
 
 
@@ -119,6 +131,8 @@ class ToolPermissionPolicy:
         }
 
     def request_for_tool(self, tool, arguments: dict[str, Any]) -> PermissionRequest:
+        from chulk.tools.policy import schema_digest
+
         level = normalize_permission_level(getattr(tool, "permission_level", ToolPermissionLevel.READ))
         reason = (
             "tool requires confirmation"
@@ -134,6 +148,9 @@ class ToolPermissionPolicy:
             reason=reason,
             capability_category=_capability_category(level),
             capability_enabled=True,
+            tool_identity=tool.resolved_identity().to_dict(),
+            tool_policy=tool.resolved_policy().to_dict(),
+            arguments_digest=schema_digest(arguments),
         )
 
     def decide(self, request: PermissionRequest) -> PermissionDecisionRecord:
@@ -155,6 +172,9 @@ class ToolPermissionPolicy:
             requires_confirmation=request.requires_confirmation,
             capability_category=request.capability_category,
             capability_enabled=request.capability_enabled,
+            tool_identity=request.tool_identity,
+            tool_policy=request.tool_policy,
+            arguments_digest=request.arguments_digest,
         )
 
 

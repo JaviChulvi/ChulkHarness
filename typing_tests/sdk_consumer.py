@@ -12,6 +12,8 @@ from chulk import (
     ConfigurationError,
     ContextReport,
     Cost,
+    ExecutionScope,
+    HostedRuntime,
     MemoryError,
     MemoryMode,
     MemoryProposal,
@@ -32,6 +34,9 @@ from chulk import (
     ToolAttempt,
     ToolContext,
     ToolExecutionError,
+    ToolEffect,
+    ToolIdentity,
+    ToolPolicy,
     ToolRetryPolicy,
     Tools,
     TraceError,
@@ -133,6 +138,23 @@ def dependency_tool(query: str, context: ToolContext[Dependencies]) -> str:
 
 
 retry_policy = ToolRetryPolicy(max_attempts=2)
+hosted_scope: ExecutionScope = ExecutionScope(
+    tenant_id="tenant",
+    workspace_id="workspace",
+    actor_id="actor",
+    agent_id="assistant",
+    agent_version="1.0.0",
+    run_id="run",
+)
+hosted_policy: ToolPolicy = ToolPolicy(
+    required_grants=frozenset({"catalog:read"}),
+    effect=ToolEffect.READ,
+)
+hosted_identity: ToolIdentity = ToolIdentity.from_schemas(
+    "catalog_lookup",
+    input_schema={"type": "object", "properties": {}},
+)
+assert HostedRuntime is not None
 
 
 def consume_proposal(proposal: MemoryProposal) -> str:

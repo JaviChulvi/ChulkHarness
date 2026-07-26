@@ -6,6 +6,11 @@ with`. A closed facade rejects further work. Construction, provider, safety,
 tool, memory, and trace failures map to the stable [SDK exception
 family](sdk-errors.md).
 
+For multi-tenant or filesystem-free application hosting, use
+`HostedRuntime`/`AsyncHostedRuntime` with a complete service bundle and
+`ExecutionScope`. See the [hosted runtime guide](hosting.md). A memory namespace
+alone is not an authorization or tenant-isolation boundary.
+
 When several logical users or workspaces share a `store_path`, set
 `AgentConfig(memory_namespace="tenant:workspace-key")` (or pass
 `memory_namespace` directly to `Agent`). Omitting it preserves the

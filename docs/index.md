@@ -16,6 +16,7 @@ Choose the path that matches what you are doing:
 
 - [Quickstart](quickstart.md): install to first deterministic result.
 - [SDK](sdk.md): facades, lifecycle, results, exceptions, and async boundaries.
+- [Hosted runtime](hosting.md): service injection, execution scope, and tool policy.
 - [Configuration](configuration.md): precedence, paths, and host ownership.
 - [Providers](providers.md): injected, scripted, hosted, and local clients.
 - [Tools](tools.md): custom tools, application context, outputs, and retries.

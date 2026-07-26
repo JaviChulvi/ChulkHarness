@@ -241,7 +241,7 @@ class AgentEvent:
             "turn_id": self.turn_id,
             "profile_id": self.profile_id,
             "payload": payload,
-            "extensions": dict(self.extensions),
+            "extensions": plain_data(self.extensions),
         }
 
     @classmethod

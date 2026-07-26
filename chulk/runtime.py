@@ -9,6 +9,7 @@ import warnings
 from typing import Protocol, cast
 
 from chulk.capabilities import Capabilities
+from chulk._version import __version__
 from chulk.config import Config
 from chulk.core import Agent, AgentState, TurnState
 from chulk.core.context import ContextBudget
@@ -20,6 +21,12 @@ from chulk.execution import (
     HostExecutionBackend,
 )
 from chulk.goals.runtime import GoalExecutionContext
+from chulk.hosting import (
+    ExecutionScope,
+    RuntimeServices,
+    SessionRuntimeServices,
+    SkillRuntimeServices,
+)
 from chulk.llm import (
     LLMClient,
     LLMModelCapabilities,
@@ -72,6 +79,7 @@ from chulk.tools.permissions import (
     PermissionRequest,
     permission_policy_for_profile,
 )
+from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing import JSONLTraceLogger
 from chulk.tracing.artifacts import TraceArtifactStore
 from chulk.usage import (
@@ -159,10 +167,65 @@ def create_agent(
     goal_execution: GoalExecutionContext | None = None,
     content_store: ContentStore | None = None,
     media_processors: MediaProcessorRegistry | None = None,
+    services: RuntimeServices | None = None,
+    execution_scope: ExecutionScope | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
         raise ValueError("Pass either llm_client or llm_client_factory, not both")
+    hosted_state: AgentState | None = None
+    resolved_services = None
+    if services is not None:
+        conflicts = [
+            name
+            for name, value in (
+                ("execution_backend", execution_backend),
+                ("plugin_registry", plugin_registry),
+                ("content_store", content_store),
+                ("media_processors", media_processors),
+                ("memory_namespace", memory_namespace),
+            )
+            if value is not None
+        ]
+        if conflicts:
+            raise ValueError(
+                "hosted services cannot be combined with individual runtime "
+                "injections: " + ", ".join(conflicts)
+            )
+        if tool_specs is None:
+            raise ValueError(
+                "hosted runtime requires an explicit tools collection"
+            )
+        if skill_specs is None:
+            raise ValueError(
+                "hosted runtime requires an explicit skills collection"
+            )
+        if execution_scope is None:
+            raise ValueError("hosted runtime requires an ExecutionScope")
+        requested_conversation_id = (
+            conversation_id or execution_scope.conversation_id
+        )
+        if (
+            conversation_id is not None
+            and execution_scope.conversation_id not in {None, conversation_id}
+        ):
+            raise ValueError(
+                "execution scope conversation_id does not match conversation_id"
+            )
+        if requested_conversation_id is None:
+            hosted_state = AgentState()
+            requested_conversation_id = hosted_state.conversation_id
+        execution_scope = execution_scope.with_conversation(
+            requested_conversation_id
+        )
+        conversation_id = (
+            requested_conversation_id
+            if hosted_state is None
+            else None
+        )
+        resolved_services = services.resolve(execution_scope)
+    elif execution_scope is not None:
+        raise ValueError("execution_scope is only accepted with hosted services")
 
     if llm_client_factory is None:
         llm_client_factory = _default_llm_client_factory
@@ -186,11 +249,21 @@ def create_agent(
         and usage_dimensions.goal_id not in {None, goal_snapshot.id}
     ):
         raise ValueError("usage dimensions do not match the claimed goal")
-    selected_plugin_registry = plugin_registry or LocalPluginRegistry(
-        config.runtime_dir,
-        profile_id=effective_profile_id,
+    selected_plugin_registry = (
+        resolved_services.plugins
+        if resolved_services is not None
+        else plugin_registry
+        or LocalPluginRegistry(
+            config.runtime_dir,
+            profile_id=effective_profile_id,
+        )
     )
-    if selected_plugin_registry.profile_id != effective_profile_id:
+    plugin_profile_id = getattr(
+        selected_plugin_registry,
+        "profile_id",
+        effective_profile_id,
+    )
+    if plugin_profile_id != effective_profile_id:
         raise ValueError(
             "plugin registry profile does not match the runtime profile"
         )
@@ -202,74 +275,138 @@ def create_agent(
             "conversation metadata profile_id does not match the runtime profile"
         )
     effective_conversation_metadata["profile_id"] = effective_profile_id
-    memory_store = SQLiteMemoryStore(
-        config.store_path,
-        namespace=memory_namespace,
+    if execution_scope is not None:
+        effective_conversation_metadata["execution_scope"] = (
+            execution_scope.to_dict()
+        )
+        effective_conversation_metadata["execution_scope_key"] = (
+            execution_scope.key
+        )
+    memory_store = (
+        resolved_services.memory
+        if resolved_services is not None
+        else SQLiteMemoryStore(
+            config.store_path,
+            namespace=memory_namespace,
+        )
     )
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
-    session_store = SQLiteSessionStore(config.store_path)
-    selected_content_store = content_store or ContentStore(
-        config.store_path,
-        config.runtime_dir / "content",
-        profile_id=effective_profile_id,
-    )
-    selected_content_store.sweep_expired()
-    selected_media_processors = media_processors or MediaProcessorRegistry(
-        (LocalTextExtractor(),)
-    )
-    profile_skills_dir = config.runtime_dir / "profile-skills"
-    registry_skill_dirs = tuple(
-        dict.fromkeys((*config.skills_dirs, profile_skills_dir))
-    )
-    skill_registry = SkillRegistry(
-        config.skills_dir,
-        skills_dirs=registry_skill_dirs,
-        max_skills=config.max_skills_per_turn,
-        max_content_chars=config.max_skill_content_chars,
-    )
-    state = _create_agent_state(session_store, conversation_id)
-    trace_logger = JSONLTraceLogger(
-        config.traces_dir,
-        state.conversation_id,
-        defer_until_event=TraceEvent.TURN_STARTED if conversation_id is None else None,
-    )
-    skill_lifecycle_store = SQLiteSkillLifecycleStore(
-        config.store_path,
-        profile_id=effective_profile_id,
-    )
-    skill_lifecycle = SkillLifecycleManager(
-        skill_lifecycle_store,
-        project_skills_dir=config.skills_dir,
-        profile_skills_dir=profile_skills_dir,
-        project_lock_path=config.skills_dir.parent / "skills.lock",
-        profile_lock_path=config.runtime_dir / "profile-skills.lock",
-        registry=skill_registry,
-    )
-    skill_lifecycle.register_existing(scope="project")
-    skill_lifecycle.register_existing(scope="profile")
-    learning_proposals = LearningProposalService(
-        memory_store=memory_store,
-        lifecycle_store=skill_lifecycle_store,
-        lifecycle_manager=skill_lifecycle,
-        automatic_approval_enabled=automatic_learning_approval,
-    )
+    if resolved_services is not None:
+        if not isinstance(resolved_services.sessions, SessionRuntimeServices):
+            raise TypeError(
+                "hosted sessions service must be SessionRuntimeServices"
+            )
+        if not isinstance(resolved_services.skills, SkillRuntimeServices):
+            raise TypeError("hosted skills service must be SkillRuntimeServices")
+        session_store = resolved_services.sessions.store
+        session_search_service = resolved_services.sessions.search
+        selected_content_store = resolved_services.content
+        selected_media_processors = resolved_services.media
+        skill_registry = resolved_services.skills.registry
+        skill_lifecycle_store = resolved_services.skills.lifecycle_store
+        skill_lifecycle = resolved_services.skills.lifecycle
+        learning_proposals = resolved_services.skills.learning_proposals
+        learning_reviewer = resolved_services.skills.learning_reviewer
+        state = hosted_state or _create_agent_state(
+            session_store,
+            conversation_id,
+            execution_scope=execution_scope,
+        )
+        trace_logger = resolved_services.traces
+    else:
+        session_store = SQLiteSessionStore(config.store_path)
+        selected_content_store = content_store or ContentStore(
+            config.store_path,
+            config.runtime_dir / "content",
+            profile_id=effective_profile_id,
+        )
+        selected_content_store.sweep_expired()
+        selected_media_processors = media_processors or MediaProcessorRegistry(
+            (LocalTextExtractor(),)
+        )
+        profile_skills_dir = config.runtime_dir / "profile-skills"
+        registry_skill_dirs = tuple(
+            dict.fromkeys((*config.skills_dirs, profile_skills_dir))
+        )
+        skill_registry = SkillRegistry(
+            config.skills_dir,
+            skills_dirs=registry_skill_dirs,
+            max_skills=config.max_skills_per_turn,
+            max_content_chars=config.max_skill_content_chars,
+        )
+        state = _create_agent_state(session_store, conversation_id)
+        trace_logger = JSONLTraceLogger(
+            config.traces_dir,
+            state.conversation_id,
+            defer_until_event=(
+                TraceEvent.TURN_STARTED
+                if conversation_id is None
+                else None
+            ),
+        )
+        skill_lifecycle_store = SQLiteSkillLifecycleStore(
+            config.store_path,
+            profile_id=effective_profile_id,
+        )
+        skill_lifecycle = SkillLifecycleManager(
+            skill_lifecycle_store,
+            project_skills_dir=config.skills_dir,
+            profile_skills_dir=profile_skills_dir,
+            project_lock_path=config.skills_dir.parent / "skills.lock",
+            profile_lock_path=config.runtime_dir / "profile-skills.lock",
+            registry=skill_registry,
+        )
+        skill_lifecycle.register_existing(scope="project")
+        skill_lifecycle.register_existing(scope="profile")
+        learning_proposals = LearningProposalService(
+            memory_store=memory_store,
+            lifecycle_store=skill_lifecycle_store,
+            lifecycle_manager=skill_lifecycle,
+            automatic_approval_enabled=automatic_learning_approval,
+        )
+    if execution_scope is None:
+        execution_scope = ExecutionScope.local(
+            agent_id=f"profile:{effective_profile_id}",
+            agent_version=__version__,
+            conversation_id=state.conversation_id,
+            profile_id=effective_profile_id,
+        )
+    effective_conversation_metadata["execution_scope"] = execution_scope.to_dict()
+    effective_conversation_metadata["execution_scope_key"] = execution_scope.key
+
     def audit_session_read(
         event_type: str,
         payload: dict,
     ) -> None:
         trace_logger.activate()
         trace_logger.log(event_type, payload)
+        if resolved_services is not None:
+            resolved_services.audit.record(
+                event_type,
+                payload,
+                scope=execution_scope,
+            )
 
-    session_search_service = SessionSearchService(
-        session_store,
-        profile_id=effective_profile_id,
-        redactor=_session_result_redactor(
-            redaction_callback,
-            fail_closed=redaction_fail_closed,
-        ),
-        audit_callback=audit_session_read,
-    )
+    def hosted_audit(event_type: str, payload: dict) -> None:
+        if resolved_services is None:
+            return
+        resolved_services.audit.record(
+            event_type,
+            payload,
+            scope=execution_scope,
+        )
+
+    if resolved_services is None:
+        session_search_service = SessionSearchService(
+            session_store,
+            profile_id=effective_profile_id,
+            redactor=_session_result_redactor(
+                redaction_callback,
+                fail_closed=redaction_fail_closed,
+            ),
+            audit_callback=audit_session_read,
+        )
     skill_registry.load_metadata()
     skill_resolution = _resolve_skill_specs(skill_registry, skill_specs)
     if allowed_skill_names is not None:
@@ -327,17 +464,18 @@ def create_agent(
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
         client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
-    learning_reviewer = LearningReviewCoordinator(
-        reviewer=RestrictedLearningReviewer(client),
-        proposal_service=learning_proposals,
-        lifecycle_store=skill_lifecycle_store,
-        policy=learning_review_policy,
-        quota=learning_review_quota,
-        automatic_approval=automatic_learning_approval,
-        granted_capabilities=tuple(
-            sorted(_skill_capability_names(selected_capabilities))
-        ),
-    )
+    if resolved_services is None:
+        learning_reviewer = LearningReviewCoordinator(
+            reviewer=RestrictedLearningReviewer(client),
+            proposal_service=learning_proposals,
+            lifecycle_store=skill_lifecycle_store,
+            policy=learning_review_policy,
+            quota=learning_review_quota,
+            automatic_approval=automatic_learning_approval,
+            granted_capabilities=tuple(
+                sorted(_skill_capability_names(selected_capabilities))
+            ),
+        )
     selection_result = getattr(client, "selection_result", None)
     effective_runtime_metadata = dict(runtime_metadata or {})
     if selection_result is not None and hasattr(selection_result, "to_dict"):
@@ -372,29 +510,33 @@ def create_agent(
         raise ValueError(
             "usage dimensions conversation_id does not match the runtime conversation"
         )
-    usage_accounting = ModelUsageAccounting(
-        SQLiteUsageStore(config.store_path),
-        client=client,
-        dimensions=replace(
-            base_usage_dimensions,
-            conversation_id=state.conversation_id,
-        ),
-        budget=(
-            goal_snapshot.budget
-            if goal_snapshot is not None
-            else run_budget or RunBudget()
-        ),
-        additional_budgets=additional_run_budgets,
-        max_output_tokens=(
-            model_capabilities.max_output_tokens
-            or model_capabilities.default_response_reserve_tokens
-        ),
-        trace_path=trace_logger.path,
-        boundary_callback=(
-            goal_execution.assert_boundary
-            if goal_execution is not None
-            else None
-        ),
+    usage_accounting = (
+        resolved_services.usage
+        if resolved_services is not None
+        else ModelUsageAccounting(
+            SQLiteUsageStore(config.store_path),
+            client=client,
+            dimensions=replace(
+                base_usage_dimensions,
+                conversation_id=state.conversation_id,
+            ),
+            budget=(
+                goal_snapshot.budget
+                if goal_snapshot is not None
+                else run_budget or RunBudget()
+            ),
+            additional_budgets=additional_run_budgets,
+            max_output_tokens=(
+                model_capabilities.max_output_tokens
+                or model_capabilities.default_response_reserve_tokens
+            ),
+            trace_path=trace_logger.path,
+            boundary_callback=(
+                goal_execution.assert_boundary
+                if goal_execution is not None
+                else None
+            ),
+        )
     )
     configured_mcp_servers = (
         tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
@@ -402,14 +544,19 @@ def create_agent(
     active_mcp_servers = (
         configured_mcp_servers if selected_capabilities.external_services else ()
     )
-    backend_is_owned = execution_backend is None
-    selected_execution_backend = execution_backend or HostExecutionBackend(
-        config.project_root,
-        shell_timeout_seconds=config.shell_timeout_seconds,
-        max_stdout_bytes=config.max_tool_stdout_chars,
-        max_stderr_bytes=config.max_tool_stderr_chars,
-        shell_execution_policy=shell_execution_policy,
-        require_shell_containment=require_shell_containment,
+    backend_is_owned = resolved_services is None and execution_backend is None
+    selected_execution_backend = (
+        resolved_services.execution
+        if resolved_services is not None
+        else execution_backend
+        or HostExecutionBackend(
+            config.project_root,
+            shell_timeout_seconds=config.shell_timeout_seconds,
+            max_stdout_bytes=config.max_tool_stdout_chars,
+            max_stderr_bytes=config.max_tool_stderr_chars,
+            shell_execution_policy=shell_execution_policy,
+            require_shell_containment=require_shell_containment,
+        )
     )
     execution_lifecycle = ExecutionContextLifecycle(selected_execution_backend)
     tool_registry, mcp_bridge_tool_names = _create_tool_registry(
@@ -424,7 +571,11 @@ def create_agent(
         deps=deps,
         shell_execution_policy=shell_execution_policy,
         require_shell_containment=require_shell_containment,
-        artifact_store=trace_logger.artifact_store,
+        artifact_store=(
+            resolved_services.artifacts
+            if resolved_services is not None
+            else trace_logger.artifact_store
+        ),
     )
     available_tool_names = {tool.name for tool in tool_registry.list_tools()}
     skill_capabilities = _skill_capability_names(selected_capabilities)
@@ -464,6 +615,8 @@ def create_agent(
             },
         )
     owned_resources: list[object] = [client] if client_is_owned else []
+    if resolved_services is not None:
+        owned_resources.extend(resolved_services.owned_resources)
     if backend_is_owned:
         owned_resources.append(selected_execution_backend)
     try:
@@ -493,6 +646,9 @@ def create_agent(
             ),
             event_callback=session_recorder.callback,
             event_sink=event_sink,
+            audit_callback=(
+                hosted_audit if resolved_services is not None else None
+            ),
             redaction_callback=redaction_callback,
             redaction_fail_closed=redaction_fail_closed,
             pinned_skill_names=skill_resolution.pinned_skill_names,
@@ -516,6 +672,13 @@ def create_agent(
             goal_execution=goal_execution,
             content_store=selected_content_store,
             media_processors=selected_media_processors,
+            execution_scope=execution_scope,
+            tool_policy_hooks=(
+                cast(ToolPolicyHooks, resolved_services.tool_policy)
+                if resolved_services is not None
+                else None
+            ),
+            close_trace_logger=resolved_services is None,
         )
     except Exception:
         for resource in reversed(owned_resources):
@@ -524,7 +687,8 @@ def create_agent(
     agent.session_store = session_store
     agent.session_recorder = session_recorder
     agent.session_search_service = session_search_service
-    learning_proposals.event_callback = agent._trace
+    if learning_proposals is not None:
+        learning_proposals.event_callback = agent._trace
     return agent
 
 
@@ -567,13 +731,25 @@ def _summary_source_ordinal(summary: ConversationSummaryRecord | None) -> int:
 
 
 def _create_agent_state(
-    session_store: SQLiteSessionStore, conversation_id: str | None
+    session_store: SQLiteSessionStore,
+    conversation_id: str | None,
+    *,
+    execution_scope: ExecutionScope | None = None,
 ) -> AgentState:
     """Create fresh state or rebuild state for an existing conversation."""
     if conversation_id is None:
         return AgentState()
 
     conversation = session_store.get_conversation(conversation_id)
+    if execution_scope is not None:
+        raw_scope = conversation.metadata.get("execution_scope")
+        if not isinstance(raw_scope, dict):
+            raise ValueError(
+                "hosted conversation has no persisted execution scope"
+            )
+        execution_scope.assert_resumable(
+            ExecutionScope.from_dict(raw_scope)
+        )
     state = AgentState(conversation_id=conversation.id)
     state.turns = session_store.load_turns(conversation.id)
     if not state.turns:

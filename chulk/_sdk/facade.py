@@ -32,6 +32,11 @@ from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
+from chulk.hosting import (
+    AsyncRuntimeServices,
+    ExecutionScope,
+    RuntimeServices,
+)
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
 from chulk.plugins import (
@@ -600,6 +605,8 @@ class Agent:
         goal_execution: GoalExecutionContext | None = None,
         content_store: ContentStore | None = None,
         media_processors: MediaProcessorRegistry | None = None,
+        services: RuntimeServices | None = None,
+        execution_scope: ExecutionScope | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -632,6 +639,8 @@ class Agent:
                 goal_execution=goal_execution,
                 content_store=content_store,
                 media_processors=media_processors,
+                services=services,
+                execution_scope=execution_scope,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -653,6 +662,10 @@ class Agent:
     @property
     def conversation_id(self) -> str:
         return self._handle.conversation_id
+
+    @property
+    def execution_scope(self) -> ExecutionScope:
+        return cast(ExecutionScope, self.runtime.execution_scope)
 
     @property
     def trace_path(self) -> Path | None:
@@ -1316,6 +1329,10 @@ class AsyncAgent:
         return self._handle.conversation_id
 
     @property
+    def execution_scope(self) -> ExecutionScope:
+        return cast(ExecutionScope, self.runtime.execution_scope)
+
+    @property
     def trace_path(self) -> Path | None:
         return self._handle.trace_path
 
@@ -1809,6 +1826,54 @@ def _terminalized_failure_event(runtime: CoreAgent, attempted_turn_id: str | Non
     return None
 
 
+class HostedRuntime(Agent):
+    """Synchronous SDK facade that requires a complete hosted boundary."""
+
+    def __init__(
+        self,
+        *,
+        services: RuntimeServices,
+        execution_scope: ExecutionScope,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            services=services,
+            execution_scope=execution_scope,
+            **kwargs,
+        )
+
+
+class AsyncHostedRuntime(AsyncAgent):
+    """Asynchronous SDK facade that requires async-hosted service contracts."""
+
+    def __init__(
+        self,
+        *,
+        services: AsyncRuntimeServices,
+        execution_scope: ExecutionScope,
+        **kwargs: Any,
+    ) -> None:
+        sync_boundary = RuntimeServices(
+            memory=services.memory,
+            sessions=services.sessions,
+            skills=services.skills,
+            traces=services.traces,
+            artifacts=services.artifacts,
+            usage=services.usage,
+            audit=services.audit,
+            execution=services.execution,
+            plugins=services.plugins,
+            content=services.content,
+            media=services.media,
+            tool_policy=services.tool_policy,
+        )
+        super().__init__(
+            services=sync_boundary,
+            execution_scope=execution_scope,
+            **kwargs,
+        )
+
+
 def _build_handle(
     *,
     config: Config | AgentConfig | None = None,
@@ -1839,6 +1904,8 @@ def _build_handle(
     goal_execution: GoalExecutionContext | None = None,
     content_store: ContentStore | None = None,
     media_processors: MediaProcessorRegistry | None = None,
+    services: RuntimeServices | None = None,
+    execution_scope: ExecutionScope | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -1871,6 +1938,8 @@ def _build_handle(
         goal_execution=goal_execution,
         content_store=content_store,
         media_processors=media_processors,
+        services=services,
+        execution_scope=execution_scope,
     )
     return AgentHandle(runtime, on_event=on_event)
 

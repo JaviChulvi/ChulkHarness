@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_typ
 from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
 from chulk.tools.artifacts import read_trace_artifact_tool
 from chulk.tools.permissions import ToolPermissionLevel
+from chulk.tools.policy import ToolIdentity, ToolPolicy
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.processes import process_tools
@@ -61,6 +62,8 @@ def tool(
     timeout_seconds: float | None = None,
     retry_policy: ToolRetryPolicy | None = None,
     idempotent: bool = False,
+    identity: ToolIdentity | None = None,
+    policy: ToolPolicy | None = None,
 ) -> Tool: ...
 
 
@@ -77,6 +80,8 @@ def tool(
     timeout_seconds: float | None = None,
     retry_policy: ToolRetryPolicy | None = None,
     idempotent: bool = False,
+    identity: ToolIdentity | None = None,
+    policy: ToolPolicy | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -92,6 +97,8 @@ def tool(
     timeout_seconds: float | None = None,
     retry_policy: ToolRetryPolicy | None = None,
     idempotent: bool = False,
+    identity: ToolIdentity | None = None,
+    policy: ToolPolicy | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Convert a Python callable into a Chulk tool."""
 
@@ -126,6 +133,8 @@ def tool(
             timeout_seconds=timeout_seconds,
             retry_policy=retry_policy,
             idempotent=idempotent,
+            identity=identity,
+            policy=policy,
         )
 
     if fn is None:

@@ -94,6 +94,12 @@ diagnostics migratable; they do not make undocumented payload fields a stable
 application API. Use the versioned public [event stream](events.md) and
 immutable [SDK results](sdk.md) for integrations.
 
+`HostedRuntime` can use a host-provided trace and artifact service instead of
+JSONL files. Hosted trace payloads include the execution scope and versioned
+tool-policy evidence. Credential values are never passed to the trace service.
+Resource ownership follows the hosted service binding; Chulk does not close a
+host-owned trace sink.
+
 ## Offline commands
 
 All trace commands operate on local files:
