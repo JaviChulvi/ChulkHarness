@@ -63,6 +63,18 @@ from chulk.skills.registry import (
     SkillSelection,
     explicit_skill_names,
 )
+from chulk.skills.publication import (
+    AsyncInMemorySkillPublicationStore,
+    AsyncSkillPublicationManager,
+    AsyncSkillPublicationStore,
+    InMemorySkillPublicationStore,
+    PortableSkill,
+    SkillActivationRecord,
+    SkillPublicationManager,
+    SkillPublicationRecord,
+    SkillPublicationStore,
+    skill_reference_map,
+)
 
 
 def bundled_skills_dir() -> Path:
@@ -183,6 +195,15 @@ __all__ = [
     "SkillRevisionRecord",
     "SkillScope",
     "SkillUsageKind",
+    "AsyncInMemorySkillPublicationStore",
+    "AsyncSkillPublicationManager",
+    "AsyncSkillPublicationStore",
+    "InMemorySkillPublicationStore",
+    "PortableSkill",
+    "SkillActivationRecord",
+    "SkillPublicationManager",
+    "SkillPublicationRecord",
+    "SkillPublicationStore",
     "RestrictedLearningReviewer",
     "bundled_skills_dir",
     "explicit_skill_names",
@@ -197,4 +218,5 @@ __all__ = [
     "resolve_skill_resource",
     "shell",
     "skill_package_digest",
+    "skill_reference_map",
 ]

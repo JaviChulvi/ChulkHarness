@@ -24,6 +24,13 @@ class LearningProposalStatus(StrEnum):
 
 
 class SkillLifecycleStatus(StrEnum):
+    DRAFT = "draft"
+    VALIDATING = "validating"
+    EVALUATING = "evaluating"
+    AWAITING_REVIEW = "awaiting_review"
+    PUBLISHED = "published"
+    DEPRECATED = "deprecated"
+    REVOKED = "revoked"
     ACTIVE = "active"
     STALE = "stale"
     ARCHIVED = "archived"

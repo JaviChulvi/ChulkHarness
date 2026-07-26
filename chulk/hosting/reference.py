@@ -29,7 +29,12 @@ from chulk.sessions import (
     SessionSearchPage,
 )
 from chulk.sessions.sqlite_store import _turn_from_dict
-from chulk.skills.registry import SkillRoutingResult
+from chulk.skills.registry import (
+    Skill,
+    SkillRouteDecision,
+    SkillRoutingResult,
+    SkillSelection,
+)
 from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing.artifacts import ArtifactRead, ArtifactRecord
 from chulk.usage import (
@@ -479,32 +484,105 @@ class InMemorySessionSearch:
 class InMemorySkillService:
     def __init__(self, scope: ExecutionScope) -> None:
         self.scope = scope
+        self._skills: dict[str, Skill] = {}
         self.last_routing_result = SkillRoutingResult((), ())
 
     def load_metadata(self) -> None:
         return None
 
+    def register(self, skill: Skill, *, replace: bool = False) -> None:
+        if skill.name in self._skills and not replace:
+            raise ValueError(f"Skill already registered: {skill.name}")
+        self._skills[skill.name] = skill
+
     def clear(self) -> None:
+        self._skills = {}
         self.last_routing_result = SkillRoutingResult((), ())
 
     def configure_environment(self, **kwargs: Any) -> None:
         return None
 
     def restrict_to(self, names: list[str]) -> None:
-        return None
+        allowed = set(names)
+        self._skills = {
+            name: skill
+            for name, skill in self._skills.items()
+            if name in allowed
+        }
 
     def list_visible_skills(self) -> list[Any]:
-        return []
+        return list(self._skills.values())
 
-    def load_selected_skills(self, *args: Any, **kwargs: Any) -> list[Any]:
-        self.last_routing_result = SkillRoutingResult((), ())
-        return []
+    def load_selected_skills(
+        self,
+        _user_request: str,
+        *,
+        pinned_names: tuple[str, ...] | list[str] = (),
+        limit: int | None = None,
+    ) -> list[SkillSelection]:
+        selected: list[SkillSelection] = []
+        decisions: list[SkillRouteDecision] = []
+        for name in pinned_names:
+            skill = self._skills.get(name)
+            if skill is None:
+                decisions.append(
+                    SkillRouteDecision(
+                        skill_name=name,
+                        status="rejected",
+                        stage="explicit",
+                        reason="not_found",
+                    )
+                )
+                continue
+            if limit is not None and len(selected) >= limit:
+                decisions.append(
+                    SkillRouteDecision(
+                        skill_name=name,
+                        status="omitted",
+                        stage="budget",
+                        reason="skill_count_limit",
+                    )
+                )
+                continue
+            selected.append(
+                SkillSelection(
+                    skill=skill,
+                    score=100,
+                    matched_keywords=[name],
+                    reason="pinned",
+                    stage="explicit",
+                )
+            )
+            decisions.append(
+                SkillRouteDecision(
+                    skill_name=name,
+                    status="selected",
+                    stage="explicit",
+                    reason="pinned",
+                    score=100,
+                    matched_keywords=(name,),
+                    digest=skill.digest,
+                )
+            )
+        self.last_routing_result = SkillRoutingResult(
+            tuple(selected),
+            tuple(decisions),
+            tuple(pinned_names),
+        )
+        return selected
 
-    def get_skill(self, name: str, *, visible_only: bool = False) -> None:
-        return None
+    def get_skill(
+        self,
+        name: str,
+        *,
+        visible_only: bool = False,
+    ) -> Skill | None:
+        del visible_only
+        return self._skills.get(name)
 
-    def load_content(self, name: str) -> None:
-        return None
+    def load_content(self, name: str) -> str:
+        skill = self._skills[name]
+        return skill.loaded_content or ""
 
 
 class InMemoryArtifactService:

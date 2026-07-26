@@ -12,8 +12,9 @@ Chulk documents four stability labels:
 The supported top-level names are governed by `chulk.__all__`. They are
 **public-stable** unless explicitly classified as provisional below. Stable
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
-`chulk.errors`, `chulk.events`, `chulk.hosting`, `chulk.results`, `chulk.tools`, and
-`chulk.testing`. `ScriptedLLMClient` is stable only from `chulk.testing`.
+`chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
+`chulk.results`, `chulk.skills`, `chulk.tools`, and `chulk.testing`.
+`ScriptedLLMClient` is stable only from `chulk.testing`.
 
 `chulk.hosting.reference` is a documented example and contract-test fixture,
 not a durable production service implementation.
@@ -32,6 +33,12 @@ Public event schema changes follow `EVENT_SCHEMA_VERSION`; unknown future enum
 values map to explicit `UNKNOWN` states where documented. Additive fields use
 extension mappings. See [SDK](sdk.md), [events](events.md), and
 [tracing](tracing.md).
+
+Portable definition JSON follows `AGENT_DEFINITION_SCHEMA_VERSION`. Readers
+fail closed on unknown fields and future schema versions. Published versions
+are immutable; behavior changes require a new artifact version, and schema
+changes require a documented compatibility reader or migration. See
+[portable authoring](authoring.md#schema-and-migration-policy).
 
 The OS-independent package claim is backed by required CI on Ubuntu for Python
 3.11, 3.12, and 3.13 plus Windows on Python 3.12. The Windows lane runs the
