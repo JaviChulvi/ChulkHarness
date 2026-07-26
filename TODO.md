@@ -201,11 +201,11 @@ Acceptance criteria:
 
 ### US-H2: Publish Immutable Agent Definitions And Governed Skills
 
-- [ ] Add immutable agent-definition revisions and resolve every run to one
+- [x] Add immutable agent-definition revisions and resolve every run to one
   exact published revision.
-- [ ] Add host-backed skill publication, evaluation, rollback, and revocation
+- [x] Add host-backed skill publication, evaluation, rollback, and revocation
   while reusing the existing skill lifecycle owner.
-- [ ] Add public builder, validator, capability-diff, and dry-run authoring
+- [x] Add public builder, validator, capability-diff, and dry-run authoring
   helpers.
 
 ### US-H3: Make Hosted Execution Durable And Controllable

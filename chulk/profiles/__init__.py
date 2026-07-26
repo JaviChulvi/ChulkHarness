@@ -8,6 +8,7 @@ from chulk.profiles.models import (
     DEFAULT_EXECUTION_BACKEND_ID,
     DEFAULT_MODEL_PROFILE_ID,
     DEFAULT_PROFILE_ID,
+    RuntimeProfile,
     normalize_profile_id,
 )
 from chulk.profiles.runtime import (
@@ -39,6 +40,7 @@ __all__ = [
     "ProfileOwnershipError",
     "ProfileRuntimeFactory",
     "ResolvedProfileRuntime",
+    "RuntimeProfile",
     "SQLiteProfileStore",
     "StoredAgentProfile",
     "normalize_profile_id",

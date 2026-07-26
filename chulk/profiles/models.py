@@ -227,6 +227,12 @@ class AgentProfile:
         }
 
 
+# The durable profile remains the owner of local paths and deployment choices.
+# Keep the established name as a compatibility alias while exposing the clearer
+# boundary next to portable ``AgentDefinition``.
+RuntimeProfile = AgentProfile
+
+
 def normalize_profile_id(value: str) -> str:
     """Normalize and validate a stable profile identifier."""
     profile_id = value.strip().lower()
@@ -276,5 +282,6 @@ __all__ = [
     "DEFAULT_EXECUTION_BACKEND_ID",
     "DEFAULT_MODEL_PROFILE_ID",
     "DEFAULT_PROFILE_ID",
+    "RuntimeProfile",
     "normalize_profile_id",
 ]
