@@ -133,6 +133,39 @@ def test_webchat_shell_is_public_but_control_data_stays_authenticated(tmp_path) 
         assert client.get("/webchat/assets/missing.js").status_code == 404
 
 
+def test_operator_dashboard_is_public_shell_with_authenticated_data(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        page = client.get("/dashboard")
+        stylesheet = client.get("/dashboard/assets/dashboard.css")
+        script = client.get("/dashboard/assets/dashboard.js")
+
+        assert page.status_code == 200
+        assert "Chulk operations board" in page.text
+        assert 'id="attention"' in page.text
+        assert 'id="work"' in page.text
+        assert 'id="usage"' in page.text
+        assert 'id="evidence"' in page.text
+        assert "<dialog" in page.text
+        assert tokens.load_or_create() not in page.text
+        assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+        assert stylesheet.status_code == 200
+        assert "@media (max-width: 580px)" in stylesheet.text
+        assert "@media (prefers-reduced-motion: reduce)" in stylesheet.text
+        assert script.status_code == 200
+        assert 'api("/v1/profiles")' in script.text
+        assert "sessionStorage" in script.text
+        assert "innerHTML" not in script.text
+        assert client.get("/v1/profiles").status_code == 401
+        inbox = client.get(
+            "/v1/profiles/default/permissions?status=pending",
+            headers=_auth(tokens),
+        )
+        assert inbox.status_code == 200
+        assert inbox.json()["permissions"] == []
+        assert client.get("/dashboard/assets/missing.js").status_code == 404
+
+
 def test_authenticated_webchat_session_creates_pairing_and_lists_routes(
     tmp_path,
 ) -> None:

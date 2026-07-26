@@ -42,6 +42,7 @@ from chulk.server.permissions import (
     PermissionBroker,
     PermissionDecisionConflictError,
     PermissionRequestNotFoundError,
+    list_profile_permissions,
 )
 
 __all__ = [
@@ -70,6 +71,7 @@ __all__ = [
     "PermissionBroker",
     "PermissionDecisionConflictError",
     "PermissionRequestNotFoundError",
+    "list_profile_permissions",
     "PublicEventCursorExpiredError",
     "PublicEventJournal",
     "PublicEventRecord",

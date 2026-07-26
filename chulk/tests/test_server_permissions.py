@@ -11,6 +11,7 @@ from chulk.server import (
     PermissionBroker,
     PermissionDecisionConflictError,
     PublicEventJournal,
+    list_profile_permissions,
 )
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -127,3 +128,27 @@ def test_permission_broker_preserves_immediate_callback_compatibility(tmp_path) 
 
     assert broker.callback(_request(), _record()) is PermissionDecision.ALLOW
     assert broker.list()[0].status == "allowed"
+
+
+def test_profile_permission_inbox_spans_owned_conversations(tmp_path) -> None:
+    first = _broker(tmp_path)
+    second = PermissionBroker(
+        tmp_path / "store.sqlite",
+        profile_id="work",
+        conversation_id="conversation-2",
+        turn_id=lambda: "turn-2",
+    )
+    first.create(_request({"command": "first"}))
+    second.create(_request({"command": "second"}))
+
+    inbox = list_profile_permissions(
+        tmp_path / "store.sqlite",
+        profile_id="work",
+        status="pending",
+        limit=10,
+    )
+
+    assert [item.conversation_id for item in inbox] == [
+        "conversation-1",
+        "conversation-2",
+    ]
