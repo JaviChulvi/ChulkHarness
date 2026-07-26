@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-import time
 from typing import Any
 
 import pytest
 
 import chulk.telegram.bot as telegram_bot_module
 from chulk import MemoryMode
+from chulk.media import UserInput
 from chulk.config import load_config
 from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
 from chulk.profiles import ProfileRuntimeFactory
@@ -58,6 +58,10 @@ class FakeAgent:
     async def run(self, message: str, **kwargs: object) -> str:
         self.calls.append(("run", (message, kwargs)))
         return f"answer: {message}"
+
+    async def run_input(self, user_input: UserInput, **kwargs: object) -> str:
+        self.calls.append(("run_input", (user_input, kwargs)))
+        return f"answer: {user_input.textual_projection()}"
 
     async def plan(self, message: str) -> str:
         self.calls.append(("plan", message))
@@ -204,13 +208,13 @@ async def test_bot_processes_media_before_normal_agent_turn(tmp_path: Path) -> N
 
     await bot.handle_update(update)
 
-    message, _kwargs = agents[0].calls[0][1]
-    assert message == "Summarize"
-    context_sections = _kwargs["context_sections"]
-    assert len(context_sections) == 1
-    assert context_sections[0].content == "transcribed words"
-    assert context_sections[0].source == "telegram_attachment"
-    assert context_sections[0].metadata["trusted"] is False
+    typed_input, _kwargs = agents[0].calls[0][1]
+    assert agents[0].calls[0][0] == "run_input"
+    assert typed_input.textual_projection().startswith("Summarize")
+    media = typed_input.media_parts[0].media
+    assert media.mime_type == "audio/ogg"
+    assert media.provenance == "telegram:voice-1"
+    assert "media" not in typed_input.textual_projection()
     assert client.downloads == [("voice-1", 10 * 1024 * 1024)]
 
 
@@ -236,9 +240,9 @@ async def test_bot_closes_owned_media_processor_once(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_media_deadline_is_sanitized_and_releases_chat_lock(tmp_path: Path) -> None:
-    class BlockingMediaProcessor:
-        def process(self, *_args: object, **_kwargs: object) -> str:
-            time.sleep(0.05)
+    class BlockingAgent(FakeAgent):
+        async def run_input(self, user_input: UserInput, **kwargs: object) -> str:
+            await asyncio.sleep(0.05)
             return "too late"
 
     client = FakeClient()
@@ -258,8 +262,7 @@ async def test_media_deadline_is_sanitized_and_releases_chat_lock(tmp_path: Path
             allowed_user_ids=frozenset({7}),
         ),
         client=client,  # type: ignore[arg-type]
-        media_processor=BlockingMediaProcessor(),
-        agent_factory=lambda chat_id, conversation_id: FakeAgent(
+        agent_factory=lambda chat_id, conversation_id: BlockingAgent(
             conversation_id or f"new-{chat_id}"
         ),
     )

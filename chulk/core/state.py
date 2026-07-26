@@ -348,6 +348,8 @@ class TurnState:
     context_sections: list[TurnContextSection] = field(default_factory=list)
     prompt_profile: str | None = None
     locale: str | None = None
+    input_parts: list[dict] = field(default_factory=list)
+    model_input: object | None = field(default=None, repr=False, compare=False)
     extension_metadata: dict = field(default_factory=dict)
     tool_context_metadata: dict = field(default_factory=dict)
     loaded_memory_ids: list[str] = field(default_factory=list)
@@ -433,6 +435,7 @@ class TurnState:
             "context_section_ids": [section.id for section in self.context_sections],
             "prompt_profile": self.prompt_profile,
             "locale": self.locale,
+            "input_parts": self.input_parts,
             "extension_metadata": self.extension_metadata,
             "tool_context_metadata": self.tool_context_metadata,
             "loaded_memory_ids": self.loaded_memory_ids,

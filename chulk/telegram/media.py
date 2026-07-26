@@ -7,6 +7,13 @@ from pathlib import PurePath
 from typing import Protocol
 
 from chulk.core.context import TurnContextSection
+from chulk.media import (
+    MediaItem,
+    MediaKind,
+    MediaTransformResult,
+    ProcessorCapability,
+    TransformKind,
+)
 from chulk.telegram.client import TelegramAttachment
 
 
@@ -158,10 +165,63 @@ class TelegramMediaProcessor(Protocol):
     ) -> str: ...
 
 
+class TelegramMediaProcessorAdapter:
+    """Expose the legacy channel processor through the shared media registry."""
+
+    def __init__(
+        self,
+        processor: TelegramMediaProcessor,
+        *,
+        provider: str,
+        max_bytes: int,
+    ) -> None:
+        self.processor = processor
+        self.capability = ProcessorCapability(
+            name=f"{provider}_telegram_media",
+            transforms=frozenset(
+                {
+                    TransformKind.TRANSCRIPTION,
+                    TransformKind.EXTRACTION,
+                    TransformKind.UNDERSTANDING,
+                }
+            ),
+            media_kinds=frozenset(MediaKind),
+            max_bytes=max_bytes,
+            provider=provider,
+            network_access=True,
+        )
+
+    def process(
+        self,
+        item: MediaItem,
+        data: bytes,
+        *,
+        instruction: str,
+        transform: TransformKind,
+    ) -> MediaTransformResult:
+        attachment = TelegramAttachment(
+            file_id=item.content_ref.id,
+            kind=item.kind.value,
+            mime_type=item.mime_type,
+            file_name=item.file_name,
+        )
+        text = self.processor.process(
+            attachment,
+            data,
+            instruction=instruction,
+        )
+        return MediaTransformResult(
+            transform=transform,
+            processor=self.capability.name,
+            text=text,
+        )
+
+
 __all__ = [
     "SUPPORTED_MEDIA_MIME_TYPES",
     "TelegramMediaError",
     "TelegramMediaProcessor",
+    "TelegramMediaProcessorAdapter",
     "attachment_context",
     "validate_attachment",
 ]

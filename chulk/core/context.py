@@ -67,14 +67,16 @@ class TurnContextSection:
     title: str | None = None
     source: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    persist_content: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "title": self.title,
             "source": self.source,
-            "content": self.content,
+            "content": self.content if self.persist_content else "[content omitted]",
             "metadata": self.metadata,
+            "persist_content": self.persist_content,
         }
 
 

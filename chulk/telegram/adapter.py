@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import suppress
 
 from chulk.gateway import (
@@ -42,12 +43,14 @@ class TelegramChannelAdapter:
         ledger: SQLiteGatewayLedger,
         account_id: str = "primary",
         defer_cursor: bool = False,
+        content_resolver: Callable[[str, str, int], bytes] | None = None,
     ) -> None:
         self.client = client
         self.config = config
         self.account_id = account_id
         self.ledger = ledger
         self.defer_cursor = defer_cursor
+        self.content_resolver = content_resolver
         self._instance_token: str | None = None
         self._pending_cursor: int | None = None
         self._renewal_task: asyncio.Task[None] | None = None
@@ -179,12 +182,51 @@ class TelegramChannelAdapter:
 
     async def deliver(self, envelope: OutboundEnvelope) -> DeliveryReceipt:
         if envelope.attachments:
+            if envelope.extensions.get("media_delivery_approved") is not True:
+                return DeliveryReceipt(
+                    envelope_id=envelope.envelope_id,
+                    state=DeliveryState.FAILED,
+                    attempt=1,
+                    error_code="approval_required",
+                    error_message="Media delivery requires explicit approval",
+                )
+            if self.content_resolver is None:
+                return DeliveryReceipt(
+                    envelope_id=envelope.envelope_id,
+                    state=DeliveryState.FAILED,
+                    attempt=1,
+                    error_code="content_unavailable",
+                    error_message="Telegram content delivery is not configured",
+                )
+            try:
+                for attachment in envelope.attachments:
+                    data = await asyncio.to_thread(
+                        self.content_resolver,
+                        envelope.profile_id,
+                        attachment.content_ref,
+                        attachment.size_bytes,
+                    )
+                    await asyncio.to_thread(
+                        self.client.send_attachment,
+                        int(envelope.target.destination_id),
+                        data,
+                        mime_type=attachment.content_type,
+                        file_name=attachment.file_name or "attachment",
+                        caption=envelope.text,
+                    )
+            except Exception:
+                return DeliveryReceipt(
+                    envelope_id=envelope.envelope_id,
+                    state=DeliveryState.RETRYABLE,
+                    attempt=1,
+                    error_code="attachment_delivery_failed",
+                    error_message="Telegram attachment delivery failed",
+                )
             return DeliveryReceipt(
                 envelope_id=envelope.envelope_id,
-                state=DeliveryState.FAILED,
+                state=DeliveryState.DELIVERED,
                 attempt=1,
-                error_code="unsupported_attachment",
-                error_message="Telegram attachment delivery is not configured",
+                checkpoint=str(envelope.sequence + 1),
             )
         assert envelope.text is not None
         await asyncio.to_thread(

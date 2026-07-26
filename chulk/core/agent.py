@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
@@ -30,6 +31,13 @@ from chulk.llm.usage import (
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
+from chulk.media import (
+    ContentStore,
+    MediaInputPart,
+    MediaProcessorRegistry,
+    TextInputPart,
+    UserInput,
+)
 from chulk.memory import (
     ConversationMemory,
     MemoryPolicy,
@@ -119,6 +127,8 @@ class Agent:
         plugin_registry: LocalPluginRegistry | None = None,
         plugin_audit_report: PluginAuditReport | None = None,
         goal_execution: GoalExecutionContext | None = None,
+        content_store: ContentStore | None = None,
+        media_processors: MediaProcessorRegistry | None = None,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -188,6 +198,8 @@ class Agent:
         self.plugin_registry = plugin_registry
         self.plugin_audit_report = plugin_audit_report
         self.goal_execution = goal_execution
+        self.content_store = content_store
+        self.media_processors = media_processors or MediaProcessorRegistry()
         self.tool_context_lifecycle = tool_context_lifecycle
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
@@ -351,6 +363,39 @@ class Agent:
             tool_context=tool_context,
         )
 
+    def run_input(
+        self,
+        user_input: UserInput,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
+        """Run one typed text/media turn through explicit media transforms."""
+        self._ensure_open()
+        blocked = self._new_turn_block_message()
+        if blocked is not None:
+            return blocked
+        turn_id = str(uuid4())
+        projection, prepared, media_sections, media_events = (
+            self._prepare_user_input(user_input, turn_id=turn_id)
+        )
+        return self._run_user_turn(
+            projection,
+            require_plan=False,
+            context_sections=[*(context_sections or []), *media_sections],
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+            input_parts=list(user_input.safe_metadata()),
+            model_input=prepared,
+            media_events=media_events,
+            turn_id=turn_id,
+        )
+
     async def run_turn_async(
         self,
         user_message: str,
@@ -374,6 +419,41 @@ class Agent:
             locale=locale,
             extension_metadata=extension_metadata,
             tool_context=tool_context,
+        )
+
+    async def run_input_async(
+        self,
+        user_input: UserInput,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> str:
+        """Run a typed input without blocking the caller during transforms."""
+        self._ensure_open()
+        blocked = self._new_turn_block_message()
+        if blocked is not None:
+            return blocked
+        turn_id = str(uuid4())
+        projection, prepared, media_sections, media_events = await asyncio.to_thread(
+            self._prepare_user_input,
+            user_input,
+            turn_id=turn_id,
+        )
+        return await self._run_user_turn_async(
+            projection,
+            require_plan=False,
+            context_sections=[*(context_sections or []), *media_sections],
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+            tool_context=tool_context,
+            input_parts=list(user_input.safe_metadata()),
+            model_input=prepared,
+            media_events=media_events,
+            turn_id=turn_id,
         )
 
     def run_planned_turn(self, user_message: str) -> str:
@@ -402,6 +482,10 @@ class Agent:
         locale: str | None = None,
         extension_metadata: dict | None = None,
         tool_context: ToolExecutionContext | dict | None = None,
+        input_parts: list[dict] | None = None,
+        model_input: UserInput | None = None,
+        media_events: list[dict] | None = None,
+        turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
         self._refresh_action_runtime()
@@ -415,6 +499,10 @@ class Agent:
                 locale=locale,
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
+                input_parts=input_parts,
+                model_input=model_input,
+                media_events=media_events,
+                turn_id=turn_id,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -440,6 +528,10 @@ class Agent:
         locale: str | None = None,
         extension_metadata: dict | None = None,
         tool_context: ToolExecutionContext | dict | None = None,
+        input_parts: list[dict] | None = None,
+        model_input: UserInput | None = None,
+        media_events: list[dict] | None = None,
+        turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it with async tool execution."""
         self._refresh_action_runtime()
@@ -453,6 +545,10 @@ class Agent:
                 locale=locale,
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
+                input_parts=input_parts,
+                model_input=model_input,
+                media_events=media_events,
+                turn_id=turn_id,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -477,15 +573,15 @@ class Agent:
         locale: str | None,
         extension_metadata: dict | None,
         tool_context: ToolExecutionContext | dict | None,
+        input_parts: list[dict] | None = None,
+        model_input: UserInput | None = None,
+        media_events: list[dict] | None = None,
+        turn_id: str | None = None,
     ) -> TurnState | str:
         """Create and trace a user turn before model/tool execution."""
-        if self.has_pending_plan():
-            return "A plan is waiting for approval. Use /approve to execute it or /reject to cancel it."
-        if self.has_resumable_plan():
-            return (
-                "An approved plan is waiting to continue. Use /approve to resume it or "
-                "/reject to cancel it before starting a new turn."
-            )
+        blocked = self._new_turn_block_message()
+        if blocked is not None:
+            return blocked
 
         turn_context_sections = _coerce_turn_context_sections(context_sections)
         execution_context = (
@@ -493,12 +589,14 @@ class Agent:
         )
         turn = TurnState(
             user_message=clean_message,
+            turn_id=turn_id or str(uuid4()),
             available_tool_names=[
                 tool.name for tool in self.tool_registry.list_tools()
             ],
             context_sections=turn_context_sections,
             prompt_profile=prompt_profile,
             locale=locale,
+            input_parts=deepcopy(input_parts or []),
             extension_metadata={
                 **deepcopy(extension_metadata or {}),
                 **deepcopy(self.runtime_metadata),
@@ -507,6 +605,7 @@ class Agent:
             if execution_context
             else {},
         )
+        turn.model_input = model_input
         if execution_context is None:
             execution_context = ToolExecutionContext()
         execution_context = ToolExecutionContext(
@@ -527,6 +626,19 @@ class Agent:
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
         self._trace(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+        if input_parts:
+            self._trace(
+                TraceEvent.MEDIA_INPUT_PREPARED,
+                {
+                    "turn_id": turn.turn_id,
+                    "parts": deepcopy(input_parts),
+                },
+            )
+        for media_event in media_events or []:
+            self._trace(
+                TraceEvent.MEDIA_TRANSFORMED,
+                {"turn_id": turn.turn_id, **deepcopy(media_event)},
+            )
         model_selection = turn.extension_metadata.get("model_selection")
         if isinstance(model_selection, dict):
             self._trace(
@@ -562,6 +674,127 @@ class Agent:
 
         self._tool_contexts[turn.turn_id] = execution_context
         return turn
+
+    def _new_turn_block_message(self) -> str | None:
+        if self.has_pending_plan():
+            return (
+                "A plan is waiting for approval. Use /approve to execute it or "
+                "/reject to cancel it."
+            )
+        if self.has_resumable_plan():
+            return (
+                "An approved plan is waiting to continue. Use /approve to resume it or "
+                "/reject to cancel it before starting a new turn."
+            )
+        return None
+
+    def _prepare_user_input(
+        self,
+        user_input: UserInput,
+        *,
+        turn_id: str,
+    ) -> tuple[
+        str,
+        UserInput,
+        list[TurnContextSection],
+        list[dict],
+    ]:
+        """Verify ownership and convert non-native media into bounded text."""
+        projection = user_input.textual_projection(
+            max_chars=self.max_observation_chars
+        )
+        prepared_parts: list[TextInputPart] = []
+        sections: list[TurnContextSection] = []
+        events: list[dict] = []
+        for operation_index, part in enumerate(user_input.parts, start=1):
+            if isinstance(part, TextInputPart):
+                prepared_parts.append(part)
+                continue
+            if not isinstance(part, MediaInputPart):  # pragma: no cover - closed union
+                raise TypeError("unsupported user input part")
+            if self.content_store is None:
+                raise RuntimeError(
+                    "Typed media input requires a profile-owned ContentStore."
+                )
+            item = self.content_store.get(
+                part.media.content_ref,
+                profile_id=self.profile_id,
+            )
+            if item.sha256 != part.media.sha256:
+                raise ValueError("typed media metadata does not match stored content")
+            processor, transform = self.media_processors.choose(item)
+            capability = processor.capability
+            usage_reservation = None
+            if self.usage_accounting is not None:
+                usage_reservation = self.usage_accounting.reserve_media_transform(
+                    turn_id=turn_id,
+                    operation_index=operation_index,
+                    content_ref=item.content_ref.id,
+                    processor=capability.name,
+                    provider=capability.provider,
+                    pricing_per_unit=capability.pricing_per_unit,
+                    network_access=capability.network_access,
+                )
+            try:
+                result = self.media_processors.transform(
+                    self.content_store,
+                    item,
+                    instruction=part.caption or projection,
+                    selection=(processor, transform),
+                )
+            except BaseException:
+                if self.usage_accounting is not None and usage_reservation is not None:
+                    self.usage_accounting.release_media_transform(usage_reservation)
+                raise
+            if result.text is None:
+                raise RuntimeError(
+                    "Native media transforms require a model client media adapter."
+                )
+            bounded_text = result.text[: self.max_observation_chars]
+            sections.append(
+                TurnContextSection(
+                    id=f"media-{item.content_ref.id.removeprefix('content:')[:16]}",
+                    title=f"Media transform: {item.file_name or item.kind.value}",
+                    source="media_processor",
+                    content=bounded_text,
+                    metadata={
+                        "trusted": item.trust.value != "untrusted",
+                        "external_content": True,
+                        "content_ref": item.content_ref.id,
+                        "mime_type": item.mime_type,
+                        "processor": result.processor,
+                        "transform": result.transform.value,
+                        "truncated": len(result.text) > len(bounded_text),
+                    },
+                    persist_content=False,
+                )
+            )
+            events.append(
+                {
+                    "content_ref": item.content_ref.id,
+                    "media_kind": item.kind.value,
+                    "mime_type": item.mime_type,
+                    "processor": result.processor,
+                    "transform": result.transform.value,
+                    "output_characters": len(bounded_text),
+                    "units": result.units,
+                }
+            )
+            if self.usage_accounting is not None and usage_reservation is not None:
+                self.usage_accounting.commit_media_transform(
+                    usage_reservation,
+                    content_ref=item.content_ref.id,
+                    processor=result.processor,
+                    provider=str(result.metadata.get("provider") or "local"),
+                    byte_length=item.byte_length,
+                    units=result.units,
+                    unit_name=str(result.metadata.get("unit_name") or "request"),
+                    network_access=bool(result.metadata.get("network_access")),
+                    retains_data=bool(result.metadata.get("retains_data")),
+                )
+        if not prepared_parts:
+            prepared_parts.append(TextInputPart(projection, external_content=True))
+        return projection, UserInput(tuple(prepared_parts)), sections, events
 
     def has_pending_plan(self) -> bool:
         """Return True when a turn is paused on a plan awaiting approval."""

@@ -24,6 +24,7 @@ from chulk.llm.usage import (
 
 if TYPE_CHECKING:
     from chulk.llm.capabilities import LLMModelCapabilities
+    from chulk.media import ModelRequest
 
 
 LLMErrorCode = Literal[
@@ -263,6 +264,53 @@ class LLMClient:
     async def acomplete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """Return a structured JSON response without blocking the event loop."""
         return _parse_json_object(await self.acomplete(messages), client=self)
+
+    def complete_action_request(
+        self,
+        request: "ModelRequest",
+        **kwargs: Any,
+    ) -> LLMActionResult:
+        """Complete a provider-neutral typed request through the text fallback.
+
+        Provider clients may override this method to consume supported media
+        parts natively. The compatibility path only accepts text parts, which
+        prevents a text-only client from silently dropping media.
+        """
+        from chulk.media import MediaInputPart, UnsupportedMediaError
+
+        if request.user_input is not None and any(
+            isinstance(part, MediaInputPart) for part in request.user_input.parts
+        ):
+            raise UnsupportedMediaError(
+                "This model client does not support native media input; configure "
+                "an explicit media processor."
+            )
+        return call_with_supported_kwargs(
+            self.complete_action,
+            request.text_messages(),
+            **kwargs,
+        )
+
+    async def acomplete_action_request(
+        self,
+        request: "ModelRequest",
+        **kwargs: Any,
+    ) -> LLMActionResult:
+        """Complete a typed request through a native async or sync fallback."""
+        from chulk.media import MediaInputPart, UnsupportedMediaError
+
+        if request.user_input is not None and any(
+            isinstance(part, MediaInputPart) for part in request.user_input.parts
+        ):
+            raise UnsupportedMediaError(
+                "This model client does not support native media input; configure "
+                "an explicit media processor."
+            )
+        return await call_async_with_supported_kwargs(
+            self.acomplete_action,
+            request.text_messages(),
+            **kwargs,
+        )
 
     def complete_action(
         self,

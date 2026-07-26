@@ -22,6 +22,8 @@ class TraceEvent:
     TURN_STARTED = "turn_started"
     MODEL_PROFILE_SELECTED = "model_profile_selected"
     USER_MESSAGE = "user_message"
+    MEDIA_INPUT_PREPARED = "media_input_prepared"
+    MEDIA_TRANSFORMED = "media_transformed"
     TURN_CONTEXT_SELECTED = "turn_context_selected"
     MEMORY_EXTRACTION_COMPLETED = "memory_extraction_completed"
     MEMORY_SEARCH_STARTED = "memory_search_started"

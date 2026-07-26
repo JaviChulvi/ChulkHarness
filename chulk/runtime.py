@@ -35,6 +35,7 @@ from chulk.llm.capabilities import (
     resolve_runtime_model_capabilities,
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
+from chulk.media import ContentStore, LocalTextExtractor, MediaProcessorRegistry
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.plugins import LocalPluginRegistry
 from chulk.redaction import redact_text
@@ -156,6 +157,8 @@ def create_agent(
     automatic_learning_approval: bool = False,
     plugin_registry: LocalPluginRegistry | None = None,
     goal_execution: GoalExecutionContext | None = None,
+    content_store: ContentStore | None = None,
+    media_processors: MediaProcessorRegistry | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     if llm_client is not None and llm_client_factory is not None:
@@ -206,6 +209,15 @@ def create_agent(
     selected_capabilities = capabilities or Capabilities.full()
     memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
     session_store = SQLiteSessionStore(config.store_path)
+    selected_content_store = content_store or ContentStore(
+        config.store_path,
+        config.runtime_dir / "content",
+        profile_id=effective_profile_id,
+    )
+    selected_content_store.sweep_expired()
+    selected_media_processors = media_processors or MediaProcessorRegistry(
+        (LocalTextExtractor(),)
+    )
     profile_skills_dir = config.runtime_dir / "profile-skills"
     registry_skill_dirs = tuple(
         dict.fromkeys((*config.skills_dirs, profile_skills_dir))
@@ -502,6 +514,8 @@ def create_agent(
             plugin_registry=selected_plugin_registry,
             plugin_audit_report=plugin_audit_report,
             goal_execution=goal_execution,
+            content_store=selected_content_store,
+            media_processors=selected_media_processors,
         )
     except Exception:
         for resource in reversed(owned_resources):

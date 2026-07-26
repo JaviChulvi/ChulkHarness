@@ -33,6 +33,7 @@ from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
 from chulk.mcp import MCPServerConfig
+from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
 from chulk.plugins import (
     LoadedPluginEntryPoint,
     LocalPluginRegistry,
@@ -172,6 +173,42 @@ class AgentHandle:
         content = self._with_callbacks(
             lambda: self.runtime.run_turn(
                 message,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            ),
+            on_delta=on_delta,
+            on_event=on_event,
+        )
+        return self._run_result(content)
+
+    def run_input(
+        self,
+        user_input: UserInput,
+        **kwargs: Any,
+    ) -> str:
+        """Run one typed text/media turn."""
+        return self.run_input_result(user_input, **kwargs).content
+
+    def run_input_result(
+        self,
+        user_input: UserInput,
+        *,
+        on_delta: DeltaCallback | None = None,
+        on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> RunResult:
+        """Run typed input and return structured SDK metadata."""
+        self._ensure_open()
+        content = self._with_callbacks(
+            lambda: self.runtime.run_input(
+                user_input,
                 context_sections=context_sections,
                 prompt_profile=prompt_profile,
                 locale=locale,
@@ -416,6 +453,44 @@ class AsyncAgentHandle:
             self.handle._active_on_event = previous_on_event
         return self.handle._run_result(content)
 
+    async def run_input(
+        self,
+        user_input: UserInput,
+        **kwargs: Any,
+    ) -> str:
+        return (await self.run_input_result(user_input, **kwargs)).content
+
+    async def run_input_result(
+        self,
+        user_input: UserInput,
+        *,
+        on_delta: DeltaCallback | None = None,
+        on_event: EventCallback | None = None,
+        context_sections: list[TurnContextSection | dict | str] | None = None,
+        prompt_profile: str | None = None,
+        locale: str | None = None,
+        extension_metadata: dict | None = None,
+        tool_context: ToolExecutionContext | dict | None = None,
+    ) -> RunResult:
+        self.handle._ensure_open()
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.run_input_async(
+                user_input,
+                context_sections=context_sections,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+                tool_context=tool_context,
+            )
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        return self.handle._run_result(content)
+
     async def plan(self, message: str) -> str:
         return (await self.plan_result(message)).content
 
@@ -521,6 +596,8 @@ class Agent:
         automatic_learning_approval: bool = False,
         plugin_registry: LocalPluginRegistry | None = None,
         goal_execution: GoalExecutionContext | None = None,
+        content_store: ContentStore | None = None,
+        media_processors: MediaProcessorRegistry | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -551,6 +628,8 @@ class Agent:
                 automatic_learning_approval=automatic_learning_approval,
                 plugin_registry=plugin_registry,
                 goal_execution=goal_execution,
+                content_store=content_store,
+                media_processors=media_processors,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
@@ -600,6 +679,22 @@ class Agent:
     def run_result(self, message: str, **kwargs: Any) -> RunResult:
         options = self._run_options(kwargs)
         return self._invoke("run_result", lambda: self._handle.run_result(message, **options), serialized=True)
+
+    def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
+        options = self._run_options(kwargs)
+        return self._invoke(
+            "run_input",
+            lambda: self._handle.run_input(user_input, **options),
+            serialized=True,
+        )
+
+    def run_input_result(self, user_input: UserInput, **kwargs: Any) -> RunResult:
+        options = self._run_options(kwargs)
+        return self._invoke(
+            "run_input_result",
+            lambda: self._handle.run_input_result(user_input, **options),
+            serialized=True,
+        )
 
     def __call__(self, message: str) -> str:
         return self.run(message)
@@ -1130,6 +1225,26 @@ class AsyncAgent:
             serialized=True,
         )
 
+    async def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
+        options = self._agent._run_options(kwargs)
+        return await self._invoke_async(
+            "run_input",
+            lambda: self._handle.run_input(user_input, **options),
+            serialized=True,
+        )
+
+    async def run_input_result(
+        self,
+        user_input: UserInput,
+        **kwargs: Any,
+    ) -> RunResult:
+        options = self._agent._run_options(kwargs)
+        return await self._invoke_async(
+            "run_input_result",
+            lambda: self._handle.run_input_result(user_input, **options),
+            serialized=True,
+        )
+
     async def plan(self, message: str) -> str:
         return await self._invoke_async("plan", lambda: self._handle.plan(message), serialized=True)
 
@@ -1519,6 +1634,8 @@ def _build_handle(
     automatic_learning_approval: bool = False,
     plugin_registry: LocalPluginRegistry | None = None,
     goal_execution: GoalExecutionContext | None = None,
+    content_store: ContentStore | None = None,
+    media_processors: MediaProcessorRegistry | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -1549,6 +1666,8 @@ def _build_handle(
         automatic_learning_approval=automatic_learning_approval,
         plugin_registry=plugin_registry,
         goal_execution=goal_execution,
+        content_store=content_store,
+        media_processors=media_processors,
     )
     return AgentHandle(runtime, on_event=on_event)
 
