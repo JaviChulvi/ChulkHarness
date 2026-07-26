@@ -61,6 +61,9 @@ resource:
 | `plugins` | reviewed plugin startup verification |
 | `content` and `media` | typed input content and media processing |
 | `tool_policy` | authorization, credential, effect, and redaction hooks |
+| `runs` | durable run, step, attempt, checkpoint, lease, and effect state |
+| `approvals` | restart-safe approval requests and single-use decisions |
+| `events` | application-owned schema-v3 public event delivery |
 
 Wrap each resource in `ServiceBinding.host(...)`,
 `ServiceBinding.runtime(...)`, or `ServiceBinding.scoped(...)`. Host-owned
@@ -79,6 +82,93 @@ The protocols exported from `chulk.hosting` do not expose SQLite paths or
 filesystem implementation types. The in-memory objects under
 `chulk.hosting.reference` are a reference implementation and contract-test
 fixture, not durable production storage.
+
+## Durable hosted execution
+
+`DurableHostedExecutor` and `AsyncDurableHostedExecutor` run an SDK turn
+through the shared run owner. The host submits an immutable definition/input
+digest and named steps, then Chulk claims a lease before invoking the model:
+
+```python
+from chulk import (
+    DurableHostedExecutor,
+    RunSubmission,
+    StepDefinition,
+)
+
+submission = RunSubmission(
+    idempotency_key="webhook:evt-42",
+    input_digest="sha256:...",
+    definition_digest="sha256:published-agent-v7",
+    steps=(StepDefinition(id="agent", name="Run agent turn"),),
+)
+outcome = DurableHostedExecutor(
+    runtime,
+    runtime.runtime.run_store,
+).execute(
+    "Update ticket 42.",
+    submission,
+    worker_id="worker-a",
+    step_id="agent",
+)
+```
+
+Duplicate idempotency keys return the existing run. Claims use expiring leases
+and every checkpoint uses compare-and-set ownership, so a stale worker cannot
+commit. Lease reconciliation requeues work only when no committed checkpoint
+or possible effect exists. Otherwise the run becomes `unknown`.
+
+Before a tool transport begins, durable execution stores the logical effect
+key, tool and input-schema versions, and arguments digest. Mutating tools must
+receive a stable effect key from `ToolPolicyHooks.derive_effect_key`. A
+transport failure after dispatch becomes `unknown`; replay is blocked until
+`reconcile_effect(...)` records an operator decision. Cancellation during an
+uncertain effect records the request but cannot claim the effect did not
+happen.
+
+The sync and async `RunStore` and `ApprovalStore` protocols are host-facing
+contracts. `SQLiteRunStore`, `AsyncSQLiteRunStore`, `SQLiteApprovalStore`, and
+`AsyncSQLiteApprovalStore` are reference adapters built on the shared
+forward-only migration and transaction policy. In-memory adapters are
+filesystem-free test and local-host fixtures.
+
+## Durable approvals
+
+When the permission policy returns `ASK`, the durable executors first commit
+the logical effect intent, then `DurableApprovalService` (or
+`AsyncDurableApprovalService`) creates an immutable effect-linked request and
+checkpoint, clears the worker lease, moves the run to
+`waiting_for_approval`, and invokes the optional budget-release hook. The SDK
+turn is left waiting rather than failed. Another process can record a decision
+and resume the run later.
+
+Resume revalidates the exact execution scope, authority, credentials, tool and
+schema versions, arguments digest, and policy version. Changed facts invalidate
+the request. Approvals are consumed with a revision compare-and-set exactly
+once; a restart between consumption and run release safely finishes the
+resume. Denial, expiry, cancellation, revoked authority, and unavailable
+credentials return typed outcomes.
+
+`ImmediateApprovalAdapter` is available to local/control-plane integrations
+that resolve the decision immediately while recording the same durable
+request, decision, and consumption trail.
+
+## Events, audit, traces, and artifacts
+
+These are separate contracts:
+
+- `EventSink` receives redacted schema-v3 application events.
+- `AuditSink` receives durable security and effect metadata, never raw prompts,
+  arguments, or credentials.
+- `TraceSink` receives sensitive diagnostic detail under host retention.
+- `ArtifactStore` owns large opaque content independently of trace retention.
+
+`RunEventPublisher` projects append-only run transitions into typed public
+payloads with stable event IDs and deterministic causation. A host can rebuild
+state from the durable run ledger even after detailed traces expire.
+`CallbackEventSink` supports application-owned streams and defaults to
+fail-closed delivery; set `fail_closed=False` only when dropping a public event
+is an explicit host policy.
 
 ## Versioned tools and host hooks
 

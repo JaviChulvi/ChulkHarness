@@ -100,6 +100,14 @@ tool-policy evidence. Credential values are never passed to the trace service.
 Resource ownership follows the hosted service binding; Chulk does not close a
 host-owned trace sink.
 
+Hosted public events, durable audit, diagnostic traces, and artifacts have
+independent owners. Deleting or expiring a `TraceSink` record never removes
+durable run events, approval decisions, effect intent, or reconciliation
+history. `AuditSink` rejects raw prompt, credential, secret, token, and
+raw-argument fields before persistence. `EventSink` receives the redacted
+schema-v3 application contract, while `ArtifactStore` retains large content
+under opaque IDs. See [hosted runtime](hosting.md#events-audit-traces-and-artifacts).
+
 ## Offline commands
 
 All trace commands operate on local files:

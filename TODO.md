@@ -210,11 +210,11 @@ Acceptance criteria:
 
 ### US-H3: Make Hosted Execution Durable And Controllable
 
-- [ ] Add durable run and step state, leases, optimistic revisions, heartbeat,
+- [x] Add durable run and step state, leases, optimistic revisions, heartbeat,
   cancellation, steering, wait/resume, and unknown-effect reconciliation.
-- [ ] Replace blocking approvals with durable externally resolvable approval
+- [x] Replace blocking approvals with durable externally resolvable approval
   records.
-- [ ] Add retry policies and transaction boundaries across provider, tool,
+- [x] Add retry policies and transaction boundaries across provider, tool,
   approval, and host-service failures.
 - [ ] Extend durable parent/child orchestration with scoped definitions,
   budgets, progress, and bounded fan-out.
@@ -223,7 +223,7 @@ Acceptance criteria:
 
 - [ ] Put gateway durability behind host-provided stores and add bounded
   backpressure, dead-letter, reconciliation, and definition/run routing.
-- [ ] Add versioned public event identities and durable host-provided trace and
+- [x] Add versioned public event identities and durable host-provided trace and
   artifact correlation.
 - [ ] Complete the restart, duplicate-trigger, uncertain-effect, approval, and
   gateway contract suite without credentials or infrastructure dependencies.

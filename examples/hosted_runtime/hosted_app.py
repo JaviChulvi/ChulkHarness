@@ -9,9 +9,13 @@ from tempfile import TemporaryDirectory
 from chulk import (
     AgentConfig,
     AgentEvent,
+    AsyncDurableHostedExecutor,
     AsyncHostedRuntime,
+    DurableHostedExecutor,
     ExecutionScope,
     HostedRuntime,
+    RunSubmission,
+    StepDefinition,
     Tool,
     ToolContext,
     ToolEffect,
@@ -65,6 +69,15 @@ def script() -> ScriptedLLMClient:
     )
 
 
+def submission(trigger: str) -> RunSubmission:
+    return RunSubmission(
+        idempotency_key=trigger,
+        input_digest=f"sha256:{trigger}:input",
+        definition_digest="sha256:catalog-assistant:1.0.0",
+        steps=(StepDefinition(id="agent", name="Run agent turn"),),
+    )
+
+
 def run_sync(root: Path, hub: InMemoryServiceHub) -> str:
     events: list[AgentEvent] = []
     with HostedRuntime(
@@ -76,13 +89,22 @@ def run_sync(root: Path, hub: InMemoryServiceHub) -> str:
         execution_scope=execution_scope("sync-run"),
         on_event=events.append,
     ) as runtime:
-        result = runtime.run_result("Check SKU-42.")
+        outcome = DurableHostedExecutor(
+            runtime,
+            runtime.runtime.run_store,
+        ).execute(
+            "Check SKU-42.",
+            submission("sync-trigger"),
+            worker_id="sync-worker",
+            step_id="agent",
+        )
+        assert outcome.result is not None
         assert all(
             event.extensions.get("execution_scope_key")
             == runtime.runtime.execution_scope.key
             for event in events
         )
-        return result.content
+        return outcome.result.content
 
 
 async def run_async(root: Path, hub: InMemoryServiceHub) -> str:
@@ -94,8 +116,17 @@ async def run_async(root: Path, hub: InMemoryServiceHub) -> str:
         services=hub.async_services(),
         execution_scope=execution_scope("async-run"),
     ) as runtime:
-        result = await runtime.run_result("Check SKU-42.")
-        return result.content
+        outcome = await AsyncDurableHostedExecutor(
+            runtime,
+            runtime.runtime.run_store,
+        ).execute(
+            "Check SKU-42.",
+            submission("async-trigger"),
+            worker_id="async-worker",
+            step_id="agent",
+        )
+        assert outcome.result is not None
+        return outcome.result.content
 
 
 async def main() -> None:

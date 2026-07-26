@@ -17,6 +17,7 @@ from chulk.core.plan_execution import PlanExecution
 from chulk.core.planning import read_only_planning_tool_names
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.state import AgentState, TurnState
+from chulk.core.signals import DurableApprovalPaused
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
@@ -521,6 +522,12 @@ class Agent:
                 return turn_or_response
             turn = turn_or_response
             result = self._run_action_loop(turn, require_plan=require_plan)
+        except DurableApprovalPaused:
+            turn = turn or self._turn_started_after(previous_turn_count)
+            if turn is not None:
+                turn.status = "waiting_for_approval"
+                self._release_tool_context(turn)
+            raise
         except BaseException as exc:
             turn = turn or self._turn_started_after(previous_turn_count)
             if turn is not None:
@@ -567,6 +574,12 @@ class Agent:
                 return turn_or_response
             turn = turn_or_response
             result = await self._run_action_loop_async(turn, require_plan=require_plan)
+        except DurableApprovalPaused:
+            turn = turn or self._turn_started_after(previous_turn_count)
+            if turn is not None:
+                turn.status = "waiting_for_approval"
+                await self._release_tool_context_async(turn)
+            raise
         except BaseException as exc:
             turn = turn or self._turn_started_after(previous_turn_count)
             if turn is not None:

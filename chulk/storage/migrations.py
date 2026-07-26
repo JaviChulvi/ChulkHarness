@@ -1315,6 +1315,192 @@ def _migrate_to_automation_engine(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migrate_to_durable_hosted_execution(conn: sqlite3.Connection) -> None:
+    """Add the shared hosted run, effect, approval, and audit ledger."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS durable_runs (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            agent_version TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            scope_json TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            definition_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            cancellation_requested INTEGER NOT NULL DEFAULT 0,
+            waiting_reason TEXT,
+            next_retry_at TEXT,
+            budget_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error TEXT,
+            claim_token TEXT,
+            worker_id TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE (tenant_id, workspace_id, idempotency_key),
+            CHECK (cancellation_requested IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_runs_claim
+        ON durable_runs(status, next_retry_at, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_durable_runs_scope
+        ON durable_runs(
+            tenant_id, workspace_id, agent_id, agent_version, updated_at, id
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_run_steps (
+            run_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            retry_json TEXT NOT NULL,
+            next_retry_at TEXT,
+            last_checkpoint_id TEXT,
+            error TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            PRIMARY KEY (run_id, id),
+            FOREIGN KEY (run_id) REFERENCES durable_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_steps_status
+        ON durable_run_steps(run_id, status, id);
+
+        CREATE TABLE IF NOT EXISTS durable_run_attempts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            lease_token TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT,
+            UNIQUE (run_id, step_id, number),
+            FOREIGN KEY (run_id, step_id)
+                REFERENCES durable_run_steps(run_id, id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_run_checkpoints (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, sequence),
+            FOREIGN KEY (attempt_id)
+                REFERENCES durable_run_attempts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_effects (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            logical_key TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            arguments_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_digest TEXT,
+            reconciliation TEXT,
+            reconciled_by TEXT,
+            reconciliation_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (run_id, logical_key),
+            FOREIGN KEY (attempt_id)
+                REFERENCES durable_run_attempts(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_effects_status
+        ON durable_effects(run_id, status, step_id);
+
+        CREATE TABLE IF NOT EXISTS durable_run_events (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            step_id TEXT,
+            payload_json TEXT NOT NULL,
+            causation_id TEXT,
+            correlation_id TEXT,
+            idempotency_key TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, sequence),
+            UNIQUE (run_id, idempotency_key),
+            FOREIGN KEY (run_id) REFERENCES durable_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_approval_requests (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            step_id TEXT NOT NULL,
+            effect_id TEXT,
+            scope_json TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            arguments_digest TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            preview_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            decision TEXT,
+            decided_by TEXT,
+            decision_reason TEXT,
+            decision_key TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            decided_at TEXT,
+            consumed_at TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE (tenant_id, workspace_id, decision_key),
+            FOREIGN KEY (run_id) REFERENCES durable_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_approvals_run
+        ON durable_approval_requests(run_id, status, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS durable_audit_events (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            run_id TEXT,
+            step_id TEXT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            correlation_id TEXT,
+            causation_id TEXT,
+            idempotency_key TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (tenant_id, workspace_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_audit_scope
+        ON durable_audit_events(
+            tenant_id, workspace_id, created_at, id
+        );
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -1372,6 +1558,11 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(15, "durable-goals", _migrate_to_durable_goals),
     SQLiteMigration(16, "child-task-graph", _migrate_to_child_task_graph),
     SQLiteMigration(17, "automation-engine", _migrate_to_automation_engine),
+    SQLiteMigration(
+        18,
+        "durable-hosted-execution",
+        _migrate_to_durable_hosted_execution,
+    ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

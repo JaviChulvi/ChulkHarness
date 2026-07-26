@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import inspect
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
@@ -56,6 +56,72 @@ class GoalExecutionPort(Protocol):
     ) -> GoalActionCheckpoint: ...
 
 
+class DurableEffectPort(Protocol):
+    """Durable effect boundary invoked immediately around one tool call."""
+
+    def prepare(
+        self,
+        *,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        turn: TurnState,
+    ) -> object: ...
+
+    def started(self, token: object) -> None: ...
+
+    def completed(self, token: object, result: ToolResult) -> None: ...
+
+    def failed(self, token: object, error: BaseException) -> None: ...
+
+    async def prepare_async(
+        self,
+        *,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        turn: TurnState,
+    ) -> object: ...
+
+    async def started_async(self, token: object) -> None: ...
+
+    async def completed_async(
+        self,
+        token: object,
+        result: ToolResult,
+    ) -> None: ...
+
+    async def failed_async(
+        self,
+        token: object,
+        error: BaseException,
+    ) -> None: ...
+
+
+class DurableApprovalPort(Protocol):
+    """Persist and resolve an approval without blocking the worker."""
+
+    def resolve(
+        self,
+        *,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        turn: TurnState,
+        record: PermissionDecisionRecord,
+    ) -> tuple[PermissionDecisionRecord, object]: ...
+
+    async def resolve_async(
+        self,
+        *,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        turn: TurnState,
+        record: PermissionDecisionRecord,
+    ) -> tuple[PermissionDecisionRecord, object]: ...
+
+
 @dataclass
 class ToolExecutor:
     """Execute tools with explicit permission, retry, and context policies."""
@@ -70,6 +136,8 @@ class ToolExecutor:
     get_context: Callable[[TurnState], ToolExecutionContext | None]
     usage_accounting: ModelUsageAccounting | None = None
     goal_execution: GoalExecutionPort | None = None
+    durable_effects: DurableEffectPort | None = None
+    durable_approvals: DurableApprovalPort | None = None
     execution_scope: ExecutionScope | None = None
     policy_hooks: ToolPolicyHooks | None = None
 
@@ -99,27 +167,77 @@ class ToolExecutor:
             try:
                 result = self._authorization_result(tool, arguments)
                 context: ToolExecutionContext | None = None
-                if result is None:
-                    result = self._permission_result(
-                        tool_name,
+                durable_token: object | None = None
+                deferred_credentials = False
+                if result is None and self.durable_approvals is not None:
+                    context = self._approval_context(
+                        tool,
                         arguments,
                         turn,
                     )
+                    deferred_credentials = True
                 if result is None:
-                    context = self._authorized_context(tool, arguments, turn)
-                    result = self.registry.run(
+                    result, durable_token = self._permission_result(
                         tool_name,
                         arguments,
+                        turn,
+                        tool=tool,
                         context=context,
                     )
-                    if context.effect_key is not None:
-                        result = replace(
-                            result,
-                            metadata={
-                                **result.metadata,
-                                "effect_key": context.effect_key,
-                            },
+                if result is None:
+                    if context is None:
+                        context = self._authorized_context(
+                            tool,
+                            arguments,
+                            turn,
                         )
+                    elif deferred_credentials:
+                        context = self._credentialed_context(
+                            tool,
+                            arguments,
+                            context,
+                        )
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is None
+                    ):
+                        durable_token = self.durable_effects.prepare(
+                            tool=tool,
+                            arguments=arguments,
+                            context=context,
+                            turn=turn,
+                        )
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is not None
+                    ):
+                        self.durable_effects.started(durable_token)
+                    try:
+                        result = self.registry.run(
+                            tool_name,
+                            arguments,
+                            context=context,
+                        )
+                        if context.effect_key is not None:
+                            result = replace(
+                                result,
+                                metadata={
+                                    **result.metadata,
+                                    "effect_key": context.effect_key,
+                                },
+                            )
+                    except BaseException as exc:
+                        if (
+                            self.durable_effects is not None
+                            and durable_token is not None
+                        ):
+                            self.durable_effects.failed(durable_token, exc)
+                        raise
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is not None
+                    ):
+                        self.durable_effects.completed(durable_token, result)
                 result = self._redacted_result(tool, arguments, result)
             except BaseException as exc:
                 self._release_tool_attempt(turn, attempt=attempt_number)
@@ -187,30 +305,82 @@ class ToolExecutor:
             try:
                 result = await self._authorization_result_async(tool, arguments)
                 context = None
-                if result is None:
-                    result = await self._permission_result_async(
-                        tool_name,
-                        arguments,
-                        turn,
-                    )
-                if result is None:
-                    context = await self._authorized_context_async(
+                durable_token: object | None = None
+                deferred_credentials = False
+                if result is None and self.durable_approvals is not None:
+                    context = await self._approval_context_async(
                         tool,
                         arguments,
                         turn,
                     )
-                    result = await self.registry.run_async(
+                    deferred_credentials = True
+                if result is None:
+                    result, durable_token = await self._permission_result_async(
                         tool_name,
                         arguments,
+                        turn,
+                        tool=tool,
                         context=context,
                     )
-                    if context.effect_key is not None:
-                        result = replace(
+                if result is None:
+                    if context is None:
+                        context = await self._authorized_context_async(
+                            tool,
+                            arguments,
+                            turn,
+                        )
+                    elif deferred_credentials:
+                        context = await self._credentialed_context_async(
+                            tool,
+                            arguments,
+                            context,
+                        )
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is None
+                    ):
+                        durable_token = await self.durable_effects.prepare_async(
+                            tool=tool,
+                            arguments=arguments,
+                            context=context,
+                            turn=turn,
+                        )
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is not None
+                    ):
+                        await self.durable_effects.started_async(durable_token)
+                    try:
+                        result = await self.registry.run_async(
+                            tool_name,
+                            arguments,
+                            context=context,
+                        )
+                        if context.effect_key is not None:
+                            result = replace(
+                                result,
+                                metadata={
+                                    **result.metadata,
+                                    "effect_key": context.effect_key,
+                                },
+                            )
+                    except BaseException as exc:
+                        if (
+                            self.durable_effects is not None
+                            and durable_token is not None
+                        ):
+                            await self.durable_effects.failed_async(
+                                durable_token,
+                                exc,
+                            )
+                        raise
+                    if (
+                        self.durable_effects is not None
+                        and durable_token is not None
+                    ):
+                        await self.durable_effects.completed_async(
+                            durable_token,
                             result,
-                            metadata={
-                                **result.metadata,
-                                "effect_key": context.effect_key,
-                            },
                         )
                 result = await self._redacted_result_async(
                     tool,
@@ -466,6 +636,74 @@ class ToolExecutor:
             effect_key=effect_key,
         )
 
+    def _approval_context(
+        self,
+        tool: Any,
+        arguments: Mapping[str, object],
+        turn: TurnState,
+    ) -> ToolExecutionContext:
+        """Resolve stable effect identity without loading credentials."""
+        context = self.get_context(turn) or ToolExecutionContext()
+        if tool is None or self.execution_scope is None:
+            return context
+        effect_key: str | None = None
+        if (
+            self.policy_hooks is not None
+            and self.policy_hooks.derive_effect_key is not None
+        ):
+            resolved_key = self.policy_hooks.derive_effect_key(
+                self.execution_scope,
+                tool.resolved_identity(),
+                tool.resolved_policy(),
+                arguments,
+            )
+            if inspect.isawaitable(resolved_key):
+                close = getattr(resolved_key, "close", None)
+                if callable(close):
+                    close()
+                raise RuntimeError(
+                    "async effect-key hook cannot be used by the synchronous "
+                    "runtime"
+                )
+            effect_key = _effect_key(resolved_key)
+        return replace(
+            context,
+            scope=self.execution_scope,
+            credentials={},
+            effect_key=effect_key,
+        )
+
+    def _credentialed_context(
+        self,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionContext:
+        """Load credentials only after a durable approval has resolved."""
+        if tool is None or self.execution_scope is None:
+            return context
+        credentials: Mapping[str, object] = {}
+        if (
+            self.policy_hooks is not None
+            and self.policy_hooks.resolve_credentials is not None
+        ):
+            resolved = self.policy_hooks.resolve_credentials(
+                self.execution_scope,
+                tool.resolved_identity(),
+                tool.resolved_policy(),
+                arguments,
+            )
+            if inspect.isawaitable(resolved):
+                close = getattr(resolved, "close", None)
+                if callable(close):
+                    close()
+                raise RuntimeError(
+                    "async credential resolver cannot be used by the "
+                    "synchronous runtime"
+                )
+            credentials = _credentials(resolved)
+        return replace(context, credentials=credentials)
+
     async def _authorized_context_async(
         self,
         tool,
@@ -506,6 +744,60 @@ class ToolExecutor:
             credentials=credentials,
             effect_key=effect_key,
         )
+
+    async def _approval_context_async(
+        self,
+        tool: Any,
+        arguments: Mapping[str, object],
+        turn: TurnState,
+    ) -> ToolExecutionContext:
+        context = self.get_context(turn) or ToolExecutionContext()
+        if tool is None or self.execution_scope is None:
+            return context
+        effect_key: str | None = None
+        if (
+            self.policy_hooks is not None
+            and self.policy_hooks.derive_effect_key is not None
+        ):
+            resolved_key = self.policy_hooks.derive_effect_key(
+                self.execution_scope,
+                tool.resolved_identity(),
+                tool.resolved_policy(),
+                arguments,
+            )
+            if inspect.isawaitable(resolved_key):
+                resolved_key = await resolved_key
+            effect_key = _effect_key(resolved_key)
+        return replace(
+            context,
+            scope=self.execution_scope,
+            credentials={},
+            effect_key=effect_key,
+        )
+
+    async def _credentialed_context_async(
+        self,
+        tool: Any,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+    ) -> ToolExecutionContext:
+        if tool is None or self.execution_scope is None:
+            return context
+        credentials: Mapping[str, object] = {}
+        if (
+            self.policy_hooks is not None
+            and self.policy_hooks.resolve_credentials is not None
+        ):
+            resolved = self.policy_hooks.resolve_credentials(
+                self.execution_scope,
+                tool.resolved_identity(),
+                tool.resolved_policy(),
+                arguments,
+            )
+            if inspect.isawaitable(resolved):
+                resolved = await resolved
+            credentials = _credentials(resolved)
+        return replace(context, credentials=credentials)
 
     def _missing_grants_reason(self, policy: ToolPolicy) -> str | None:
         if not policy.required_grants:
@@ -737,12 +1029,13 @@ class ToolExecutor:
         tool_name: str,
         arguments: dict,
         turn: TurnState,
-    ) -> ToolResult | None:
+        *,
+        tool: Any,
+        context: ToolExecutionContext | None,
+    ) -> tuple[ToolResult | None, object | None]:
         """Resolve blocking host approvals without stalling the agent event loop."""
-        try:
-            tool = self.registry.get(tool_name)
-        except KeyError:
-            return None
+        if tool is None:
+            return None, None
         request = self.permission_policy.request_for_tool(tool, arguments)
         self.trace(
             TraceEvent.TOOL_PERMISSION_REQUESTED,
@@ -750,14 +1043,36 @@ class ToolExecutor:
         )
         record = self.permission_policy.decide(request)
         if record.decision == PermissionDecision.ASK:
-            record = await asyncio.to_thread(self._resolve_approval, request, record)
+            if self.durable_approvals is not None:
+                if context is None:
+                    raise RuntimeError(
+                        "durable approval requires an authorized tool context"
+                    )
+                record, durable_token = (
+                    await self.durable_approvals.resolve_async(
+                        tool=tool,
+                        arguments=arguments,
+                        context=context,
+                        turn=turn,
+                        record=record,
+                    )
+                )
+            else:
+                record = await asyncio.to_thread(
+                    self._resolve_approval,
+                    request,
+                    record,
+                )
+                durable_token = None
+        else:
+            durable_token = None
         self.trace(
             TraceEvent.TOOL_PERMISSION_DECIDED,
             {"turn_id": turn.turn_id, "decision": record.to_dict()},
         )
         if record.decision == PermissionDecision.ALLOW:
-            return None
-        return _permission_denied_result(request, record)
+            return None, durable_token
+        return _permission_denied_result(request, record), durable_token
 
     def resolve_hosted_mcp_approval(self, approval: dict, turn: TurnState) -> bool:
         """Resolve one provider-hosted MCP approval through the same policy."""
@@ -817,11 +1132,12 @@ class ToolExecutor:
         tool_name: str,
         arguments: dict,
         turn: TurnState,
-    ) -> ToolResult | None:
-        try:
-            tool = self.registry.get(tool_name)
-        except KeyError:
-            return None
+        *,
+        tool: Any,
+        context: ToolExecutionContext | None,
+    ) -> tuple[ToolResult | None, object | None]:
+        if tool is None:
+            return None, None
         request = self.permission_policy.request_for_tool(tool, arguments)
         self.trace(
             TraceEvent.TOOL_PERMISSION_REQUESTED,
@@ -829,14 +1145,30 @@ class ToolExecutor:
         )
         record = self.permission_policy.decide(request)
         if record.decision == PermissionDecision.ASK:
-            record = self._resolve_approval(request, record)
+            if self.durable_approvals is not None:
+                if context is None:
+                    raise RuntimeError(
+                        "durable approval requires an authorized tool context"
+                    )
+                record, durable_token = self.durable_approvals.resolve(
+                    tool=tool,
+                    arguments=arguments,
+                    context=context,
+                    turn=turn,
+                    record=record,
+                )
+            else:
+                record = self._resolve_approval(request, record)
+                durable_token = None
+        else:
+            durable_token = None
         self.trace(
             TraceEvent.TOOL_PERMISSION_DECIDED,
             {"turn_id": turn.turn_id, "decision": record.to_dict()},
         )
         if record.decision == PermissionDecision.ALLOW:
-            return None
-        return _permission_denied_result(request, record)
+            return None, durable_token
+        return _permission_denied_result(request, record), durable_token
 
     def _resolve_approval(
         self,

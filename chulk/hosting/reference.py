@@ -9,6 +9,10 @@ import hashlib
 from typing import Any
 from uuid import uuid4
 
+from chulk.approvals import (
+    AsyncInMemoryApprovalStore,
+    InMemoryApprovalStore,
+)
 from chulk.core.state import TurnState
 from chulk.execution import ExecutionSessionRequest
 from chulk.hosting.scope import ExecutionScope
@@ -20,8 +24,10 @@ from chulk.hosting.services import (
     SessionRuntimeServices,
     SkillRuntimeServices,
 )
+from chulk.hosting.sinks import InMemoryEventSink, safe_audit_payload
 from chulk.media import MediaProcessorRegistry
 from chulk.plugins import PluginAuditReport
+from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.sessions import (
     ConversationRecord,
     ConversationSummaryRecord,
@@ -65,6 +71,11 @@ class InMemoryServiceHub:
         self._artifacts: dict[str, InMemoryArtifactService] = {}
         self._traces: dict[str, InMemoryTraceService] = {}
         self._audit: dict[str, InMemoryAuditService] = {}
+        self._runs: dict[str, InMemoryRunStore] = {}
+        self._approvals: dict[str, InMemoryApprovalStore] = {}
+        self._events: dict[str, InMemoryEventSink] = {}
+        self._async_runs: dict[str, AsyncInMemoryRunStore] = {}
+        self._async_approvals: dict[str, AsyncInMemoryApprovalStore] = {}
 
     def services(
         self,
@@ -93,6 +104,15 @@ class InMemoryServiceHub:
             return self._traces.setdefault(
                 scope.key,
                 InMemoryTraceService(scope, artifacts(scope)),
+            )
+
+        def runs(scope: ExecutionScope) -> InMemoryRunStore:
+            return self._runs.setdefault(scope.key, InMemoryRunStore())
+
+        def approvals(scope: ExecutionScope) -> InMemoryApprovalStore:
+            return self._approvals.setdefault(
+                scope.key,
+                InMemoryApprovalStore(runs(scope)),
             )
 
         def host_factory(factory: Any) -> ServiceBinding[Any]:
@@ -132,6 +152,14 @@ class InMemoryServiceHub:
             tool_policy=ServiceBinding.host(
                 policy_hooks or ToolPolicyHooks()
             ),
+            runs=host_factory(runs),
+            approvals=host_factory(approvals),
+            events=host_factory(
+                lambda scope: self._events.setdefault(
+                    scope.key,
+                    InMemoryEventSink(scope),
+                )
+            ),
         )
 
     def async_services(
@@ -141,6 +169,26 @@ class InMemoryServiceHub:
     ) -> AsyncRuntimeServices:
         """Return the corresponding bundle for ``AsyncHostedRuntime``."""
         services = self.services(policy_hooks=policy_hooks)
+        def async_runs(scope: ExecutionScope) -> AsyncInMemoryRunStore:
+            sync = self._runs.setdefault(scope.key, InMemoryRunStore())
+            return self._async_runs.setdefault(
+                scope.key,
+                AsyncInMemoryRunStore(sync),
+            )
+
+        def async_approvals(
+            scope: ExecutionScope,
+        ) -> AsyncInMemoryApprovalStore:
+            sync_runs = self._runs.setdefault(scope.key, InMemoryRunStore())
+            sync = self._approvals.setdefault(
+                scope.key,
+                InMemoryApprovalStore(sync_runs),
+            )
+            return self._async_approvals.setdefault(
+                scope.key,
+                AsyncInMemoryApprovalStore(sync),
+            )
+
         return AsyncRuntimeServices(
             memory=services.memory,
             sessions=services.sessions,
@@ -154,6 +202,15 @@ class InMemoryServiceHub:
             content=services.content,
             media=services.media,
             tool_policy=services.tool_policy,
+            runs=ServiceBinding.scoped(
+                async_runs,
+                ownership=ResourceOwnership.HOST,
+            ),
+            approvals=ServiceBinding.scoped(
+                async_approvals,
+                ownership=ResourceOwnership.HOST,
+            ),
+            events=services.events,
         )
 
     def trace_events(self, scope: ExecutionScope) -> tuple[dict[str, Any], ...]:
@@ -163,6 +220,10 @@ class InMemoryServiceHub:
     def audit_events(self, scope: ExecutionScope) -> tuple[dict[str, Any], ...]:
         audit = self._audit.get(scope.key)
         return tuple(audit.events) if audit is not None else ()
+
+    def public_events(self, scope: ExecutionScope) -> tuple[Any, ...]:
+        sink = self._events.get(scope.key)
+        return tuple(sink.events) if sink is not None else ()
 
 
 class InMemoryMemoryService:
@@ -676,7 +737,11 @@ class InMemoryAuditService:
     ) -> None:
         self.scope.assert_same_authority(scope)
         self.events.append(
-            {"type": event_type, "payload": dict(payload), "scope": scope.to_dict()}
+            {
+                "type": event_type,
+                "payload": safe_audit_payload(payload),
+                "scope": scope.to_dict(),
+            }
         )
 
 
