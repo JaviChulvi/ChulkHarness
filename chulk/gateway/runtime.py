@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 
 from chulk.gateway.ledger import ExecutionClaim, SQLiteGatewayLedger
@@ -141,6 +142,7 @@ class GatewayRuntime:
 
     async def process_available(self) -> int:
         """Run one bounded wave of eligible executions."""
+        queued_before = datetime.now(timezone.utc)
         tasks: list[asyncio.Task[None]] = []
         while len(tasks) < self.limits.global_concurrency:
             claim = await asyncio.to_thread(
@@ -148,6 +150,7 @@ class GatewayRuntime:
                 global_limit=self.limits.global_concurrency,
                 profile_limit=self.limits.profile_concurrency,
                 adapter_keys=tuple(self._adapters),
+                queued_before=queued_before,
                 lease_seconds=self.limits.execution_lease_seconds,
             )
             if claim is None:

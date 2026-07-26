@@ -148,6 +148,40 @@ def test_execution_claims_preserve_fifo_and_enforce_concurrency_limits(tmp_path)
     assert resumed.record.id == second.id
 
 
+def test_execution_claim_respects_queue_wave_cutoff(tmp_path) -> None:
+    ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
+    first = ledger.ingest(_inbound("1"), profile_id="work").record
+    second = ledger.ingest(
+        _inbound("2", destination_id="chat-10"),
+        profile_id="personal",
+    ).record
+
+    claim = ledger.claim_execution(
+        global_limit=2,
+        profile_limit=1,
+        queued_before=first.created_at,
+    )
+
+    assert claim is not None
+    assert claim.record.id == first.id
+    assert ledger.complete_execution(
+        first.id,
+        claim.execution_token,
+        (_outbound(first.id),),
+    )
+    assert (
+        ledger.claim_execution(
+            global_limit=2,
+            profile_limit=1,
+            queued_before=first.created_at,
+        )
+        is None
+    )
+    next_claim = ledger.claim_execution(global_limit=2, profile_limit=1)
+    assert next_claim is not None
+    assert next_claim.record.id == second.id
+
+
 def test_expired_execution_is_quarantined_and_never_reclaimed(tmp_path) -> None:
     ledger = SQLiteGatewayLedger(tmp_path / "control.sqlite")
     record = ledger.ingest(_inbound("1"), profile_id="work").record
