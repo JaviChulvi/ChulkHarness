@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Generic, Protocol, TypeVar, cast
@@ -13,6 +13,13 @@ from typing import Any, Generic, Protocol, TypeVar, cast
 from chulk.capabilities import ToolRetryPolicy
 from chulk.redaction import redact_data, redact_text
 from chulk.tools.permissions import ToolPermissionLevel, normalize_permission_level
+from chulk.tools.policy import (
+    ToolApprovalMode,
+    ToolIdentity,
+    ToolPolicy,
+    callable_digest,
+    validate_tool_contract,
+)
 from chulk.tools.schema import (
     ToolValidationError,
     ToolValidationIssue,
@@ -57,12 +64,18 @@ class ToolExecutionContext(Generic[DepsT]):
     metadata: dict[str, Any] = field(default_factory=dict)
     deps: DepsT | None = None
     execution_session: object | None = None
+    scope: object | None = None
+    credentials: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    effect_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "metadata": self.metadata,
             "has_dependencies": self.deps is not None,
             "has_execution_session": self.execution_session is not None,
+            "has_scope": self.scope is not None,
+            "has_credentials": bool(self.credentials),
+            "effect_key": self.effect_key,
         }
 
     def require_deps(self) -> DepsT:
@@ -138,9 +151,25 @@ class Tool:
     output_schema: dict[str, Any] | None = None
     retry_policy: ToolRetryPolicy | None = None
     idempotent: bool = False
+    identity: ToolIdentity | None = None
+    policy: ToolPolicy | None = None
 
     def normalized_permission_level(self) -> ToolPermissionLevel:
         return normalize_permission_level(self.permission_level)
+
+    def resolved_identity(self) -> ToolIdentity:
+        return self.identity or ToolIdentity.from_schemas(
+            self.name,
+            input_schema=self.args_schema,
+            output_schema=self.output_schema,
+        )
+
+    def resolved_policy(self) -> ToolPolicy:
+        return self.policy or ToolPolicy.safe_default(
+            self.normalized_permission_level(),
+            requires_confirmation=self.requires_confirmation,
+            idempotent=self.idempotent,
+        )
 
 
 def tool_descriptions_for_prompt(tools: Iterable[object]) -> str:
@@ -154,6 +183,16 @@ def tool_descriptions_for_prompt(tools: Iterable[object]) -> str:
             "permission_level": normalize_permission_level(
                 getattr(tool, "permission_level", ToolPermissionLevel.READ)
             ).value,
+            "identity": (
+                tool.resolved_identity().to_dict()
+                if isinstance(tool, Tool)
+                else None
+            ),
+            "policy": (
+                tool.resolved_policy().to_dict()
+                if isinstance(tool, Tool)
+                else None
+            ),
         }
         for tool in tools
     ]
@@ -180,6 +219,43 @@ class ToolRegistry:
             validate_tool_output_schema(tool.name, tool.output_schema)
         if tool.timeout_seconds is not None and tool.timeout_seconds <= 0:
             raise ValueError(f"Tool {tool.name} timeout_seconds must be greater than zero")
+        identity = tool.resolved_identity()
+        policy = tool.resolved_policy()
+        implementation_digest = callable_digest(tool.callable)
+        if (
+            identity.implementation_digest
+            and identity.implementation_digest != implementation_digest
+        ):
+            raise ValueError(
+                "tool callable does not match its implementation digest"
+            )
+        identity = replace(
+            identity,
+            implementation_digest=implementation_digest,
+        )
+        validate_tool_contract(
+            name=tool.name,
+            args_schema=tool.args_schema,
+            output_schema=tool.output_schema,
+            identity=identity,
+            policy=policy,
+        )
+        if (
+            policy.approval is ToolApprovalMode.NEVER
+            and tool.requires_confirmation
+        ):
+            raise ValueError(
+                "tool confirmation requirement conflicts with approval=never"
+            )
+        tool = replace(
+            tool,
+            identity=identity,
+            policy=policy,
+            requires_confirmation=(
+                tool.requires_confirmation
+                or policy.approval is ToolApprovalMode.ALWAYS
+            ),
+        )
         self._tools[tool.name] = tool
 
     def list_tools(self) -> list[Tool]:

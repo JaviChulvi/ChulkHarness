@@ -12,8 +12,11 @@ Chulk documents four stability labels:
 The supported top-level names are governed by `chulk.__all__`. They are
 **public-stable** unless explicitly classified as provisional below. Stable
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
-`chulk.errors`, `chulk.events`, `chulk.results`, `chulk.tools`, and
+`chulk.errors`, `chulk.events`, `chulk.hosting`, `chulk.results`, `chulk.tools`, and
 `chulk.testing`. `ScriptedLLMClient` is stable only from `chulk.testing`.
+
+`chulk.hosting.reference` is a documented example and contract-test fixture,
+not a durable production service implementation.
 
 `AgentHandle`, `AsyncAgentHandle`, `ChatAgent`, `AsyncChatAgent`, and their
 lowercase compatibility factories are **public-provisional** for the current

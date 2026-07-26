@@ -60,7 +60,11 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
     """Project one explicitly supported internal event, excluding all others."""
     conversation_id = runtime.state.conversation_id
     turn_id = _turn_id(runtime, payload)
-    extensions = {"internal_event": event_type}
+    extensions: dict[str, Any] = {"internal_event": event_type}
+    execution_scope = getattr(runtime, "execution_scope", None)
+    if execution_scope is not None:
+        extensions["execution_scope"] = execution_scope.to_dict()
+        extensions["execution_scope_key"] = execution_scope.key
 
     if event_type == TraceEvent.TURN_STARTED:
         turn_value = payload.get("turn")
@@ -200,6 +204,83 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 success=payload.get("success") if isinstance(payload.get("success"), bool) else None,
                 failure_kind=payload.get("failure_kind"),
                 error=payload.get("error"),
+                extensions={
+                    "tool_identity": (
+                        payload.get("metadata", {}).get("tool_identity")
+                        if isinstance(payload.get("metadata"), dict)
+                        else None
+                    ),
+                    "tool_identity_digest": (
+                        payload.get("metadata", {}).get(
+                            "tool_identity_digest"
+                        )
+                        if isinstance(payload.get("metadata"), dict)
+                        else None
+                    ),
+                    "tool_policy": (
+                        payload.get("metadata", {}).get("tool_policy")
+                        if isinstance(payload.get("metadata"), dict)
+                        else None
+                    ),
+                    "tool_policy_digest": (
+                        payload.get("metadata", {}).get(
+                            "tool_policy_digest"
+                        )
+                        if isinstance(payload.get("metadata"), dict)
+                        else None
+                    ),
+                },
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+        )
+    if event_type == TraceEvent.TOOL_AUTHORIZATION_REQUESTED:
+        return _event(
+            EventName.PERMISSION_REQUESTED,
+            conversation_id,
+            turn_id,
+            PermissionPayload(
+                tool_name=str(payload.get("tool_name") or "unknown"),
+                reason="host authorization required",
+                policy_name="host",
+                extensions={
+                    key: payload.get(key)
+                    for key in (
+                        "tool_identity",
+                        "tool_identity_digest",
+                        "tool_policy",
+                        "tool_policy_digest",
+                        "arguments_digest",
+                    )
+                },
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+        )
+    if event_type == TraceEvent.TOOL_AUTHORIZATION_DECIDED:
+        return _event(
+            EventName.PERMISSION_RESOLVED,
+            conversation_id,
+            turn_id,
+            PermissionPayload(
+                tool_name=str(payload.get("tool_name") or "unknown"),
+                decision=payload.get("decision")
+                if isinstance(payload.get("decision"), str)
+                else None,
+                reason=payload.get("reason")
+                if isinstance(payload.get("reason"), str)
+                else None,
+                policy_name="host",
+                extensions={
+                    key: payload.get(key)
+                    for key in (
+                        "tool_identity",
+                        "tool_identity_digest",
+                        "tool_policy",
+                        "tool_policy_digest",
+                        "arguments_digest",
+                    )
+                },
             ),
             extensions,
             profile_id=runtime.profile_id,
@@ -215,6 +296,11 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 tool_name=str(request.get("tool_name") or "unknown"),
                 reason=request.get("reason"),
                 policy_name=request.get("policy_name"),
+                extensions={
+                    "tool_identity": request.get("tool_identity"),
+                    "tool_policy": request.get("tool_policy"),
+                    "arguments_digest": request.get("arguments_digest"),
+                },
             ),
             extensions,
             profile_id=runtime.profile_id,
@@ -231,6 +317,11 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
                 decision=decision.get("decision"),
                 reason=decision.get("reason"),
                 policy_name=decision.get("policy_name"),
+                extensions={
+                    "tool_identity": decision.get("tool_identity"),
+                    "tool_policy": decision.get("tool_policy"),
+                    "arguments_digest": decision.get("arguments_digest"),
+                },
             ),
             extensions,
             profile_id=runtime.profile_id,

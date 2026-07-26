@@ -29,6 +29,7 @@ from chulk.llm.usage import (
     usage_from_dict,
 )
 from chulk.goals.runtime import GoalExecutionContext
+from chulk.hosting import ExecutionScope
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.media import (
@@ -67,6 +68,7 @@ from chulk.tools.permissions import (
     ToolPermissionPolicy,
 )
 from chulk.tools.registry import ToolContextLifecycle, ToolExecutionContext
+from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
@@ -109,6 +111,7 @@ class Agent:
         max_model_output_tokens: int | None = None,
         event_callback: Callable[[str, dict], None] | None = None,
         event_sink: Callable[[AgentEvent], None] | None = None,
+        audit_callback: Callable[[str, dict], None] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
         redaction_fail_closed: bool = False,
         pinned_skill_names: list[str] | None = None,
@@ -129,6 +132,9 @@ class Agent:
         goal_execution: GoalExecutionContext | None = None,
         content_store: ContentStore | None = None,
         media_processors: MediaProcessorRegistry | None = None,
+        execution_scope: ExecutionScope | None = None,
+        tool_policy_hooks: ToolPolicyHooks | None = None,
+        close_trace_logger: bool = True,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -180,6 +186,7 @@ class Agent:
         self.permission_callback = permission_callback
         self.event_callback = event_callback
         self.event_sink = event_sink
+        self.audit_callback = audit_callback
         self.redaction_callback = redaction_callback
         self.redaction_fail_closed = redaction_fail_closed
         self.pinned_skill_names = pinned_skill_names or []
@@ -190,6 +197,8 @@ class Agent:
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self.default_tool_context = default_tool_context
         self.runtime_metadata = deepcopy(runtime_metadata or {})
+        self.execution_scope = execution_scope
+        self._close_trace_logger = close_trace_logger
         self.usage_accounting = usage_accounting
         self.skill_lifecycle_store = skill_lifecycle_store
         self.skill_lifecycle = skill_lifecycle
@@ -214,6 +223,8 @@ class Agent:
             get_context=self._tool_context_for_turn,
             usage_accounting=self.usage_accounting,
             goal_execution=self.goal_execution,
+            execution_scope=self.execution_scope,
+            policy_hooks=tool_policy_hooks,
         )
         self._plan_execution = PlanExecution(
             state=self.state,
@@ -291,13 +302,14 @@ class Agent:
                 close_resources((resource,))
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
-        if self.trace_logger is not None:
+        if self.trace_logger is not None and self._close_trace_logger:
             try:
                 self.trace_logger.close()
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
         self.event_callback = None
         self.event_sink = None
+        self.audit_callback = None
         if failures:
             raise RuntimeError(
                 f"Failed to close {len(failures)} owned agent resource(s)"
@@ -322,13 +334,14 @@ class Agent:
                 await aclose_resources((resource,))
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
-        if self.trace_logger is not None:
+        if self.trace_logger is not None and self._close_trace_logger:
             try:
                 self.trace_logger.close()
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
         self.event_callback = None
         self.event_sink = None
+        self.audit_callback = None
         if failures:
             raise RuntimeError(
                 f"Failed to close {len(failures)} owned agent resource(s)"
@@ -1539,11 +1552,14 @@ class Agent:
         return payload
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
-        payload = self._redact_event_payload(event_type, payload or {})
+        payload = dict(payload or {})
+        payload = self._redact_event_payload(event_type, payload)
         if self.trace_logger is not None:
             self.trace_logger.log(event_type, payload)
         if self.event_callback is not None:
             self.event_callback(event_type, payload)
+        if self.audit_callback is not None:
+            self.audit_callback(event_type, payload)
         if self.event_sink is not None:
             self.event_sink(AgentEvent(event_type, payload))
 

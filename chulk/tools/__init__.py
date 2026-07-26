@@ -36,6 +36,18 @@ from chulk.tools.permissions import (
     normalize_permission_profile,
     permission_policy_for_profile,
 )
+from chulk.tools.policy import (
+    DataClassification,
+    ToolApprovalMode,
+    ToolAuthorization,
+    ToolConcurrency,
+    ToolEffect,
+    ToolIdentity,
+    ToolIdempotencyStrategy,
+    ToolPolicy,
+    ToolPolicyHooks,
+    ToolRisk,
+)
 from chulk.tools.processes import process_tools
 from chulk.tools.public import (
     ToolContext,
@@ -95,6 +107,16 @@ __all__ = [
     "ShellExecutionRequest",
     "ToolRegistry",
     "ToolResult",
+    "DataClassification",
+    "ToolApprovalMode",
+    "ToolAuthorization",
+    "ToolConcurrency",
+    "ToolEffect",
+    "ToolIdentity",
+    "ToolIdempotencyStrategy",
+    "ToolPolicy",
+    "ToolPolicyHooks",
+    "ToolRisk",
     "PermissionDecision",
     "PermissionDecisionRecord",
     "PermissionRequest",

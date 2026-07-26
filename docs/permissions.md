@@ -43,3 +43,9 @@ Approval callbacks receive a redacted request with the tool name, declared
 capability category, arguments, and policy context. Treat approval as a host UI
 decision, not as model consent. MCP is an external-service boundary even for
 read-looking methods; see [MCP](mcp.md) and [safety](safety.md).
+
+Hosted mode adds a prior application-authorization layer based on
+`ExecutionScope.grants` and `ToolPolicy.required_grants`. Permission requests
+include tool/schema versions, policy versions, schema digests, and an exact
+argument digest. Credential resolution happens only after host authorization
+and Chulk permission/approval succeed. See [hosted runtime](hosting.md).

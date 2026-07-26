@@ -40,6 +40,11 @@ with Agent(config=config, llm=client) as agent:
 Unknown future trace events are excluded until Chulk explicitly adds a public
 projection. Permission payloads deliberately omit raw tool arguments.
 
+Hosted runtime events include the redacted execution scope and its canonical
+key in envelope extensions. Tool completion and permission payload extensions
+include tool/schema identity, policy versions, and digests, but never resolved
+credential values.
+
 ## Iteration and callbacks
 
 Use `agent.run_events(...)` for a synchronous iterator and

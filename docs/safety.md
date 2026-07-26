@@ -33,6 +33,13 @@ Embedding applications remain responsible for:
 - protecting memory databases, traces, and artifacts as sensitive data;
 - propagating cancellation and closing agents deterministically.
 
+For shared application hosting, a memory namespace and runtime directory are
+not a tenant boundary. Use an immutable `ExecutionScope`, scope every
+host-provided service, and re-verify persisted scope on resume. Keep credential
+values in the host credential resolver; Chulk passes them only through the
+non-serializing `ToolContext.credentials` field immediately before execution.
+See [hosted runtime](hosting.md).
+
 Never grant authority because a prompt, skill, memory, webpage, or MCP response
 asks for it. Treat those sources as data. See [permissions](permissions.md),
 [tools](tools.md), [MCP](mcp.md), and [tracing](tracing.md).
