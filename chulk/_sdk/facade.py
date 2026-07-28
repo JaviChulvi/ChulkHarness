@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
 from contextlib import suppress
+import inspect
 from pathlib import Path
 import threading
 from typing import Any, Callable, TypeVar, cast
@@ -1922,6 +1923,7 @@ class AsyncHostedRuntime(AsyncAgent):
         self.runtime.public_event_sink = event_buffer
         self.runtime.async_event_buffer = event_buffer
         self._async_owned_services: ResolvedRuntimeServices | None = None
+        self._async_host_flushables: tuple[object, ...] = ()
 
     @classmethod
     async def create(
@@ -1934,11 +1936,26 @@ class AsyncHostedRuntime(AsyncAgent):
         """Resolve async factories without blocking, then construct the runtime."""
         resolved = await services.resolve_async(execution_scope)
         bindings = resolved.host_bindings()
+        flushables: list[object] = []
+        fields = {
+            name: getattr(bindings, name)
+            for name in bindings.__dataclass_fields__
+        }
+        from chulk.hosting.sinks import (
+            BufferedAsyncAuditSink,
+            BufferedAsyncTraceSink,
+        )
+
+        if _has_async_method(resolved.traces, "log"):
+            trace_sink = BufferedAsyncTraceSink(resolved.traces)
+            fields["traces"] = type(bindings.traces).host(trace_sink)
+            flushables.append(trace_sink)
+        if _has_async_method(resolved.audit, "record"):
+            audit_sink = BufferedAsyncAuditSink(resolved.audit)
+            fields["audit"] = type(bindings.audit).host(audit_sink)
+            flushables.append(audit_sink)
         compatibility = AsyncRuntimeServices(
-            **{
-                name: getattr(bindings, name)
-                for name in bindings.__dataclass_fields__
-            }
+            **fields
         )
         try:
             runtime = cls(
@@ -1950,7 +1967,26 @@ class AsyncHostedRuntime(AsyncAgent):
             await resolved.aclose_owned()
             raise
         runtime._async_owned_services = resolved
+        runtime._async_host_flushables = tuple(flushables)
         return runtime
+
+    async def _invoke_async(
+        self,
+        operation: str,
+        call: Callable[[], Awaitable[T]],
+        *,
+        serialized: bool = False,
+    ) -> T:
+        try:
+            return await super()._invoke_async(
+                operation,
+                call,
+                serialized=serialized,
+            )
+        finally:
+            for flushable in self._async_host_flushables:
+                flush = getattr(flushable, "flush")
+                await flush()
 
     async def close(self) -> None:
         owned = self._async_owned_services
@@ -1960,6 +1996,10 @@ class AsyncHostedRuntime(AsyncAgent):
             if owned is not None:
                 self._async_owned_services = None
                 await owned.aclose_owned()
+
+
+def _has_async_method(value: object, name: str) -> bool:
+    return inspect.iscoroutinefunction(getattr(value, name, None))
 
 
 def _build_handle(
