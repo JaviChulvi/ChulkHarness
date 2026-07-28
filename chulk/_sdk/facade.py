@@ -1985,7 +1985,8 @@ class AsyncHostedRuntime(AsyncAgent):
             )
         finally:
             for flushable in self._async_host_flushables:
-                await flushable.flush()
+                flush = getattr(flushable, "flush")
+                await flush()
 
     async def close(self) -> None:
         owned = self._async_owned_services

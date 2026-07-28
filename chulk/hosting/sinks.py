@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import asyncio
 import inspect
-from typing import Any
+from typing import Any, cast
 
 from chulk.events import AgentEvent
 from chulk.hosting.scope import ExecutionScope
+from chulk.hosting.services import AsyncAuditSink, AsyncTraceSink
 from chulk.redaction import redact_data
 
 
@@ -75,7 +76,7 @@ class BufferedAsyncTraceSink:
     """
 
     def __init__(self, sink: object) -> None:
-        self.sink = sink
+        self.sink = cast(AsyncTraceSink, sink)
         self.path = getattr(sink, "path", None)
         self.artifact_store = getattr(sink, "artifact_store", None)
         self._pending: list[tuple[str, dict[str, Any] | None, str | None]] = []
@@ -111,7 +112,7 @@ class BufferedAsyncAuditSink:
     """Queue redacted audit records for native async host sinks."""
 
     def __init__(self, sink: object) -> None:
-        self.sink = sink
+        self.sink = cast(AsyncAuditSink, sink)
         self._pending: list[tuple[str, dict[str, Any], ExecutionScope]] = []
 
     def record(
