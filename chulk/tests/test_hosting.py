@@ -495,6 +495,61 @@ async def test_async_hosted_factory_and_owned_cleanup_are_native(
     assert {loop_id for _name, loop_id in calls} == {id(loop)}
 
 
+@pytest.mark.asyncio
+async def test_async_hosted_runtime_awaits_native_trace_and_audit_sinks(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    class TraceSink:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.loop_ids: list[int] = []
+
+        async def log(self, event_type, payload=None, *, turn_id=None) -> None:
+            self.events.append(event_type)
+            self.loop_ids.append(id(asyncio.get_running_loop()))
+
+    class AuditSink:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.loop_ids: list[int] = []
+
+        async def record(self, event_type, payload, *, scope) -> None:
+            self.events.append(event_type)
+            self.loop_ids.append(id(asyncio.get_running_loop()))
+
+    class EventSink:
+        async def emit(self, event) -> None:
+            return None
+
+    trace = TraceSink()
+    audit = AuditSink()
+    services = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["traces"] = AsyncServiceBinding.host(trace)
+    fields["audit"] = AsyncServiceBinding.host(audit)
+    fields["events"] = AsyncServiceBinding.host(EventSink())
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("native sinks")]),
+        tools=[],
+        skills=[],
+        services=type(services)(**fields),
+        execution_scope=_scope(),
+    )
+
+    assert await agent.run("hello") == "native sinks"
+    assert "turn_started" in trace.events
+    assert "turn_started" in audit.events
+    assert set(trace.loop_ids) == {id(loop)}
+    assert set(audit.loop_ids) == {id(loop)}
+    await agent.close()
+
+
 def test_tool_registry_rejects_schema_identity_mismatch() -> None:
     registry = ToolRegistry()
     tool = Tool(

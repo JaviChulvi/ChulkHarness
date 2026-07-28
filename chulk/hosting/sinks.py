@@ -67,6 +67,69 @@ class BufferedAsyncEventSink:
             self._pending.pop(0)
 
 
+class BufferedAsyncTraceSink:
+    """Preserve trace ordering while the synchronous core emits into an async sink.
+
+    The async hosted facade drains this journal at every public await boundary.
+    It deliberately never invokes a host's synchronous compatibility method.
+    """
+
+    def __init__(self, sink: object) -> None:
+        self.sink = sink
+        self.path = getattr(sink, "path", None)
+        self.artifact_store = getattr(sink, "artifact_store", None)
+        self._pending: list[tuple[str, dict[str, Any] | None, str | None]] = []
+
+    def activate(self) -> None:
+        """Activation is represented by the next queued trace record."""
+
+    def log(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        self._pending.append((event_type, payload, turn_id))
+
+    def write_artifact(self, name: str, content: str) -> dict[str, Any] | None:
+        raise RuntimeError(
+            "native async trace artifacts require the async artifact execution path"
+        )
+
+    def close(self) -> None:
+        """The owning async facade closes the native resource."""
+
+    async def flush(self) -> None:
+        while self._pending:
+            event_type, payload, turn_id = self._pending[0]
+            await self.sink.log(event_type, payload, turn_id=turn_id)
+            self._pending.pop(0)
+
+
+class BufferedAsyncAuditSink:
+    """Queue redacted audit records for native async host sinks."""
+
+    def __init__(self, sink: object) -> None:
+        self.sink = sink
+        self._pending: list[tuple[str, dict[str, Any], ExecutionScope]] = []
+
+    def record(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        scope: ExecutionScope,
+    ) -> None:
+        self._pending.append((event_type, payload, scope))
+
+    async def flush(self) -> None:
+        while self._pending:
+            event_type, payload, scope = self._pending[0]
+            await self.sink.record(event_type, payload, scope=scope)
+            self._pending.pop(0)
+
+
 class CallbackEventSink:
     """Invoke an app callback with explicit fail-closed behavior."""
 
@@ -150,8 +213,10 @@ def safe_audit_payload(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "BufferedAsyncAuditSink",
     "AsyncInMemoryEventSink",
     "BufferedAsyncEventSink",
+    "BufferedAsyncTraceSink",
     "CallbackEventSink",
     "InMemoryAuditSink",
     "InMemoryEventSink",
