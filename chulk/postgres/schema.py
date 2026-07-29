@@ -368,7 +368,13 @@ AUTOMATION_SCHEMA_STATEMENTS: tuple[str, ...] = (
         CHECK (revision >= 0),
         CHECK (run_count >= 0),
         CHECK (max_runs IS NULL OR max_runs > 0),
-        CHECK (requires_approval IN (0, 1))
+        CHECK (requires_approval IN (0, 1)),
+        CHECK (
+            (claim_token IS NULL AND lease_until IS NULL AND active_run_id IS NULL)
+            OR
+            (claim_token IS NOT NULL AND lease_until IS NOT NULL
+                AND active_run_id IS NOT NULL)
+        )
     )
     """,
     """

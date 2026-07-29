@@ -69,6 +69,8 @@ class PostgreSQLConnection:
             raise sqlite3.IntegrityError(str(exc)) from exc
 
     def _lock_run(self, run_id: str) -> None:
+        # SQLite serializes every run state read under BEGIN IMMEDIATE.
+        # _run_row calls this hook before the corresponding PostgreSQL read.
         self.execute(
             "SELECT id FROM durable_runs WHERE id = ? FOR UPDATE",
             (run_id,),

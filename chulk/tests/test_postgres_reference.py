@@ -20,6 +20,7 @@ pytest.importorskip("psycopg")
 pytest.importorskip("alembic")
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from chulk.approvals import ApprovalDecision, ApprovalSubmission
 from chulk.gateway import (
@@ -53,6 +54,7 @@ from chulk.postgres import (
     upgrade_postgres,
 )
 from chulk.runs import (
+    InvalidRunTransitionError,
     RunConflictError,
     RunNotFoundError,
     RunSubmission,
@@ -175,6 +177,34 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
         ).scalar_one()
     assert revision == "0001"
     assert table_count == 21
+
+
+def test_postgres_rejects_partial_schedule_lease_tuple(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    schedules = PostgreSQLScheduleStore(
+        postgres_database.engine,
+        profile_id="lease-constraint",
+    )
+    job = schedules.create(
+        adapter="contract",
+        destination_id="destination",
+        prompt="lease tuple",
+        next_run_at=datetime.now(timezone.utc),
+    )
+    with pytest.raises(IntegrityError):
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE automation_jobs SET claim_token = 'partial' "
+                    "WHERE id = :id"
+                ),
+                {"id": job.id},
+            )
+    persisted = schedules.get(job.id)
+    assert persisted.claim_token is None
+    assert persisted.lease_until is None
+    assert persisted.active_run_id is None
 
 
 def test_engine_factories_reject_non_psycopg_urls() -> None:
@@ -864,6 +894,55 @@ def test_concurrent_run_events_have_unique_ordered_sequences(
     assert [event.sequence for event in persisted] == list(range(1, 10))
 
 
+def test_run_cancellation_and_completion_are_serialized(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    scope = _scope()
+    stores[0].submit(
+        scope,
+        _submission(idempotency_key="cancel-complete-race"),
+    )
+    claim = stores[0].claim(scope, worker_id="race-worker")
+    assert claim is not None
+    stores[0].start_step(scope, claim, "agent")
+    stores[0].complete_step(scope, claim, "agent", result={"ok": True})
+    barrier = Barrier(2)
+
+    def complete() -> str:
+        barrier.wait()
+        try:
+            stores[0].complete(scope, claim, result={"ok": True})
+        except InvalidRunTransitionError:
+            return "rejected"
+        return "completed"
+
+    def cancel() -> str:
+        barrier.wait()
+        try:
+            stores[1].request_cancellation(
+                scope,
+                scope.run_id,
+                actor="operator",
+                reason="stop",
+            )
+        except InvalidRunTransitionError:
+            return "rejected"
+        return "cancelled"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = (executor.submit(complete), executor.submit(cancel))
+        results = tuple(outcome.result() for outcome in outcomes)
+    assert results.count("rejected") == 1
+    persisted = stores[0].get(scope, scope.run_id)
+    assert (persisted.status.value, persisted.cancellation_requested) in {
+        ("completed", False),
+        ("running", True),
+    }
+
+
 def test_concurrent_adapter_lease_has_one_owner(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
@@ -991,6 +1070,65 @@ def test_gateway_run_ownership_transfers_are_atomic(
     )
     assert completed.status.value == "completed"
     assert len(gateway.list_outbox(ingested.record.id)) == 1
+
+
+def test_completion_rejects_an_inbox_owned_by_another_run(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    gateway = PostgreSQLGatewayStore(postgres_database.engine)
+    scopes = (_scope(), _scope())
+    ingested = []
+    for index, scope in enumerate(scopes):
+        accepted, _run = ingest_and_submit_run(
+            postgres_database.engine,
+            gateway,
+            runs,
+            _inbound(f"ownership-{index}"),
+            profile_id="contract",
+            target=_target(scope),
+            submission=_submission(idempotency_key=f"ownership-run-{index}"),
+            conversation_key=f"ownership-conversation-{index}",
+        )
+        ingested.append(accepted)
+    executions = tuple(
+        gateway.claim_execution(global_limit=2, profile_limit=2)
+        for _index in range(2)
+    )
+    assert all(execution is not None for execution in executions)
+    execution_by_inbox = {
+        execution.record.id: execution
+        for execution in executions
+        if execution is not None
+    }
+    claims = []
+    for scope in scopes:
+        claim = runs.claim(scope, worker_id=f"worker-{scope.run_id}")
+        assert claim is not None
+        runs.start_step(scope, claim, "agent")
+        runs.complete_step(scope, claim, "agent", result={"ok": True})
+        claims.append(claim)
+    unrelated_inbox = ingested[1].record.id
+    unrelated_execution = execution_by_inbox[unrelated_inbox]
+    with pytest.raises(
+        PostgreSQLTransactionError,
+        match="does not own the claimed run scope",
+    ):
+        complete_run_and_enqueue(
+            postgres_database.engine,
+            gateway,
+            runs,
+            scopes[0],
+            claims[0],
+            inbox_id=unrelated_inbox,
+            execution_token=unrelated_execution.execution_token,
+            result={"ok": True},
+            responses=(_outbound(unrelated_inbox),),
+        )
+    assert runs.get(scopes[0], scopes[0].run_id).status.value == "running"
+    persisted_inbox = gateway.get_inbox(unrelated_inbox)
+    assert persisted_inbox is not None
+    assert persisted_inbox.state == "processing"
 
 
 def test_ingest_rolls_back_when_run_submission_conflicts(

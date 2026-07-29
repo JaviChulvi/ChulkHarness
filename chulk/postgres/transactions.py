@@ -132,6 +132,13 @@ def complete_run_and_enqueue(
             gateway._using_connection(connection),
             runs._using_connection(connection),
         ):
+            _validate_execution_ownership(
+                gateway,
+                scope,
+                claim,
+                inbox_id=inbox_id,
+                execution_token=execution_token,
+            )
             record = runs.complete(scope, claim, result=result)
             if not gateway.complete_execution(
                 inbox_id,
@@ -167,6 +174,13 @@ async def async_complete_run_and_enqueue(
                 sync_gateway._using_connection(sync_connection),
                 sync_runs._using_connection(sync_connection),
             ):
+                _validate_execution_ownership(
+                    sync_gateway,
+                    scope,
+                    claim,
+                    inbox_id=inbox_id,
+                    execution_token=execution_token,
+                )
                 record = sync_runs.complete(scope, claim, result=result)
                 if not sync_gateway.complete_execution(
                     inbox_id,
@@ -179,6 +193,37 @@ async def async_complete_run_and_enqueue(
                 return record
 
         return await connection.run_sync(invoke)
+
+
+def _validate_execution_ownership(
+    gateway: PostgreSQLGatewayStore,
+    scope: ExecutionScope,
+    claim: RunClaim,
+    *,
+    inbox_id: str,
+    execution_token: str,
+) -> None:
+    with gateway._connect() as conn:
+        gateway._serialize_inbox_mutation(conn, inbox_id)
+        inbox = gateway.get_inbox(inbox_id)
+    if (
+        inbox is None
+        or inbox.state != "processing"
+        or inbox.execution_token != execution_token
+    ):
+        raise PostgreSQLTransactionError(
+            "gateway execution lease changed before run completion"
+        )
+    target = inbox.run_target
+    if (
+        target is None
+        or target.scope.run_id != claim.run_id
+        or target.scope.key != scope.key
+        or claim.scope_key != scope.key
+    ):
+        raise PostgreSQLTransactionError(
+            "gateway execution does not own the claimed run scope"
+        )
 
 
 def _require_sync_engine(
