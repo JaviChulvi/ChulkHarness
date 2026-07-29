@@ -1,0 +1,195 @@
+"""PostgreSQL implementations of the stable hosted persistence contracts."""
+
+from __future__ import annotations
+
+import sqlite3
+from typing import Any
+
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from chulk.approvals.async_store import AsyncApprovalStoreAdapter
+from chulk.approvals.store import SQLiteApprovalStore
+from chulk.gateway.ledger import SQLiteGatewayLedger
+from chulk.gateway.models import InboundEnvelope
+from chulk.gateway.stores import GatewayRunTarget
+from chulk.hosting import ExecutionScope
+from chulk.runs.async_store import AsyncRunStoreAdapter
+from chulk.runs.models import RunRecord, RunSubmission
+from chulk.runs.store import RunConflictError, SQLiteRunStore
+from chulk.scheduling.recurrence import RecurrenceCalculator
+from chulk.scheduling.store import SQLiteScheduleStore
+
+from ._compat import PostgreSQLConnectionOwner
+
+
+class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
+    """Durable-run store backed by a synchronous SQLAlchemy engine."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._initialize_postgres(engine)
+
+    def submit(
+        self,
+        scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        actor: str = "host",
+    ) -> RunRecord:
+        try:
+            return super().submit(scope, submission, actor=actor)
+        except RunConflictError:
+            if self._connection_is_bound():
+                raise
+            # A concurrent identical insert may win after our initial lookup.
+            # Re-read through the owner's normal idempotency validation.
+            return super().submit(scope, submission, actor=actor)
+
+
+class PostgreSQLApprovalStore(PostgreSQLConnectionOwner, SQLiteApprovalStore):
+    """Durable approval store backed by a synchronous SQLAlchemy engine."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._initialize_postgres(engine)
+
+
+class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
+    """Gateway inbox/outbox store backed by a synchronous SQLAlchemy engine."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._initialize_postgres(engine)
+
+    def ingest(
+        self,
+        envelope: InboundEnvelope,
+        *,
+        profile_id: str,
+        conversation_key: str | None = None,
+        max_pending: int | None = None,
+        run_target: GatewayRunTarget | None = None,
+    ) -> Any:
+        try:
+            return super().ingest(
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=max_pending,
+                run_target=run_target,
+            )
+        except sqlite3.IntegrityError:
+            if self._connection_is_bound():
+                raise
+            # Resolve a concurrent duplicate through the established collision
+            # and run-target validation path.
+            return super().ingest(
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=max_pending,
+                run_target=run_target,
+            )
+
+
+class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
+    """Profile-owned schedule execution store backed by PostgreSQL."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        profile_id: str = "default",
+        recurrence_calculator: RecurrenceCalculator | None = None,
+    ) -> None:
+        selected = profile_id.strip()
+        if not selected:
+            raise ValueError("profile_id is required")
+        self.profile_id = selected
+        self.recurrence = recurrence_calculator or RecurrenceCalculator()
+        self._initialize_postgres(engine)
+
+
+class _AsyncPostgreSQLStore:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        store: Any,
+    ) -> None:
+        self.async_engine = engine
+        self.store = store
+
+    async def call(self, method: str, /, *args: Any, **kwargs: Any) -> Any:
+        async with self.async_engine.begin() as connection:
+            def invoke(sync_connection: Any) -> Any:
+                with self.store._using_connection(sync_connection):
+                    return getattr(self.store, method)(*args, **kwargs)
+
+            return await connection.run_sync(invoke)
+
+    def __getattr__(self, method: str) -> Any:
+        if method.startswith("_") or not hasattr(self.store, method):
+            raise AttributeError(
+                f"{type(self).__name__!s} has no attribute {method!r}"
+            )
+
+        async def invoke(*args: Any, **kwargs: Any) -> Any:
+            return await self.call(method, *args, **kwargs)
+
+        return invoke
+
+
+class AsyncPostgreSQLRunStore(_AsyncPostgreSQLStore, AsyncRunStoreAdapter):
+    """Native-async durable-run store using SQLAlchemy's async engine."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        store = PostgreSQLRunStore(engine.sync_engine)
+        _AsyncPostgreSQLStore.__init__(self, engine, store)
+
+
+class AsyncPostgreSQLApprovalStore(
+    _AsyncPostgreSQLStore,
+    AsyncApprovalStoreAdapter,
+):
+    """Native-async durable approval store."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        store = PostgreSQLApprovalStore(engine.sync_engine)
+        _AsyncPostgreSQLStore.__init__(self, engine, store)
+
+
+class AsyncPostgreSQLGatewayStore(_AsyncPostgreSQLStore):
+    """Native-async gateway store exposing the complete gateway protocol."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        super().__init__(engine, PostgreSQLGatewayStore(engine.sync_engine))
+
+
+class AsyncPostgreSQLScheduleStore(_AsyncPostgreSQLStore):
+    """Native-async schedule store for host worker loops."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        profile_id: str = "default",
+        recurrence_calculator: RecurrenceCalculator | None = None,
+    ) -> None:
+        super().__init__(
+            engine,
+            PostgreSQLScheduleStore(
+                engine.sync_engine,
+                profile_id=profile_id,
+                recurrence_calculator=recurrence_calculator,
+            ),
+        )
+
+
+__all__ = [
+    "AsyncPostgreSQLApprovalStore",
+    "AsyncPostgreSQLGatewayStore",
+    "AsyncPostgreSQLRunStore",
+    "AsyncPostgreSQLScheduleStore",
+    "PostgreSQLApprovalStore",
+    "PostgreSQLGatewayStore",
+    "PostgreSQLRunStore",
+    "PostgreSQLScheduleStore",
+]

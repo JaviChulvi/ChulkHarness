@@ -68,12 +68,44 @@ from chulk import (
     Usage,
     VersionedReference,
 )
+from chulk.postgres import (
+    AsyncPostgreSQLApprovalStore,
+    AsyncPostgreSQLGatewayStore,
+    AsyncPostgreSQLRunStore,
+    AsyncPostgreSQLScheduleStore,
+    PostgreSQLApprovalStore,
+    PostgreSQLGatewayStore,
+    PostgreSQLRunStore,
+    PostgreSQLScheduleStore,
+    async_complete_run_and_enqueue,
+    async_ingest_and_submit_run,
+    complete_run_and_enqueue,
+    create_async_postgres_engine,
+    create_postgres_engine,
+    ingest_and_submit_run,
+    upgrade_postgres,
+)
 
 
 assert Tool is not None
 assert AgentCompiler is not None
 assert AgentDefinitionRuntime is not None
 assert RuntimeProfile is not None
+assert PostgreSQLRunStore is not None
+assert PostgreSQLApprovalStore is not None
+assert PostgreSQLGatewayStore is not None
+assert PostgreSQLScheduleStore is not None
+assert AsyncPostgreSQLRunStore is not None
+assert AsyncPostgreSQLApprovalStore is not None
+assert AsyncPostgreSQLGatewayStore is not None
+assert AsyncPostgreSQLScheduleStore is not None
+assert create_postgres_engine is not None
+assert create_async_postgres_engine is not None
+assert upgrade_postgres is not None
+assert ingest_and_submit_run is not None
+assert async_ingest_and_submit_run is not None
+assert complete_run_and_enqueue is not None
+assert async_complete_run_and_enqueue is not None
 
 config: AgentConfig = AgentConfig.local(
     project_root=Path.cwd(),

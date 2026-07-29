@@ -21,7 +21,7 @@ def test_documentation_checker_passes() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "19 topics" in completed.stdout
+    assert "20 topics" in completed.stdout
     assert "trace hygiene" in completed.stdout
 
 

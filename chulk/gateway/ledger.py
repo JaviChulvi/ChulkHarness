@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -108,6 +109,9 @@ class SQLiteGatewayLedger:
         self.db_path = Path(db_path).expanduser().resolve()
         initialize_sqlite_database(self.db_path, migrations=CONTROL_MIGRATIONS)
 
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return sqlite_connection(self.db_path)
+
     def start_adapter(
         self,
         adapter: str,
@@ -122,7 +126,7 @@ class SQLiteGatewayLedger:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
         token = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _adapter_row(conn, adapter, account_id)
             if (
@@ -174,7 +178,7 @@ class SQLiteGatewayLedger:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -211,7 +215,7 @@ class SQLiteGatewayLedger:
         )
         if instance_token is not None:
             arguments += (instance_token,)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE gateway_adapters
@@ -228,12 +232,12 @@ class SQLiteGatewayLedger:
         adapter: str,
         account_id: str,
     ) -> GatewayAdapterStatus | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _adapter_row(conn, adapter, account_id)
         return _row_to_adapter_status(row) if row is not None else None
 
     def list_adapter_statuses(self) -> tuple[GatewayAdapterStatus, ...]:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_adapters
@@ -244,7 +248,7 @@ class SQLiteGatewayLedger:
 
     def request_adapter_stop(self, adapter: str, account_id: str) -> bool:
         """Ask the active lease owner to stop without impersonating it."""
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -265,7 +269,7 @@ class SQLiteGatewayLedger:
     ) -> bool:
         if not cursor or not instance_token:
             raise ValueError("cursor and instance_token are required")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             updated = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -297,7 +301,7 @@ class SQLiteGatewayLedger:
         encoded = _bounded_json(_inbound_to_dict(envelope))
         observed = _utc_now()
         record_id = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 """
@@ -415,7 +419,7 @@ class SQLiteGatewayLedger:
             conversation_key=conversation_key,
         )
         if result.created:
-            with sqlite_connection(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.execute(
                     """
                     UPDATE gateway_inbox
@@ -453,7 +457,7 @@ class SQLiteGatewayLedger:
             else None
         )
         token = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             global_count = int(
                 conn.execute(
@@ -565,7 +569,7 @@ class SQLiteGatewayLedger:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -595,7 +599,7 @@ class SQLiteGatewayLedger:
         if not responses:
             raise ValueError("responses cannot be empty")
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _inbox_row(conn, inbox_id)
             if (
@@ -656,7 +660,7 @@ class SQLiteGatewayLedger:
             raise ValueError("limit must be greater than zero")
         observed = _observed(now)
         recovered: list[InboxRecord] = []
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
@@ -694,7 +698,7 @@ class SQLiteGatewayLedger:
         """Terminally quarantine an execution whose side effects are unknown."""
         if not execution_token:
             raise ValueError("execution_token is required")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _inbox_row(conn, inbox_id)
             if (
@@ -731,7 +735,7 @@ class SQLiteGatewayLedger:
         if not execution_token:
             raise ValueError("execution_token is required")
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -754,7 +758,7 @@ class SQLiteGatewayLedger:
     def dead_letter_inbox(self, inbox_id: str, *, error: str) -> bool:
         """Persist a poison input as terminal before any execution claim."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -774,7 +778,7 @@ class SQLiteGatewayLedger:
     def request_cancellation(self, inbox_id: str) -> bool:
         """Cancel queued work or signal the owner of an active execution."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -795,7 +799,7 @@ class SQLiteGatewayLedger:
     ) -> tuple[str, ...]:
         """Cancel earlier work while leaving the stop command itself queued."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
@@ -825,7 +829,7 @@ class SQLiteGatewayLedger:
         return ids
 
     def mark_execution_cancelled(self, inbox_id: str, execution_token: str) -> bool:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -839,7 +843,7 @@ class SQLiteGatewayLedger:
         return cursor.rowcount == 1
 
     def get_inbox(self, inbox_id: str) -> InboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _inbox_row(conn, inbox_id)
         return _row_to_inbox(row) if row is not None else None
 
@@ -850,7 +854,7 @@ class SQLiteGatewayLedger:
         account_id: str,
         idempotency_key: str,
     ) -> InboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM gateway_inbox
@@ -861,7 +865,7 @@ class SQLiteGatewayLedger:
         return _row_to_inbox(row) if row is not None else None
 
     def list_outbox(self, inbox_id: str) -> tuple[OutboxRecord, ...]:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_outbox
@@ -874,7 +878,7 @@ class SQLiteGatewayLedger:
 
     def inbox_complete(self, inbox_id: str) -> bool:
         """Return whether an event is terminal and has no outstanding delivery."""
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             inbox = _inbox_row(conn, inbox_id)
             if inbox is None:
                 return False
@@ -895,7 +899,7 @@ class SQLiteGatewayLedger:
     def pending_count(self, *, profile_id: str | None = None) -> int:
         clause = " AND profile_id = ?" if profile_id is not None else ""
         parameters: tuple[object, ...] = (profile_id,) if profile_id is not None else ()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 f"""
                 SELECT COUNT(*) FROM gateway_inbox
@@ -930,7 +934,7 @@ class SQLiteGatewayLedger:
                 for _item in adapter_keys
             ) + ")"
             parameters += tuple(value for item in adapter_keys for value in item)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"""
@@ -1035,7 +1039,7 @@ class SQLiteGatewayLedger:
             delivered_at = None
             reconciliation_required = 0
             dead_lettered_at = None
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _outbox_row(conn, outbox_id)
             if (
@@ -1128,7 +1132,7 @@ class SQLiteGatewayLedger:
             next_attempt_at = None
             delivered_at = None
             dead_lettered_at = None
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = _outbox_row(conn, outbox_id)
             if (
@@ -1191,7 +1195,7 @@ class SQLiteGatewayLedger:
     ) -> tuple[OutboxRecord, ...]:
         if limit <= 0:
             raise ValueError("limit must be greater than zero")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_outbox
@@ -1204,7 +1208,7 @@ class SQLiteGatewayLedger:
         return tuple(_row_to_outbox(row) for row in rows)
 
     def get_outbox(self, outbox_id: str) -> OutboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _outbox_row(conn, outbox_id)
         return _row_to_outbox(row) if row is not None else None
 
