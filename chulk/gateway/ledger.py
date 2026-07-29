@@ -853,11 +853,12 @@ class SQLiteGatewayLedger:
                 """,
                 (profile_id, conversation_key, exclude_inbox_id),
             ).fetchall()
-            ids = tuple(str(row["id"]) for row in rows)
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(
-                    f"""
+            cancelled: list[str] = []
+            for row in rows:
+                inbox_id = str(row["id"])
+                self._serialize_inbox_mutation(conn, inbox_id)
+                cursor = conn.execute(
+                    """
                     UPDATE gateway_inbox
                     SET state = CASE
                             WHEN state = 'queued' THEN 'cancelled'
@@ -865,11 +866,13 @@ class SQLiteGatewayLedger:
                         END,
                         cancellation_requested = 1,
                         updated_at = ?
-                    WHERE id IN ({placeholders})
+                    WHERE id = ? AND state IN ('queued', 'processing')
                     """,
-                    (_encode(observed), *ids),
+                    (_encode(observed), inbox_id),
                 )
-        return ids
+                if cursor.rowcount == 1:
+                    cancelled.append(inbox_id)
+        return tuple(cancelled)
 
     def mark_execution_cancelled(self, inbox_id: str, execution_token: str) -> bool:
         with self._connect() as conn:

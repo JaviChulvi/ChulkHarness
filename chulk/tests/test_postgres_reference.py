@@ -704,6 +704,64 @@ def test_concurrent_bounded_gateway_replay_is_idempotent(
     assert gateways[0].pending_count() == 1
 
 
+def test_conversation_cancellation_revalidates_completed_inboxes(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    cancellation_selected = Event()
+    completion_finished = Event()
+
+    class PausedCancellationStore(PostgreSQLGatewayStore):
+        def _serialize_inbox_mutation(self, conn: Any, inbox_id: str) -> None:
+            cancellation_selected.set()
+            assert completion_finished.wait(timeout=2)
+            super()._serialize_inbox_mutation(conn, inbox_id)
+
+    completion_store = PostgreSQLGatewayStore(postgres_database.engine)
+    cancellation_store = PausedCancellationStore(postgres_database.engine)
+    conversation_key = "cancel-complete-conversation"
+    active = completion_store.ingest(
+        _inbound("cancel-complete-active"),
+        profile_id="contract",
+        conversation_key=conversation_key,
+        run_target=_target(_scope()),
+    ).record
+    stop = completion_store.ingest(
+        _inbound("cancel-complete-stop"),
+        profile_id="contract",
+        conversation_key=conversation_key,
+        run_target=_target(_scope()),
+    ).record
+    execution = completion_store.claim_execution(
+        global_limit=1,
+        profile_limit=1,
+    )
+    assert execution is not None
+    assert execution.record.id == active.id
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            cancellation_store.request_conversation_cancellation,
+            profile_id="contract",
+            conversation_key=conversation_key,
+            exclude_inbox_id=stop.id,
+        )
+        assert cancellation_selected.wait(timeout=2)
+        try:
+            assert completion_store.complete_execution(
+                active.id,
+                execution.execution_token,
+                (_outbound(active.id),),
+            )
+        finally:
+            completion_finished.set()
+        assert future.result(timeout=2) == ()
+
+    persisted = completion_store.get_inbox(active.id)
+    assert persisted is not None
+    assert persisted.state == "executed"
+    assert not persisted.cancellation_requested
+
+
 def test_concurrent_approval_creation_reuses_pending_request(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
