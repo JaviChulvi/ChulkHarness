@@ -91,7 +91,10 @@ class SQLiteRunStore:
                 ),
             ).fetchone()
             if duplicate is not None:
-                existing = _run_from_conn(conn, duplicate)
+                existing = _run_from_conn(
+                    conn,
+                    _run_row(conn, str(duplicate["id"])),
+                )
                 _assert_scope(scope, existing.scope)
                 if (
                     existing.input_digest != submission.input_digest

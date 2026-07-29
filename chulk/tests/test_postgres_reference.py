@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -524,6 +524,56 @@ def test_concurrent_duplicate_submission_and_gateway_claims(
         claimed = tuple(executor.map(claim_gateway, range(2)))
     assert None not in claimed
     assert len(set(claimed)) == 2
+
+
+def test_idempotent_run_submission_locks_existing_aggregate(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    submission = _submission(idempotency_key="locked-idempotent-run")
+    runs.submit(scope, submission)
+    started = Event()
+
+    def replay() -> Any:
+        started.set()
+        return runs.submit(scope, submission)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM durable_runs WHERE id = :id FOR UPDATE"),
+                {"id": scope.run_id},
+            )
+            future = executor.submit(replay)
+            assert started.wait(timeout=2)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.25)
+            connection.execute(
+                text(
+                    """
+                    UPDATE durable_runs
+                    SET status = 'cancelled', revision = revision + 1
+                    WHERE id = :id
+                    """
+                ),
+                {"id": scope.run_id},
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE durable_run_steps
+                    SET status = 'cancelled', revision = revision + 1
+                    WHERE run_id = :id
+                    """
+                ),
+                {"id": scope.run_id},
+            )
+
+        replayed = future.result(timeout=2)
+
+    assert replayed.status.value == "cancelled"
+    assert replayed.steps[0].status.value == "cancelled"
 
 
 def test_gateway_concurrency_caps_are_atomic(
