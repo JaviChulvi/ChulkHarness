@@ -8,11 +8,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
-from threading import Barrier, Event
+from threading import Barrier, Event, Lock
 from typing import Any
 from uuid import uuid4
 
 import pytest
+import chulk.runs.store as run_store_module
 
 
 pytest.importorskip("sqlalchemy")
@@ -54,7 +55,9 @@ from chulk.postgres import (
     upgrade_postgres,
 )
 from chulk.runs import (
+    EffectConflictError,
     InvalidRunTransitionError,
+    ReconciliationDecision,
     RunConflictError,
     RunNotFoundError,
     RunSubmission,
@@ -1036,6 +1039,95 @@ def test_concurrent_run_events_have_unique_ordered_sequences(
     assert sorted(event.sequence for event in appended) == list(range(2, 10))
     persisted = stores[0].events(scope, scope.run_id)
     assert [event.sequence for event in persisted] == list(range(1, 10))
+
+
+def test_concurrent_effect_reconciliation_has_one_winner(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    scope = _scope()
+    stores[0].submit(
+        scope,
+        _submission(idempotency_key="concurrent-effect-reconciliation"),
+    )
+    claim = stores[0].claim(scope, worker_id="effect-worker")
+    assert claim is not None
+    stores[0].start_step(scope, claim, "agent")
+    effect = stores[0].begin_effect(
+        scope,
+        claim,
+        "agent",
+        logical_key="external:effect",
+        tool_name="external_write",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:arguments",
+    )
+    stores[0].mark_effect_started(scope, claim, effect.id)
+    stores[0].mark_effect_unknown(
+        scope,
+        claim,
+        effect.id,
+        reason="outcome is unknown",
+    )
+
+    initial_lock_barrier = Barrier(2)
+    initial_call_count = 0
+    initial_call_lock = Lock()
+    original_run_row = run_store_module._run_row
+
+    def coordinated_run_row(conn: Any, run_id: str) -> Any:
+        nonlocal initial_call_count
+        with initial_call_lock:
+            coordinate = initial_call_count < 2
+            initial_call_count += 1
+        if coordinate:
+            initial_lock_barrier.wait()
+        return original_run_row(conn, run_id)
+
+    monkeypatch.setattr(run_store_module, "_run_row", coordinated_run_row)
+    decisions = (
+        ReconciliationDecision.RETRY,
+        ReconciliationDecision.FAILED,
+    )
+
+    def reconcile(
+        indexed_store: tuple[int, PostgreSQLRunStore],
+    ) -> ReconciliationDecision | None:
+        index, store = indexed_store
+        try:
+            return store.reconcile_effect(
+                scope,
+                effect.id,
+                decision=decisions[index],
+                actor=f"operator-{index}",
+                reason=f"decision-{index}",
+            ).decision
+        except EffectConflictError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(reconcile, enumerate(stores)))
+
+    assert sum(outcome is not None for outcome in outcomes) == 1
+    persisted_effect = stores[0].effects(scope, scope.run_id)[0]
+    persisted_run = stores[0].get(scope, scope.run_id)
+    if persisted_effect.status.value == "intended":
+        assert ReconciliationDecision.RETRY in outcomes
+        assert persisted_run.status.value == "queued"
+        assert persisted_run.steps[0].status.value == "queued"
+    else:
+        assert persisted_effect.status.value == "failed"
+        assert ReconciliationDecision.FAILED in outcomes
+        assert persisted_run.status.value == "failed"
+        assert persisted_run.steps[0].status.value == "failed"
+    assert [
+        event.name
+        for event in stores[0].events(scope, scope.run_id)
+    ].count("effect.reconciled") == 1
 
 
 def test_run_cancellation_and_completion_are_serialized(

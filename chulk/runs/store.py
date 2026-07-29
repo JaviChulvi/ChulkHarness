@@ -867,8 +867,15 @@ class SQLiteRunStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            owner = conn.execute(
+                "SELECT run_id FROM durable_effects WHERE id = ?",
+                (effect_id,),
+            ).fetchone()
+            if owner is None:
+                raise RunNotFoundError(f"durable effect {effect_id!r} was not found")
+            run_id = str(owner["run_id"])
+            run = _run_from_conn(conn, _run_row(conn, run_id))
             effect = _effect_from_row(_effect_row(conn, effect_id))
-            run = _run_from_conn(conn, _run_row(conn, effect.run_id))
             _assert_scope(scope, run.scope)
             if effect.status is not EffectStatus.UNKNOWN:
                 raise EffectConflictError("only unknown effects can be reconciled")
@@ -900,7 +907,7 @@ class SQLiteRunStore:
                 new_effect_status = EffectStatus.CANCELLED
                 new_step_status = StepStatus.CANCELLED
                 new_run_status = RunStatus.CANCELLED
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE durable_effects
                 SET status = ?, result_digest = ?, reconciliation = ?,
@@ -917,6 +924,8 @@ class SQLiteRunStore:
                     effect_id,
                 ),
             )
+            if updated.rowcount != 1:
+                raise EffectConflictError("only unknown effects can be reconciled")
             terminal = new_step_status in {
                 StepStatus.FAILED,
                 StepStatus.CANCELLED,
