@@ -181,24 +181,19 @@ class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
             (self.profile_id, trigger_id),
         )
 
-    def _acquire_job_claim_lock(self, conn: Any, job_id: str) -> bool:
-        return (
-            conn.execute(
-                """
-                SELECT id FROM automation_jobs
-                WHERE profile_id = ? AND id = ? AND status = 'active'
-                FOR UPDATE SKIP LOCKED
-                """,
-                (self.profile_id, job_id),
-            ).fetchone()
-            is not None
-        )
+    def _claim_lock_clause(self) -> str:
+        return "FOR UPDATE OF j SKIP LOCKED"
+
+    def _claim_candidate_limit(self, limit: int) -> int:
+        return limit
 
     def _recovery_lock_clause(self) -> str:
         return "FOR UPDATE SKIP LOCKED"
 
 
 class _AsyncPostgreSQLStore:
+    _idempotent_retry_methods: frozenset[str] = frozenset()
+
     def __init__(
         self,
         engine: AsyncEngine,
@@ -208,12 +203,18 @@ class _AsyncPostgreSQLStore:
         self.store = store
 
     async def call(self, method: str, /, *args: Any, **kwargs: Any) -> Any:
-        async with self.async_engine.begin() as connection:
-            def invoke(sync_connection: Any) -> Any:
-                with self.store._using_connection(sync_connection):
-                    return getattr(self.store, method)(*args, **kwargs)
+        for attempt in range(2):
+            try:
+                async with self.async_engine.begin() as connection:
+                    def invoke(sync_connection: Any) -> Any:
+                        with self.store._using_connection(sync_connection):
+                            return getattr(self.store, method)(*args, **kwargs)
 
-            return await connection.run_sync(invoke)
+                    return await connection.run_sync(invoke)
+            except (RunConflictError, sqlite3.IntegrityError):
+                if method not in self._idempotent_retry_methods or attempt:
+                    raise
+        raise AssertionError("unreachable")
 
     def __getattr__(self, method: str) -> Any:
         if method.startswith("_") or not hasattr(self.store, method):
@@ -229,6 +230,8 @@ class _AsyncPostgreSQLStore:
 
 class AsyncPostgreSQLRunStore(_AsyncPostgreSQLStore, AsyncRunStoreAdapter):
     """Native-async durable-run store using SQLAlchemy's async engine."""
+
+    _idempotent_retry_methods = frozenset({"submit"})
 
     def __init__(self, engine: AsyncEngine) -> None:
         store = PostgreSQLRunStore(engine.sync_engine)
@@ -249,12 +252,16 @@ class AsyncPostgreSQLApprovalStore(
 class AsyncPostgreSQLGatewayStore(_AsyncPostgreSQLStore):
     """Native-async gateway store exposing the complete gateway protocol."""
 
+    _idempotent_retry_methods = frozenset({"ingest"})
+
     def __init__(self, engine: AsyncEngine) -> None:
         super().__init__(engine, PostgreSQLGatewayStore(engine.sync_engine))
 
 
 class AsyncPostgreSQLScheduleStore(_AsyncPostgreSQLStore):
     """Native-async schedule store for host worker loops."""
+
+    _idempotent_retry_methods = frozenset({"create"})
 
     def __init__(
         self,

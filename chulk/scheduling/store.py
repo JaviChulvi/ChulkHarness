@@ -84,13 +84,13 @@ class SQLiteScheduleStore:
     ) -> None:
         """Let backends serialize source-event deduplication per trigger."""
 
-    def _acquire_job_claim_lock(
-        self,
-        conn: sqlite3.Connection,
-        job_id: str,
-    ) -> bool:
-        """Let backends skip jobs already selected by another claim worker."""
-        return True
+    def _claim_lock_clause(self) -> str:
+        """Return backend-specific locking for due-job candidates."""
+        return ""
+
+    def _claim_candidate_limit(self, limit: int) -> int:
+        """Overfetch SQLite candidates that may terminalize before claiming."""
+        return limit * 4
 
     def _recovery_lock_clause(self) -> str:
         """Return backend-specific locking for schedule recovery workers."""
@@ -653,7 +653,7 @@ class SQLiteScheduleStore:
             if adapter is not None:
                 clauses.append("j.adapter = ?")
                 params.append(adapter)
-            params.append(limit * 4)
+            params.append(self._claim_candidate_limit(limit))
             rows = conn.execute(
                 f"""
                 SELECT j.* FROM automation_jobs j
@@ -661,6 +661,7 @@ class SQLiteScheduleStore:
                 ORDER BY CASE WHEN j.next_run_at <= ? THEN j.next_run_at ELSE NULL END,
                          j.created_at, j.id
                 LIMIT ?
+                {self._claim_lock_clause()}
                 """,
                 (*params[:-1], _encode(observed), params[-1]),
             ).fetchall()
@@ -668,8 +669,6 @@ class SQLiteScheduleStore:
                 if len(claims) >= limit:
                     break
                 job_id = str(row["id"])
-                if not self._acquire_job_claim_lock(conn, job_id):
-                    continue
                 job = self._get_in(conn, job_id)
                 if (
                     job.status is not AutomationJobStatus.ACTIVE

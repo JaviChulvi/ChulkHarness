@@ -40,6 +40,7 @@ def ingest_and_submit_run(
     """Atomically accept an inbound event and submit its immutable run."""
 
     _require_sync_engine(engine, gateway, runs)
+    _validate_submission_target(target, submission)
     for attempt in range(2):
         try:
             with engine.begin() as connection:
@@ -81,6 +82,7 @@ async def async_ingest_and_submit_run(
     """Native-async equivalent of :func:`ingest_and_submit_run`."""
 
     _require_async_engine(engine, gateway, runs)
+    _validate_submission_target(target, submission)
     for attempt in range(2):
         try:
             async with engine.begin() as connection:
@@ -223,6 +225,16 @@ def _validate_execution_ownership(
     ):
         raise PostgreSQLTransactionError(
             "gateway execution does not own the claimed run scope"
+        )
+
+
+def _validate_submission_target(
+    target: GatewayRunTarget,
+    submission: RunSubmission,
+) -> None:
+    if target.definition_digest != submission.definition_digest:
+        raise PostgreSQLTransactionError(
+            "run submission definition digest does not match the gateway target"
         )
 
 

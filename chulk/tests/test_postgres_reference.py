@@ -131,11 +131,12 @@ def _submission(
     *,
     idempotency_key: str = "submission",
     input_digest: str = "sha256:input",
+    definition_digest: str = "sha256:definition",
 ) -> RunSubmission:
     return RunSubmission(
         idempotency_key=idempotency_key,
         input_digest=input_digest,
-        definition_digest="sha256:definition",
+        definition_digest=definition_digest,
         steps=(StepDefinition(id="agent", name="Agent turn"),),
     )
 
@@ -261,6 +262,65 @@ async def test_native_async_public_contracts(
                 target=_target(_scope(run_id="async-gateway-contract-run")),
             )
         ).passed
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_async_stores_retry_concurrent_idempotency_collisions(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    engine = create_async_postgres_engine(
+        postgres_database.url,
+        connect_args=postgres_database.connect_args,
+    )
+    try:
+        run_stores = tuple(AsyncPostgreSQLRunStore(engine) for _index in range(2))
+        scope = _scope()
+        submission = _submission(idempotency_key="async-concurrent-run")
+        submitted = await asyncio.gather(
+            *(store.submit(scope, submission) for store in run_stores)
+        )
+        assert [run.id for run in submitted] == [scope.run_id, scope.run_id]
+
+        gateway_stores = tuple(
+            AsyncPostgreSQLGatewayStore(engine) for _index in range(2)
+        )
+        envelope = _inbound("async-concurrent-inbox")
+        target = _target(_scope())
+        ingested = await asyncio.gather(
+            *(
+                store.ingest(
+                    envelope,
+                    profile_id="async-concurrent",
+                    conversation_key="async-concurrent",
+                    run_target=target,
+                )
+                for store in gateway_stores
+            )
+        )
+        assert ingested[0].record.id == ingested[1].record.id
+
+        schedule_stores = tuple(
+            AsyncPostgreSQLScheduleStore(
+                engine,
+                profile_id="async-concurrent",
+            )
+            for _index in range(2)
+        )
+        scheduled = await asyncio.gather(
+            *(
+                store.create(
+                    adapter="contract",
+                    destination_id="destination",
+                    prompt="idempotent",
+                    next_run_at=datetime.now(timezone.utc),
+                    idempotency_key="async-concurrent-schedule",
+                )
+                for store in schedule_stores
+            )
+        )
+        assert scheduled[0].id == scheduled[1].id
     finally:
         await engine.dispose()
 
@@ -722,23 +782,23 @@ def test_schedule_claim_skips_locked_due_job(
         profile_id="skip-locked-claims",
     )
     observed = datetime(2026, 7, 29, 23, 30, tzinfo=timezone.utc)
-    first = schedules.create(
-        adapter="contract",
-        destination_id="first",
-        prompt="first",
-        next_run_at=observed,
-    )
-    second = schedules.create(
-        adapter="contract",
-        destination_id="second",
-        prompt="second",
-        next_run_at=observed,
+    jobs = tuple(
+        schedules.create(
+            adapter="contract",
+            destination_id=str(index),
+            prompt=f"job {index}",
+            next_run_at=observed,
+        )
+        for index in range(5)
     )
     with ThreadPoolExecutor(max_workers=1) as executor:
         with postgres_database.engine.begin() as connection:
             connection.execute(
-                text("SELECT id FROM automation_jobs WHERE id = :id FOR UPDATE"),
-                {"id": first.id},
+                text(
+                    "SELECT id FROM automation_jobs "
+                    "WHERE id = ANY(:ids) FOR UPDATE"
+                ),
+                {"ids": [job.id for job in jobs[:4]]},
             )
             future = executor.submit(
                 schedules.claim_due,
@@ -747,7 +807,7 @@ def test_schedule_claim_skips_locked_due_job(
                 worker_id="parallel-worker",
             )
             claims = future.result(timeout=2)
-    assert [claim.id for claim in claims] == [second.id]
+    assert [claim.id for claim in claims] == [jobs[4].id]
 
 
 def test_recovery_workers_skip_locked_leases(
@@ -1159,6 +1219,41 @@ def test_ingest_rolls_back_when_run_submission_conflicts(
         )
         is None
     )
+
+
+def test_ingest_rejects_definition_digest_mismatch_before_writes(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    gateway = PostgreSQLGatewayStore(postgres_database.engine)
+    scope = _scope()
+    envelope = _inbound("definition-mismatch")
+    with pytest.raises(
+        PostgreSQLTransactionError,
+        match="definition digest",
+    ):
+        ingest_and_submit_run(
+            postgres_database.engine,
+            gateway,
+            runs,
+            envelope,
+            profile_id="contract",
+            target=_target(scope),
+            submission=_submission(
+                idempotency_key="definition-mismatch",
+                definition_digest="sha256:different-definition",
+            ),
+        )
+    assert (
+        gateway.find_inbox(
+            adapter="contract",
+            account_id="primary",
+            idempotency_key=envelope.idempotency_key,
+        )
+        is None
+    )
+    with pytest.raises(RunNotFoundError):
+        runs.get(scope, scope.run_id)
 
 
 @pytest.mark.asyncio
