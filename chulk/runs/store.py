@@ -2040,6 +2040,9 @@ class SQLiteRunStore:
 
 
 def _run_row(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row:
+    lock = getattr(conn, "_lock_run", None)
+    if lock is not None:
+        lock(run_id)
     row = conn.execute(
         "SELECT * FROM durable_runs WHERE id = ?",
         (run_id,),

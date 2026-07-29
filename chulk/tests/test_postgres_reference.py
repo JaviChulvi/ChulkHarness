@@ -21,11 +21,13 @@ pytest.importorskip("alembic")
 
 from sqlalchemy import text
 
+from chulk.approvals import ApprovalSubmission
 from chulk.gateway import (
     AuthenticationState,
     ChannelIdentity,
     ChannelScope,
     DeliveryTarget,
+    GatewayBackpressureError,
     GatewayRunTarget,
     InboundEnvelope,
     OutboundEnvelope,
@@ -57,6 +59,7 @@ from chulk.runs import (
     StepDefinition,
 )
 from chulk.scheduling import (
+    AutomationConflictError,
     AutomationDeliveryState,
     AutomationNotFoundError,
 )
@@ -491,6 +494,140 @@ def test_gateway_concurrency_caps_are_atomic(
         selected_profile="shared-profile",
     )
     assert sum(claim is not None for claim in profile_claims) == 1
+
+
+def test_concurrent_gateway_pending_admission_respects_limit(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    gateways = tuple(
+        PostgreSQLGatewayStore(postgres_database.engine) for _index in range(2)
+    )
+    barrier = Barrier(2)
+
+    def ingest(
+        indexed_store: tuple[int, PostgreSQLGatewayStore],
+    ) -> bool:
+        index, store = indexed_store
+        barrier.wait()
+        try:
+            store.ingest(
+                _inbound(f"bounded-pending-{index}"),
+                profile_id="bounded",
+                conversation_key=f"bounded-conversation-{index}",
+                max_pending=1,
+                run_target=_target(_scope()),
+            )
+        except GatewayBackpressureError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        admitted = tuple(executor.map(ingest, enumerate(gateways)))
+    assert sum(admitted) == 1
+    assert gateways[0].pending_count() == 1
+
+
+def test_concurrent_approval_creation_reuses_pending_request(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    runs.submit(scope, _submission(idempotency_key="approval-run"))
+    stores = tuple(
+        PostgreSQLApprovalStore(postgres_database.engine) for _index in range(2)
+    )
+    submission = ApprovalSubmission(
+        step_id="agent",
+        tool_name="write_ticket",
+        tool_version="1.0.0",
+        schema_version="1",
+        arguments_digest="sha256:approval-arguments",
+        policy_version="policy-1",
+        preview={"ticket_id": "42"},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    barrier = Barrier(2)
+
+    def create(store: PostgreSQLApprovalStore) -> str:
+        barrier.wait()
+        return store.create(scope, submission).id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        approval_ids = tuple(executor.map(create, stores))
+    assert approval_ids[0] == approval_ids[1]
+    assert len(stores[0].list(scope, run_id=scope.run_id)) == 1
+
+
+def test_concurrent_schedule_controls_preserve_revisions(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    stores = tuple(
+        PostgreSQLScheduleStore(
+            postgres_database.engine,
+            profile_id="revision-profile",
+        )
+        for _index in range(2)
+    )
+    observed = datetime(2026, 7, 29, 23, tzinfo=timezone.utc)
+    job = stores[0].create(
+        adapter="contract",
+        destination_id="destination",
+        prompt="original",
+        next_run_at=observed,
+    )
+
+    def race(action: Any) -> tuple[bool, bool]:
+        barrier = Barrier(2)
+
+        def invoke(indexed_store: tuple[int, PostgreSQLScheduleStore]) -> bool:
+            index, store = indexed_store
+            barrier.wait()
+            try:
+                action(index, store)
+            except AutomationConflictError:
+                return False
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            return tuple(executor.map(invoke, enumerate(stores)))
+
+    updated = race(
+        lambda index, store: store.update(
+            job.id,
+            expected_revision=0,
+            idempotency_key=f"update-{index}",
+            prompt=f"winner-{index}",
+        )
+    )
+    assert sum(updated) == 1
+    assert stores[0].get(job.id).revision == 1
+
+    requested = race(
+        lambda index, store: store.run_now(
+            job.id,
+            expected_revision=1,
+            idempotency_key=f"run-now-{index}",
+            now=observed,
+        )
+    )
+    assert sum(requested) == 1
+    assert stores[0].get(job.id).revision == 2
+
+    paused = race(
+        lambda index, store: store.pause(
+            job.id,
+            expected_revision=2,
+            idempotency_key=f"pause-{index}",
+        )
+    )
+    assert sum(paused) == 1
+    persisted = stores[0].get(job.id)
+    assert persisted.revision == 3
+    assert persisted.status.value == "paused"
+    actions = [event.action for event in stores[0].events(job.id)]
+    assert actions.count("updated") == 1
+    assert actions.count("run_now_requested") == 1
+    assert actions.count("pause") == 1
 
 
 def test_concurrent_run_events_have_unique_ordered_sequences(

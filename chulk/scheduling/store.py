@@ -70,6 +70,20 @@ class SQLiteScheduleStore:
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return sqlite_connection(self.db_path)
 
+    def _serialize_job_mutation(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+    ) -> None:
+        """Let backends serialize state transitions for one job."""
+
+    def _serialize_trigger_ingest(
+        self,
+        conn: sqlite3.Connection,
+        trigger_id: str,
+    ) -> None:
+        """Let backends serialize source-event deduplication per trigger."""
+
     def create(
         self,
         *,
@@ -363,6 +377,7 @@ class SQLiteScheduleStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             if adapter is not None and job.adapter != adapter:
                 return False
@@ -456,6 +471,7 @@ class SQLiteScheduleStore:
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -535,6 +551,7 @@ class SQLiteScheduleStore:
         fingerprint = _fingerprint({"job_id": job_id, "action": "run_now"})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -808,6 +825,7 @@ class SQLiteScheduleStore:
         lease_until = observed + timedelta(seconds=lease_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             row = conn.execute(
                 """
                 SELECT active_run_id FROM automation_jobs
@@ -1301,6 +1319,7 @@ class SQLiteScheduleStore:
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_trigger_ingest(conn, trigger.id)
             existing = conn.execute(
                 """
                 SELECT * FROM automation_trigger_events
@@ -1352,6 +1371,7 @@ class SQLiteScheduleStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             if job.status is AutomationJobStatus.CANCELLED:
                 raise AutomationConflictError(
@@ -1420,6 +1440,7 @@ class SQLiteScheduleStore:
         fingerprint = _fingerprint({"job_id": job_id, "action": action})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -1492,6 +1513,7 @@ class SQLiteScheduleStore:
         claim_token: str,
         observed: datetime,
     ) -> ScheduledJob | None:
+        self._serialize_job_mutation(conn, job_id)
         row = conn.execute(
             """
             SELECT * FROM automation_jobs

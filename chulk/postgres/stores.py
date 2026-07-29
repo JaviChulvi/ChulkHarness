@@ -23,7 +23,7 @@ from chulk.scheduling.store import SQLiteScheduleStore
 from ._compat import PostgreSQLConnectionOwner
 
 
-_GATEWAY_CLAIM_LOCK_ID = 0x4348554C4B
+_GATEWAY_ADMISSION_LOCK_ID = 0x4348554C4B
 
 
 class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
@@ -55,6 +55,19 @@ class PostgreSQLApprovalStore(PostgreSQLConnectionOwner, SQLiteApprovalStore):
     def __init__(self, engine: Engine) -> None:
         self._initialize_postgres(engine)
 
+    def _serialize_creation(self, conn: Any, run_id: str) -> None:
+        conn._lock_run(run_id)
+
+    def _serialize_request_mutation(
+        self,
+        conn: Any,
+        approval_id: str,
+    ) -> None:
+        conn.execute(
+            "SELECT id FROM durable_approval_requests WHERE id = ? FOR UPDATE",
+            (approval_id,),
+        )
+
 
 class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
     """Gateway inbox/outbox store backed by a synchronous SQLAlchemy engine."""
@@ -65,7 +78,25 @@ class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
     def _serialize_execution_claim(self, conn: Any) -> None:
         conn.execute(
             "SELECT pg_advisory_xact_lock(?)",
-            (_GATEWAY_CLAIM_LOCK_ID,),
+            (_GATEWAY_ADMISSION_LOCK_ID,),
+        )
+
+    def _serialize_pending_admission(self, conn: Any) -> None:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(?)",
+            (_GATEWAY_ADMISSION_LOCK_ID,),
+        )
+
+    def _serialize_inbox_mutation(self, conn: Any, inbox_id: str) -> None:
+        conn.execute(
+            "SELECT id FROM gateway_inbox WHERE id = ? FOR UPDATE",
+            (inbox_id,),
+        )
+
+    def _serialize_outbox_mutation(self, conn: Any, outbox_id: str) -> None:
+        conn.execute(
+            "SELECT id FROM gateway_outbox WHERE id = ? FOR UPDATE",
+            (outbox_id,),
         )
 
     def ingest(
@@ -115,6 +146,34 @@ class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
         self.profile_id = selected
         self.recurrence = recurrence_calculator or RecurrenceCalculator()
         self._initialize_postgres(engine)
+
+    def create(self, **kwargs: Any) -> Any:
+        try:
+            return super().create(**kwargs)
+        except sqlite3.IntegrityError:
+            if self._connection_is_bound():
+                raise
+            # A concurrent create can win on the control-action idempotency key.
+            # Re-read it through the owner's fingerprint validation path.
+            return super().create(**kwargs)
+
+    def _serialize_job_mutation(self, conn: Any, job_id: str) -> None:
+        conn.execute(
+            """
+            SELECT id FROM automation_jobs
+            WHERE profile_id = ? AND id = ? FOR UPDATE
+            """,
+            (self.profile_id, job_id),
+        )
+
+    def _serialize_trigger_ingest(self, conn: Any, trigger_id: str) -> None:
+        conn.execute(
+            """
+            SELECT id FROM automation_triggers
+            WHERE profile_id = ? AND id = ? FOR UPDATE
+            """,
+            (self.profile_id, trigger_id),
+        )
 
 
 class _AsyncPostgreSQLStore:

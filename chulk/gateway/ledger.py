@@ -115,6 +115,23 @@ class SQLiteGatewayLedger:
     def _serialize_execution_claim(self, conn: sqlite3.Connection) -> None:
         """Let backends serialize concurrency admission inside the transaction."""
 
+    def _serialize_pending_admission(self, conn: sqlite3.Connection) -> None:
+        """Let backends serialize bounded inbox admission inside the transaction."""
+
+    def _serialize_inbox_mutation(
+        self,
+        conn: sqlite3.Connection,
+        inbox_id: str,
+    ) -> None:
+        """Let backends serialize dependent writes for one inbox record."""
+
+    def _serialize_outbox_mutation(
+        self,
+        conn: sqlite3.Connection,
+        outbox_id: str,
+    ) -> None:
+        """Let backends serialize delivery evidence for one outbox record."""
+
     def start_adapter(
         self,
         adapter: str,
@@ -332,6 +349,7 @@ class SQLiteGatewayLedger:
                 _validate_stored_run_target(existing, run_target)
                 return IngestResult(_row_to_inbox(existing), False)
             if max_pending is not None:
+                self._serialize_pending_admission(conn)
                 pending = int(
                     conn.execute(
                         """
@@ -601,6 +619,7 @@ class SQLiteGatewayLedger:
         observed = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_inbox_mutation(conn, inbox_id)
             row = _inbox_row(conn, inbox_id)
             if (
                 row is None
@@ -700,6 +719,7 @@ class SQLiteGatewayLedger:
             raise ValueError("execution_token is required")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_inbox_mutation(conn, inbox_id)
             row = _inbox_row(conn, inbox_id)
             if (
                 row is None
@@ -1041,6 +1061,7 @@ class SQLiteGatewayLedger:
             dead_lettered_at = None
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_outbox_mutation(conn, outbox_id)
             row = _outbox_row(conn, outbox_id)
             if (
                 row is None
@@ -1134,6 +1155,7 @@ class SQLiteGatewayLedger:
             dead_lettered_at = None
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_outbox_mutation(conn, outbox_id)
             row = _outbox_row(conn, outbox_id)
             if (
                 row is None

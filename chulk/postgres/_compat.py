@@ -68,11 +68,14 @@ class PostgreSQLConnection:
         except IntegrityError as exc:
             raise sqlite3.IntegrityError(str(exc)) from exc
 
-    def _lock_run_sequence_allocation(self, run_id: str) -> None:
+    def _lock_run(self, run_id: str) -> None:
         self.execute(
             "SELECT id FROM durable_runs WHERE id = ? FOR UPDATE",
             (run_id,),
         )
+
+    def _lock_run_sequence_allocation(self, run_id: str) -> None:
+        self._lock_run(run_id)
 
 
 class PostgreSQLConnectionOwner:
