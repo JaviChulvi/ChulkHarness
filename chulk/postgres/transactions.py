@@ -136,6 +136,7 @@ def complete_run_and_enqueue(
         ):
             _validate_execution_ownership(
                 gateway,
+                runs,
                 scope,
                 claim,
                 inbox_id=inbox_id,
@@ -178,6 +179,7 @@ async def async_complete_run_and_enqueue(
             ):
                 _validate_execution_ownership(
                     sync_gateway,
+                    sync_runs,
                     scope,
                     claim,
                     inbox_id=inbox_id,
@@ -199,6 +201,7 @@ async def async_complete_run_and_enqueue(
 
 def _validate_execution_ownership(
     gateway: PostgreSQLGatewayStore,
+    runs: PostgreSQLRunStore,
     scope: ExecutionScope,
     claim: RunClaim,
     *,
@@ -225,6 +228,11 @@ def _validate_execution_ownership(
     ):
         raise PostgreSQLTransactionError(
             "gateway execution does not own the claimed run scope"
+        )
+    run = runs.get(scope, claim.run_id)
+    if run.definition_digest != target.definition_digest:
+        raise PostgreSQLTransactionError(
+            "gateway execution definition digest does not match the claimed run"
         )
 
 

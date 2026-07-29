@@ -1275,6 +1275,53 @@ def test_completion_rejects_an_inbox_owned_by_another_run(
     assert persisted_inbox.state == "processing"
 
 
+def test_completion_rejects_a_different_run_definition(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    gateway = PostgreSQLGatewayStore(postgres_database.engine)
+    scope = _scope()
+    ingested = gateway.ingest(
+        _inbound("completion-definition-mismatch"),
+        profile_id="contract",
+        run_target=_target(scope),
+    )
+    runs.submit(
+        scope,
+        _submission(
+            idempotency_key="completion-definition-mismatch",
+            definition_digest="sha256:different-definition",
+        ),
+    )
+    execution = gateway.claim_execution(global_limit=1, profile_limit=1)
+    claim = runs.claim(scope, worker_id="worker")
+    assert execution is not None and claim is not None
+    runs.start_step(scope, claim, "agent")
+    runs.complete_step(scope, claim, "agent", result={"ok": True})
+
+    with pytest.raises(
+        PostgreSQLTransactionError,
+        match="definition digest",
+    ):
+        complete_run_and_enqueue(
+            postgres_database.engine,
+            gateway,
+            runs,
+            scope,
+            claim,
+            inbox_id=ingested.record.id,
+            execution_token=execution.execution_token,
+            result={"ok": True},
+            responses=(_outbound(ingested.record.id),),
+        )
+
+    assert runs.get(scope, scope.run_id).status.value == "running"
+    persisted_inbox = gateway.get_inbox(ingested.record.id)
+    assert persisted_inbox is not None
+    assert persisted_inbox.state == "processing"
+    assert gateway.list_outbox(ingested.record.id) == ()
+
+
 def test_ingest_rolls_back_when_run_submission_conflicts(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
