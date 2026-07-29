@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
-from threading import Barrier
+from threading import Barrier, Event
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ pytest.importorskip("alembic")
 
 from sqlalchemy import text
 
-from chulk.approvals import ApprovalSubmission
+from chulk.approvals import ApprovalDecision, ApprovalSubmission
 from chulk.gateway import (
     AuthenticationState,
     ChannelIdentity,
@@ -558,6 +558,60 @@ def test_concurrent_approval_creation_reuses_pending_request(
     assert len(stores[0].list(scope, run_id=scope.run_id)) == 1
 
 
+def test_approval_expiration_revalidates_after_concurrent_decision(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    selected = Event()
+    proceed = Event()
+
+    class PausingApprovalStore(PostgreSQLApprovalStore):
+        def _serialize_request_mutation(
+            self,
+            conn: Any,
+            approval_id: str,
+        ) -> None:
+            selected.set()
+            assert proceed.wait(timeout=2)
+            super()._serialize_request_mutation(conn, approval_id)
+
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    runs.submit(scope, _submission(idempotency_key="approval-expiration-run"))
+    approvals = PostgreSQLApprovalStore(postgres_database.engine)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    approval = approvals.create(
+        scope,
+        ApprovalSubmission(
+            step_id="agent",
+            tool_name="write_ticket",
+            tool_version="1.0.0",
+            schema_version="1",
+            arguments_digest="sha256:expiration-arguments",
+            policy_version="policy-1",
+            preview={"ticket_id": "42"},
+            expires_at=expires_at,
+        ),
+    )
+    expirer = PausingApprovalStore(postgres_database.engine)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            expirer.expire,
+            now=expires_at + timedelta(seconds=1),
+        )
+        assert selected.wait(timeout=2)
+        decided = approvals.decide(
+            scope,
+            approval.id,
+            ApprovalDecision.DENY,
+            decided_by="operator",
+            reason="not authorized",
+            idempotency_key="deny-before-expire",
+        )
+        proceed.set()
+        assert future.result(timeout=2) == ()
+    assert approvals.get(scope, approval.id).revision == decided.revision
+
+
 def test_concurrent_schedule_controls_preserve_revisions(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
@@ -628,6 +682,152 @@ def test_concurrent_schedule_controls_preserve_revisions(
     assert actions.count("updated") == 1
     assert actions.count("run_now_requested") == 1
     assert actions.count("pause") == 1
+
+
+def test_schedule_claim_skips_locked_due_job(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    schedules = PostgreSQLScheduleStore(
+        postgres_database.engine,
+        profile_id="skip-locked-claims",
+    )
+    observed = datetime(2026, 7, 29, 23, 30, tzinfo=timezone.utc)
+    first = schedules.create(
+        adapter="contract",
+        destination_id="first",
+        prompt="first",
+        next_run_at=observed,
+    )
+    second = schedules.create(
+        adapter="contract",
+        destination_id="second",
+        prompt="second",
+        next_run_at=observed,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM automation_jobs WHERE id = :id FOR UPDATE"),
+                {"id": first.id},
+            )
+            future = executor.submit(
+                schedules.claim_due,
+                now=observed,
+                limit=1,
+                worker_id="parallel-worker",
+            )
+            claims = future.result(timeout=2)
+    assert [claim.id for claim in claims] == [second.id]
+
+
+def test_recovery_workers_skip_locked_leases(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    observed = datetime(2026, 7, 29, 23, 45, tzinfo=timezone.utc)
+    gateway = PostgreSQLGatewayStore(postgres_database.engine)
+    inbox = gateway.ingest(
+        _inbound("locked-expired-inbox"),
+        profile_id="locked-recovery",
+        run_target=_target(_scope()),
+    ).record
+    execution = gateway.claim_execution(
+        global_limit=1,
+        profile_limit=1,
+        now=observed,
+        lease_seconds=10,
+    )
+    assert execution is not None
+    assert execution.record.id == inbox.id
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM gateway_inbox WHERE id = :id FOR UPDATE"),
+                {"id": inbox.id},
+            )
+            future = executor.submit(
+                gateway.recover_expired_executions,
+                now=observed + timedelta(seconds=11),
+            )
+            assert future.result(timeout=2) == ()
+    assert gateway.renew_execution(
+        inbox.id,
+        execution.execution_token,
+        now=observed + timedelta(seconds=5),
+        lease_seconds=20,
+    )
+    assert gateway.recover_expired_executions(
+        now=observed + timedelta(seconds=11),
+    ) == ()
+
+    schedules = PostgreSQLScheduleStore(
+        postgres_database.engine,
+        profile_id="locked-recovery",
+    )
+    job = schedules.create(
+        adapter="contract",
+        destination_id="destination",
+        prompt="locked recovery",
+        next_run_at=observed,
+    )
+    claimed = schedules.claim_due(
+        now=observed,
+        lease_seconds=10,
+        worker_id="lease-owner",
+    )[0]
+    assert claimed.claim_token is not None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM automation_jobs WHERE id = :id FOR UPDATE"),
+                {"id": job.id},
+            )
+            future = executor.submit(
+                schedules.recover_expired,
+                now=observed + timedelta(seconds=11),
+            )
+            assert future.result(timeout=2) == ()
+    assert schedules.renew_lease(
+        job.id,
+        claimed.claim_token,
+        now=observed + timedelta(seconds=5),
+        lease_seconds=20,
+    )
+    assert schedules.recover_expired(
+        now=observed + timedelta(seconds=11),
+    ) == ()
+
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    runs.submit(scope, _submission(idempotency_key="locked-run-recovery"))
+    run_claim = runs.claim(scope, worker_id="run-lease-owner")
+    assert run_claim is not None
+    run_expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    with postgres_database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE durable_runs SET lease_until = :lease_until "
+                "WHERE id = :id"
+            ),
+            {
+                "id": scope.run_id,
+                "lease_until": run_expired_at.isoformat(),
+            },
+        )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM durable_runs WHERE id = :id FOR UPDATE"),
+                {"id": scope.run_id},
+            )
+            future = executor.submit(
+                runs.reconcile_expired,
+                now=run_expired_at + timedelta(seconds=1),
+            )
+            assert future.result(timeout=2) == ()
+    recovered_runs = runs.reconcile_expired(
+        now=run_expired_at + timedelta(seconds=1),
+    )
+    assert [run.id for run in recovered_runs] == [scope.run_id]
 
 
 def test_concurrent_run_events_have_unique_ordered_sequences(

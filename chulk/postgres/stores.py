@@ -32,6 +32,9 @@ class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
     def __init__(self, engine: Engine) -> None:
         self._initialize_postgres(engine)
 
+    def _recovery_lock_clause(self) -> str:
+        return "FOR UPDATE SKIP LOCKED"
+
     def submit(
         self,
         scope: ExecutionScope,
@@ -98,6 +101,9 @@ class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
             "SELECT id FROM gateway_outbox WHERE id = ? FOR UPDATE",
             (outbox_id,),
         )
+
+    def _execution_recovery_lock_clause(self) -> str:
+        return "FOR UPDATE SKIP LOCKED"
 
     def ingest(
         self,
@@ -174,6 +180,22 @@ class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
             """,
             (self.profile_id, trigger_id),
         )
+
+    def _acquire_job_claim_lock(self, conn: Any, job_id: str) -> bool:
+        return (
+            conn.execute(
+                """
+                SELECT id FROM automation_jobs
+                WHERE profile_id = ? AND id = ? AND status = 'active'
+                FOR UPDATE SKIP LOCKED
+                """,
+                (self.profile_id, job_id),
+            ).fetchone()
+            is not None
+        )
+
+    def _recovery_lock_clause(self) -> str:
+        return "FOR UPDATE SKIP LOCKED"
 
 
 class _AsyncPostgreSQLStore:

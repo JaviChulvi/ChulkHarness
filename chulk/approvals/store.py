@@ -410,8 +410,16 @@ class SQLiteApprovalStore:
                 (_iso(observed),),
             ).fetchall()
             for row in rows:
-                request = _from_row(row)
-                conn.execute(
+                approval_id = str(row["id"])
+                self._serialize_request_mutation(conn, approval_id)
+                request = _from_row(_row(conn, approval_id))
+                if (
+                    request.status
+                    not in {ApprovalStatus.PENDING, ApprovalStatus.APPROVED}
+                    or request.expires_at > observed
+                ):
+                    continue
+                cursor = conn.execute(
                     """
                     UPDATE durable_approval_requests
                     SET status = 'expired', revision = revision + 1,
@@ -421,6 +429,8 @@ class SQLiteApprovalStore:
                     """,
                     (_iso(observed), request.id, request.revision),
                 )
+                if cursor.rowcount != 1:
+                    continue
                 _audit(
                     conn,
                     request.scope,

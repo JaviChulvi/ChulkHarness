@@ -63,6 +63,10 @@ class SQLiteRunStore:
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return sqlite_connection(self.db_path)
 
+    def _recovery_lock_clause(self) -> str:
+        """Return backend-specific locking for expired run workers."""
+        return ""
+
     def submit(
         self,
         scope: ExecutionScope,
@@ -1747,15 +1751,24 @@ class SQLiteRunStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM durable_runs
                 WHERE status = 'running' AND lease_until < ?
                 ORDER BY lease_until, id
+                {self._recovery_lock_clause()}
                 """,
                 (_iso(observed),),
             ).fetchall()
             for row in rows:
                 run_id = str(row["id"])
+                current = _run_row(conn, run_id)
+                if (
+                    str(current["status"]) != RunStatus.RUNNING.value
+                    or current["claim_token"] != row["claim_token"]
+                    or current["lease_until"] is None
+                    or _decode(str(current["lease_until"])) >= observed
+                ):
+                    continue
                 active_step = conn.execute(
                     """
                     SELECT * FROM durable_run_steps

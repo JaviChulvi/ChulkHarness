@@ -84,6 +84,18 @@ class SQLiteScheduleStore:
     ) -> None:
         """Let backends serialize source-event deduplication per trigger."""
 
+    def _acquire_job_claim_lock(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+    ) -> bool:
+        """Let backends skip jobs already selected by another claim worker."""
+        return True
+
+    def _recovery_lock_clause(self) -> str:
+        """Return backend-specific locking for schedule recovery workers."""
+        return ""
+
     def create(
         self,
         *,
@@ -655,7 +667,15 @@ class SQLiteScheduleStore:
             for row in rows:
                 if len(claims) >= limit:
                     break
-                job = _row_to_job(row)
+                job_id = str(row["id"])
+                if not self._acquire_job_claim_lock(conn, job_id):
+                    continue
+                job = self._get_in(conn, job_id)
+                if (
+                    job.status is not AutomationJobStatus.ACTIVE
+                    or job.revision != int(row["revision"])
+                ):
+                    continue
                 if job.max_runs is not None and job.run_count >= job.max_runs:
                     self._terminalize(
                         conn, job, AutomationJobStatus.COMPLETED, observed
@@ -1072,15 +1092,22 @@ class SQLiteScheduleStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM automation_jobs
                 WHERE profile_id = ? AND status = 'running' AND lease_until < ?
                 ORDER BY lease_until, id
+                {self._recovery_lock_clause()}
                 """,
                 (self.profile_id, _encode(observed)),
             ).fetchall()
             for row in rows:
-                job = _row_to_job(row)
+                job = self._get_in(conn, str(row["id"]))
+                if (
+                    job.status is not AutomationJobStatus.RUNNING
+                    or job.lease_until is None
+                    or job.lease_until >= observed
+                ):
+                    continue
                 assert job.active_run_id is not None
                 run = self._run_in(conn, job.active_run_id)
                 conn.execute(

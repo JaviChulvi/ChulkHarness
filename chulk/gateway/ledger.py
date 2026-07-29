@@ -132,6 +132,10 @@ class SQLiteGatewayLedger:
     ) -> None:
         """Let backends serialize delivery evidence for one outbox record."""
 
+    def _execution_recovery_lock_clause(self) -> str:
+        """Return backend-specific locking for expired execution workers."""
+        return ""
+
     def start_adapter(
         self,
         adapter: str,
@@ -682,29 +686,47 @@ class SQLiteGatewayLedger:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM gateway_inbox
                 WHERE state = 'processing' AND execution_lease_until <= ?
                 ORDER BY execution_lease_until, id
                 LIMIT ?
+                {self._execution_recovery_lock_clause()}
                 """,
                 (_encode(observed), limit),
             ).fetchall()
             for row in rows:
-                _insert_uncertain_outbox(conn, row, observed)
-                conn.execute(
+                current = _inbox_row(conn, str(row["id"]))
+                if (
+                    current is None
+                    or current["state"] != "processing"
+                    or current["execution_token"] is None
+                    or current["execution_lease_until"] is None
+                    or _decode(str(current["execution_lease_until"])) > observed
+                ):
+                    continue
+                cursor = conn.execute(
                     """
                     UPDATE gateway_inbox
                     SET state = 'uncertain', execution_token = NULL,
                         execution_lease_until = NULL,
                         last_error = 'execution lease expired', updated_at = ?
                     WHERE id = ? AND state = 'processing'
+                      AND execution_token = ? AND execution_lease_until <= ?
                     """,
-                    (_encode(observed), row["id"]),
+                    (
+                        _encode(observed),
+                        current["id"],
+                        current["execution_token"],
+                        _encode(observed),
+                    ),
                 )
-                current = _inbox_row(conn, str(row["id"]))
-                if current is not None:
-                    recovered.append(_row_to_inbox(current))
+                if cursor.rowcount != 1:
+                    continue
+                _insert_uncertain_outbox(conn, current, observed)
+                persisted = _inbox_row(conn, str(current["id"]))
+                if persisted is not None:
+                    recovered.append(_row_to_inbox(persisted))
         return tuple(recovered)
 
     def quarantine_execution(
