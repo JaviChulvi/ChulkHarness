@@ -127,16 +127,7 @@ class SQLiteGatewayLedger:
         observed = _observed(now)
         token = uuid4().hex
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = _adapter_row(conn, adapter, account_id)
-            if (
-                row is not None
-                and row["state"] == "running"
-                and row["lease_until"] is not None
-                and _decode(str(row["lease_until"])) > observed
-            ):
-                raise RuntimeError(f"{adapter}/{account_id} is already running")
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO gateway_adapters (
                     adapter, account_id, state, instance_token, lease_until,
@@ -150,6 +141,9 @@ class SQLiteGatewayLedger:
                     started_at = excluded.started_at,
                     stopped_at = NULL,
                     updated_at = excluded.updated_at
+                WHERE gateway_adapters.state != 'running'
+                   OR gateway_adapters.lease_until IS NULL
+                   OR gateway_adapters.lease_until <= excluded.started_at
                 """,
                 (
                     adapter,
@@ -160,6 +154,8 @@ class SQLiteGatewayLedger:
                     _encode(observed),
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"{adapter}/{account_id} is already running")
             row = _adapter_row(conn, adapter, account_id)
         assert row is not None
         return _row_to_adapter_status(row)

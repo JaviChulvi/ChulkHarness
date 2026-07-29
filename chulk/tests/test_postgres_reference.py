@@ -433,6 +433,51 @@ def test_concurrent_duplicate_submission_and_gateway_claims(
     assert len(set(claimed)) == 2
 
 
+def test_concurrent_adapter_lease_has_one_owner(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    gateways = (
+        PostgreSQLGatewayStore(postgres_database.engine),
+        PostgreSQLGatewayStore(postgres_database.engine),
+    )
+    observed = datetime(2026, 7, 29, 22, tzinfo=timezone.utc)
+    winners: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for index in range(20):
+            barrier = Barrier(2)
+            account_id = f"lease-{index}"
+
+            def acquire(gateway: PostgreSQLGatewayStore) -> str | None:
+                barrier.wait()
+                try:
+                    return gateway.start_adapter(
+                        "contract",
+                        account_id,
+                        now=observed,
+                        lease_seconds=10,
+                    ).instance_token
+                except RuntimeError:
+                    return None
+
+            tokens = tuple(executor.map(acquire, gateways))
+            assert sum(token is not None for token in tokens) == 1
+            persisted = gateways[0].adapter_status("contract", account_id)
+            assert persisted is not None
+            assert persisted.instance_token in tokens
+            assert persisted.instance_token is not None
+            winners[account_id] = persisted.instance_token
+
+    replacement = gateways[1].start_adapter(
+        "contract",
+        "lease-0",
+        now=observed + timedelta(seconds=11),
+        lease_seconds=10,
+    )
+    assert replacement.instance_token is not None
+    assert replacement.instance_token != winners["lease-0"]
+
+
 def test_concurrent_atomic_ingest_and_submission_is_idempotent(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
