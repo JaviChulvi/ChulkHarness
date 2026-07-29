@@ -323,6 +323,8 @@ class SQLiteGatewayLedger:
         record_id = uuid4().hex
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if max_pending is not None:
+                self._serialize_pending_admission(conn)
             existing = conn.execute(
                 """
                 SELECT * FROM gateway_inbox
@@ -353,7 +355,6 @@ class SQLiteGatewayLedger:
                 _validate_stored_run_target(existing, run_target)
                 return IngestResult(_row_to_inbox(existing), False)
             if max_pending is not None:
-                self._serialize_pending_admission(conn)
                 pending = int(
                     conn.execute(
                         """

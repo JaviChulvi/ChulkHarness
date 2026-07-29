@@ -667,6 +667,40 @@ def test_concurrent_gateway_pending_admission_respects_limit(
     assert gateways[0].pending_count() == 1
 
 
+def test_concurrent_bounded_gateway_replay_is_idempotent(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    admission_barrier = Barrier(2)
+
+    class CoordinatedGatewayStore(PostgreSQLGatewayStore):
+        def _serialize_pending_admission(self, conn: Any) -> None:
+            admission_barrier.wait()
+            super()._serialize_pending_admission(conn)
+
+    gateways = tuple(
+        CoordinatedGatewayStore(postgres_database.engine) for _index in range(2)
+    )
+    envelope = _inbound("bounded-idempotent-replay")
+    target = _target(_scope())
+
+    def ingest(store: PostgreSQLGatewayStore) -> tuple[str, bool]:
+        result = store.ingest(
+            envelope,
+            profile_id="bounded",
+            conversation_key="bounded-idempotent-conversation",
+            max_pending=1,
+            run_target=target,
+        )
+        return result.record.id, result.created
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        ingested = tuple(executor.map(ingest, gateways))
+
+    assert len({record_id for record_id, _created in ingested}) == 1
+    assert sorted(created for _record_id, created in ingested) == [False, True]
+    assert gateways[0].pending_count() == 1
+
+
 def test_concurrent_approval_creation_reuses_pending_request(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:
