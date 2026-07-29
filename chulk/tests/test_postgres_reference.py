@@ -433,6 +433,100 @@ def test_concurrent_duplicate_submission_and_gateway_claims(
     assert len(set(claimed)) == 2
 
 
+def test_gateway_concurrency_caps_are_atomic(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    gateways = (
+        PostgreSQLGatewayStore(postgres_database.engine),
+        PostgreSQLGatewayStore(postgres_database.engine),
+    )
+
+    def race_claims(
+        *,
+        prefix: str,
+        profiles: tuple[str, str],
+        global_limit: int,
+        profile_limit: int,
+        selected_profile: str | None = None,
+    ) -> tuple[Any | None, Any | None]:
+        for index, profile_id in enumerate(profiles):
+            gateways[0].ingest(
+                _inbound(f"{prefix}-{index}"),
+                profile_id=profile_id,
+                conversation_key=f"{prefix}-conversation-{index}",
+                run_target=_target(_scope()),
+            )
+        barrier = Barrier(2)
+
+        def claim(gateway: PostgreSQLGatewayStore) -> Any | None:
+            barrier.wait()
+            return gateway.claim_execution(
+                global_limit=global_limit,
+                profile_limit=profile_limit,
+                profile_id=selected_profile,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            return tuple(executor.map(claim, gateways))
+
+    global_claims = race_claims(
+        prefix="global-cap",
+        profiles=("profile-a", "profile-b"),
+        global_limit=1,
+        profile_limit=1,
+    )
+    assert sum(claim is not None for claim in global_claims) == 1
+    global_winner = next(claim for claim in global_claims if claim is not None)
+    assert gateways[0].quarantine_execution(
+        global_winner.record.id,
+        global_winner.execution_token,
+        error="test cleanup",
+    )
+
+    profile_claims = race_claims(
+        prefix="profile-cap",
+        profiles=("shared-profile", "shared-profile"),
+        global_limit=2,
+        profile_limit=1,
+        selected_profile="shared-profile",
+    )
+    assert sum(claim is not None for claim in profile_claims) == 1
+
+
+def test_concurrent_run_events_have_unique_ordered_sequences(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine)
+        for _index in range(8)
+    )
+    scope = _scope()
+    stores[0].submit(
+        scope,
+        _submission(idempotency_key="concurrent-event-run"),
+    )
+    barrier = Barrier(len(stores))
+
+    def append_event(
+        indexed_store: tuple[int, PostgreSQLRunStore],
+    ) -> Any:
+        index, store = indexed_store
+        barrier.wait()
+        return store.record_event(
+            scope,
+            scope.run_id,
+            name=f"host.event.{index}",
+            actor=f"worker-{index}",
+            payload={"index": index},
+        )
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        appended = tuple(executor.map(append_event, enumerate(stores)))
+    assert sorted(event.sequence for event in appended) == list(range(2, 10))
+    persisted = stores[0].events(scope, scope.run_id)
+    assert [event.sequence for event in persisted] == list(range(1, 10))
+
+
 def test_concurrent_adapter_lease_has_one_owner(
     postgres_database: PostgreSQLTestDatabase,
 ) -> None:

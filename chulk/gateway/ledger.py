@@ -112,6 +112,9 @@ class SQLiteGatewayLedger:
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return sqlite_connection(self.db_path)
 
+    def _serialize_execution_claim(self, conn: sqlite3.Connection) -> None:
+        """Let backends serialize concurrency admission inside the transaction."""
+
     def start_adapter(
         self,
         adapter: str,
@@ -455,6 +458,7 @@ class SQLiteGatewayLedger:
         token = uuid4().hex
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_execution_claim(conn)
             global_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM gateway_inbox WHERE state = 'processing'"

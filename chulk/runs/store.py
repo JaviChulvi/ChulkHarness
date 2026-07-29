@@ -2368,6 +2368,7 @@ def _insert_event(
     correlation_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> RunEvent:
+    _lock_run_sequence_allocation(conn, run_id)
     if idempotency_key is not None:
         existing = conn.execute(
             """
@@ -2435,6 +2436,7 @@ def _next_checkpoint_sequence(
     conn: sqlite3.Connection,
     run_id: str,
 ) -> int:
+    _lock_run_sequence_allocation(conn, run_id)
     return int(
         conn.execute(
             """
@@ -2444,6 +2446,15 @@ def _next_checkpoint_sequence(
             (run_id,),
         ).fetchone()[0]
     )
+
+
+def _lock_run_sequence_allocation(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> None:
+    lock = getattr(conn, "_lock_run_sequence_allocation", None)
+    if lock is not None:
+        lock(run_id)
 
 
 def _assert_scope(requested: ExecutionScope, persisted: ExecutionScope) -> None:

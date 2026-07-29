@@ -23,6 +23,9 @@ from chulk.scheduling.store import SQLiteScheduleStore
 from ._compat import PostgreSQLConnectionOwner
 
 
+_GATEWAY_CLAIM_LOCK_ID = 0x4348554C4B
+
+
 class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
     """Durable-run store backed by a synchronous SQLAlchemy engine."""
 
@@ -58,6 +61,12 @@ class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
 
     def __init__(self, engine: Engine) -> None:
         self._initialize_postgres(engine)
+
+    def _serialize_execution_claim(self, conn: Any) -> None:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(?)",
+            (_GATEWAY_CLAIM_LOCK_ID,),
+        )
 
     def ingest(
         self,
