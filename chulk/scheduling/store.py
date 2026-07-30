@@ -1696,7 +1696,7 @@ class SQLiteScheduleStore:
                 available_at, trigger_event_id, idempotency_key, status,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-            ON CONFLICT(profile_id, idempotency_key) DO NOTHING
+            ON CONFLICT DO NOTHING
             """,
             (
                 uuid4().hex,

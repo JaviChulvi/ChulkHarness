@@ -84,9 +84,14 @@ gateway FIFO and reconciliation, and due schedules/triggers. Run and gateway
 claims use PostgreSQL row locks with `SKIP LOCKED`; all transitions retain the
 existing revisions, leases, uniqueness, and stale-worker checks.
 
+Idempotency uniqueness uses SHA-256 expression indexes over the complete owner
+scope and key. The original text remains stored and is compared on every
+replay, while companion hash indexes keep equality lookups bounded even for
+large, poorly compressible keys.
+
 Inspect plans after representative data volume and run `ANALYZE` after large
 migrations or cleanup. Add deployment-specific partial indexes only after
-measurement; never remove the shipped uniqueness constraints.
+measurement; never remove the shipped uniqueness indexes.
 
 ## Backup and cleanup
 

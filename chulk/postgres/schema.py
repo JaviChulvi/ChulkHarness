@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-SCHEMA_REVISION = "0001"
+SCHEMA_REVISION = "0002"
 
 
 POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (

@@ -179,8 +179,148 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
                 "WHERE table_schema = current_schema()"
             )
         ).scalar_one()
-    assert revision == "0001"
+    assert revision == "0002"
     assert table_count == 21
+
+
+def test_upgrade_from_0001_preserves_idempotency_rows(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    schema = f"chulk_upgrade_{uuid4().hex}"
+    admin = create_postgres_engine(postgres_database.url)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_postgres_engine(
+        postgres_database.url,
+        connect_args={"options": f"-csearch_path={schema}"},
+    )
+    try:
+        upgrade_postgres(engine, "0001")
+        runs = PostgreSQLRunStore(engine)
+        scope = _scope()
+        submission = _submission(idempotency_key="existing-run-key")
+        created = runs.submit(scope, submission)
+
+        upgrade_postgres(engine)
+
+        replayed = runs.submit(scope, submission)
+        assert replayed.id == created.id
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+        assert revision == "0002"
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+def test_long_idempotency_keys_preserve_hosted_store_contracts(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    long_key = "".join(chr(0x10000 + index) for index in range(950))
+    runs = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    submission = _submission(idempotency_key=f"run:{long_key}")
+    created_run = runs.submit(scope, submission)
+    assert runs.submit(scope, submission).id == created_run.id
+    event = runs.record_event(
+        scope,
+        scope.run_id,
+        name="run.long_key",
+        actor="host",
+        payload={"kind": "idempotency-regression"},
+        idempotency_key=f"event:{long_key}",
+    )
+    replayed_event = runs.record_event(
+        scope,
+        scope.run_id,
+        name="run.long_key",
+        actor="host",
+        payload={"kind": "idempotency-regression"},
+        idempotency_key=f"event:{long_key}",
+    )
+    assert replayed_event.id == event.id
+
+    gateway = PostgreSQLGatewayStore(postgres_database.engine)
+    envelope = _inbound(f"gateway:{long_key}")
+    ingested = gateway.ingest(envelope, profile_id="long-key-profile")
+    replayed_ingest = gateway.ingest(envelope, profile_id="long-key-profile")
+    assert replayed_ingest.record.id == ingested.record.id
+
+    schedules = PostgreSQLScheduleStore(
+        postgres_database.engine,
+        profile_id="long-key-profile",
+    )
+    schedule_key = f"schedule:{long_key}"
+    job = schedules.create(
+        adapter="contract",
+        destination_id="destination",
+        prompt="long idempotency key",
+        next_run_at=datetime.now(timezone.utc),
+        idempotency_key=schedule_key,
+    )
+    assert (
+        schedules.create(
+            adapter="contract",
+            destination_id="destination",
+            prompt="long idempotency key",
+            next_run_at=job.next_run_at,
+            idempotency_key=schedule_key,
+        ).id
+        == job.id
+    )
+    control_key = f"control:{long_key}"
+    requested = schedules.run_now(
+        job.id,
+        expected_revision=0,
+        idempotency_key=control_key,
+    )
+    assert (
+        schedules.run_now(
+            job.id,
+            expected_revision=0,
+            idempotency_key=control_key,
+        ).revision
+        == requested.revision
+    )
+
+    approvals = PostgreSQLApprovalStore(postgres_database.engine)
+    approval = approvals.create(
+        scope,
+        ApprovalSubmission(
+            step_id="agent",
+            tool_name="write_ticket",
+            tool_version="1.0.0",
+            schema_version="1",
+            arguments_digest="sha256:long-key-arguments",
+            policy_version="policy-1",
+            preview={"ticket_id": "42"},
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        ),
+    )
+    decision_key = f"decision:{long_key}"
+    decided = approvals.decide(
+        scope,
+        approval.id,
+        ApprovalDecision.DENY,
+        decided_by="operator",
+        reason="not authorized",
+        idempotency_key=decision_key,
+    )
+    assert (
+        approvals.decide(
+            scope,
+            approval.id,
+            ApprovalDecision.DENY,
+            decided_by="operator",
+            reason="not authorized",
+            idempotency_key=decision_key,
+        ).revision
+        == decided.revision
+    )
 
 
 def test_postgres_rejects_partial_schedule_lease_tuple(
