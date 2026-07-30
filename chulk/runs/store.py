@@ -3361,7 +3361,9 @@ def _expire_linked_child_run_if_due(
           AND runs.tenant_id = ? AND runs.workspace_id = ?
           AND runs.agent_id = ? AND runs.agent_version = ?
           AND runs.cancellation_requested = 0
-          AND runs.status IN ('queued', 'waiting_for_retry')
+          AND runs.status IN (
+              'queued', 'waiting_for_approval', 'waiting_for_retry'
+          )
         """,
         (
             run_id,
@@ -3384,6 +3386,7 @@ def _expire_linked_child_run_if_due(
         and str(current["status"])
         in {
             RunStatus.QUEUED.value,
+            RunStatus.WAITING_FOR_APPROVAL.value,
             RunStatus.WAITING_FOR_RETRY.value,
         }
     ):

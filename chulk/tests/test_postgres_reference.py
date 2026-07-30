@@ -601,9 +601,15 @@ def test_parent_child_fanout_is_serialized_across_postgres_workers(
         )
 
 
+@pytest.mark.parametrize(
+    "pause_for_approval",
+    (False, True),
+    ids=("queued", "waiting-for-approval"),
+)
 def test_expired_postgres_child_fails_before_claim(
     postgres_database: PostgreSQLTestDatabase,
     monkeypatch: pytest.MonkeyPatch,
+    pause_for_approval: bool,
 ) -> None:
     store = PostgreSQLRunStore(postgres_database.engine)
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
@@ -641,6 +647,22 @@ def test_expired_postgres_child_fails_before_claim(
         ),
         definition_revision=child_scope.agent_version,
     )
+    if pause_for_approval:
+        claim = store.claim(
+            child_scope,
+            worker_id="approval-worker",
+            run_id=child_scope.run_id,
+        )
+        assert claim is not None
+        store.start_step(child_scope, claim, "agent")
+        paused = store.pause_for_approval(
+            child_scope,
+            claim,
+            "agent",
+            approval_id="postgres-deadline-approval",
+            payload={"reason": "operator review"},
+        )
+        assert paused.status.value == "waiting_for_approval"
 
     observed[0] += timedelta(minutes=2)
     assert store.claim(
