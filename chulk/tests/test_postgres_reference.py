@@ -655,6 +655,34 @@ def test_expired_postgres_child_fails_before_claim(
         )
         assert claim is not None
         store.start_step(child_scope, claim, "agent")
+        effect = store.begin_effect(
+            child_scope,
+            claim,
+            "agent",
+            logical_key="postgres-deadline-effect",
+            tool_name="write",
+            tool_version="1",
+            schema_version="1",
+            arguments_digest="sha256:postgres-deadline",
+        )
+        store.mark_effect_started(child_scope, claim, effect.id)
+        with pytest.raises(
+            InvalidRunTransitionError,
+            match="reconciled before approval pause",
+        ):
+            store.pause_for_approval(
+                child_scope,
+                claim,
+                "agent",
+                approval_id="postgres-unsafe-deadline-approval",
+                payload={"reason": "operator review"},
+            )
+        store.fail_effect(
+            child_scope,
+            claim,
+            effect.id,
+            reason="effect stopped before approval pause",
+        )
         paused = store.pause_for_approval(
             child_scope,
             claim,

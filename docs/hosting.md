@@ -200,7 +200,8 @@ parent, grants are a subset, the published definition revision is explicit,
 matches `child_scope.agent_version`, and the cumulative child allocations fit
 the parent budget. Parent-row serialization makes the fan-out and budget checks
 safe across multiple workers. A child can inspect only its exact run; siblings
-remain invisible.
+remain invisible. Parentless queue discovery excludes linked children, which
+workers claim through their exact child scopes.
 
 Workers use the ordinary child run lease for steps, approvals, effects,
 retry/resume, and reconciliation. `record_child_progress(...)` additionally
@@ -238,7 +239,9 @@ the logical effect intent, then `DurableApprovalService` (or
 checkpoint, clears the worker lease, moves the run to
 `waiting_for_approval`, and invokes the optional budget-release hook. The SDK
 turn is left waiting rather than failed. Another process can record a decision
-and resume the run later.
+and resume the run later. An approval pause is rejected after an effect becomes
+`executing` or `unknown`; that effect must finish or be reconciled before the
+lease can be released.
 
 Resume revalidates the exact execution scope, authority, credentials, tool and
 schema versions, arguments digest, and policy version. Changed facts invalidate

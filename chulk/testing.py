@@ -601,6 +601,41 @@ def assert_parent_child_run_contract(
         lambda: runs.get(parentless_child_scope, children[0].run.id),
         "parentless scope could inspect a linked child run",
     )
+    ordinary_scope = replace(
+        child_scopes[0],
+        run_id=f"{scope.run_id}-ordinary",
+        parent_run_id=None,
+    )
+    runs.submit(
+        ordinary_scope,
+        _contract_child_submission(
+            f"{scope.run_id}-ordinary-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        actor="contract",
+    )
+    ordinary_claim = runs.claim(
+        ordinary_scope,
+        worker_id="contract-ordinary-worker",
+    )
+    _require(
+        ordinary_claim is not None
+        and ordinary_claim.run_id == ordinary_scope.run_id,
+        "parentless queue claim was blocked by a linked child",
+    )
+    runs.start_step(ordinary_scope, ordinary_claim, "contract")
+    runs.complete_step(
+        ordinary_scope,
+        ordinary_claim,
+        "contract",
+        result={"status": "completed"},
+    )
+    runs.complete(
+        ordinary_scope,
+        ordinary_claim,
+        result={"status": "completed"},
+    )
     _must_reject(
         lambda: runs.submit_child(
             scope,
@@ -886,6 +921,7 @@ def assert_parent_child_run_contract(
             "bounded_fanout",
             "child_scope_isolation",
             "parentless_child_scope_isolation",
+            "parentless_queue_child_isolation",
             "child_approval_resume",
             "child_retry_resume",
             "ordered_progress",
@@ -957,6 +993,41 @@ async def assert_async_parent_child_run_contract(
     await _must_reject_async(
         lambda: runs.get(parentless_child_scope, children[0].run.id),
         "async parentless scope could inspect a linked child run",
+    )
+    ordinary_scope = replace(
+        child_scopes[0],
+        run_id=f"{scope.run_id}-ordinary",
+        parent_run_id=None,
+    )
+    await runs.submit(
+        ordinary_scope,
+        _contract_child_submission(
+            f"{scope.run_id}-ordinary-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        actor="contract",
+    )
+    ordinary_claim = await runs.claim(
+        ordinary_scope,
+        worker_id="contract-ordinary-worker",
+    )
+    _require(
+        ordinary_claim is not None
+        and ordinary_claim.run_id == ordinary_scope.run_id,
+        "async parentless queue claim was blocked by a linked child",
+    )
+    await runs.start_step(ordinary_scope, ordinary_claim, "contract")
+    await runs.complete_step(
+        ordinary_scope,
+        ordinary_claim,
+        "contract",
+        result={"status": "completed"},
+    )
+    await runs.complete(
+        ordinary_scope,
+        ordinary_claim,
+        result={"status": "completed"},
     )
     for index, (child_scope, child) in enumerate(
         zip(child_scopes, children, strict=True),
@@ -1173,6 +1244,7 @@ async def assert_async_parent_child_run_contract(
             "async_bounded_fanout",
             "async_child_scope_isolation",
             "async_parentless_child_scope_isolation",
+            "async_parentless_queue_child_isolation",
             "async_child_approval_resume",
             "async_child_retry_resume",
             "async_ordered_progress",

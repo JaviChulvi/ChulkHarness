@@ -1260,9 +1260,17 @@ class SQLiteRunStore:
                 _iso(now),
             ]
             run_clause = ""
+            queue_scope_clause = ""
             if run_id is not None:
                 run_clause = "AND id = ?"
                 parameters.append(run_id)
+            else:
+                queue_scope_clause = """
+                  AND NOT EXISTS (
+                    SELECT 1 FROM durable_child_runs AS linked_child
+                    WHERE linked_child.child_run_id = durable_runs.id
+                  )
+                """
             row = conn.execute(
                 f"""
                 SELECT * FROM durable_runs
@@ -1277,6 +1285,7 @@ class SQLiteRunStore:
                         AND next_retry_at <= ?
                     )
                   )
+                  {queue_scope_clause}
                   {run_clause}
                 ORDER BY created_at, id
                 LIMIT 1
@@ -2145,6 +2154,17 @@ class SQLiteRunStore:
             conn.execute("BEGIN IMMEDIATE")
             _owned_run(conn, scope, claim, now=now)
             attempt = _active_attempt(conn, claim.run_id, step_id)
+            if conn.execute(
+                """
+                SELECT 1 FROM durable_effects
+                WHERE run_id = ? AND step_id = ?
+                  AND status IN ('executing', 'unknown')
+                """,
+                (claim.run_id, step_id),
+            ).fetchone():
+                raise InvalidRunTransitionError(
+                    "uncertain effects must be reconciled before approval pause"
+                )
             sequence = _next_checkpoint_sequence(conn, claim.run_id)
             checkpoint_id = uuid4().hex
             conn.execute(
@@ -3363,6 +3383,11 @@ def _expire_linked_child_run_if_due(
           AND runs.cancellation_requested = 0
           AND runs.status IN (
               'queued', 'waiting_for_approval', 'waiting_for_retry'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM durable_effects AS effects
+              WHERE effects.run_id = runs.id
+                AND effects.status IN ('executing', 'unknown')
           )
         """,
         (

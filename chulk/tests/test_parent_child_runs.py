@@ -298,6 +298,28 @@ def test_multiple_workers_cannot_exceed_parent_fanout(tmp_path: Path) -> None:
     assert len(SQLiteRunStore(path).children(parent, parent.run_id)) == 2
 
 
+def test_parentless_queue_claim_skips_linked_children(tmp_path: Path) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    parent = _scope("queue-isolation-parent")
+    _submit_parent(store, parent)
+    child = _submit_child(store, parent, 1)
+    ordinary = replace(
+        child,
+        run_id="queue-isolation-ordinary",
+        parent_run_id=None,
+    )
+    store.submit(
+        ordinary,
+        _submission("queue-isolation-ordinary-key"),
+    )
+
+    claim = store.claim(ordinary, worker_id="ordinary-worker")
+
+    assert claim is not None
+    assert claim.run_id == ordinary.run_id
+    assert store.get(child, child.run_id).status is RunStatus.QUEUED
+
+
 def test_child_idempotency_is_namespaced_by_parent(tmp_path: Path) -> None:
     store = SQLiteRunStore(tmp_path / "runs.sqlite")
     parents = (_scope("first-parent"), _scope("second-parent"))
@@ -514,6 +536,36 @@ def test_approval_waiting_child_expires_at_its_deadline(
     claim = store.claim(child, worker_id="worker-a", run_id=child.run_id)
     assert claim is not None
     store.start_step(child, claim, "agent")
+    effect = store.begin_effect(
+        child,
+        claim,
+        "agent",
+        logical_key="approval-deadline-effect",
+        tool_name="write",
+        tool_version="1",
+        schema_version="1",
+        arguments_digest="sha256:approval-deadline",
+    )
+    store.mark_effect_started(child, claim, effect.id)
+    with pytest.raises(
+        InvalidRunTransitionError,
+        match="reconciled before approval pause",
+    ):
+        store.pause_for_approval(
+            child,
+            claim,
+            "agent",
+            approval_id="unsafe-approval-deadline",
+            payload={"reason": "operator review"},
+        )
+    assert store.get(child, child.run_id).status is RunStatus.RUNNING
+    assert store.checkpoints(child, child.run_id) == ()
+    store.fail_effect(
+        child,
+        claim,
+        effect.id,
+        reason="effect stopped before approval pause",
+    )
     paused = store.pause_for_approval(
         child,
         claim,
