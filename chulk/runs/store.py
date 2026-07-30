@@ -1243,6 +1243,15 @@ class SQLiteRunStore:
         lease_until = now + timedelta(seconds=lease_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            preflight_run_id = run_id
+            if preflight_run_id is not None and _expire_linked_child_run_if_due(
+                conn,
+                scope,
+                preflight_run_id,
+                actor=worker_id,
+                now=now,
+            ):
+                return None
             parameters: list[Any] = [
                 scope.tenant_id,
                 scope.workspace_id,
@@ -1278,42 +1287,17 @@ class SQLiteRunStore:
                 return None
             persisted_scope = ExecutionScope.from_dict(_object(row["scope_json"]))
             _assert_scope(scope, persisted_scope)
-            linked_child = conn.execute(
-                """
-                SELECT budget_json FROM durable_child_runs
-                WHERE child_run_id = ?
-                """,
-                (str(row["id"]),),
-            ).fetchone()
-            if linked_child is not None:
-                budget = run_budget_from_dict(
-                    _object(linked_child["budget_json"])
+            if (
+                str(row["id"]) != preflight_run_id
+                and _expire_linked_child_run_if_due(
+                    conn,
+                    scope,
+                    str(row["id"]),
+                    actor=worker_id,
+                    now=now,
                 )
-                if budget.deadline is not None and budget.deadline <= now:
-                    current = _run_row(conn, str(row["id"]))
-                    if (
-                        not bool(current["cancellation_requested"])
-                        and str(current["status"])
-                        in {
-                            RunStatus.QUEUED.value,
-                            RunStatus.WAITING_FOR_RETRY.value,
-                        }
-                    ):
-                        current_budget = run_budget_from_dict(
-                            _object(current["budget_json"])
-                        )
-                        if (
-                            current_budget.deadline is not None
-                            and current_budget.deadline <= now
-                        ):
-                            _fail_expired_child_run(
-                                conn,
-                                str(row["id"]),
-                                actor=worker_id,
-                                deadline=current_budget.deadline,
-                                now=now,
-                            )
-                    return None
+            ):
+                return None
             token = uuid4().hex
             revision = int(row["revision"]) + 1
             cursor = conn.execute(
@@ -3357,6 +3341,65 @@ def _completion_from_row(row: sqlite3.Row) -> ParentCompletion:
         updated_at=_decode(str(row["updated_at"])),
         delivered_at=_optional_datetime(row["delivered_at"]),
     )
+
+
+def _expire_linked_child_run_if_due(
+    conn: sqlite3.Connection,
+    scope: ExecutionScope,
+    run_id: str,
+    *,
+    actor: str,
+    now: datetime,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT runs.scope_json, children.budget_json
+        FROM durable_runs AS runs
+        JOIN durable_child_runs AS children
+          ON children.child_run_id = runs.id
+        WHERE runs.id = ?
+          AND runs.tenant_id = ? AND runs.workspace_id = ?
+          AND runs.agent_id = ? AND runs.agent_version = ?
+          AND runs.cancellation_requested = 0
+          AND runs.status IN ('queued', 'waiting_for_retry')
+        """,
+        (
+            run_id,
+            scope.tenant_id,
+            scope.workspace_id,
+            scope.agent_id,
+            scope.agent_version,
+        ),
+    ).fetchone()
+    if row is None:
+        return False
+    persisted_scope = ExecutionScope.from_dict(_object(row["scope_json"]))
+    _assert_scope(scope, persisted_scope)
+    budget = run_budget_from_dict(_object(row["budget_json"]))
+    if budget.deadline is None or budget.deadline > now:
+        return False
+    current = _run_row(conn, run_id)
+    if (
+        not bool(current["cancellation_requested"])
+        and str(current["status"])
+        in {
+            RunStatus.QUEUED.value,
+            RunStatus.WAITING_FOR_RETRY.value,
+        }
+    ):
+        current_budget = run_budget_from_dict(_object(current["budget_json"]))
+        if (
+            current_budget.deadline is not None
+            and current_budget.deadline <= now
+        ):
+            _fail_expired_child_run(
+                conn,
+                run_id,
+                actor=actor,
+                deadline=current_budget.deadline,
+                now=now,
+            )
+    return True
 
 
 def _fail_expired_child_run(

@@ -17,6 +17,7 @@ from chulk.runs import (
     InvalidRunTransitionError,
     ParentCompletionStatus,
     ParentRunPolicy,
+    RetryPolicy,
     RunLeaseError,
     RunNotFoundError,
     RunStatus,
@@ -398,6 +399,69 @@ def test_child_expiring_after_allocation_fails_before_claim(
         idempotency_key="expired-child-aggregate",
     )
     assert aggregate.run.status is RunStatus.FAILED
+
+
+def test_retry_waiting_child_expires_before_its_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    deadline = observed[0] + timedelta(seconds=10)
+    parent = _scope("retry-deadline-parent")
+    _submit_parent(
+        store,
+        parent,
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=_budget(model_calls=1, deadline=deadline),
+        ),
+    )
+    child = parent.child(
+        run_id="retry-deadline-child",
+        agent_id="child-agent",
+        agent_version="published-1",
+        grants=frozenset({"files:read"}),
+    )
+    store.submit_child(
+        parent,
+        child,
+        RunSubmission(
+            idempotency_key="retry-deadline-child-key",
+            input_digest="sha256:retry-deadline-input",
+            definition_digest="sha256:retry-deadline-definition",
+            steps=(
+                StepDefinition(
+                    id="agent",
+                    name="Agent",
+                    retry_policy=RetryPolicy(initial_delay_seconds=60),
+                ),
+            ),
+            budget=_budget(
+                model_calls=1,
+                deadline=deadline,
+            ).to_dict(),
+        ),
+        definition_revision=child.agent_version,
+    )
+    claim = store.claim(child, worker_id="worker-a", run_id=child.run_id)
+    assert claim is not None
+    store.start_step(child, claim, "agent")
+    waiting = store.fail_step(
+        child,
+        claim,
+        "agent",
+        reason="provider overloaded",
+        retryable=True,
+    )
+    assert waiting.next_retry_at is not None
+    assert waiting.next_retry_at > deadline
+
+    observed[0] = deadline + timedelta(seconds=1)
+    assert store.claim(child, worker_id="worker-b", run_id=child.run_id) is None
+    assert store.get(child, child.run_id).status is RunStatus.FAILED
 
 
 def test_unknown_and_partial_child_outcomes_block_or_fail_parent(
