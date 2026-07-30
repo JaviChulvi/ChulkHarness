@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import blake2b
 import sqlite3
 from typing import Any
 
@@ -179,6 +180,19 @@ class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
             """,
             (self.profile_id, job_id),
         )
+
+    def _serialize_control_action(
+        self,
+        conn: Any,
+        idempotency_key: str,
+    ) -> None:
+        digest = blake2b(
+            f"{self.profile_id}\0{idempotency_key.strip()}".encode(),
+            digest_size=8,
+            person=b"chulk-schedule",
+        ).digest()
+        lock_id = int.from_bytes(digest, byteorder="big", signed=True)
+        conn.execute("SELECT pg_advisory_xact_lock(?)", (lock_id,))
 
     def _serialize_trigger_ingest(self, conn: Any, trigger_id: str) -> None:
         conn.execute(

@@ -77,6 +77,13 @@ class SQLiteScheduleStore:
     ) -> None:
         """Let backends serialize state transitions for one job."""
 
+    def _serialize_control_action(
+        self,
+        conn: sqlite3.Connection,
+        idempotency_key: str,
+    ) -> None:
+        """Let backends serialize profile-wide control idempotency keys."""
+
     def _serialize_trigger_ingest(
         self,
         conn: sqlite3.Connection,
@@ -160,6 +167,7 @@ class SQLiteScheduleStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if key:
+                self._serialize_control_action(conn, key)
                 existing = conn.execute(
                     """
                     SELECT job_id, fingerprint FROM automation_control_actions
@@ -389,6 +397,8 @@ class SQLiteScheduleStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                self._serialize_control_action(conn, idempotency_key)
             self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             if adapter is not None and job.adapter != adapter:
@@ -483,6 +493,7 @@ class SQLiteScheduleStore:
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
             self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(
@@ -563,6 +574,7 @@ class SQLiteScheduleStore:
         fingerprint = _fingerprint({"job_id": job_id, "action": "run_now"})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
             self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             replay = self._action_replay(
@@ -1466,6 +1478,7 @@ class SQLiteScheduleStore:
         fingerprint = _fingerprint({"job_id": job_id, "action": action})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
             self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(

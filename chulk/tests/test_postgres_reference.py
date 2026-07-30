@@ -338,6 +338,36 @@ async def test_async_stores_retry_concurrent_idempotency_collisions(
             )
         )
         assert scheduled[0].id == scheduled[1].id
+
+        jobs = await asyncio.gather(
+            *(
+                store.create(
+                    adapter="contract",
+                    destination_id=f"destination-{index}",
+                    prompt=f"job-{index}",
+                    next_run_at=datetime.now(timezone.utc),
+                )
+                for index, store in enumerate(schedule_stores)
+            )
+        )
+
+        async def update_job(index: int) -> Any | None:
+            try:
+                return await schedule_stores[index].update(
+                    jobs[index].id,
+                    expected_revision=0,
+                    idempotency_key=(
+                        "async-shared-control-key"
+                        if index == 0
+                        else " async-shared-control-key "
+                    ),
+                    prompt=f"updated-{index}",
+                )
+            except AutomationConflictError:
+                return None
+
+        updated = await asyncio.gather(*(update_job(index) for index in range(2)))
+        assert sum(result is not None for result in updated) == 1
     finally:
         await engine.dispose()
 
@@ -970,6 +1000,59 @@ def test_concurrent_schedule_controls_preserve_revisions(
     assert actions.count("updated") == 1
     assert actions.count("run_now_requested") == 1
     assert actions.count("pause") == 1
+
+
+def test_schedule_control_keys_are_serialized_across_jobs(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    barrier = Barrier(2)
+
+    class CoordinatedScheduleStore(PostgreSQLScheduleStore):
+        def _serialize_control_action(
+            self,
+            conn: Any,
+            idempotency_key: str,
+        ) -> None:
+            barrier.wait()
+            super()._serialize_control_action(conn, idempotency_key)
+
+    stores = tuple(
+        CoordinatedScheduleStore(
+            postgres_database.engine,
+            profile_id="shared-control-key-profile",
+        )
+        for _index in range(2)
+    )
+    observed = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    jobs = tuple(
+        stores[0].create(
+            adapter="contract",
+            destination_id=f"destination-{index}",
+            prompt=f"job-{index}",
+            next_run_at=observed,
+        )
+        for index in range(2)
+    )
+
+    def update_job(index: int) -> bool:
+        try:
+            stores[index].update(
+                jobs[index].id,
+                expected_revision=0,
+                idempotency_key=(
+                    "shared-control-key" if index == 0 else " shared-control-key "
+                ),
+                prompt=f"updated-{index}",
+            )
+        except AutomationConflictError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        updated = tuple(executor.map(update_job, range(2)))
+
+    assert sum(updated) == 1
+    assert sum(stores[0].get(job.id).revision for job in jobs) == 1
 
 
 def test_schedule_claim_skips_locked_due_job(
