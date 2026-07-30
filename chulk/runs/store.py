@@ -4156,9 +4156,12 @@ def _assert_scope(requested: ExecutionScope, persisted: ExecutionScope) -> None:
         raise RunNotFoundError(
             "durable run does not belong to this execution scope"
         ) from exc
-    if requested.parent_run_id is not None and requested.key != persisted.key:
+    if (
+        requested.parent_run_id is not None
+        or persisted.parent_run_id is not None
+    ) and requested.key != persisted.key:
         raise RunNotFoundError(
-            "child execution scope cannot inspect or mutate a sibling run"
+            "linked child run requires its exact execution scope"
         )
 
 

@@ -233,10 +233,33 @@ def test_child_creation_fails_closed_for_scope_budget_and_required_set(
         )
 
     sibling = replace(child, run_id="unlinked-sibling")
-    with pytest.raises(RunNotFoundError, match="sibling"):
+    with pytest.raises(RunNotFoundError, match="exact execution scope"):
         store.get(sibling, child.run_id)
     with pytest.raises(RunNotFoundError, match="sibling"):
         store.claim(child, worker_id="wrong-child", run_id="unlinked-sibling")
+
+    parentless = replace(
+        child,
+        actor_id="actor-b",
+        parent_run_id=None,
+    )
+    with pytest.raises(RunNotFoundError, match="exact execution scope"):
+        store.get(parentless, child.run_id)
+    with pytest.raises(RunNotFoundError, match="exact execution scope"):
+        store.events(parentless, child.run_id)
+    with pytest.raises(RunNotFoundError, match="exact execution scope"):
+        store.claim(
+            parentless,
+            worker_id="parentless-worker",
+            run_id=child.run_id,
+        )
+    with pytest.raises(RunNotFoundError, match="exact execution scope"):
+        store.request_cancellation(
+            parentless,
+            child.run_id,
+            actor="operator",
+            reason="parentless scopes cannot mutate linked children",
+        )
 
     with pytest.raises(
         InvalidRunTransitionError,

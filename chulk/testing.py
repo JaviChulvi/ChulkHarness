@@ -592,6 +592,15 @@ def assert_parent_child_run_contract(
         lambda: runs.get_child(child_scopes[0], children[1].run.id),
         "child scope could inspect a sibling run",
     )
+    parentless_child_scope = replace(
+        child_scopes[0],
+        actor_id="contract-other-actor",
+        parent_run_id=None,
+    )
+    _must_reject(
+        lambda: runs.get(parentless_child_scope, children[0].run.id),
+        "parentless scope could inspect a linked child run",
+    )
     _must_reject(
         lambda: runs.submit_child(
             scope,
@@ -876,6 +885,7 @@ def assert_parent_child_run_contract(
         (
             "bounded_fanout",
             "child_scope_isolation",
+            "parentless_child_scope_isolation",
             "child_approval_resume",
             "child_retry_resume",
             "ordered_progress",
@@ -938,6 +948,15 @@ async def assert_async_parent_child_run_contract(
     await _must_reject_async(
         lambda: runs.get_child(child_scopes[0], children[1].run.id),
         "async child scope could inspect a sibling run",
+    )
+    parentless_child_scope = replace(
+        child_scopes[0],
+        actor_id="contract-other-actor",
+        parent_run_id=None,
+    )
+    await _must_reject_async(
+        lambda: runs.get(parentless_child_scope, children[0].run.id),
+        "async parentless scope could inspect a linked child run",
     )
     for index, (child_scope, child) in enumerate(
         zip(child_scopes, children, strict=True),
@@ -1153,6 +1172,7 @@ async def assert_async_parent_child_run_contract(
         (
             "async_bounded_fanout",
             "async_child_scope_isolation",
+            "async_parentless_child_scope_isolation",
             "async_child_approval_resume",
             "async_child_retry_resume",
             "async_ordered_progress",
