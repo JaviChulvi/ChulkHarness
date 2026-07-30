@@ -143,6 +143,12 @@ contracts. `SQLiteRunStore`, `AsyncSQLiteRunStore`, `SQLiteApprovalStore`, and
 forward-only migration and transaction policy. In-memory adapters are
 filesystem-free test and local-host fixtures.
 
+For a production relational reference, install `chulkharness[postgres]` and
+follow the [PostgreSQL operations guide](postgres.md). The optional adapters
+reuse these same run, approval, gateway, and schedule state owners and add
+forward-only Alembic migrations plus atomic inbox/run and run/outbox ownership
+transfers.
+
 ## Durable approvals
 
 When the permission policy returns `ASK`, the durable executors first commit

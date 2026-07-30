@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -66,6 +67,42 @@ class SQLiteScheduleStore:
         self.recurrence = recurrence_calculator or RecurrenceCalculator()
         initialize_sqlite_database(self.db_path)
 
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return sqlite_connection(self.db_path)
+
+    def _serialize_job_mutation(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+    ) -> None:
+        """Let backends serialize state transitions for one job."""
+
+    def _serialize_control_action(
+        self,
+        conn: sqlite3.Connection,
+        idempotency_key: str,
+    ) -> None:
+        """Let backends serialize profile-wide control idempotency keys."""
+
+    def _serialize_trigger_ingest(
+        self,
+        conn: sqlite3.Connection,
+        trigger_id: str,
+    ) -> None:
+        """Let backends serialize source-event deduplication per trigger."""
+
+    def _claim_lock_clause(self) -> str:
+        """Return backend-specific locking for due-job candidates."""
+        return ""
+
+    def _claim_candidate_limit(self, limit: int) -> int:
+        """Overfetch SQLite candidates that may terminalize before claiming."""
+        return limit * 4
+
+    def _recovery_lock_clause(self) -> str:
+        """Return backend-specific locking for schedule recovery workers."""
+        return ""
+
     def create(
         self,
         *,
@@ -127,9 +164,10 @@ class SQLiteScheduleStore:
                 "recurrence": selected_recurrence.to_dict(),
             }
         )
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if key:
+                self._serialize_control_action(conn, key)
                 existing = conn.execute(
                     """
                     SELECT job_id, fingerprint FROM automation_control_actions
@@ -194,7 +232,7 @@ class SQLiteScheduleStore:
             return self._get_in(conn, job_id)
 
     def get(self, job_id: str) -> ScheduledJob:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             return self._get_in(conn, job_id)
 
     def list(
@@ -224,7 +262,7 @@ class SQLiteScheduleStore:
                 "status IN ('pending_approval', 'active', 'running', 'paused')"
             )
         params.append(limit)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM automation_jobs
@@ -240,7 +278,7 @@ class SQLiteScheduleStore:
         self, job_id: str, *, limit: int = 500
     ) -> tuple[AutomationJobEvent, ...]:
         self.get(job_id)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM automation_job_events
@@ -253,7 +291,7 @@ class SQLiteScheduleStore:
 
     def runs(self, job_id: str, *, limit: int = 100) -> tuple[AutomationRun, ...]:
         self.get(job_id)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM automation_runs
@@ -265,7 +303,7 @@ class SQLiteScheduleStore:
         return tuple(_row_to_run(row) for row in rows)
 
     def get_run(self, run_id: str) -> AutomationRun:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM automation_runs WHERE profile_id = ? AND id = ?",
                 (self.profile_id, run_id),
@@ -279,7 +317,7 @@ class SQLiteScheduleStore:
         run_id: str,
     ) -> tuple[AutomationDeliveryAttempt, ...]:
         self.get_run(run_id)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM automation_delivery_attempts
@@ -357,8 +395,11 @@ class SQLiteScheduleStore:
     ) -> bool:
         """Cancel by owner profile, preserving the legacy destination-scoped API."""
         now = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                self._serialize_control_action(conn, idempotency_key)
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             if adapter is not None and job.adapter != adapter:
                 return False
@@ -450,8 +491,10 @@ class SQLiteScheduleStore:
                 "max_runs": max_runs,
             }
         )
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
+            self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -529,8 +572,10 @@ class SQLiteScheduleStore:
     ) -> ScheduledJob:
         observed = _utc(now or _utc_now(), "now")
         fingerprint = _fingerprint({"job_id": job_id, "action": "run_now"})
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -596,7 +641,7 @@ class SQLiteScheduleStore:
         self.recover_expired(now=observed, actor="lease-recovery")
         lease_until = observed + timedelta(seconds=lease_seconds)
         claims: list[ScheduledJob] = []
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             clauses = [
                 "j.profile_id = ?",
@@ -620,7 +665,7 @@ class SQLiteScheduleStore:
             if adapter is not None:
                 clauses.append("j.adapter = ?")
                 params.append(adapter)
-            params.append(limit * 4)
+            params.append(self._claim_candidate_limit(limit))
             rows = conn.execute(
                 f"""
                 SELECT j.* FROM automation_jobs j
@@ -628,13 +673,20 @@ class SQLiteScheduleStore:
                 ORDER BY CASE WHEN j.next_run_at <= ? THEN j.next_run_at ELSE NULL END,
                          j.created_at, j.id
                 LIMIT ?
+                {self._claim_lock_clause()}
                 """,
                 (*params[:-1], _encode(observed), params[-1]),
             ).fetchall()
             for row in rows:
                 if len(claims) >= limit:
                     break
-                job = _row_to_job(row)
+                job_id = str(row["id"])
+                job = self._get_in(conn, job_id)
+                if (
+                    job.status is not AutomationJobStatus.ACTIVE
+                    or job.revision != int(row["revision"])
+                ):
+                    continue
                 if job.max_runs is not None and job.run_count >= job.max_runs:
                     self._terminalize(
                         conn, job, AutomationJobStatus.COMPLETED, observed
@@ -802,8 +854,9 @@ class SQLiteScheduleStore:
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
         lease_until = observed + timedelta(seconds=lease_seconds)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             row = conn.execute(
                 """
                 SELECT active_run_id FROM automation_jobs
@@ -856,7 +909,7 @@ class SQLiteScheduleStore:
         delivery_state: AutomationDeliveryState = AutomationDeliveryState.NONE,
     ) -> bool:
         finished = _utc(finished_at or _utc_now(), "finished_at")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             job = self._claimed_job(conn, job_id, claim_token, finished)
             if job is None:
@@ -946,7 +999,7 @@ class SQLiteScheduleStore:
         budget_exhausted: bool = False,
     ) -> bool:
         observed = _utc(failed_at or _utc_now(), "failed_at")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             job = self._claimed_job(conn, job_id, claim_token, observed)
             if job is None:
@@ -1047,18 +1100,25 @@ class SQLiteScheduleStore:
     ) -> tuple[AutomationRun, ...]:
         observed = _utc(now or _utc_now(), "now")
         recovered: list[AutomationRun] = []
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM automation_jobs
                 WHERE profile_id = ? AND status = 'running' AND lease_until < ?
                 ORDER BY lease_until, id
+                {self._recovery_lock_clause()}
                 """,
                 (self.profile_id, _encode(observed)),
             ).fetchall()
             for row in rows:
-                job = _row_to_job(row)
+                job = self._get_in(conn, str(row["id"]))
+                if (
+                    job.status is not AutomationJobStatus.RUNNING
+                    or job.lease_until is None
+                    or job.lease_until >= observed
+                ):
+                    continue
                 assert job.active_run_id is not None
                 run = self._run_in(conn, job.active_run_id)
                 conn.execute(
@@ -1141,7 +1201,7 @@ class SQLiteScheduleStore:
     ) -> AutomationRun:
         selected = AutomationDeliveryState(state)
         now = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE automation_runs SET delivery_state = ?, delivery_error = ?,
@@ -1200,7 +1260,7 @@ class SQLiteScheduleStore:
             self.get(job_id)
             clauses.append("job_id = ?")
             params.append(job_id)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM automation_triggers
@@ -1221,7 +1281,7 @@ class SQLiteScheduleStore:
         occurred_at: datetime | None = None,
     ) -> TriggerEnvelope:
         observed = _utc(occurred_at or _utc_now(), "occurred_at")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM automation_triggers
@@ -1256,7 +1316,7 @@ class SQLiteScheduleStore:
         selected = TriggerKind(kind)
         if selected is TriggerKind.WEBHOOK:
             raise ValueError("completion kind cannot be webhook")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM automation_triggers
@@ -1295,8 +1355,9 @@ class SQLiteScheduleStore:
             occurred_at=occurred_at,
             source_event_id=_required(event_id, "event_id"),
         )
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_trigger_ingest(conn, trigger.id)
             existing = conn.execute(
                 """
                 SELECT * FROM automation_trigger_events
@@ -1346,8 +1407,9 @@ class SQLiteScheduleStore:
         self.get(job_id)
         trigger_id = uuid4().hex
         now = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_job_mutation(conn, job_id)
             job = self._get_in(conn, job_id)
             if job.status is AutomationJobStatus.CANCELLED:
                 raise AutomationConflictError(
@@ -1414,8 +1476,10 @@ class SQLiteScheduleStore:
     ) -> ScheduledJob:
         now = _utc_now()
         fingerprint = _fingerprint({"job_id": job_id, "action": action})
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_control_action(conn, idempotency_key)
+            self._serialize_job_mutation(conn, job_id)
             current = self._get_in(conn, job_id)
             replay = self._action_replay(
                 conn,
@@ -1488,6 +1552,7 @@ class SQLiteScheduleStore:
         claim_token: str,
         observed: datetime,
     ) -> ScheduledJob | None:
+        self._serialize_job_mutation(conn, job_id)
         row = conn.execute(
             """
             SELECT * FROM automation_jobs
@@ -1631,7 +1696,7 @@ class SQLiteScheduleStore:
                 available_at, trigger_event_id, idempotency_key, status,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-            ON CONFLICT(profile_id, idempotency_key) DO NOTHING
+            ON CONFLICT DO NOTHING
             """,
             (
                 uuid4().hex,

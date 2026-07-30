@@ -84,6 +84,11 @@ discord = [
 browser = [
   "playwright>=1.49,<2",
 ]
+postgres = [
+  "SQLAlchemy[asyncio]>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "alembic>=1.14,<2",
+]
 
 [project.scripts]
 chulk = "chulk.main:main"

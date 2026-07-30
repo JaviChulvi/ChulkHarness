@@ -14,7 +14,7 @@ The supported top-level names are governed by `chulk.__all__`. They are
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
-`chulk.tools`, and `chulk.testing`.
+`chulk.tools`, `chulk.testing`, and the optional `chulk.postgres` module.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
 The `assert_*_contract` functions in `chulk.testing` are public-stable
 compatibility gates for third-party hosted services and gateway stores.
@@ -30,6 +30,12 @@ SQLite implementations remain internal.
 Gateway and scheduling protocols, run-target records, and hosted
 definition/run submitters are public-stable. The SQLite gateway ledger remains
 a public-provisional reference adapter.
+
+The PostgreSQL factories, forward-only migration entry point, atomic
+ownership-transfer functions, and sync/async stores exported by
+`chulk.postgres` are **public-provisional**. Importing that module requires the
+`postgres` extra; default `chulk` and `chulk.api` imports remain free of
+relational-database dependencies.
 
 `AgentHandle`, `AsyncAgentHandle`, `ChatAgent`, `AsyncChatAgent`, and their
 lowercase compatibility factories are **public-provisional** for the current

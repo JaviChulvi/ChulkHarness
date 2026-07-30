@@ -39,6 +39,20 @@ class SQLiteApprovalStore:
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return sqlite_connection(self.db_path)
 
+    def _serialize_creation(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+    ) -> None:
+        """Let backends serialize approval reuse for one owning run."""
+
+    def _serialize_request_mutation(
+        self,
+        conn: sqlite3.Connection,
+        approval_id: str,
+    ) -> None:
+        """Let backends serialize transitions for one approval request."""
+
     def create(
         self,
         scope: ExecutionScope,
@@ -49,6 +63,7 @@ class SQLiteApprovalStore:
             raise ValueError("approval expiry must be in the future")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_creation(conn, scope.run_id)
             _assert_run_scope(conn, scope)
             existing = conn.execute(
                 """
@@ -188,6 +203,7 @@ class SQLiteApprovalStore:
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_request_mutation(conn, approval_id)
             request = _from_row(_row(conn, approval_id))
             _assert_scope(scope, request.scope)
             if request.status is not ApprovalStatus.PENDING:
@@ -268,6 +284,7 @@ class SQLiteApprovalStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_request_mutation(conn, approval_id)
             request = _from_row(_row(conn, approval_id))
             _assert_scope(scope, request.scope)
             if request.status is ApprovalStatus.CONSUMED:
@@ -338,6 +355,7 @@ class SQLiteApprovalStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_request_mutation(conn, approval_id)
             request = _from_row(_row(conn, approval_id))
             _assert_scope(scope, request.scope)
             if request.status is ApprovalStatus.INVALIDATED:
@@ -392,8 +410,16 @@ class SQLiteApprovalStore:
                 (_iso(observed),),
             ).fetchall()
             for row in rows:
-                request = _from_row(row)
-                conn.execute(
+                approval_id = str(row["id"])
+                self._serialize_request_mutation(conn, approval_id)
+                request = _from_row(_row(conn, approval_id))
+                if (
+                    request.status
+                    not in {ApprovalStatus.PENDING, ApprovalStatus.APPROVED}
+                    or request.expires_at > observed
+                ):
+                    continue
+                cursor = conn.execute(
                     """
                     UPDATE durable_approval_requests
                     SET status = 'expired', revision = revision + 1,
@@ -403,6 +429,8 @@ class SQLiteApprovalStore:
                     """,
                     (_iso(observed), request.id, request.revision),
                 )
+                if cursor.rowcount != 1:
+                    continue
                 _audit(
                     conn,
                     request.scope,
@@ -427,6 +455,7 @@ class SQLiteApprovalStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_request_mutation(conn, approval_id)
             request = _from_row(_row(conn, approval_id))
             _assert_scope(scope, request.scope)
             if request.status is ApprovalStatus.CANCELLED:

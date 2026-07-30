@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -108,6 +109,33 @@ class SQLiteGatewayLedger:
         self.db_path = Path(db_path).expanduser().resolve()
         initialize_sqlite_database(self.db_path, migrations=CONTROL_MIGRATIONS)
 
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return sqlite_connection(self.db_path)
+
+    def _serialize_execution_claim(self, conn: sqlite3.Connection) -> None:
+        """Let backends serialize concurrency admission inside the transaction."""
+
+    def _serialize_pending_admission(self, conn: sqlite3.Connection) -> None:
+        """Let backends serialize bounded inbox admission inside the transaction."""
+
+    def _serialize_inbox_mutation(
+        self,
+        conn: sqlite3.Connection,
+        inbox_id: str,
+    ) -> None:
+        """Let backends serialize dependent writes for one inbox record."""
+
+    def _serialize_outbox_mutation(
+        self,
+        conn: sqlite3.Connection,
+        outbox_id: str,
+    ) -> None:
+        """Let backends serialize delivery evidence for one outbox record."""
+
+    def _execution_recovery_lock_clause(self) -> str:
+        """Return backend-specific locking for expired execution workers."""
+        return ""
+
     def start_adapter(
         self,
         adapter: str,
@@ -122,17 +150,8 @@ class SQLiteGatewayLedger:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
         token = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = _adapter_row(conn, adapter, account_id)
-            if (
-                row is not None
-                and row["state"] == "running"
-                and row["lease_until"] is not None
-                and _decode(str(row["lease_until"])) > observed
-            ):
-                raise RuntimeError(f"{adapter}/{account_id} is already running")
-            conn.execute(
+        with self._connect() as conn:
+            cursor = conn.execute(
                 """
                 INSERT INTO gateway_adapters (
                     adapter, account_id, state, instance_token, lease_until,
@@ -146,6 +165,9 @@ class SQLiteGatewayLedger:
                     started_at = excluded.started_at,
                     stopped_at = NULL,
                     updated_at = excluded.updated_at
+                WHERE gateway_adapters.state != 'running'
+                   OR gateway_adapters.lease_until IS NULL
+                   OR gateway_adapters.lease_until <= excluded.started_at
                 """,
                 (
                     adapter,
@@ -156,6 +178,8 @@ class SQLiteGatewayLedger:
                     _encode(observed),
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"{adapter}/{account_id} is already running")
             row = _adapter_row(conn, adapter, account_id)
         assert row is not None
         return _row_to_adapter_status(row)
@@ -174,7 +198,7 @@ class SQLiteGatewayLedger:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -211,7 +235,7 @@ class SQLiteGatewayLedger:
         )
         if instance_token is not None:
             arguments += (instance_token,)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE gateway_adapters
@@ -228,12 +252,12 @@ class SQLiteGatewayLedger:
         adapter: str,
         account_id: str,
     ) -> GatewayAdapterStatus | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _adapter_row(conn, adapter, account_id)
         return _row_to_adapter_status(row) if row is not None else None
 
     def list_adapter_statuses(self) -> tuple[GatewayAdapterStatus, ...]:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_adapters
@@ -244,7 +268,7 @@ class SQLiteGatewayLedger:
 
     def request_adapter_stop(self, adapter: str, account_id: str) -> bool:
         """Ask the active lease owner to stop without impersonating it."""
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -265,7 +289,7 @@ class SQLiteGatewayLedger:
     ) -> bool:
         if not cursor or not instance_token:
             raise ValueError("cursor and instance_token are required")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             updated = conn.execute(
                 """
                 UPDATE gateway_adapters
@@ -287,6 +311,27 @@ class SQLiteGatewayLedger:
         run_target: GatewayRunTarget | None = None,
     ) -> IngestResult:
         """Durably accept an envelope before its transport acknowledgement."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self._ingest_in_transaction(
+                conn,
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=max_pending,
+                run_target=run_target,
+            )
+
+    def _ingest_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        envelope: InboundEnvelope,
+        *,
+        profile_id: str,
+        conversation_key: str | None,
+        max_pending: int | None,
+        run_target: GatewayRunTarget | None,
+    ) -> IngestResult:
         profile_id = _required(profile_id, "profile_id")
         if max_pending is not None and max_pending <= 0:
             raise ValueError("max_pending must be greater than zero")
@@ -297,107 +342,106 @@ class SQLiteGatewayLedger:
         encoded = _bounded_json(_inbound_to_dict(envelope))
         observed = _utc_now()
         record_id = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                """
-                SELECT * FROM gateway_inbox
-                WHERE adapter = ? AND account_id = ? AND idempotency_key = ?
-                """,
-                (
-                    envelope.identity.adapter,
-                    envelope.identity.account_id,
-                    envelope.idempotency_key,
-                ),
-            ).fetchone()
-            if existing is not None:
-                if (
-                    str(existing["event_id"]) != envelope.event_id
-                    or str(existing["principal_id"])
-                    != envelope.identity.principal_id
-                    or str(existing["destination_id"]) != envelope.destination_id
-                    or (
-                        str(existing["thread_id"])
-                        if existing["thread_id"] is not None
-                        else None
-                    )
-                    != envelope.thread_id
-                ):
-                    raise ValueError(
-                        "idempotency key collision does not match the stored event"
-                    )
-                _validate_stored_run_target(existing, run_target)
-                return IngestResult(_row_to_inbox(existing), False)
-            if max_pending is not None:
-                pending = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*) FROM gateway_inbox AS inbox
-                        WHERE inbox.state IN ('queued', 'processing')
-                           OR EXISTS (
-                               SELECT 1 FROM gateway_outbox AS outbox
-                               WHERE outbox.inbox_id = inbox.id
-                                 AND outbox.state IN ('pending', 'delivering')
-                           )
-                        """
-                    ).fetchone()[0]
+        if max_pending is not None:
+            self._serialize_pending_admission(conn)
+        existing = conn.execute(
+            """
+            SELECT * FROM gateway_inbox
+            WHERE adapter = ? AND account_id = ? AND idempotency_key = ?
+            """,
+            (
+                envelope.identity.adapter,
+                envelope.identity.account_id,
+                envelope.idempotency_key,
+            ),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["event_id"]) != envelope.event_id
+                or str(existing["principal_id"]) != envelope.identity.principal_id
+                or str(existing["destination_id"]) != envelope.destination_id
+                or (
+                    str(existing["thread_id"])
+                    if existing["thread_id"] is not None
+                    else None
                 )
-                if pending >= max_pending:
-                    raise GatewayBackpressureError(
-                        "gateway inbox has reached its configured pending limit"
-                    )
-            conn.execute(
-                """
-                INSERT INTO gateway_inbox (
-                    id, profile_id, adapter, account_id, event_id,
-                    idempotency_key, conversation_key, principal_id,
-                    destination_id, thread_id, envelope_json, state,
-                    created_at, updated_at, execution_scope_json,
-                    agent_definition_id, agent_definition_version,
-                    agent_definition_digest, run_id
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
-                    ?, ?, ?, ?, ?
+                != envelope.thread_id
+            ):
+                raise ValueError(
+                    "idempotency key collision does not match the stored event"
                 )
-                """,
-                (
-                    record_id,
-                    profile_id,
-                    envelope.identity.adapter,
-                    envelope.identity.account_id,
-                    envelope.event_id,
-                    envelope.idempotency_key,
-                    key,
-                    envelope.identity.principal_id,
-                    envelope.destination_id,
-                    envelope.thread_id,
-                    encoded,
-                    _encode(observed),
-                    _encode(observed),
-                    (
-                        json.dumps(
-                            run_target.scope.to_dict(),
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        )
-                        if run_target is not None
-                        else None
-                    ),
-                    run_target.definition_id if run_target is not None else None,
-                    (
-                        run_target.definition_version
-                        if run_target is not None
-                        else None
-                    ),
-                    (
-                        run_target.definition_digest
-                        if run_target is not None
-                        else None
-                    ),
-                    run_target.scope.run_id if run_target is not None else None,
-                ),
+            _validate_stored_run_target(existing, run_target)
+            return IngestResult(_row_to_inbox(existing), False)
+        if max_pending is not None:
+            pending = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM gateway_inbox AS inbox
+                    WHERE inbox.state IN ('queued', 'processing')
+                       OR EXISTS (
+                           SELECT 1 FROM gateway_outbox AS outbox
+                           WHERE outbox.inbox_id = inbox.id
+                             AND outbox.state IN ('pending', 'delivering')
+                       )
+                    """
+                ).fetchone()[0]
             )
-            row = _inbox_row(conn, record_id)
+            if pending >= max_pending:
+                raise GatewayBackpressureError(
+                    "gateway inbox has reached its configured pending limit"
+                )
+        conn.execute(
+            """
+            INSERT INTO gateway_inbox (
+                id, profile_id, adapter, account_id, event_id,
+                idempotency_key, conversation_key, principal_id,
+                destination_id, thread_id, envelope_json, state,
+                created_at, updated_at, execution_scope_json,
+                agent_definition_id, agent_definition_version,
+                agent_definition_digest, run_id
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
+                ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                record_id,
+                profile_id,
+                envelope.identity.adapter,
+                envelope.identity.account_id,
+                envelope.event_id,
+                envelope.idempotency_key,
+                key,
+                envelope.identity.principal_id,
+                envelope.destination_id,
+                envelope.thread_id,
+                encoded,
+                _encode(observed),
+                _encode(observed),
+                (
+                    json.dumps(
+                        run_target.scope.to_dict(),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    if run_target is not None
+                    else None
+                ),
+                run_target.definition_id if run_target is not None else None,
+                (
+                    run_target.definition_version
+                    if run_target is not None
+                    else None
+                ),
+                (
+                    run_target.definition_digest
+                    if run_target is not None
+                    else None
+                ),
+                run_target.scope.run_id if run_target is not None else None,
+            ),
+        )
+        row = _inbox_row(conn, record_id)
         assert row is not None
         return IngestResult(_row_to_inbox(row), True)
 
@@ -409,14 +453,18 @@ class SQLiteGatewayLedger:
         reason: str,
         conversation_key: str | None = None,
     ) -> InboxRecord:
-        result = self.ingest(
-            envelope,
-            profile_id=profile_id,
-            conversation_key=conversation_key,
-        )
-        if result.created:
-            with sqlite_connection(self.db_path) as conn:
-                conn.execute(
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            result = self._ingest_in_transaction(
+                conn,
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=None,
+                run_target=None,
+            )
+            if result.created:
+                updated = conn.execute(
                     """
                     UPDATE gateway_inbox
                     SET state = 'ignored', last_error = ?, updated_at = ?
@@ -424,7 +472,9 @@ class SQLiteGatewayLedger:
                     """,
                     (reason[:500], _encode(_utc_now()), result.record.id),
                 )
-        record = self.get_inbox(result.record.id)
+                assert updated.rowcount == 1
+            row = _inbox_row(conn, result.record.id)
+        record = _row_to_inbox(row) if row is not None else None
         assert record is not None
         return record
 
@@ -453,8 +503,9 @@ class SQLiteGatewayLedger:
             else None
         )
         token = uuid4().hex
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_execution_claim(conn)
             global_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM gateway_inbox WHERE state = 'processing'"
@@ -565,7 +616,7 @@ class SQLiteGatewayLedger:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         observed = _observed(now)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -595,8 +646,9 @@ class SQLiteGatewayLedger:
         if not responses:
             raise ValueError("responses cannot be empty")
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_inbox_mutation(conn, inbox_id)
             row = _inbox_row(conn, inbox_id)
             if (
                 row is None
@@ -656,32 +708,50 @@ class SQLiteGatewayLedger:
             raise ValueError("limit must be greater than zero")
         observed = _observed(now)
         recovered: list[InboxRecord] = []
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM gateway_inbox
                 WHERE state = 'processing' AND execution_lease_until <= ?
                 ORDER BY execution_lease_until, id
                 LIMIT ?
+                {self._execution_recovery_lock_clause()}
                 """,
                 (_encode(observed), limit),
             ).fetchall()
             for row in rows:
-                _insert_uncertain_outbox(conn, row, observed)
-                conn.execute(
+                current = _inbox_row(conn, str(row["id"]))
+                if (
+                    current is None
+                    or current["state"] != "processing"
+                    or current["execution_token"] is None
+                    or current["execution_lease_until"] is None
+                    or _decode(str(current["execution_lease_until"])) > observed
+                ):
+                    continue
+                cursor = conn.execute(
                     """
                     UPDATE gateway_inbox
                     SET state = 'uncertain', execution_token = NULL,
                         execution_lease_until = NULL,
                         last_error = 'execution lease expired', updated_at = ?
                     WHERE id = ? AND state = 'processing'
+                      AND execution_token = ? AND execution_lease_until <= ?
                     """,
-                    (_encode(observed), row["id"]),
+                    (
+                        _encode(observed),
+                        current["id"],
+                        current["execution_token"],
+                        _encode(observed),
+                    ),
                 )
-                current = _inbox_row(conn, str(row["id"]))
-                if current is not None:
-                    recovered.append(_row_to_inbox(current))
+                if cursor.rowcount != 1:
+                    continue
+                _insert_uncertain_outbox(conn, current, observed)
+                persisted = _inbox_row(conn, str(current["id"]))
+                if persisted is not None:
+                    recovered.append(_row_to_inbox(persisted))
         return tuple(recovered)
 
     def quarantine_execution(
@@ -694,8 +764,9 @@ class SQLiteGatewayLedger:
         """Terminally quarantine an execution whose side effects are unknown."""
         if not execution_token:
             raise ValueError("execution_token is required")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_inbox_mutation(conn, inbox_id)
             row = _inbox_row(conn, inbox_id)
             if (
                 row is None
@@ -731,7 +802,7 @@ class SQLiteGatewayLedger:
         if not execution_token:
             raise ValueError("execution_token is required")
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -754,7 +825,7 @@ class SQLiteGatewayLedger:
     def dead_letter_inbox(self, inbox_id: str, *, error: str) -> bool:
         """Persist a poison input as terminal before any execution claim."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -774,7 +845,7 @@ class SQLiteGatewayLedger:
     def request_cancellation(self, inbox_id: str) -> bool:
         """Cancel queued work or signal the owner of an active execution."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -795,7 +866,7 @@ class SQLiteGatewayLedger:
     ) -> tuple[str, ...]:
         """Cancel earlier work while leaving the stop command itself queued."""
         observed = _utc_now()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """
@@ -806,11 +877,12 @@ class SQLiteGatewayLedger:
                 """,
                 (profile_id, conversation_key, exclude_inbox_id),
             ).fetchall()
-            ids = tuple(str(row["id"]) for row in rows)
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(
-                    f"""
+            cancelled: list[str] = []
+            for row in rows:
+                inbox_id = str(row["id"])
+                self._serialize_inbox_mutation(conn, inbox_id)
+                cursor = conn.execute(
+                    """
                     UPDATE gateway_inbox
                     SET state = CASE
                             WHEN state = 'queued' THEN 'cancelled'
@@ -818,14 +890,16 @@ class SQLiteGatewayLedger:
                         END,
                         cancellation_requested = 1,
                         updated_at = ?
-                    WHERE id IN ({placeholders})
+                    WHERE id = ? AND state IN ('queued', 'processing')
                     """,
-                    (_encode(observed), *ids),
+                    (_encode(observed), inbox_id),
                 )
-        return ids
+                if cursor.rowcount == 1:
+                    cancelled.append(inbox_id)
+        return tuple(cancelled)
 
     def mark_execution_cancelled(self, inbox_id: str, execution_token: str) -> bool:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE gateway_inbox
@@ -839,7 +913,7 @@ class SQLiteGatewayLedger:
         return cursor.rowcount == 1
 
     def get_inbox(self, inbox_id: str) -> InboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _inbox_row(conn, inbox_id)
         return _row_to_inbox(row) if row is not None else None
 
@@ -850,7 +924,7 @@ class SQLiteGatewayLedger:
         account_id: str,
         idempotency_key: str,
     ) -> InboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM gateway_inbox
@@ -861,7 +935,7 @@ class SQLiteGatewayLedger:
         return _row_to_inbox(row) if row is not None else None
 
     def list_outbox(self, inbox_id: str) -> tuple[OutboxRecord, ...]:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_outbox
@@ -874,7 +948,7 @@ class SQLiteGatewayLedger:
 
     def inbox_complete(self, inbox_id: str) -> bool:
         """Return whether an event is terminal and has no outstanding delivery."""
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             inbox = _inbox_row(conn, inbox_id)
             if inbox is None:
                 return False
@@ -895,7 +969,7 @@ class SQLiteGatewayLedger:
     def pending_count(self, *, profile_id: str | None = None) -> int:
         clause = " AND profile_id = ?" if profile_id is not None else ""
         parameters: tuple[object, ...] = (profile_id,) if profile_id is not None else ()
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 f"""
                 SELECT COUNT(*) FROM gateway_inbox
@@ -930,7 +1004,7 @@ class SQLiteGatewayLedger:
                 for _item in adapter_keys
             ) + ")"
             parameters += tuple(value for item in adapter_keys for value in item)
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"""
@@ -1035,8 +1109,9 @@ class SQLiteGatewayLedger:
             delivered_at = None
             reconciliation_required = 0
             dead_lettered_at = None
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_outbox_mutation(conn, outbox_id)
             row = _outbox_row(conn, outbox_id)
             if (
                 row is None
@@ -1128,8 +1203,9 @@ class SQLiteGatewayLedger:
             next_attempt_at = None
             delivered_at = None
             dead_lettered_at = None
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._serialize_outbox_mutation(conn, outbox_id)
             row = _outbox_row(conn, outbox_id)
             if (
                 row is None
@@ -1191,7 +1267,7 @@ class SQLiteGatewayLedger:
     ) -> tuple[OutboxRecord, ...]:
         if limit <= 0:
             raise ValueError("limit must be greater than zero")
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM gateway_outbox
@@ -1204,7 +1280,7 @@ class SQLiteGatewayLedger:
         return tuple(_row_to_outbox(row) for row in rows)
 
     def get_outbox(self, outbox_id: str) -> OutboxRecord | None:
-        with sqlite_connection(self.db_path) as conn:
+        with self._connect() as conn:
             row = _outbox_row(conn, outbox_id)
         return _row_to_outbox(row) if row is not None else None
 

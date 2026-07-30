@@ -18,6 +18,7 @@ TOPICS = (
     "quickstart.md",
     "sdk.md",
     "hosting.md",
+    "postgres.md",
     "gateway.md",
     "scheduling.md",
     "authoring.md",

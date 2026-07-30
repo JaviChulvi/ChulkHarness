@@ -66,7 +66,7 @@ jobs:
       - name: Install development dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,providers,mcp]"
+          python -m pip install -e ".[dev,providers,mcp,postgres]"
 
       - name: Typecheck package, examples, and external consumer
         run: python -m mypy chulk examples typing_tests
@@ -80,6 +80,49 @@ jobs:
         run: |
           python examples/00_sdk_quickstart.py
           python examples/repo_review_bot/app.py
+
+  postgres:
+    name: PostgreSQL hosted contracts
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chulk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d chulk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PostgreSQL reference dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,postgres]"
+
+      - name: Run real PostgreSQL contract suite
+        env:
+          CHULK_POSTGRES_TEST_URL: >-
+            postgresql+psycopg://postgres:postgres@localhost:5432/chulk
+        run: python -m pytest chulk/tests/test_postgres_reference.py -q
+
+      - name: Run PostgreSQL hosted example
+        env:
+          CHULK_POSTGRES_URL: >-
+            postgresql+psycopg://postgres:postgres@localhost:5432/chulk
+        run: python examples/hosted_runtime/postgres_app.py
 
   windows:
     name: Windows Python 3.12
