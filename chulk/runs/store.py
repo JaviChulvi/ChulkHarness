@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -240,7 +241,19 @@ class SQLiteRunStore:
                         "child idempotency key was reused for different work"
                     )
                 return existing
-            if _idempotent_run_row(conn, child_scope, submission) is not None:
+            storage_idempotency_key = _child_storage_idempotency_key(
+                parent.run.id,
+                submission.idempotency_key,
+            )
+            if (
+                _idempotent_run_row(
+                    conn,
+                    child_scope,
+                    submission,
+                    storage_idempotency_key=storage_idempotency_key,
+                )
+                is not None
+            ):
                 raise RunConflictError(
                     "child idempotency key already belongs to an unlinked run"
                 )
@@ -257,6 +270,7 @@ class SQLiteRunStore:
                 parent.policy.budget,
                 child_budget,
                 existing_budgets,
+                observed_at=now,
             )
             child_run = _submit_run(
                 conn,
@@ -264,6 +278,7 @@ class SQLiteRunStore:
                 submission,
                 actor=actor,
                 now=now,
+                storage_idempotency_key=storage_idempotency_key,
             )
             ordinal = len(child_rows) + 1
             try:
@@ -1042,7 +1057,7 @@ class SQLiteRunStore:
             ):
                 raise RunLeaseError("parent completion claim has expired")
             delivered = status is ParentCompletionStatus.DELIVERED
-            conn.execute(
+            updated = conn.execute(
                 """
                 UPDATE durable_parent_completion_outbox
                 SET status = ?, worker_id = NULL, lease_token = NULL,
@@ -1060,6 +1075,10 @@ class SQLiteRunStore:
                     claim.lease_token,
                 ),
             )
+            if updated.rowcount != 1:
+                raise RunLeaseError(
+                    "parent completion claim is absent or stale"
+                )
             _insert_event(
                 conn,
                 parent.run.id,
@@ -1803,9 +1822,14 @@ class SQLiteRunStore:
                         "confirmed reconciliation requires a result digest"
                     )
             elif decision is ReconciliationDecision.RETRY:
-                new_effect_status = EffectStatus.INTENDED
-                new_step_status = StepStatus.QUEUED
-                new_run_status = RunStatus.QUEUED
+                if run.cancellation_requested:
+                    new_effect_status = EffectStatus.CANCELLED
+                    new_step_status = StepStatus.CANCELLED
+                    new_run_status = RunStatus.CANCELLED
+                else:
+                    new_effect_status = EffectStatus.INTENDED
+                    new_step_status = StepStatus.QUEUED
+                    new_run_status = RunStatus.QUEUED
             elif decision is ReconciliationDecision.FAILED:
                 new_effect_status = EffectStatus.FAILED
                 new_step_status = StepStatus.FAILED
@@ -2993,8 +3017,14 @@ def _submit_run(
     *,
     actor: str,
     now: datetime,
+    storage_idempotency_key: str | None = None,
 ) -> RunRecord:
-    duplicate = _idempotent_run_row(conn, scope, submission)
+    duplicate = _idempotent_run_row(
+        conn,
+        scope,
+        submission,
+        storage_idempotency_key=storage_idempotency_key,
+    )
     if duplicate is not None:
         return _run_from_conn(
             conn,
@@ -3020,7 +3050,7 @@ def _submit_run(
                 scope.agent_version,
                 scope.key,
                 _json(scope.to_dict()),
-                submission.idempotency_key,
+                storage_idempotency_key or submission.idempotency_key,
                 submission.input_digest,
                 submission.definition_digest,
                 _json(submission.budget),
@@ -3072,6 +3102,8 @@ def _idempotent_run_row(
     conn: sqlite3.Connection,
     scope: ExecutionScope,
     submission: RunSubmission,
+    *,
+    storage_idempotency_key: str | None = None,
 ) -> sqlite3.Row | None:
     duplicate = conn.execute(
         """
@@ -3082,7 +3114,7 @@ def _idempotent_run_row(
         (
             scope.tenant_id,
             scope.workspace_id,
-            submission.idempotency_key,
+            storage_idempotency_key or submission.idempotency_key,
         ),
     ).fetchone()
     if duplicate is None:
@@ -3102,6 +3134,18 @@ def _idempotent_run_row(
             "or budget"
         )
     return duplicate
+
+
+def _child_storage_idempotency_key(
+    parent_run_id: str,
+    idempotency_key: str,
+) -> str:
+    value = json.dumps(
+        [parent_run_id, idempotency_key],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return f"child:{hashlib.sha256(value).hexdigest()}"
 
 
 def _parent_row(conn: sqlite3.Connection, parent_run_id: str) -> sqlite3.Row:
@@ -3184,7 +3228,11 @@ def _child_from_row(
     evidence_value = row["terminal_evidence_json"]
     return ChildRunRecord(
         parent_run_id=str(row["parent_run_id"]),
-        run=_run_from_conn(conn, _run_row(conn, child_run_id)),
+        run=_run_from_conn(
+            conn,
+            _run_row(conn, child_run_id),
+            idempotency_key=str(row["idempotency_key"]),
+        ),
         ordinal=int(row["ordinal"]),
         definition_revision=str(row["definition_revision"]),
         progress=tuple(_progress_from_row(item) for item in progress_rows),
@@ -3513,7 +3561,20 @@ def _effect_row(conn: sqlite3.Connection, effect_id: str) -> sqlite3.Row:
 def _run_from_conn(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
+    *,
+    idempotency_key: str | None = None,
 ) -> RunRecord:
+    stored_idempotency_key = str(row["idempotency_key"])
+    if idempotency_key is None and stored_idempotency_key.startswith("child:"):
+        child = conn.execute(
+            """
+            SELECT idempotency_key FROM durable_child_runs
+            WHERE child_run_id = ?
+            """,
+            (str(row["id"]),),
+        ).fetchone()
+        if child is not None:
+            idempotency_key = str(child["idempotency_key"])
     step_rows = conn.execute(
         """
         SELECT * FROM durable_run_steps
@@ -3525,7 +3586,11 @@ def _run_from_conn(
     return RunRecord(
         id=str(row["id"]),
         scope=ExecutionScope.from_dict(_object(row["scope_json"])),
-        idempotency_key=str(row["idempotency_key"]),
+        idempotency_key=(
+            idempotency_key
+            if idempotency_key is not None
+            else stored_idempotency_key
+        ),
         input_digest=str(row["input_digest"]),
         definition_digest=str(row["definition_digest"]),
         status=RunStatus(str(row["status"])),

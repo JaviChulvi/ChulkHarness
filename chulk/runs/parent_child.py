@@ -393,6 +393,8 @@ def validate_child_budget_allocation(
     parent: RunBudget,
     child: RunBudget,
     existing: tuple[RunBudget, ...],
+    *,
+    observed_at: datetime,
 ) -> None:
     """Fail closed when a child allocation exceeds the parent envelope."""
 
@@ -400,6 +402,11 @@ def validate_child_budget_allocation(
         raise ValueError("parent child budget scope must be child_task")
     if child.scope is not BudgetScope.CHILD_TASK:
         raise ValueError("child run budget scope must be child_task")
+    observed_at = observed_at.astimezone(timezone.utc)
+    if parent.deadline is not None and parent.deadline <= observed_at:
+        raise ValueError("parent child budget deadline has expired")
+    if child.deadline is not None and child.deadline <= observed_at:
+        raise ValueError("child run budget deadline has expired")
     for name in ("max_model_calls", "max_tool_calls", "max_tokens"):
         parent_limit = getattr(parent, name)
         child_limit = getattr(child, name)

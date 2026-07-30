@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, local
 from typing import Any
 from uuid import uuid4
 
@@ -57,9 +57,11 @@ from chulk.postgres import (
 from chulk.runs import (
     EffectConflictError,
     InvalidRunTransitionError,
+    ParentCompletionStatus,
     ParentRunPolicy,
     ReconciliationDecision,
     RunConflictError,
+    RunLeaseError,
     RunNotFoundError,
     RunSubmission,
     StepDefinition,
@@ -597,6 +599,133 @@ def test_parent_child_fanout_is_serialized_across_postgres_workers(
             ),
             definition_revision="published-2",
         )
+
+
+def test_parent_completion_transition_rejects_a_stale_postgres_cas(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    parent_scope = _scope(run_id="completion-cas-parent")
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+    )
+    stores[0].submit_parent(
+        parent_scope,
+        _submission(idempotency_key="completion-cas-parent-key"),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=child_budget,
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id="completion-cas-child",
+        agent_version="published-1",
+    )
+    stores[0].submit_child(
+        parent_scope,
+        child_scope,
+        RunSubmission(
+            idempotency_key="completion-cas-child-key",
+            input_digest="sha256:completion-cas-child-input",
+            definition_digest="sha256:completion-cas-child-definition",
+            steps=(StepDefinition(id="agent", name="Agent turn"),),
+            budget=child_budget.to_dict(),
+        ),
+        definition_revision=child_scope.agent_version,
+    )
+    child_claim = stores[0].claim(
+        child_scope,
+        worker_id="child-worker",
+        run_id=child_scope.run_id,
+    )
+    assert child_claim is not None
+    stores[0].start_step(child_scope, child_claim, "agent")
+    stores[0].complete_step(child_scope, child_claim, "agent")
+    stores[0].complete(child_scope, child_claim, result={"ok": True})
+    stores[0].aggregate_children(
+        parent_scope,
+        actor="host",
+        idempotency_key="completion-cas-aggregate",
+    )
+    completion_claim = stores[0].claim_parent_completion(
+        parent_scope,
+        worker_id="delivery-worker",
+        parent_run_id=parent_scope.run_id,
+    )
+    assert completion_claim is not None
+
+    initial_reads = Barrier(2)
+    failure_committed = Event()
+    transition_kind = local()
+    original_completion_row = run_store_module._completion_row
+
+    def coordinated_completion_row(conn: Any, completion_id: str) -> Any:
+        row = original_completion_row(conn, completion_id)
+        if str(row["status"]) == ParentCompletionStatus.CLAIMED.value:
+            initial_reads.wait()
+            if transition_kind.value == "complete":
+                assert failure_committed.wait(timeout=5)
+        return row
+
+    monkeypatch.setattr(
+        run_store_module,
+        "_completion_row",
+        coordinated_completion_row,
+    )
+
+    def fail_delivery() -> ParentCompletionStatus:
+        transition_kind.value = "fail"
+        completion = stores[0].fail_parent_completion(
+            parent_scope,
+            completion_claim,
+            reason="delivery did not start",
+        )
+        failure_committed.set()
+        return completion.status
+
+    def complete_delivery() -> str:
+        transition_kind.value = "complete"
+        try:
+            stores[1].complete_parent_completion(
+                parent_scope,
+                completion_claim,
+            )
+        except RunLeaseError:
+            return "stale"
+        return "delivered"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed = executor.submit(fail_delivery)
+        completed = executor.submit(complete_delivery)
+        assert failed.result(timeout=10) is ParentCompletionStatus.PENDING
+        assert completed.result(timeout=10) == "stale"
+
+    events = stores[0].events(parent_scope, parent_scope.run_id)
+    assert [event.name for event in events].count(
+        "parent.completion_failed"
+    ) == 1
+    assert all(event.name != "parent.completion_delivered" for event in events)
+
+    monkeypatch.setattr(
+        run_store_module,
+        "_completion_row",
+        original_completion_row,
+    )
+    retry_claim = stores[0].claim_parent_completion(
+        parent_scope,
+        worker_id="retry-delivery-worker",
+        parent_run_id=parent_scope.run_id,
+    )
+    assert retry_claim is not None
+    delivered = stores[0].complete_parent_completion(parent_scope, retry_claim)
+    assert delivered.status is ParentCompletionStatus.DELIVERED
 
 
 def test_concurrent_workers_claim_distinct_runs_and_schedules(

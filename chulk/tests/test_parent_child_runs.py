@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -60,12 +61,14 @@ def _budget(
     model_calls: int,
     tool_calls: int | None = None,
     tokens: int = 100,
+    deadline: datetime | None = None,
 ) -> RunBudget:
     return RunBudget(
         scope=BudgetScope.CHILD_TASK,
         max_model_calls=model_calls,
         max_tool_calls=tool_calls or model_calls,
         max_tokens=tokens,
+        deadline=deadline,
     )
 
 
@@ -268,6 +271,89 @@ def test_multiple_workers_cannot_exceed_parent_fanout(tmp_path: Path) -> None:
     assert len(SQLiteRunStore(path).children(parent, parent.run_id)) == 2
 
 
+def test_child_idempotency_is_namespaced_by_parent(tmp_path: Path) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    parents = (_scope("first-parent"), _scope("second-parent"))
+    for parent in parents:
+        _submit_parent(store, parent)
+
+    children = []
+    for parent in parents:
+        child_scope = parent.child(
+            run_id=f"{parent.run_id}-child",
+            agent_id="child-agent",
+            agent_version="published-1",
+            grants=frozenset({"files:read"}),
+        )
+        child = store.submit_child(
+            parent,
+            child_scope,
+            _submission("shared-child-key", budget=_budget(model_calls=1)),
+            definition_revision=child_scope.agent_version,
+        )
+        children.append(child)
+
+    assert children[0].run.id != children[1].run.id
+    assert [child.run.idempotency_key for child in children] == [
+        "shared-child-key",
+        "shared-child-key",
+    ]
+    assert [
+        store.get(
+            child.run.scope,
+            child.run.id,
+        ).idempotency_key
+        for child in children
+    ] == ["shared-child-key", "shared-child-key"]
+
+
+def test_child_allocation_rejects_expired_budget_deadlines(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    now = datetime.now(timezone.utc)
+    expired_parent = _scope("expired-parent")
+    _submit_parent(
+        store,
+        expired_parent,
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=_budget(
+                model_calls=1,
+                deadline=now - timedelta(minutes=1),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="parent child budget deadline has expired"):
+        _submit_child(store, expired_parent, 1)
+
+    live_parent = _scope("live-parent")
+    _submit_parent(
+        store,
+        live_parent,
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=_budget(
+                model_calls=1,
+                deadline=now + timedelta(hours=1),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="child run budget deadline has expired"):
+        _submit_child(
+            store,
+            live_parent,
+            1,
+            budget=_budget(
+                model_calls=1,
+                deadline=now - timedelta(minutes=1),
+            ),
+        )
+
+
 def test_unknown_and_partial_child_outcomes_block_or_fail_parent(
     tmp_path: Path,
 ) -> None:
@@ -319,6 +405,57 @@ def test_unknown_and_partial_child_outcomes_block_or_fail_parent(
     assert aggregate.run.status is RunStatus.FAILED
     assert aggregate.children[0].terminal_evidence is not None
     assert store.parent_completion(parent, parent.run_id) is not None
+
+
+def test_cancelling_unknown_child_settles_when_retry_is_reconciled(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    parent = _scope("unknown-cancel-parent")
+    _submit_parent(store, parent)
+    child = _submit_child(store, parent, 1)
+    claim = store.claim(child, worker_id="worker-a", run_id=child.run_id)
+    assert claim is not None
+    store.start_step(child, claim, "agent")
+    effect = store.begin_effect(
+        child,
+        claim,
+        "agent",
+        logical_key="external-write",
+        tool_name="write",
+        tool_version="1",
+        schema_version="1",
+        arguments_digest="sha256:arguments",
+    )
+    store.mark_effect_started(child, claim, effect.id)
+    store.mark_effect_unknown(
+        child,
+        claim,
+        effect.id,
+        reason="transport disconnected",
+    )
+    store.request_parent_cancellation(
+        parent,
+        actor="operator",
+        reason="operator cancelled the parent",
+    )
+
+    reconciled = store.reconcile_effect(
+        child,
+        effect.id,
+        decision="retry",
+        actor="operator",
+        reason="target confirms the write did not occur",
+    )
+
+    assert reconciled.run.status is RunStatus.CANCELLED
+    assert store.claim(child, worker_id="late-worker", run_id=child.run_id) is None
+    aggregate = store.aggregate_children(
+        parent,
+        actor="operator",
+        idempotency_key="cancelled-after-reconciliation",
+    )
+    assert aggregate.run.status is RunStatus.CANCELLED
 
 
 def test_parent_cancellation_propagates_and_stale_child_cannot_progress(
