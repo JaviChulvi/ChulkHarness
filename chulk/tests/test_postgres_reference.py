@@ -601,6 +601,58 @@ def test_parent_child_fanout_is_serialized_across_postgres_workers(
         )
 
 
+def test_expired_postgres_child_fails_before_claim(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgreSQLRunStore(postgres_database.engine)
+    observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+        deadline=observed[0] + timedelta(minutes=1),
+    )
+    parent_scope = _scope(run_id="postgres-deadline-parent")
+    store.submit_parent(
+        parent_scope,
+        _submission(idempotency_key="postgres-deadline-parent-key"),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=child_budget,
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id="postgres-deadline-child",
+        agent_version="published-1",
+    )
+    store.submit_child(
+        parent_scope,
+        child_scope,
+        RunSubmission(
+            idempotency_key="postgres-deadline-child-key",
+            input_digest="sha256:postgres-deadline-child-input",
+            definition_digest="sha256:postgres-deadline-child-definition",
+            steps=(StepDefinition(id="agent", name="Agent turn"),),
+            budget=child_budget.to_dict(),
+        ),
+        definition_revision=child_scope.agent_version,
+    )
+
+    observed[0] += timedelta(minutes=2)
+    assert store.claim(
+        child_scope,
+        worker_id="late-worker",
+        run_id=child_scope.run_id,
+    ) is None
+    expired = store.get(child_scope, child_scope.run_id)
+    assert expired.status.value == "failed"
+    assert expired.error == "child run budget deadline expired before claim"
+
+
 def test_parent_completion_transition_rejects_a_stale_postgres_cas(
     postgres_database: PostgreSQLTestDatabase,
     monkeypatch: pytest.MonkeyPatch,

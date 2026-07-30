@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import chulk.runs.store as run_store_module
 
+from chulk.events import RunLifecyclePayload
 from chulk.hosting import ExecutionScope
 from chulk.runs import (
     AsyncSQLiteRunStore,
@@ -22,6 +24,7 @@ from chulk.runs import (
     SQLiteRunStore,
     StepDefinition,
 )
+from chulk.runs.events import project_run_event
 from chulk.testing import (
     assert_async_parent_child_run_contract,
     assert_parent_child_run_contract,
@@ -354,6 +357,49 @@ def test_child_allocation_rejects_expired_budget_deadlines(
         )
 
 
+def test_child_expiring_after_allocation_fails_before_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    parent = _scope("claim-deadline-parent")
+    _submit_parent(
+        store,
+        parent,
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=_budget(
+                model_calls=1,
+                deadline=observed[0] + timedelta(minutes=2),
+            ),
+        ),
+    )
+    child = _submit_child(
+        store,
+        parent,
+        1,
+        budget=_budget(
+            model_calls=1,
+            deadline=observed[0] + timedelta(minutes=1),
+        ),
+    )
+
+    observed[0] += timedelta(minutes=3)
+    assert store.claim(child, worker_id="late-worker", run_id=child.run_id) is None
+    expired = store.get(child, child.run_id)
+    assert expired.status is RunStatus.FAILED
+    assert expired.error == "child run budget deadline expired before claim"
+    aggregate = store.aggregate_children(
+        parent,
+        actor="host",
+        idempotency_key="expired-child-aggregate",
+    )
+    assert aggregate.run.status is RunStatus.FAILED
+
+
 def test_unknown_and_partial_child_outcomes_block_or_fail_parent(
     tmp_path: Path,
 ) -> None:
@@ -458,6 +504,75 @@ def test_cancelling_unknown_child_settles_when_retry_is_reconciled(
     assert aggregate.run.status is RunStatus.CANCELLED
 
 
+def test_retryable_child_failure_settles_pending_parent_cancellation(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    parent = _scope("retry-cancel-parent")
+    _submit_parent(store, parent)
+    child = _submit_child(store, parent, 1)
+    claim = store.claim(child, worker_id="worker-a", run_id=child.run_id)
+    assert claim is not None
+    store.start_step(child, claim, "agent")
+    store.request_parent_cancellation(
+        parent,
+        actor="operator",
+        reason="operator cancelled the parent",
+    )
+
+    settled = store.fail_step(
+        child,
+        claim,
+        "agent",
+        reason="provider overloaded",
+        retryable=True,
+    )
+
+    assert settled.status is RunStatus.CANCELLED
+    assert settled.step("agent").status.value == "cancelled"
+    aggregate = store.aggregate_children(
+        parent,
+        actor="operator",
+        idempotency_key="retry-cancel-aggregate",
+    )
+    assert aggregate.run.status is RunStatus.CANCELLED
+
+
+def test_expired_child_lease_settles_pending_parent_cancellation(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteRunStore(tmp_path / "runs.sqlite")
+    parent = _scope("lease-cancel-parent")
+    _submit_parent(store, parent)
+    child = _submit_child(store, parent, 1)
+    claim = store.claim(
+        child,
+        worker_id="worker-a",
+        run_id=child.run_id,
+        lease_seconds=1,
+    )
+    assert claim is not None
+    store.start_step(child, claim, "agent")
+    store.request_parent_cancellation(
+        parent,
+        actor="operator",
+        reason="operator cancelled the parent",
+    )
+
+    reconciled = store.reconcile_expired(
+        now=claim.lease_until + timedelta(seconds=1),
+    )
+
+    assert len(reconciled) == 1
+    assert reconciled[0].status is RunStatus.CANCELLED
+    aggregate = store.aggregate_children(
+        parent,
+        actor="operator",
+        idempotency_key="lease-cancel-aggregate",
+    )
+    assert aggregate.run.status is RunStatus.CANCELLED
+
+
 def test_parent_cancellation_propagates_and_stale_child_cannot_progress(
     tmp_path: Path,
 ) -> None:
@@ -476,6 +591,14 @@ def test_parent_cancellation_propagates_and_stale_child_cannot_progress(
     )
     assert cancelling.run.cancellation_requested
     assert cancelling.children[0].run.cancellation_requested
+    cancellation_event = next(
+        event
+        for event in store.events(parent, parent.run_id)
+        if event.name == "run.cancellation_requested"
+    )
+    projected = project_run_event(cancellation_event, parent)
+    assert isinstance(projected.payload, RunLifecyclePayload)
+    assert projected.payload.status == RunStatus.WAITING_FOR_CHILDREN.value
 
     cancelled_child = store.cancel(
         child,

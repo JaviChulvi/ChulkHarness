@@ -552,6 +552,7 @@ class SQLiteRunStore:
                     actor=actor,
                     payload={
                         "reason": reason,
+                        "status": parent.run.status.value,
                         "child_run_ids": [
                             child.run.id for child in parent.children
                         ],
@@ -1277,6 +1278,42 @@ class SQLiteRunStore:
                 return None
             persisted_scope = ExecutionScope.from_dict(_object(row["scope_json"]))
             _assert_scope(scope, persisted_scope)
+            linked_child = conn.execute(
+                """
+                SELECT budget_json FROM durable_child_runs
+                WHERE child_run_id = ?
+                """,
+                (str(row["id"]),),
+            ).fetchone()
+            if linked_child is not None:
+                budget = run_budget_from_dict(
+                    _object(linked_child["budget_json"])
+                )
+                if budget.deadline is not None and budget.deadline <= now:
+                    current = _run_row(conn, str(row["id"]))
+                    if (
+                        not bool(current["cancellation_requested"])
+                        and str(current["status"])
+                        in {
+                            RunStatus.QUEUED.value,
+                            RunStatus.WAITING_FOR_RETRY.value,
+                        }
+                    ):
+                        current_budget = run_budget_from_dict(
+                            _object(current["budget_json"])
+                        )
+                        if (
+                            current_budget.deadline is not None
+                            and current_budget.deadline <= now
+                        ):
+                            _fail_expired_child_run(
+                                conn,
+                                str(row["id"]),
+                                actor=worker_id,
+                                deadline=current_budget.deadline,
+                                now=now,
+                            )
+                    return None
             token = uuid4().hex
             revision = int(row["revision"]) + 1
             cursor = conn.execute(
@@ -1979,7 +2016,7 @@ class SQLiteRunStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            _owned_run(conn, scope, claim, now=now)
+            owned = _owned_run(conn, scope, claim, now=now)
             step = _step_from_row(_step_row(conn, claim.run_id, step_id))
             _active_attempt(conn, claim.run_id, step_id)
             if conn.execute(
@@ -1993,14 +2030,6 @@ class SQLiteRunStore:
                 raise InvalidRunTransitionError(
                     "uncertain effects must be reconciled before retry or failure"
                 )
-            _mark_active_attempt(
-                conn,
-                claim.run_id,
-                step_id,
-                AttemptStatus.FAILED,
-                now,
-                reason,
-            )
             counted_attempts = int(
                 conn.execute(
                     """
@@ -2013,6 +2042,26 @@ class SQLiteRunStore:
             can_retry = (
                 retryable
                 and counted_attempts < step.retry_policy.max_attempts
+            )
+            if can_retry and bool(owned["cancellation_requested"]):
+                _settle_run_cancellation(
+                    conn,
+                    claim.run_id,
+                    actor=claim.worker_id,
+                    reason=(
+                        "cancellation settled after retryable step failure: "
+                        f"{reason}"
+                    ),
+                    now=now,
+                )
+                return _run_from_conn(conn, _run_row(conn, claim.run_id))
+            _mark_active_attempt(
+                conn,
+                claim.run_id,
+                step_id,
+                AttemptStatus.FAILED,
+                now,
+                reason,
             )
             if can_retry:
                 next_retry = now + step.retry_policy.delay_for_attempt(
@@ -2763,7 +2812,18 @@ class SQLiteRunStore:
                     unsafe_effect is None and non_intent_checkpoint is None
                 )
                 if safe_to_requeue:
-                    if active_attempt is not None:
+                    if bool(current["cancellation_requested"]):
+                        _settle_run_cancellation(
+                            conn,
+                            run_id,
+                            actor="reconciler",
+                            reason=(
+                                "cancellation settled after the worker lease "
+                                "expired before an unsafe effect"
+                            ),
+                            now=observed,
+                        )
+                    elif active_attempt is not None:
                         conn.execute(
                             """
                             UPDATE durable_run_attempts
@@ -2774,7 +2834,10 @@ class SQLiteRunStore:
                             """,
                             (_iso(observed), str(active_attempt["id"])),
                         )
-                    if active_step is not None:
+                    if (
+                        not bool(current["cancellation_requested"])
+                        and active_step is not None
+                    ):
                         conn.execute(
                             """
                             UPDATE durable_run_steps
@@ -2788,21 +2851,24 @@ class SQLiteRunStore:
                                 str(active_step["id"]),
                             ),
                         )
-                    _set_run_state(
-                        conn,
-                        run_id,
-                        RunStatus.QUEUED,
-                        now=observed,
-                        clear_lease=True,
-                    )
-                    _insert_event(
-                        conn,
-                        run_id,
-                        name="run.requeued",
-                        actor="reconciler",
-                        payload={"reason": "lease expired before work started"},
-                        now=observed,
-                    )
+                    if not bool(current["cancellation_requested"]):
+                        _set_run_state(
+                            conn,
+                            run_id,
+                            RunStatus.QUEUED,
+                            now=observed,
+                            clear_lease=True,
+                        )
+                        _insert_event(
+                            conn,
+                            run_id,
+                            name="run.requeued",
+                            actor="reconciler",
+                            payload={
+                                "reason": "lease expired before work started"
+                            },
+                            now=observed,
+                        )
                 else:
                     if unsafe_effect is not None and str(
                         unsafe_effect["status"]
@@ -3290,6 +3356,92 @@ def _completion_from_row(row: sqlite3.Row) -> ParentCompletion:
         created_at=_decode(str(row["created_at"])),
         updated_at=_decode(str(row["updated_at"])),
         delivered_at=_optional_datetime(row["delivered_at"]),
+    )
+
+
+def _fail_expired_child_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str,
+    deadline: datetime,
+    now: datetime,
+) -> None:
+    reason = "child run budget deadline expired before claim"
+    conn.execute(
+        """
+        UPDATE durable_run_steps
+        SET status = 'failed', revision = revision + 1, error = ?,
+            updated_at = ?, completed_at = ?
+        WHERE run_id = ?
+          AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
+        """,
+        (reason, _iso(now), _iso(now), run_id),
+    )
+    _set_run_state(
+        conn,
+        run_id,
+        RunStatus.FAILED,
+        now=now,
+        error=reason,
+        clear_lease=True,
+        completed=True,
+    )
+    _insert_event(
+        conn,
+        run_id,
+        name="run.failed",
+        actor=actor,
+        payload={
+            "reason": reason,
+            "deadline": _iso(deadline),
+        },
+        now=now,
+    )
+
+
+def _settle_run_cancellation(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    conn.execute(
+        """
+        UPDATE durable_run_attempts
+        SET status = 'cancelled', error = ?, completed_at = ?
+        WHERE run_id = ? AND status = 'running'
+        """,
+        (reason, _iso(now), run_id),
+    )
+    conn.execute(
+        """
+        UPDATE durable_run_steps
+        SET status = 'cancelled', revision = revision + 1, error = ?,
+            next_retry_at = NULL, updated_at = ?, completed_at = ?
+        WHERE run_id = ?
+          AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
+        """,
+        (reason, _iso(now), _iso(now), run_id),
+    )
+    _set_run_state(
+        conn,
+        run_id,
+        RunStatus.CANCELLED,
+        now=now,
+        error=reason,
+        clear_lease=True,
+        completed=True,
+    )
+    _insert_event(
+        conn,
+        run_id,
+        name="run.cancelled",
+        actor=actor,
+        payload={"reason": reason},
+        now=now,
     )
 
 
