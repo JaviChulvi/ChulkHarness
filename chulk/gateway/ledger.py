@@ -311,6 +311,27 @@ class SQLiteGatewayLedger:
         run_target: GatewayRunTarget | None = None,
     ) -> IngestResult:
         """Durably accept an envelope before its transport acknowledgement."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self._ingest_in_transaction(
+                conn,
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=max_pending,
+                run_target=run_target,
+            )
+
+    def _ingest_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        envelope: InboundEnvelope,
+        *,
+        profile_id: str,
+        conversation_key: str | None,
+        max_pending: int | None,
+        run_target: GatewayRunTarget | None,
+    ) -> IngestResult:
         profile_id = _required(profile_id, "profile_id")
         if max_pending is not None and max_pending <= 0:
             raise ValueError("max_pending must be greater than zero")
@@ -321,109 +342,106 @@ class SQLiteGatewayLedger:
         encoded = _bounded_json(_inbound_to_dict(envelope))
         observed = _utc_now()
         record_id = uuid4().hex
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if max_pending is not None:
-                self._serialize_pending_admission(conn)
-            existing = conn.execute(
-                """
-                SELECT * FROM gateway_inbox
-                WHERE adapter = ? AND account_id = ? AND idempotency_key = ?
-                """,
-                (
-                    envelope.identity.adapter,
-                    envelope.identity.account_id,
-                    envelope.idempotency_key,
-                ),
-            ).fetchone()
-            if existing is not None:
-                if (
-                    str(existing["event_id"]) != envelope.event_id
-                    or str(existing["principal_id"])
-                    != envelope.identity.principal_id
-                    or str(existing["destination_id"]) != envelope.destination_id
-                    or (
-                        str(existing["thread_id"])
-                        if existing["thread_id"] is not None
-                        else None
-                    )
-                    != envelope.thread_id
-                ):
-                    raise ValueError(
-                        "idempotency key collision does not match the stored event"
-                    )
-                _validate_stored_run_target(existing, run_target)
-                return IngestResult(_row_to_inbox(existing), False)
-            if max_pending is not None:
-                pending = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*) FROM gateway_inbox AS inbox
-                        WHERE inbox.state IN ('queued', 'processing')
-                           OR EXISTS (
-                               SELECT 1 FROM gateway_outbox AS outbox
-                               WHERE outbox.inbox_id = inbox.id
-                                 AND outbox.state IN ('pending', 'delivering')
-                           )
-                        """
-                    ).fetchone()[0]
+        if max_pending is not None:
+            self._serialize_pending_admission(conn)
+        existing = conn.execute(
+            """
+            SELECT * FROM gateway_inbox
+            WHERE adapter = ? AND account_id = ? AND idempotency_key = ?
+            """,
+            (
+                envelope.identity.adapter,
+                envelope.identity.account_id,
+                envelope.idempotency_key,
+            ),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["event_id"]) != envelope.event_id
+                or str(existing["principal_id"]) != envelope.identity.principal_id
+                or str(existing["destination_id"]) != envelope.destination_id
+                or (
+                    str(existing["thread_id"])
+                    if existing["thread_id"] is not None
+                    else None
                 )
-                if pending >= max_pending:
-                    raise GatewayBackpressureError(
-                        "gateway inbox has reached its configured pending limit"
-                    )
-            conn.execute(
-                """
-                INSERT INTO gateway_inbox (
-                    id, profile_id, adapter, account_id, event_id,
-                    idempotency_key, conversation_key, principal_id,
-                    destination_id, thread_id, envelope_json, state,
-                    created_at, updated_at, execution_scope_json,
-                    agent_definition_id, agent_definition_version,
-                    agent_definition_digest, run_id
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
-                    ?, ?, ?, ?, ?
+                != envelope.thread_id
+            ):
+                raise ValueError(
+                    "idempotency key collision does not match the stored event"
                 )
-                """,
-                (
-                    record_id,
-                    profile_id,
-                    envelope.identity.adapter,
-                    envelope.identity.account_id,
-                    envelope.event_id,
-                    envelope.idempotency_key,
-                    key,
-                    envelope.identity.principal_id,
-                    envelope.destination_id,
-                    envelope.thread_id,
-                    encoded,
-                    _encode(observed),
-                    _encode(observed),
-                    (
-                        json.dumps(
-                            run_target.scope.to_dict(),
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        )
-                        if run_target is not None
-                        else None
-                    ),
-                    run_target.definition_id if run_target is not None else None,
-                    (
-                        run_target.definition_version
-                        if run_target is not None
-                        else None
-                    ),
-                    (
-                        run_target.definition_digest
-                        if run_target is not None
-                        else None
-                    ),
-                    run_target.scope.run_id if run_target is not None else None,
-                ),
+            _validate_stored_run_target(existing, run_target)
+            return IngestResult(_row_to_inbox(existing), False)
+        if max_pending is not None:
+            pending = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM gateway_inbox AS inbox
+                    WHERE inbox.state IN ('queued', 'processing')
+                       OR EXISTS (
+                           SELECT 1 FROM gateway_outbox AS outbox
+                           WHERE outbox.inbox_id = inbox.id
+                             AND outbox.state IN ('pending', 'delivering')
+                       )
+                    """
+                ).fetchone()[0]
             )
-            row = _inbox_row(conn, record_id)
+            if pending >= max_pending:
+                raise GatewayBackpressureError(
+                    "gateway inbox has reached its configured pending limit"
+                )
+        conn.execute(
+            """
+            INSERT INTO gateway_inbox (
+                id, profile_id, adapter, account_id, event_id,
+                idempotency_key, conversation_key, principal_id,
+                destination_id, thread_id, envelope_json, state,
+                created_at, updated_at, execution_scope_json,
+                agent_definition_id, agent_definition_version,
+                agent_definition_digest, run_id
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
+                ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                record_id,
+                profile_id,
+                envelope.identity.adapter,
+                envelope.identity.account_id,
+                envelope.event_id,
+                envelope.idempotency_key,
+                key,
+                envelope.identity.principal_id,
+                envelope.destination_id,
+                envelope.thread_id,
+                encoded,
+                _encode(observed),
+                _encode(observed),
+                (
+                    json.dumps(
+                        run_target.scope.to_dict(),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    if run_target is not None
+                    else None
+                ),
+                run_target.definition_id if run_target is not None else None,
+                (
+                    run_target.definition_version
+                    if run_target is not None
+                    else None
+                ),
+                (
+                    run_target.definition_digest
+                    if run_target is not None
+                    else None
+                ),
+                run_target.scope.run_id if run_target is not None else None,
+            ),
+        )
+        row = _inbox_row(conn, record_id)
         assert row is not None
         return IngestResult(_row_to_inbox(row), True)
 
@@ -435,14 +453,18 @@ class SQLiteGatewayLedger:
         reason: str,
         conversation_key: str | None = None,
     ) -> InboxRecord:
-        result = self.ingest(
-            envelope,
-            profile_id=profile_id,
-            conversation_key=conversation_key,
-        )
-        if result.created:
-            with self._connect() as conn:
-                conn.execute(
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            result = self._ingest_in_transaction(
+                conn,
+                envelope,
+                profile_id=profile_id,
+                conversation_key=conversation_key,
+                max_pending=None,
+                run_target=None,
+            )
+            if result.created:
+                updated = conn.execute(
                     """
                     UPDATE gateway_inbox
                     SET state = 'ignored', last_error = ?, updated_at = ?
@@ -450,7 +472,9 @@ class SQLiteGatewayLedger:
                     """,
                     (reason[:500], _encode(_utc_now()), result.record.id),
                 )
-        record = self.get_inbox(result.record.id)
+                assert updated.rowcount == 1
+            row = _inbox_row(conn, result.record.id)
+        record = _row_to_inbox(row) if row is not None else None
         assert record is not None
         return record
 

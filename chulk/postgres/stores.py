@@ -135,6 +135,14 @@ class PostgreSQLGatewayStore(PostgreSQLConnectionOwner, SQLiteGatewayLedger):
                 run_target=run_target,
             )
 
+    def ignore(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().ignore(*args, **kwargs)
+        except sqlite3.IntegrityError:
+            if self._connection_is_bound():
+                raise
+            return super().ignore(*args, **kwargs)
+
 
 class PostgreSQLScheduleStore(PostgreSQLConnectionOwner, SQLiteScheduleStore):
     """Profile-owned schedule execution store backed by PostgreSQL."""
@@ -252,7 +260,7 @@ class AsyncPostgreSQLApprovalStore(
 class AsyncPostgreSQLGatewayStore(_AsyncPostgreSQLStore):
     """Native-async gateway store exposing the complete gateway protocol."""
 
-    _idempotent_retry_methods = frozenset({"ingest"})
+    _idempotent_retry_methods = frozenset({"ignore", "ingest"})
 
     def __init__(self, engine: AsyncEngine) -> None:
         super().__init__(engine, PostgreSQLGatewayStore(engine.sync_engine))

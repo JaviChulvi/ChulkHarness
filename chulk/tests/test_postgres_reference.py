@@ -304,6 +304,20 @@ async def test_async_stores_retry_concurrent_idempotency_collisions(
         )
         assert ingested[0].record.id == ingested[1].record.id
 
+        ignored_envelope = _inbound("async-concurrent-ignore")
+        ignored = await asyncio.gather(
+            *(
+                store.ignore(
+                    ignored_envelope,
+                    profile_id="async-concurrent",
+                    reason="challenge consumed",
+                )
+                for store in gateway_stores
+            )
+        )
+        assert ignored[0].id == ignored[1].id
+        assert ignored[0].state == ignored[1].state == "ignored"
+
         schedule_stores = tuple(
             AsyncPostgreSQLScheduleStore(
                 engine,
@@ -702,6 +716,45 @@ def test_concurrent_bounded_gateway_replay_is_idempotent(
     assert len({record_id for record_id, _created in ingested}) == 1
     assert sorted(created for _record_id, created in ingested) == [False, True]
     assert gateways[0].pending_count() == 1
+
+
+def test_ignored_ingestion_is_not_claimable_before_commit(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    accepted = Event()
+    allow_ignore = Event()
+
+    class PausedIgnoreStore(PostgreSQLGatewayStore):
+        def _ingest_in_transaction(self, *args: Any, **kwargs: Any) -> Any:
+            result = super()._ingest_in_transaction(*args, **kwargs)
+            if result.created:
+                accepted.set()
+                assert allow_ignore.wait(timeout=2)
+            return result
+
+    ignore_store = PausedIgnoreStore(postgres_database.engine)
+    claim_store = PostgreSQLGatewayStore(postgres_database.engine)
+    envelope = _inbound("atomic-ignore")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            ignore_store.ignore,
+            envelope,
+            profile_id="contract",
+            reason="pairing challenge consumed",
+        )
+        assert accepted.wait(timeout=2)
+        assert claim_store.claim_execution(
+            global_limit=1,
+            profile_limit=1,
+        ) is None
+        allow_ignore.set()
+        ignored = future.result(timeout=2)
+
+    assert ignored.state == "ignored"
+    assert claim_store.claim_execution(
+        global_limit=1,
+        profile_limit=1,
+    ) is None
 
 
 def test_conversation_cancellation_revalidates_completed_inboxes(
