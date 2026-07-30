@@ -18,6 +18,16 @@ from chulk.runs.models import (
     StepRecord,
     StepStatus,
 )
+from chulk.runs.parent_child import (
+    ChildRunProgress,
+    ChildRunRecord,
+    ParentAggregationStatus,
+    ParentCompletion,
+    ParentCompletionClaim,
+    ParentCompletionStatus,
+    ParentRunPolicy,
+    ParentRunRecord,
+)
 from chulk.runs.in_memory import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.runs.async_store import AsyncRunStoreAdapter, AsyncSQLiteRunStore
 from chulk.runs.execution import (
@@ -55,6 +65,8 @@ __all__ = [
     "AttemptRecord",
     "AttemptStatus",
     "Checkpoint",
+    "ChildRunProgress",
+    "ChildRunRecord",
     "DurableEffectCoordinator",
     "DurableEffectToken",
     "DurableExecutionOutcome",
@@ -64,6 +76,12 @@ __all__ = [
     "EffectStatus",
     "InvalidRunTransitionError",
     "InMemoryRunStore",
+    "ParentAggregationStatus",
+    "ParentCompletion",
+    "ParentCompletionClaim",
+    "ParentCompletionStatus",
+    "ParentRunPolicy",
+    "ParentRunRecord",
     "ReconciliationDecision",
     "ReconciliationRecord",
     "RetryPolicy",

@@ -15,6 +15,7 @@ from chulk.results import freeze_mapping, plain_data
 class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    WAITING_FOR_CHILDREN = "waiting_for_children"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     WAITING_FOR_RETRY = "waiting_for_retry"
     COMPLETED = "completed"

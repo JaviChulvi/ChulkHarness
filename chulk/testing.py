@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
@@ -38,11 +38,15 @@ from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
 from chulk.llm.base import LLMClient, LLMError, LLMStreamChunk
 from chulk.runs import (
     EffectStatus,
+    ParentCompletionStatus,
+    ParentRunPolicy,
     ReconciliationDecision,
+    RetryPolicy,
     RunStatus,
     RunSubmission,
     StepDefinition,
 )
+from chulk.usage import BudgetScope, RunBudget
 
 
 ScriptedResponse = str | Mapping[str, Any] | AgentAction
@@ -524,6 +528,643 @@ async def assert_async_durable_execution_contract(
     )
 
 
+def assert_parent_child_run_contract(
+    runs: Any,
+    *,
+    scope: ExecutionScope,
+) -> HostedContractReport:
+    """Exercise bounded fan-out, isolation, aggregation, and delivery recovery."""
+    policy = _contract_parent_policy(required_children=2, max_children=2)
+    parent = runs.submit_parent(
+        scope,
+        _contract_parent_submission(scope.run_id),
+        policy=policy,
+        actor="contract",
+    )
+    _require(
+        parent.run.status is RunStatus.WAITING_FOR_CHILDREN,
+        "parent run entered the worker queue",
+    )
+    child_scopes = (
+        scope.child(
+            run_id=f"{scope.run_id}-child-1",
+            agent_id="contract-child",
+            agent_version="published-1",
+            grants=frozenset(),
+        ),
+        scope.child(
+            run_id=f"{scope.run_id}-child-2",
+            agent_id="contract-child",
+            agent_version="published-2",
+            grants=frozenset(),
+        ),
+    )
+    children = tuple(
+        runs.submit_child(
+            scope,
+            child_scope,
+            _contract_child_submission(
+                f"{scope.run_id}-child-key-{index}",
+                model_calls=2,
+                tokens=200,
+            ),
+            definition_revision=f"published-{index}",
+            actor="contract",
+        )
+        for index, child_scope in enumerate(child_scopes, start=1)
+    )
+    duplicate = runs.submit_child(
+        scope,
+        child_scopes[0],
+        _contract_child_submission(
+            f"{scope.run_id}-child-key-1",
+            model_calls=2,
+            tokens=200,
+        ),
+        definition_revision="published-1",
+        actor="contract",
+    )
+    _require(
+        duplicate.run.id == children[0].run.id,
+        "duplicate child submission created another run",
+    )
+    _must_reject(
+        lambda: runs.get_child(child_scopes[0], children[1].run.id),
+        "child scope could inspect a sibling run",
+    )
+    _must_reject(
+        lambda: runs.submit_child(
+            scope,
+            scope.child(
+                run_id=f"{scope.run_id}-child-3",
+                agent_id="contract-child",
+                agent_version="published-3",
+                grants=frozenset(),
+            ),
+            _contract_child_submission(
+                f"{scope.run_id}-child-key-3",
+                model_calls=1,
+                tokens=100,
+            ),
+            definition_revision="published-3",
+            actor="contract",
+        ),
+        "parent accepted child work beyond its fan-out limit",
+    )
+    for index, (child_scope, child) in enumerate(
+        zip(child_scopes, children, strict=True),
+        start=1,
+    ):
+        claim = runs.claim(
+            child_scope,
+            worker_id=f"contract-child-worker-{index}",
+            run_id=child.run.id,
+        )
+        _require(claim is not None, "child run could not be claimed")
+        runs.start_step(child_scope, claim, "contract")
+        if index == 1:
+            paused = runs.pause_for_approval(
+                child_scope,
+                claim,
+                "contract",
+                approval_id="contract-child-approval",
+                payload={"child": index},
+            )
+            _require(
+                paused.status is RunStatus.WAITING_FOR_APPROVAL,
+                "child approval pause was not durable",
+            )
+            runs.resume(
+                child_scope,
+                child.run.id,
+                actor="contract-approver",
+                reason="contract child approved",
+            )
+            claim = runs.claim(
+                child_scope,
+                worker_id="contract-child-worker-1-resumed",
+                run_id=child.run.id,
+            )
+            _require(claim is not None, "approved child could not resume")
+            runs.start_step(child_scope, claim, "contract")
+        else:
+            retrying = runs.fail_step(
+                child_scope,
+                claim,
+                "contract",
+                reason="contract retry",
+                retryable=True,
+            )
+            _require(
+                retrying.status is RunStatus.WAITING_FOR_RETRY,
+                "retryable child failure did not pause durably",
+            )
+            runs.resume(
+                child_scope,
+                child.run.id,
+                actor="contract-recovery",
+                reason="contract retry is ready",
+            )
+            claim = runs.claim(
+                child_scope,
+                worker_id="contract-child-worker-2-retried",
+                run_id=child.run.id,
+            )
+            _require(claim is not None, "retryable child could not resume")
+            runs.start_step(child_scope, claim, "contract")
+        progress = runs.record_child_progress(
+            child_scope,
+            claim,
+            sequence=1,
+            payload={"completed": index, "total": 2},
+            idempotency_key=f"progress-{index}",
+        )
+        _require(
+            progress.sequence == 1,
+            "child progress was not committed in order",
+        )
+        runs.complete_step(
+            child_scope,
+            claim,
+            "contract",
+            result={"child": index},
+        )
+        runs.complete(
+            child_scope,
+            claim,
+            result={"child": index, "status": "completed"},
+        )
+    aggregated = runs.aggregate_children(
+        scope,
+        actor="contract",
+        idempotency_key="contract-aggregate",
+    )
+    repeated = runs.aggregate_children(
+        scope,
+        actor="contract",
+        idempotency_key="contract-aggregate",
+    )
+    _require(
+        aggregated.run.status is RunStatus.COMPLETED
+        and repeated.aggregation_revision == 1,
+        "parent aggregation was not idempotent",
+    )
+    _require(
+        all(child.terminal_evidence for child in aggregated.children),
+        "parent aggregation omitted terminal child evidence",
+    )
+    delivery_claim = runs.claim_parent_completion(
+        scope,
+        worker_id="contract-delivery-a",
+        parent_run_id=scope.run_id,
+    )
+    _require(delivery_claim is not None, "parent completion was not enqueued")
+    unknown = runs.mark_parent_completion_unknown(
+        scope,
+        delivery_claim,
+        reason="contract disconnected after delivery",
+    )
+    _require(
+        unknown.status is ParentCompletionStatus.UNKNOWN,
+        "ambiguous parent completion was not quarantined",
+    )
+    _require(
+        runs.claim_parent_completion(
+            scope,
+            worker_id="contract-delivery-b",
+            parent_run_id=scope.run_id,
+        )
+        is None,
+        "ambiguous parent completion was blindly replayed",
+    )
+    runs.reconcile_parent_completion(
+        scope,
+        scope.run_id,
+        delivered=False,
+        actor="contract-operator",
+        reason="contract target confirms no delivery",
+    )
+    retry_claim = runs.claim_parent_completion(
+        scope,
+        worker_id="contract-delivery-b",
+        parent_run_id=scope.run_id,
+    )
+    _require(retry_claim is not None, "reconciled parent completion was not retryable")
+    delivered = runs.complete_parent_completion(scope, retry_claim)
+    _require(
+        delivered.status is ParentCompletionStatus.DELIVERED,
+        "parent completion was not delivered",
+    )
+    _require(
+        runs.claim_parent_completion(
+            scope,
+            worker_id="contract-delivery-c",
+            parent_run_id=scope.run_id,
+        )
+        is None,
+        "delivered parent completion was emitted twice",
+    )
+
+    child_cancel_scope = replace(
+        scope,
+        run_id=f"{scope.run_id}-child-cancel-parent",
+    )
+    runs.submit_parent(
+        child_cancel_scope,
+        _contract_parent_submission(child_cancel_scope.run_id),
+        policy=_contract_parent_policy(required_children=1, max_children=1),
+        actor="contract",
+    )
+    cancelled_child_scope = child_cancel_scope.child(
+        run_id=f"{child_cancel_scope.run_id}-child",
+        agent_id="contract-child",
+        agent_version="published-cancelled",
+        grants=frozenset(),
+    )
+    cancelled_child = runs.submit_child(
+        child_cancel_scope,
+        cancelled_child_scope,
+        _contract_child_submission(
+            f"{child_cancel_scope.run_id}-child-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        definition_revision=cancelled_child_scope.agent_version,
+        actor="contract",
+    )
+    cancelled_child = runs.request_child_cancellation(
+        child_cancel_scope,
+        cancelled_child.run.id,
+        actor="contract",
+        reason="contract child cancelled",
+    )
+    _require(
+        cancelled_child.run.status is RunStatus.CANCELLED,
+        "queued child cancellation was not terminal",
+    )
+    failed_parent = runs.aggregate_children(
+        child_cancel_scope,
+        actor="contract",
+        idempotency_key="contract-child-cancel-aggregate",
+    )
+    _require(
+        failed_parent.run.status is RunStatus.FAILED,
+        "cancelled child did not propagate to the parent aggregate",
+    )
+
+    parent_cancel_scope = replace(
+        scope,
+        run_id=f"{scope.run_id}-parent-cancel",
+    )
+    runs.submit_parent(
+        parent_cancel_scope,
+        _contract_parent_submission(parent_cancel_scope.run_id),
+        policy=_contract_parent_policy(required_children=1, max_children=1),
+        actor="contract",
+    )
+    active_child_scope = parent_cancel_scope.child(
+        run_id=f"{parent_cancel_scope.run_id}-child",
+        agent_id="contract-child",
+        agent_version="published-active",
+        grants=frozenset(),
+    )
+    active_child = runs.submit_child(
+        parent_cancel_scope,
+        active_child_scope,
+        _contract_child_submission(
+            f"{parent_cancel_scope.run_id}-child-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        definition_revision=active_child_scope.agent_version,
+        actor="contract",
+    )
+    active_claim = runs.claim(
+        active_child_scope,
+        worker_id="contract-active-child",
+        run_id=active_child.run.id,
+    )
+    _require(active_claim is not None, "active cancellation child was not claimed")
+    runs.start_step(active_child_scope, active_claim, "contract")
+    cancelling_parent = runs.request_parent_cancellation(
+        parent_cancel_scope,
+        actor="contract",
+        reason="contract parent cancelled",
+    )
+    _require(
+        cancelling_parent.run.cancellation_requested
+        and cancelling_parent.children[0].run.cancellation_requested,
+        "parent cancellation did not propagate to its active child",
+    )
+    runs.cancel(
+        active_child_scope,
+        active_child.run.id,
+        actor="contract-active-child",
+        reason="contract parent cancellation observed",
+        claim=active_claim,
+    )
+    cancelled_parent = runs.aggregate_children(
+        parent_cancel_scope,
+        actor="contract",
+        idempotency_key="contract-parent-cancel-aggregate",
+    )
+    _require(
+        cancelled_parent.run.status is RunStatus.CANCELLED,
+        "settled parent cancellation did not terminalize the parent",
+    )
+    return HostedContractReport(
+        (
+            "bounded_fanout",
+            "child_scope_isolation",
+            "child_approval_resume",
+            "child_retry_resume",
+            "ordered_progress",
+            "terminal_evidence",
+            "idempotent_parent_aggregation",
+            "parent_delivery_reconciliation",
+            "exactly_once_parent_delivery",
+            "child_cancellation_propagation",
+            "parent_cancellation_propagation",
+        )
+    )
+
+
+async def assert_async_parent_child_run_contract(
+    runs: Any,
+    *,
+    scope: ExecutionScope,
+) -> HostedContractReport:
+    """Native async equivalent of :func:`assert_parent_child_run_contract`."""
+    policy = _contract_parent_policy(required_children=2, max_children=2)
+    parent = await runs.submit_parent(
+        scope,
+        _contract_parent_submission(scope.run_id),
+        policy=policy,
+        actor="contract",
+    )
+    _require(
+        parent.run.status is RunStatus.WAITING_FOR_CHILDREN,
+        "async parent run entered the worker queue",
+    )
+    child_scopes = (
+        scope.child(
+            run_id=f"{scope.run_id}-child-1",
+            agent_id="contract-child",
+            agent_version="published-1",
+            grants=frozenset(),
+        ),
+        scope.child(
+            run_id=f"{scope.run_id}-child-2",
+            agent_id="contract-child",
+            agent_version="published-2",
+            grants=frozenset(),
+        ),
+    )
+    children = []
+    for index, child_scope in enumerate(child_scopes, start=1):
+        children.append(
+            await runs.submit_child(
+                scope,
+                child_scope,
+                _contract_child_submission(
+                    f"{scope.run_id}-child-key-{index}",
+                    model_calls=2,
+                    tokens=200,
+                ),
+                definition_revision=f"published-{index}",
+                actor="contract",
+            )
+        )
+    await _must_reject_async(
+        lambda: runs.get_child(child_scopes[0], children[1].run.id),
+        "async child scope could inspect a sibling run",
+    )
+    for index, (child_scope, child) in enumerate(
+        zip(child_scopes, children, strict=True),
+        start=1,
+    ):
+        claim = await runs.claim(
+            child_scope,
+            worker_id=f"contract-child-worker-{index}",
+            run_id=child.run.id,
+        )
+        _require(claim is not None, "async child run could not be claimed")
+        await runs.start_step(child_scope, claim, "contract")
+        if index == 1:
+            paused = await runs.pause_for_approval(
+                child_scope,
+                claim,
+                "contract",
+                approval_id="contract-async-child-approval",
+                payload={"child": index},
+            )
+            _require(
+                paused.status is RunStatus.WAITING_FOR_APPROVAL,
+                "async child approval pause was not durable",
+            )
+            await runs.resume(
+                child_scope,
+                child.run.id,
+                actor="contract-approver",
+                reason="contract child approved",
+            )
+            claim = await runs.claim(
+                child_scope,
+                worker_id="contract-child-worker-1-resumed",
+                run_id=child.run.id,
+            )
+            _require(claim is not None, "async approved child could not resume")
+            await runs.start_step(child_scope, claim, "contract")
+        else:
+            retrying = await runs.fail_step(
+                child_scope,
+                claim,
+                "contract",
+                reason="contract retry",
+                retryable=True,
+            )
+            _require(
+                retrying.status is RunStatus.WAITING_FOR_RETRY,
+                "async retryable child failure did not pause durably",
+            )
+            await runs.resume(
+                child_scope,
+                child.run.id,
+                actor="contract-recovery",
+                reason="contract retry is ready",
+            )
+            claim = await runs.claim(
+                child_scope,
+                worker_id="contract-child-worker-2-retried",
+                run_id=child.run.id,
+            )
+            _require(claim is not None, "async retryable child could not resume")
+            await runs.start_step(child_scope, claim, "contract")
+        await runs.record_child_progress(
+            child_scope,
+            claim,
+            sequence=1,
+            payload={"completed": index, "total": 2},
+            idempotency_key=f"progress-{index}",
+        )
+        await runs.complete_step(
+            child_scope,
+            claim,
+            "contract",
+            result={"child": index},
+        )
+        await runs.complete(
+            child_scope,
+            claim,
+            result={"child": index, "status": "completed"},
+        )
+    aggregated = await runs.aggregate_children(
+        scope,
+        actor="contract",
+        idempotency_key="contract-aggregate",
+    )
+    _require(
+        aggregated.run.status is RunStatus.COMPLETED,
+        "async parent aggregation did not complete",
+    )
+    claim = await runs.claim_parent_completion(
+        scope,
+        worker_id="contract-delivery",
+        parent_run_id=scope.run_id,
+    )
+    _require(claim is not None, "async parent completion was not enqueued")
+    delivered = await runs.complete_parent_completion(scope, claim)
+    _require(
+        delivered.status is ParentCompletionStatus.DELIVERED,
+        "async parent completion was not delivered",
+    )
+
+    child_cancel_scope = replace(
+        scope,
+        run_id=f"{scope.run_id}-child-cancel-parent",
+    )
+    await runs.submit_parent(
+        child_cancel_scope,
+        _contract_parent_submission(child_cancel_scope.run_id),
+        policy=_contract_parent_policy(required_children=1, max_children=1),
+        actor="contract",
+    )
+    cancelled_child_scope = child_cancel_scope.child(
+        run_id=f"{child_cancel_scope.run_id}-child",
+        agent_id="contract-child",
+        agent_version="published-cancelled",
+        grants=frozenset(),
+    )
+    cancelled_child = await runs.submit_child(
+        child_cancel_scope,
+        cancelled_child_scope,
+        _contract_child_submission(
+            f"{child_cancel_scope.run_id}-child-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        definition_revision=cancelled_child_scope.agent_version,
+        actor="contract",
+    )
+    cancelled_child = await runs.request_child_cancellation(
+        child_cancel_scope,
+        cancelled_child.run.id,
+        actor="contract",
+        reason="contract child cancelled",
+    )
+    _require(
+        cancelled_child.run.status is RunStatus.CANCELLED,
+        "async queued child cancellation was not terminal",
+    )
+    failed_parent = await runs.aggregate_children(
+        child_cancel_scope,
+        actor="contract",
+        idempotency_key="contract-child-cancel-aggregate",
+    )
+    _require(
+        failed_parent.run.status is RunStatus.FAILED,
+        "async child cancellation did not propagate to the parent aggregate",
+    )
+
+    parent_cancel_scope = replace(
+        scope,
+        run_id=f"{scope.run_id}-parent-cancel",
+    )
+    await runs.submit_parent(
+        parent_cancel_scope,
+        _contract_parent_submission(parent_cancel_scope.run_id),
+        policy=_contract_parent_policy(required_children=1, max_children=1),
+        actor="contract",
+    )
+    active_child_scope = parent_cancel_scope.child(
+        run_id=f"{parent_cancel_scope.run_id}-child",
+        agent_id="contract-child",
+        agent_version="published-active",
+        grants=frozenset(),
+    )
+    active_child = await runs.submit_child(
+        parent_cancel_scope,
+        active_child_scope,
+        _contract_child_submission(
+            f"{parent_cancel_scope.run_id}-child-key",
+            model_calls=1,
+            tokens=100,
+        ),
+        definition_revision=active_child_scope.agent_version,
+        actor="contract",
+    )
+    active_claim = await runs.claim(
+        active_child_scope,
+        worker_id="contract-active-child",
+        run_id=active_child.run.id,
+    )
+    _require(
+        active_claim is not None,
+        "async active cancellation child was not claimed",
+    )
+    await runs.start_step(active_child_scope, active_claim, "contract")
+    cancelling_parent = await runs.request_parent_cancellation(
+        parent_cancel_scope,
+        actor="contract",
+        reason="contract parent cancelled",
+    )
+    _require(
+        cancelling_parent.run.cancellation_requested
+        and cancelling_parent.children[0].run.cancellation_requested,
+        "async parent cancellation did not propagate to its active child",
+    )
+    await runs.cancel(
+        active_child_scope,
+        active_child.run.id,
+        actor="contract-active-child",
+        reason="contract parent cancellation observed",
+        claim=active_claim,
+    )
+    cancelled_parent = await runs.aggregate_children(
+        parent_cancel_scope,
+        actor="contract",
+        idempotency_key="contract-parent-cancel-aggregate",
+    )
+    _require(
+        cancelled_parent.run.status is RunStatus.CANCELLED,
+        "async settled parent cancellation did not terminalize the parent",
+    )
+    return HostedContractReport(
+        (
+            "async_bounded_fanout",
+            "async_child_scope_isolation",
+            "async_child_approval_resume",
+            "async_child_retry_resume",
+            "async_ordered_progress",
+            "async_terminal_evidence",
+            "async_idempotent_parent_aggregation",
+            "async_exactly_once_parent_delivery",
+            "async_child_cancellation_propagation",
+            "async_parent_cancellation_propagation",
+        )
+    )
+
+
 def assert_gateway_store_contract(
     store: Any,
     *,
@@ -705,6 +1346,61 @@ def _contract_submission(
     )
 
 
+def _contract_parent_submission(run_id: str) -> RunSubmission:
+    return RunSubmission(
+        idempotency_key=f"{run_id}-parent-key",
+        input_digest=f"sha256:{run_id}-parent-input",
+        definition_digest=f"sha256:{run_id}-parent-definition",
+        steps=(StepDefinition(id="orchestrate", name="Aggregate children"),),
+    )
+
+
+def _contract_child_submission(
+    idempotency_key: str,
+    *,
+    model_calls: int,
+    tokens: int,
+) -> RunSubmission:
+    return RunSubmission(
+        idempotency_key=idempotency_key,
+        input_digest=f"sha256:{idempotency_key}-input",
+        definition_digest=f"sha256:{idempotency_key}-definition",
+        steps=(
+            StepDefinition(
+                id="contract",
+                name="Contract child step",
+                retry_policy=RetryPolicy(
+                    initial_delay_seconds=0,
+                    max_delay_seconds=0,
+                ),
+            ),
+        ),
+        budget=RunBudget(
+            scope=BudgetScope.CHILD_TASK,
+            max_model_calls=model_calls,
+            max_tool_calls=model_calls,
+            max_tokens=tokens,
+        ).to_dict(),
+    )
+
+
+def _contract_parent_policy(
+    *,
+    required_children: int,
+    max_children: int,
+) -> ParentRunPolicy:
+    return ParentRunPolicy(
+        required_children=required_children,
+        max_children=max_children,
+        budget=RunBudget(
+            scope=BudgetScope.CHILD_TASK,
+            max_model_calls=4,
+            max_tool_calls=4,
+            max_tokens=400,
+        ),
+    )
+
+
 def _contract_approval() -> ApprovalSubmission:
     return ApprovalSubmission(
         step_id="contract",
@@ -796,7 +1492,9 @@ __all__ = [
     "assert_async_durable_execution_contract",
     "assert_async_gateway_store_contract",
     "assert_async_hosted_services_contract",
+    "assert_async_parent_child_run_contract",
     "assert_durable_execution_contract",
     "assert_gateway_store_contract",
     "assert_hosted_services_contract",
+    "assert_parent_child_run_contract",
 ]

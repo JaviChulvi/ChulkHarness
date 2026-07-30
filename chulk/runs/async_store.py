@@ -20,6 +20,14 @@ from chulk.runs.models import (
     RunRecord,
     RunSubmission,
 )
+from chulk.runs.parent_child import (
+    ChildRunProgress,
+    ChildRunRecord,
+    ParentCompletion,
+    ParentCompletionClaim,
+    ParentRunPolicy,
+    ParentRunRecord,
+)
 from chulk.runs.protocols import RunStore
 from chulk.runs.store import SQLiteRunStore
 
@@ -42,6 +50,199 @@ class AsyncRunStoreAdapter:
         actor: str = "host",
     ) -> RunRecord:
         return await self.call("submit", scope, submission, actor=actor)
+
+    async def submit_parent(
+        self,
+        scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        policy: ParentRunPolicy,
+        actor: str = "host",
+    ) -> ParentRunRecord:
+        return await self.call(
+            "submit_parent",
+            scope,
+            submission,
+            policy=policy,
+            actor=actor,
+        )
+
+    async def submit_child(
+        self,
+        parent_scope: ExecutionScope,
+        child_scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        definition_revision: str,
+        actor: str = "host",
+    ) -> ChildRunRecord:
+        return await self.call(
+            "submit_child",
+            parent_scope,
+            child_scope,
+            submission,
+            definition_revision=definition_revision,
+            actor=actor,
+        )
+
+    async def get_parent(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentRunRecord:
+        return await self.call("get_parent", scope, parent_run_id)
+
+    async def children(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> tuple[ChildRunRecord, ...]:
+        return await self.call("children", scope, parent_run_id)
+
+    async def get_child(
+        self,
+        scope: ExecutionScope,
+        child_run_id: str,
+    ) -> ChildRunRecord:
+        return await self.call("get_child", scope, child_run_id)
+
+    async def record_child_progress(
+        self,
+        scope: ExecutionScope,
+        claim: RunClaim,
+        *,
+        sequence: int,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> ChildRunProgress:
+        return await self.call(
+            "record_child_progress",
+            scope,
+            claim,
+            sequence=sequence,
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+
+    async def request_child_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        child_run_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ChildRunRecord:
+        return await self.call(
+            "request_child_cancellation",
+            parent_scope,
+            child_run_id,
+            actor=actor,
+            reason=reason,
+        )
+
+    async def request_parent_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ParentRunRecord:
+        return await self.call(
+            "request_parent_cancellation",
+            parent_scope,
+            actor=actor,
+            reason=reason,
+        )
+
+    async def aggregate_children(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        idempotency_key: str,
+    ) -> ParentRunRecord:
+        return await self.call(
+            "aggregate_children",
+            parent_scope,
+            actor=actor,
+            idempotency_key=idempotency_key,
+        )
+
+    async def parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentCompletion | None:
+        return await self.call("parent_completion", scope, parent_run_id)
+
+    async def claim_parent_completion(
+        self,
+        scope: ExecutionScope,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+        parent_run_id: str | None = None,
+    ) -> ParentCompletionClaim | None:
+        return await self.call(
+            "claim_parent_completion",
+            scope,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            parent_run_id=parent_run_id,
+        )
+
+    async def complete_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+    ) -> ParentCompletion:
+        return await self.call("complete_parent_completion", scope, claim)
+
+    async def fail_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion:
+        return await self.call(
+            "fail_parent_completion",
+            scope,
+            claim,
+            reason=reason,
+        )
+
+    async def mark_parent_completion_unknown(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion:
+        return await self.call(
+            "mark_parent_completion_unknown",
+            scope,
+            claim,
+            reason=reason,
+        )
+
+    async def reconcile_parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+        *,
+        delivered: bool,
+        actor: str,
+        reason: str,
+    ) -> ParentCompletion:
+        return await self.call(
+            "reconcile_parent_completion",
+            scope,
+            parent_run_id,
+            delivered=delivered,
+            actor=actor,
+            reason=reason,
+        )
 
     async def get(
         self,

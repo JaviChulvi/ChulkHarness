@@ -1501,6 +1501,86 @@ def _migrate_to_durable_hosted_execution(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_durable_parent_child_runs(conn: sqlite3.Connection) -> None:
+    """Add scoped child lineage, progress, aggregation, and completion delivery."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS durable_run_parents (
+            parent_run_id TEXT PRIMARY KEY,
+            policy_json TEXT NOT NULL,
+            aggregation_status TEXT NOT NULL DEFAULT 'open',
+            aggregation_revision INTEGER NOT NULL DEFAULT 0,
+            aggregation_key TEXT,
+            aggregate_result_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (parent_run_id)
+                REFERENCES durable_runs(id) ON DELETE CASCADE,
+            CHECK (aggregation_status IN ('open', 'completed')),
+            CHECK (aggregation_revision >= 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_child_runs (
+            child_run_id TEXT PRIMARY KEY,
+            parent_run_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            definition_revision TEXT NOT NULL,
+            definition_digest TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            budget_json TEXT NOT NULL,
+            terminal_evidence_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (parent_run_id, ordinal),
+            UNIQUE (parent_run_id, idempotency_key),
+            FOREIGN KEY (parent_run_id)
+                REFERENCES durable_run_parents(parent_run_id) ON DELETE CASCADE,
+            FOREIGN KEY (child_run_id)
+                REFERENCES durable_runs(id) ON DELETE CASCADE,
+            CHECK (ordinal > 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_child_runs_parent
+        ON durable_child_runs(parent_run_id, ordinal);
+
+        CREATE TABLE IF NOT EXISTS durable_child_progress (
+            child_run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (child_run_id, sequence),
+            UNIQUE (child_run_id, idempotency_key),
+            FOREIGN KEY (child_run_id)
+                REFERENCES durable_child_runs(child_run_id) ON DELETE CASCADE,
+            CHECK (sequence > 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_parent_completion_outbox (
+            id TEXT PRIMARY KEY,
+            parent_run_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            payload_json TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            worker_id TEXT,
+            lease_token TEXT,
+            lease_until TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            delivered_at TEXT,
+            FOREIGN KEY (parent_run_id)
+                REFERENCES durable_run_parents(parent_run_id) ON DELETE CASCADE,
+            CHECK (status IN ('pending', 'claimed', 'delivered', 'unknown')),
+            CHECK (attempt_count >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_durable_parent_completion_claim
+        ON durable_parent_completion_outbox(status, created_at, id);
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -1562,6 +1642,11 @@ SQLITE_MIGRATIONS = (
         18,
         "durable-hosted-execution",
         _migrate_to_durable_hosted_execution,
+    ),
+    SQLiteMigration(
+        19,
+        "durable-parent-child-runs",
+        _migrate_to_durable_parent_child_runs,
     ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version

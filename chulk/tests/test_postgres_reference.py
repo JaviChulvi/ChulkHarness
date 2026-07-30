@@ -57,6 +57,7 @@ from chulk.postgres import (
 from chulk.runs import (
     EffectConflictError,
     InvalidRunTransitionError,
+    ParentRunPolicy,
     ReconciliationDecision,
     RunConflictError,
     RunNotFoundError,
@@ -71,9 +72,12 @@ from chulk.scheduling import (
 from chulk.testing import (
     assert_async_durable_execution_contract,
     assert_async_gateway_store_contract,
+    assert_async_parent_child_run_contract,
     assert_durable_execution_contract,
     assert_gateway_store_contract,
+    assert_parent_child_run_contract,
 )
+from chulk.usage import BudgetScope, RunBudget
 
 
 @dataclass
@@ -179,8 +183,8 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
                 "WHERE table_schema = current_schema()"
             )
         ).scalar_one()
-    assert revision == "0002"
-    assert table_count == 21
+    assert revision == "0003"
+    assert table_count == 25
 
 
 def test_upgrade_from_0001_preserves_idempotency_rows(
@@ -209,7 +213,7 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert revision == "0002"
+        assert revision == "0003"
     finally:
         engine.dispose()
         with admin.begin() as connection:
@@ -367,6 +371,10 @@ def test_sync_public_contracts_and_scope_isolation(
     scope = _scope()
 
     assert assert_durable_execution_contract(runs, approvals, scope=scope).passed
+    assert assert_parent_child_run_contract(
+        runs,
+        scope=_scope(run_id="parent-child-contract"),
+    ).passed
     assert assert_gateway_store_contract(
         gateway,
         target=_target(_scope(run_id="gateway-contract-run")),
@@ -397,6 +405,12 @@ async def test_native_async_public_contracts(
                 AsyncPostgreSQLRunStore(engine),
                 AsyncPostgreSQLApprovalStore(engine),
                 scope=_scope(),
+            )
+        ).passed
+        assert (
+            await assert_async_parent_child_run_contract(
+                AsyncPostgreSQLRunStore(engine),
+                scope=_scope(run_id="async-parent-child-contract"),
             )
         ).passed
         assert (
@@ -510,6 +524,79 @@ async def test_async_stores_retry_concurrent_idempotency_collisions(
         assert sum(result is not None for result in updated) == 1
     finally:
         await engine.dispose()
+
+
+def test_parent_child_fanout_is_serialized_across_postgres_workers(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    parent_scope = _scope(run_id="concurrent-parent-child")
+    stores[0].submit_parent(
+        parent_scope,
+        _submission(idempotency_key="concurrent-parent"),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=RunBudget(
+                scope=BudgetScope.CHILD_TASK,
+                max_model_calls=1,
+                max_tool_calls=1,
+                max_tokens=100,
+            ),
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id="concurrent-child",
+        agent_version="published-1",
+    )
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+    )
+    child_submission = RunSubmission(
+        idempotency_key="concurrent-child-key",
+        input_digest="sha256:concurrent-child-input",
+        definition_digest="sha256:concurrent-child-definition",
+        steps=(StepDefinition(id="agent", name="Agent turn"),),
+        budget=child_budget.to_dict(),
+    )
+    barrier = Barrier(2)
+
+    def submit(store: PostgreSQLRunStore) -> str:
+        barrier.wait()
+        return store.submit_child(
+            parent_scope,
+            child_scope,
+            child_submission,
+            definition_revision="published-1",
+        ).run.id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        children = tuple(pool.map(submit, stores))
+
+    assert children == (child_scope.run_id, child_scope.run_id)
+    assert len(stores[0].children(parent_scope, parent_scope.run_id)) == 1
+
+    with pytest.raises(InvalidRunTransitionError, match="fan-out"):
+        stores[1].submit_child(
+            parent_scope,
+            parent_scope.child(
+                run_id="competing-child",
+                agent_version="published-2",
+            ),
+            RunSubmission(
+                idempotency_key="competing-child-key",
+                input_digest="sha256:competing-child-input",
+                definition_digest="sha256:competing-child-definition",
+                steps=(StepDefinition(id="agent", name="Agent turn"),),
+                budget=child_budget.to_dict(),
+            ),
+            definition_revision="published-2",
+        )
 
 
 def test_concurrent_workers_claim_distinct_runs_and_schedules(

@@ -36,6 +36,9 @@ class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
     def _recovery_lock_clause(self) -> str:
         return "FOR UPDATE SKIP LOCKED"
 
+    def _parent_completion_claim_lock_clause(self) -> str:
+        return "FOR UPDATE OF outbox SKIP LOCKED"
+
     def submit(
         self,
         scope: ExecutionScope,
@@ -51,6 +54,22 @@ class PostgreSQLRunStore(PostgreSQLConnectionOwner, SQLiteRunStore):
             # A concurrent identical insert may win after our initial lookup.
             # Re-read through the owner's normal idempotency validation.
             return super().submit(scope, submission, actor=actor)
+
+    def submit_parent(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().submit_parent(*args, **kwargs)
+        except RunConflictError:
+            if self._connection_is_bound():
+                raise
+            return super().submit_parent(*args, **kwargs)
+
+    def submit_child(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().submit_child(*args, **kwargs)
+        except RunConflictError:
+            if self._connection_is_bound():
+                raise
+            return super().submit_child(*args, **kwargs)
 
 
 class PostgreSQLApprovalStore(PostgreSQLConnectionOwner, SQLiteApprovalStore):
@@ -253,7 +272,9 @@ class _AsyncPostgreSQLStore:
 class AsyncPostgreSQLRunStore(_AsyncPostgreSQLStore, AsyncRunStoreAdapter):
     """Native-async durable-run store using SQLAlchemy's async engine."""
 
-    _idempotent_retry_methods = frozenset({"submit"})
+    _idempotent_retry_methods = frozenset(
+        {"submit", "submit_child", "submit_parent"}
+    )
 
     def __init__(self, engine: AsyncEngine) -> None:
         store = PostgreSQLRunStore(engine.sync_engine)

@@ -24,8 +24,11 @@ not a durable production service implementation.
 
 The SQLite and async SQLite run/approval stores are **public-provisional**
 reference adapters. The store protocols, immutable records, transition enums,
-and durable execution/approval coordinators are public-stable. Other concrete
-SQLite implementations remain internal.
+parent/child policy and record contracts, and durable execution/approval
+coordinators are public-stable. New parent/child store methods are additive;
+hosts implementing `RunStore` or `AsyncRunStore` must provide them before
+advertising compatibility with this release. Other concrete SQLite
+implementations remain internal.
 
 Gateway and scheduling protocols, run-target records, and hosted
 definition/run submitters are public-stable. The SQLite gateway ledger remains

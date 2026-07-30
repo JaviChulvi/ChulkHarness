@@ -24,11 +24,13 @@ from chulk.runs.protocols import AsyncRunStore, RunStore
 _RUN_STATUS = {
     "run.queued": "queued",
     "run.started": "running",
+    "run.waiting_for_children": "waiting_for_children",
     "run.paused": "waiting_for_approval",
     "run.resumed": "queued",
     "run.retry_scheduled": "waiting_for_retry",
     "run.requeued": "queued",
     "run.steered": "unchanged",
+    "run.children_aggregated": "unchanged",
     "run.completed": "completed",
     "run.failed": "failed",
     "run.cancellation_requested": "running",

@@ -74,8 +74,10 @@ def test_testing_module_exports_only_documented_test_utilities() -> None:
         "assert_async_durable_execution_contract",
         "assert_async_gateway_store_contract",
         "assert_async_hosted_services_contract",
+        "assert_async_parent_child_run_contract",
         "assert_durable_execution_contract",
         "assert_gateway_store_contract",
         "assert_hosted_services_contract",
+        "assert_parent_child_run_contract",
     ]
     assert "ScriptedLLMClient" not in chulk.__all__

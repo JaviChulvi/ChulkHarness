@@ -92,9 +92,11 @@ def check_public_policy() -> None:
         "assert_async_durable_execution_contract",
         "assert_async_gateway_store_contract",
         "assert_async_hosted_services_contract",
+        "assert_async_parent_child_run_contract",
         "assert_durable_execution_contract",
         "assert_gateway_store_contract",
         "assert_hosted_services_contract",
+        "assert_parent_child_run_contract",
     ]
     _require(
         testing.__all__ == expected_testing_exports,

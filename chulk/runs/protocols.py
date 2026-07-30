@@ -18,6 +18,14 @@ from chulk.runs.models import (
     RunRecord,
     RunSubmission,
 )
+from chulk.runs.parent_child import (
+    ChildRunProgress,
+    ChildRunRecord,
+    ParentCompletion,
+    ParentCompletionClaim,
+    ParentRunPolicy,
+    ParentRunRecord,
+)
 
 
 @runtime_checkable
@@ -31,6 +39,125 @@ class RunStore(Protocol):
         *,
         actor: str = "host",
     ) -> RunRecord: ...
+
+    def submit_parent(
+        self,
+        scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        policy: ParentRunPolicy,
+        actor: str = "host",
+    ) -> ParentRunRecord: ...
+
+    def submit_child(
+        self,
+        parent_scope: ExecutionScope,
+        child_scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        definition_revision: str,
+        actor: str = "host",
+    ) -> ChildRunRecord: ...
+
+    def get_parent(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentRunRecord: ...
+
+    def children(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> tuple[ChildRunRecord, ...]: ...
+
+    def get_child(
+        self,
+        scope: ExecutionScope,
+        child_run_id: str,
+    ) -> ChildRunRecord: ...
+
+    def record_child_progress(
+        self,
+        scope: ExecutionScope,
+        claim: RunClaim,
+        *,
+        sequence: int,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> ChildRunProgress: ...
+
+    def request_child_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        child_run_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ChildRunRecord: ...
+
+    def request_parent_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ParentRunRecord: ...
+
+    def aggregate_children(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        idempotency_key: str,
+    ) -> ParentRunRecord: ...
+
+    def parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentCompletion | None: ...
+
+    def claim_parent_completion(
+        self,
+        scope: ExecutionScope,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+        parent_run_id: str | None = None,
+    ) -> ParentCompletionClaim | None: ...
+
+    def complete_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+    ) -> ParentCompletion: ...
+
+    def fail_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion: ...
+
+    def mark_parent_completion_unknown(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion: ...
+
+    def reconcile_parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+        *,
+        delivered: bool,
+        actor: str,
+        reason: str,
+    ) -> ParentCompletion: ...
 
     def get(self, scope: ExecutionScope, run_id: str) -> RunRecord: ...
 
@@ -290,6 +417,125 @@ class AsyncRunStore(Protocol):
         *,
         actor: str = "host",
     ) -> RunRecord: ...
+
+    async def submit_parent(
+        self,
+        scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        policy: ParentRunPolicy,
+        actor: str = "host",
+    ) -> ParentRunRecord: ...
+
+    async def submit_child(
+        self,
+        parent_scope: ExecutionScope,
+        child_scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        definition_revision: str,
+        actor: str = "host",
+    ) -> ChildRunRecord: ...
+
+    async def get_parent(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentRunRecord: ...
+
+    async def children(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> tuple[ChildRunRecord, ...]: ...
+
+    async def get_child(
+        self,
+        scope: ExecutionScope,
+        child_run_id: str,
+    ) -> ChildRunRecord: ...
+
+    async def record_child_progress(
+        self,
+        scope: ExecutionScope,
+        claim: RunClaim,
+        *,
+        sequence: int,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> ChildRunProgress: ...
+
+    async def request_child_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        child_run_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ChildRunRecord: ...
+
+    async def request_parent_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ParentRunRecord: ...
+
+    async def aggregate_children(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        idempotency_key: str,
+    ) -> ParentRunRecord: ...
+
+    async def parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentCompletion | None: ...
+
+    async def claim_parent_completion(
+        self,
+        scope: ExecutionScope,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+        parent_run_id: str | None = None,
+    ) -> ParentCompletionClaim | None: ...
+
+    async def complete_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+    ) -> ParentCompletion: ...
+
+    async def fail_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion: ...
+
+    async def mark_parent_completion_unknown(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion: ...
+
+    async def reconcile_parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+        *,
+        delivered: bool,
+        actor: str,
+        reason: str,
+    ) -> ParentCompletion: ...
 
     async def get(self, scope: ExecutionScope, run_id: str) -> RunRecord: ...
 
