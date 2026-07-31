@@ -13,7 +13,9 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-import chulk.runs.store as run_store_module
+import chulk.runs._store_clock as run_store_clock
+import chulk.runs._store_effects as run_store_effects_module
+import chulk.runs._store_parent_child as run_store_parent_child_module
 
 
 pytest.importorskip("sqlalchemy")
@@ -64,7 +66,9 @@ from chulk.runs import (
     RunConflictError,
     RunLeaseError,
     RunNotFoundError,
+    RunStore,
     RunSubmission,
+    SQLiteRunStore,
     StepDefinition,
 )
 from chulk.scheduling import (
@@ -88,6 +92,21 @@ class PostgreSQLTestDatabase:
     url: str
     connect_args: dict[str, str]
     engine: Any
+
+
+def test_postgres_run_store_preserves_the_shared_store_contract() -> None:
+    operations = {
+        name
+        for name, value in vars(RunStore).items()
+        if not name.startswith("_") and callable(value)
+    }
+
+    assert issubclass(PostgreSQLRunStore, SQLiteRunStore)
+    assert {
+        name
+        for name in operations
+        if not callable(getattr(PostgreSQLRunStore, name, None))
+    } == set()
 
 
 @pytest.fixture
@@ -675,7 +694,7 @@ def test_expired_postgres_child_fails_before_claim(
 ) -> None:
     store = PostgreSQLRunStore(postgres_database.engine)
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
-    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    monkeypatch.setattr(run_store_clock, "utc_now", lambda: observed[0])
     child_budget = RunBudget(
         scope=BudgetScope.CHILD_TASK,
         max_model_calls=1,
@@ -784,7 +803,7 @@ def test_parent_completion_transition_rejects_a_stale_postgres_cas(
     initial_reads = Barrier(2)
     failure_committed = Event()
     transition_kind = local()
-    original_completion_row = run_store_module._completion_row
+    original_completion_row = run_store_parent_child_module._completion_row
 
     def coordinated_completion_row(conn: Any, completion_id: str) -> Any:
         row = original_completion_row(conn, completion_id)
@@ -795,7 +814,7 @@ def test_parent_completion_transition_rejects_a_stale_postgres_cas(
         return row
 
     monkeypatch.setattr(
-        run_store_module,
+        run_store_parent_child_module,
         "_completion_row",
         coordinated_completion_row,
     )
@@ -834,7 +853,7 @@ def test_parent_completion_transition_rejects_a_stale_postgres_cas(
     assert all(event.name != "parent.completion_delivered" for event in events)
 
     monkeypatch.setattr(
-        run_store_module,
+        run_store_parent_child_module,
         "_completion_row",
         original_completion_row,
     )
@@ -855,7 +874,7 @@ def test_parent_completion_recovery_locks_parent_before_outbox(
     store = PostgreSQLRunStore(postgres_database.engine)
     parent_scope = _scope(run_id="completion-lock-order-parent")
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
-    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    monkeypatch.setattr(run_store_clock, "utc_now", lambda: observed[0])
     _enqueue_parent_completion(store, parent_scope)
     completion_claim = store.claim_parent_completion(
         parent_scope,
@@ -1868,7 +1887,7 @@ def test_concurrent_effect_reconciliation_has_one_winner(
     initial_lock_barrier = Barrier(2)
     initial_call_count = 0
     initial_call_lock = Lock()
-    original_run_row = run_store_module._run_row
+    original_run_row = run_store_effects_module._run_row
 
     def coordinated_run_row(conn: Any, run_id: str) -> Any:
         nonlocal initial_call_count
@@ -1879,7 +1898,11 @@ def test_concurrent_effect_reconciliation_has_one_winner(
             initial_lock_barrier.wait()
         return original_run_row(conn, run_id)
 
-    monkeypatch.setattr(run_store_module, "_run_row", coordinated_run_row)
+    monkeypatch.setattr(
+        run_store_effects_module,
+        "_run_row",
+        coordinated_run_row,
+    )
     decisions = (
         ReconciliationDecision.RETRY,
         ReconciliationDecision.FAILED,

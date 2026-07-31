@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-import chulk.runs.store as run_store_module
+import chulk.runs._store_clock as run_store_clock
 
 from chulk.events import RunLifecyclePayload
 from chulk.hosting import ExecutionScope
@@ -409,7 +409,7 @@ def test_child_expiring_after_allocation_fails_before_claim(
 ) -> None:
     store = SQLiteRunStore(tmp_path / "runs.sqlite")
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
-    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    monkeypatch.setattr(run_store_clock, "utc_now", lambda: observed[0])
     parent = _scope("claim-deadline-parent")
     _submit_parent(
         store,
@@ -452,7 +452,7 @@ def test_retry_waiting_child_expires_before_its_backoff(
 ) -> None:
     store = SQLiteRunStore(tmp_path / "runs.sqlite")
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
-    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    monkeypatch.setattr(run_store_clock, "utc_now", lambda: observed[0])
     deadline = observed[0] + timedelta(seconds=10)
     parent = _scope("retry-deadline-parent")
     _submit_parent(
@@ -515,7 +515,7 @@ def test_approval_waiting_child_expires_at_its_deadline(
 ) -> None:
     store = SQLiteRunStore(tmp_path / "runs.sqlite")
     observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
-    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    monkeypatch.setattr(run_store_clock, "utc_now", lambda: observed[0])
     deadline = observed[0] + timedelta(seconds=10)
     parent = _scope("approval-deadline-parent")
     _submit_parent(

@@ -14,12 +14,31 @@ from chulk.runs import (
     InMemoryRunStore,
     RunConflictError,
     RunLeaseError,
+    RunStore,
     RunStatus,
     RunSubmission,
     SQLiteRunStore,
     StepDefinition,
     StepStatus,
 )
+
+
+def test_run_store_implementations_preserve_the_protocol_surface() -> None:
+    operations = {
+        name
+        for name, value in vars(RunStore).items()
+        if not name.startswith("_") and callable(value)
+    }
+
+    assert operations
+    for store_type in (SQLiteRunStore, InMemoryRunStore):
+        assert {
+            name
+            for name in operations
+            if not callable(getattr(store_type, name, None))
+        } == set()
+    assert issubclass(InMemoryRunStore, SQLiteRunStore)
+    assert SQLiteRunStore.__module__ == "chulk.runs.store"
 
 
 def _scope(
