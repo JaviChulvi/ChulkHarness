@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import inspect
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -58,6 +61,7 @@ from chulk.skills.registry import (
 from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing.artifacts import ArtifactRead, ArtifactRecord
 from chulk.usage import (
+    MAX_EXPORT_ENTRIES,
     BudgetReservation,
     ExactCost,
     ReservationState,
@@ -98,6 +102,42 @@ def _usage_group_key(
         UsageGroupBy.CHILD_TASK: "child_task_id",
     }[group_by]
     return getattr(entry.dimensions, field_name) or "unassigned"
+
+
+def _encode_usage_cursor(occurred_at: datetime, entry_id: str) -> str:
+    payload = json.dumps(
+        {
+            "occurred_at": occurred_at.isoformat(),
+            "id": entry_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_usage_cursor(value: str) -> tuple[datetime, str]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode((value + padding).encode()).decode()
+        )
+        occurred_at = datetime.fromisoformat(str(payload["occurred_at"]))
+        entry_id = str(payload["id"])
+        if occurred_at.tzinfo is None:
+            raise ValueError("usage cursor timestamp must be timezone-aware")
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("invalid usage cursor") from exc
+    if not entry_id:
+        raise ValueError("invalid usage cursor")
+    return occurred_at.astimezone(timezone.utc), entry_id
 
 
 class _AsyncServiceAdapter:
@@ -1450,38 +1490,77 @@ class InMemoryUsageService:
         limit: int = 100,
         cursor: str | None = None,
     ) -> UsagePage:
-        del cursor
-        entries = [
-            entry
-            for entry in self._entries
-            if (start is None or entry.occurred_at >= start)
-            and (end is None or entry.occurred_at < end)
-            and (
-                resource_kind is None
-                or entry.resource_kind is ResourceKind(resource_kind)
+        for name, boundary in (("start", start), ("end", end)):
+            if boundary is not None and boundary.tzinfo is None:
+                raise ValueError(
+                    f"usage query {name} must be timezone-aware"
+                )
+        if start is not None and end is not None and start >= end:
+            raise ValueError(
+                "usage query start must be earlier than end"
             )
-            and (
-                channel is None
-                or entry.dimensions.channel == channel
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("usage query limit must be an integer")
+        if limit < 1 or limit > MAX_EXPORT_ENTRIES:
+            raise ValueError(
+                "usage query limit must be between 1 and 10000"
             )
-            and (
-                conversation_id is None
-                or entry.dimensions.conversation_id == conversation_id
+        cursor_key = (
+            _decode_usage_cursor(cursor)
+            if cursor is not None
+            else None
+        )
+        entries = sorted(
+            (
+                entry
+                for entry in self._entries
+                if (start is None or entry.occurred_at >= start)
+                and (end is None or entry.occurred_at < end)
+                and (
+                    resource_kind is None
+                    or entry.resource_kind is ResourceKind(resource_kind)
+                )
+                and (
+                    channel is None
+                    or entry.dimensions.channel == channel
+                )
+                and (
+                    conversation_id is None
+                    or entry.dimensions.conversation_id == conversation_id
+                )
+                and (
+                    goal_id is None
+                    or entry.dimensions.goal_id == goal_id
+                )
+                and (
+                    job_id is None
+                    or entry.dimensions.job_id == job_id
+                )
+                and (
+                    child_task_id is None
+                    or entry.dimensions.child_task_id == child_task_id
+                )
+                and (
+                    cursor_key is None
+                    or (entry.occurred_at, entry.id) > cursor_key
+                )
+            ),
+            key=lambda entry: (entry.occurred_at, entry.id),
+        )
+        has_more = len(entries) > limit
+        page_entries = tuple(entries[:limit])
+        next_cursor = (
+            _encode_usage_cursor(
+                page_entries[-1].occurred_at,
+                page_entries[-1].id,
             )
-            and (
-                goal_id is None
-                or entry.dimensions.goal_id == goal_id
-            )
-            and (
-                job_id is None
-                or entry.dimensions.job_id == job_id
-            )
-            and (
-                child_task_id is None
-                or entry.dimensions.child_task_id == child_task_id
-            )
-        ]
-        return UsagePage(entries=tuple(entries[:limit]))
+            if has_more and page_entries
+            else None
+        )
+        return UsagePage(
+            entries=page_entries,
+            next_cursor=next_cursor,
+        )
 
     def group(
         self,
@@ -1489,32 +1568,60 @@ class InMemoryUsageService:
         **kwargs: Any,
     ) -> tuple[UsageAggregate, ...]:
         group_by = UsageGroupBy(group_by)
-        entries = self.query(**kwargs).entries
+        query_kwargs = dict(kwargs)
+        query_kwargs.setdefault("limit", MAX_EXPORT_ENTRIES)
+        page = self.query(**query_kwargs)
+        if page.next_cursor is not None:
+            raise ValueError(
+                "usage aggregation exceeds the bounded query limit; "
+                "narrow the range"
+            )
+        entries = page.entries
         grouped: dict[str, list[UsageEntry]] = {}
         for entry in entries:
             key = _usage_group_key(entry, group_by)
             grouped.setdefault(key, []).append(entry)
         aggregates = []
         for key, records in sorted(grouped.items()):
-            known_costs = [
-                record.cost.amount
-                for record in records
-                if record.cost.pricing_known
-                and record.cost.amount is not None
-            ]
+            currencies = {record.cost.currency for record in records}
+            known_cost = sum(
+                (
+                    record.cost.amount
+                    for record in records
+                    if record.cost.amount is not None
+                ),
+                start=Decimal(0),
+            )
             unknown_cost_entries = sum(
-                not record.cost.pricing_known for record in records
+                not record.cost.pricing_known
+                or record.cost.amount is None
+                for record in records
+            )
+            currency = (
+                next(iter(currencies))
+                if len(currencies) == 1
+                else "MIXED"
             )
             aggregates.append(
                 UsageAggregate(
                     key=key,
                     entry_count=len(records),
                     model_calls=sum(
-                        record.resource_kind is ResourceKind.MODEL
+                        int(
+                            record.units.get(
+                                "model_calls",
+                                Decimal(0),
+                            )
+                        )
                         for record in records
                     ),
                     tool_calls=sum(
-                        record.resource_kind is ResourceKind.TOOL
+                        int(
+                            record.units.get(
+                                "tool_calls",
+                                Decimal(0),
+                            )
+                        )
                         for record in records
                     ),
                     total_tokens=int(
@@ -1527,12 +1634,20 @@ class InMemoryUsageService:
                         )
                     ),
                     cost=ExactCost(
-                        (
-                            sum(known_costs, Decimal("0"))
-                            if not unknown_cost_entries
-                            else None
+                        known_cost if len(currencies) == 1 else None,
+                        currency=currency,
+                        pricing_known=(
+                            unknown_cost_entries == 0
+                            and len(currencies) == 1
                         ),
-                        pricing_known=not unknown_cost_entries,
+                        estimated=any(
+                            record.cost.estimated
+                            for record in records
+                        ),
+                        reported=all(
+                            record.cost.reported
+                            for record in records
+                        ),
                     ),
                     unknown_cost_entries=unknown_cost_entries,
                 )

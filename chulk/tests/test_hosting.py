@@ -740,6 +740,49 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
     assert services.content.sweep_expired() == 0
 
 
+def test_in_memory_reference_usage_is_paginated_and_fully_aggregated() -> None:
+    usage = InMemoryServiceHub().services().resolve(_scope()).usage
+    for index in range(105):
+        usage.reserve_tool_call(
+            turn_id="turn-1",
+            tool_call_index=index,
+        )
+        usage.commit_tool_call(
+            turn_id="turn-1",
+            tool_call_index=index,
+            tool_name="lookup",
+            attempt=1,
+            success=True,
+            failure_kind=None,
+        )
+
+    first = usage.query(limit=50)
+    second = usage.query(limit=50, cursor=first.next_cursor)
+    third = usage.query(limit=50, cursor=second.next_cursor)
+
+    assert len(first.entries) == 50
+    assert first.next_cursor is not None
+    assert len(second.entries) == 50
+    assert second.next_cursor is not None
+    assert len(third.entries) == 5
+    assert third.next_cursor is None
+    assert len(
+        {
+            entry.id
+            for page in (first, second, third)
+            for entry in page.entries
+        }
+    ) == 105
+    aggregate = usage.group(UsageGroupBy.RESOURCE_KIND)
+    assert len(aggregate) == 1
+    assert aggregate[0].entry_count == 105
+    assert aggregate[0].tool_calls == 105
+    with pytest.raises(ValueError, match="bounded query limit"):
+        usage.group(UsageGroupBy.RESOURCE_KIND, limit=100)
+    with pytest.raises(ValueError, match="invalid usage cursor"):
+        usage.query(cursor="not-a-cursor")
+
+
 def test_hosted_resume_rejects_persisted_scope_mismatch(
     tmp_path: Path,
 ) -> None:
