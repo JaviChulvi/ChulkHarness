@@ -5,7 +5,7 @@ from __future__ import annotations
 from inspect import signature
 
 import chulk.scheduling as scheduling
-from chulk.postgres import PostgreSQLScheduleStore
+import pytest
 from chulk.scheduling.store import (
     AutomationConflictError,
     AutomationNotFoundError,
@@ -87,6 +87,12 @@ def test_schedule_store_keeps_public_methods_and_direct_backend_hooks() -> None:
 
 
 def test_postgres_schedule_store_still_subclasses_and_overrides_backend_hooks() -> None:
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("psycopg")
+    pytest.importorskip("alembic")
+
+    from chulk.postgres import PostgreSQLScheduleStore
+
     assert issubclass(PostgreSQLScheduleStore, SQLiteScheduleStore)
     assert {
         "_claim_candidate_limit",
