@@ -37,8 +37,10 @@ from chulk.hosting.sinks import (
 )
 from chulk.llm import LLMCost, LLMUsage
 from chulk.media import MediaProcessorRegistry
+from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.memory.markdown import parse_markdown_memory_line
 from chulk.memory.models import MemoryProposalRecord, MemoryRecord
+from chulk.memory.retrieval import resolve_profile_conflicts
 from chulk.memory.security import ensure_memory_payload_safe
 from chulk.plugins import PluginAuditReport
 from chulk.redaction import redact_text
@@ -454,7 +456,13 @@ class InMemoryMemoryService:
         self._proposals: dict[str, MemoryProposalRecord] = {}
 
     def profile_memories(self, limit: int = 50) -> list[Any]:
-        return list(self._records.values())[:limit]
+        eligible = [
+            record
+            for record in self._records.values()
+            if record.archived_at is None
+            and set(record.tags) & PROFILE_MEMORY_TAGS
+        ]
+        return resolve_profile_conflicts(eligible)[:limit]
 
     def search_memory(
         self,

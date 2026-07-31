@@ -1459,6 +1459,90 @@ async def test_async_hosted_tool_refs_await_native_services(
 
 
 @pytest.mark.asyncio
+async def test_async_hosted_artifact_tool_accepts_mapping_results(
+    tmp_path: Path,
+) -> None:
+    class MappingArtifacts:
+        async def read(self, artifact_id: str, **_kwargs):
+            return {
+                "artifact_id": artifact_id,
+                "content": "mapping artifact evidence",
+                "byte_count": 25,
+                "total_byte_count": 25,
+                "truncated": False,
+            }
+
+    hub = InMemoryServiceHub()
+    services = hub.async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["artifacts"] = AsyncServiceBinding.host(MappingArtifacts())
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[read_trace_artifact_ref],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+    artifact_id = f"art_{'a' * 32}"
+
+    result = await agent.tool_registry.run_async(
+        "read_trace_artifact",
+        {"artifact_id": artifact_id},
+    )
+
+    assert result.success
+    assert result.value["content"] == "mapping artifact evidence"
+    assert result.metadata == {
+        "artifact_id": artifact_id,
+        "byte_count": 25,
+        "total_byte_count": 25,
+        "truncated": False,
+    }
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_reference_profile_memories_exclude_archived_and_general_records(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM([_final("done")])
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    memory = agent._resolved_async_services().memory
+    await memory.save_memory(
+        "active preference marker",
+        tags=["preference"],
+    )
+    archived_id = await memory.save_memory(
+        "archived workflow marker",
+        tags=["workflow"],
+    )
+    await memory.archive_memory(archived_id)
+    await memory.save_memory(
+        "project-only marker",
+        tags=["project"],
+    )
+
+    assert await agent.run("load profile") == "done"
+
+    requests = json.dumps(llm.requests)
+    assert "active preference marker" in requests
+    assert "archived workflow marker" not in requests
+    assert "project-only marker" not in requests
+    await agent.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata",
     [

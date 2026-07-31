@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 import json
 from typing import Any
@@ -95,16 +96,22 @@ def read_trace_artifact(
 
 
 def _artifact_read_result(result: Any) -> ToolResult:
-    payload = result.to_dict()
+    if isinstance(result, Mapping):
+        payload = dict(result)
+    else:
+        to_dict = getattr(result, "to_dict", None)
+        if not callable(to_dict):
+            raise TypeError("artifact store returned an unsupported read")
+        payload = dict(to_dict())
     return ToolResult(
         "read_trace_artifact",
         True,
         json.dumps(payload, ensure_ascii=False, sort_keys=True),
         metadata={
-            "artifact_id": result.artifact_id,
-            "byte_count": result.byte_count,
-            "total_byte_count": result.total_byte_count,
-            "truncated": result.truncated,
+            "artifact_id": payload.get("artifact_id"),
+            "byte_count": payload.get("byte_count"),
+            "total_byte_count": payload.get("total_byte_count"),
+            "truncated": payload.get("truncated"),
         },
         value=payload,
     )
