@@ -979,6 +979,7 @@ async def create_async_hosted_agent(
             shell_execution_policy=None,
             require_shell_containment=False,
             artifact_store=cast(TraceArtifactStore, resolved.artifacts),
+            async_services=True,
         )
         available_tool_names = {
             tool.name for tool in tool_registry.list_tools()
@@ -1664,6 +1665,7 @@ def _create_tool_registry(
     shell_execution_policy: ShellExecutionPolicy | None,
     require_shell_containment: bool,
     artifact_store: TraceArtifactStore,
+    async_services: bool = False,
 ) -> tuple[ToolRegistry, list[str]]:
     if tool_specs is None:
         registry = create_default_tool_registry(
@@ -1699,7 +1701,11 @@ def _create_tool_registry(
     )
     registry = ToolRegistry()
     for spec in tool_specs:
-        tool = _resolve_tool_spec(spec, context)
+        tool = _resolve_tool_spec(
+            spec,
+            context,
+            async_services=async_services,
+        )
         registry.register(tool)
     return _register_mcp_bridge_tools(
         config,
@@ -1825,9 +1831,16 @@ def _skill_capability_names(capabilities: Capabilities) -> set[str]:
     return names
 
 
-def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
+def _resolve_tool_spec(
+    spec: object,
+    context: RuntimeToolContext,
+    *,
+    async_services: bool = False,
+) -> Tool:
     if isinstance(spec, Tool):
         return spec
+    if async_services and hasattr(spec, "to_async_tool"):
+        return spec.to_async_tool(context)  # type: ignore[no-any-return, attr-defined]
     if hasattr(spec, "to_tool"):
         return spec.to_tool(context)  # type: ignore[no-any-return, attr-defined]
     raise TypeError(f"Unsupported tool spec: {spec!r}")

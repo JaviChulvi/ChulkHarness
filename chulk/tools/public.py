@@ -11,13 +11,27 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints, overload
 
 from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
-from chulk.tools.artifacts import read_trace_artifact_tool
+from chulk.tools.artifacts import (
+    async_read_trace_artifact_tool,
+    read_trace_artifact_tool,
+)
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.policy import ToolIdentity, ToolPolicy
 from chulk.tools.calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.processes import process_tools
 from chulk.tools.memory import (
+    async_archive_memory_tool,
+    async_compact_memories_tool,
+    async_delete_memory_tool,
+    async_export_memories_tool,
+    async_import_memories_tool,
+    async_list_memories_tool,
+    async_restore_memory_tool,
+    async_save_memory_tool,
+    async_search_memory_tool,
+    async_summarize_memories_tool,
+    async_update_memory_tool,
     archive_memory_tool,
     compact_memories_tool,
     delete_memory_tool,
@@ -31,7 +45,12 @@ from chulk.tools.memory import (
     update_memory_tool,
 )
 from chulk.tools.registry import Tool, ToolExecutionContext, ToolResult
-from chulk.tools.sessions import session_read_tool, session_search_tool
+from chulk.tools.sessions import (
+    async_session_read_tool,
+    async_session_search_tool,
+    session_read_tool,
+    session_search_tool,
+)
 from chulk.tools.shell import shell_tool
 
 
@@ -44,9 +63,14 @@ class ToolRef:
 
     name: str
     factory: Callable[[Any], Tool]
+    async_factory: Callable[[Any], Tool] | None = None
 
     def to_tool(self, context: Any) -> Tool:
         return self.factory(context)
+
+    def to_async_tool(self, context: Any) -> Tool:
+        factory = self.async_factory or self.factory
+        return factory(context)
 
 
 @overload
@@ -296,34 +320,121 @@ read_trace_artifact = ToolRef(
     _artifact_tool(
         lambda context: read_trace_artifact_tool(context.artifact_store)
     ),
+    _artifact_tool(
+        lambda context: async_read_trace_artifact_tool(
+            context.artifact_store
+        )
+    ),
 )
-save_memory = ToolRef("save_memory", _memory_tool(lambda context: save_memory_tool(context.memory_store)))
-search_memory = ToolRef("search_memory", _memory_tool(lambda context: search_memory_tool(context.memory_store)))
-list_memories = ToolRef("list_memories", _memory_tool(lambda context: list_memories_tool(context.memory_store)))
-delete_memory = ToolRef("delete_memory", _memory_tool(lambda context: delete_memory_tool(context.memory_store)))
-update_memory = ToolRef("update_memory", _memory_tool(lambda context: update_memory_tool(context.memory_store)))
-summarize_memories = ToolRef("summarize_memories", _memory_tool(lambda context: summarize_memories_tool(context.memory_store)))
-archive_memory = ToolRef("archive_memory", _memory_tool(lambda context: archive_memory_tool(context.memory_store)))
-restore_memory = ToolRef("restore_memory", _memory_tool(lambda context: restore_memory_tool(context.memory_store)))
-compact_memories = ToolRef("compact_memories", _memory_tool(lambda context: compact_memories_tool(context.memory_store)))
+save_memory = ToolRef(
+    "save_memory",
+    _memory_tool(lambda context: save_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_save_memory_tool(context.memory_store)
+    ),
+)
+search_memory = ToolRef(
+    "search_memory",
+    _memory_tool(lambda context: search_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_search_memory_tool(context.memory_store)
+    ),
+)
+list_memories = ToolRef(
+    "list_memories",
+    _memory_tool(lambda context: list_memories_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_list_memories_tool(context.memory_store)
+    ),
+)
+delete_memory = ToolRef(
+    "delete_memory",
+    _memory_tool(lambda context: delete_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_delete_memory_tool(context.memory_store)
+    ),
+)
+update_memory = ToolRef(
+    "update_memory",
+    _memory_tool(lambda context: update_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_update_memory_tool(context.memory_store)
+    ),
+)
+summarize_memories = ToolRef(
+    "summarize_memories",
+    _memory_tool(
+        lambda context: summarize_memories_tool(context.memory_store)
+    ),
+    _memory_tool(
+        lambda context: async_summarize_memories_tool(
+            context.memory_store
+        )
+    ),
+)
+archive_memory = ToolRef(
+    "archive_memory",
+    _memory_tool(lambda context: archive_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_archive_memory_tool(context.memory_store)
+    ),
+)
+restore_memory = ToolRef(
+    "restore_memory",
+    _memory_tool(lambda context: restore_memory_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_restore_memory_tool(context.memory_store)
+    ),
+)
+compact_memories = ToolRef(
+    "compact_memories",
+    _memory_tool(lambda context: compact_memories_tool(context.memory_store)),
+    _memory_tool(
+        lambda context: async_compact_memories_tool(
+            context.memory_store
+        )
+    ),
+)
 import_memories = ToolRef(
     "import_memories",
     _memory_tool(lambda context: import_memories_tool(context.memory_store, context.project_root)),
+    _memory_tool(
+        lambda context: async_import_memories_tool(
+            context.memory_store,
+            context.project_root,
+        )
+    ),
 )
 export_memories = ToolRef(
     "export_memories",
     _memory_tool(lambda context: export_memories_tool(context.memory_store, context.project_root)),
+    _memory_tool(
+        lambda context: async_export_memories_tool(
+            context.memory_store,
+            context.project_root,
+        )
+    ),
 )
 session_search = ToolRef(
     "session_search",
     _session_tool(
         lambda context: session_search_tool(context.session_search_service)
     ),
+    _session_tool(
+        lambda context: async_session_search_tool(
+            context.session_search_service
+        )
+    ),
 )
 session_read = ToolRef(
     "session_read",
     _session_tool(
         lambda context: session_read_tool(context.session_search_service)
+    ),
+    _session_tool(
+        lambda context: async_session_read_tool(
+            context.session_search_service
+        )
     ),
 )
 

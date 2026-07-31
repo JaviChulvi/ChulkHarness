@@ -91,6 +91,13 @@ resources remain supported and are isolated in worker threads. Direct
 `AsyncHostedRuntime(...)` construction remains available only when every
 binding is synchronous.
 
+The async boundary also owns the SDK's service-backed management operations:
+memory and learning proposals, governed skills, plugin lifecycle actions,
+session and artifact reads, and usage queries/grouping all await their hosted
+services. Built-in memory, session, and artifact `ToolRef` values bind
+async-aware tool callables, so their persistence calls remain on the caller
+event loop instead of entering a synchronous tool implementation.
+
 ```python
 runtime = await AsyncHostedRuntime.create(
     config=config,
@@ -120,6 +127,11 @@ context manager). Close drains remaining journals, closes turn-scoped
 execution sessions, and finalizes runtime-owned resources once in reverse
 resolution order. Host-owned resources remain the application's
 responsibility.
+
+An execution session is registered for cleanup immediately after
+`open_session_async(...)` returns. Failures or cancellation during subsequent
+memory, skill, trace, or prompt preparation therefore close the opened session
+before the exception crosses the SDK boundary.
 
 The protocols exported from `chulk.hosting` do not expose SQLite paths or
 filesystem implementation types. The in-memory objects under

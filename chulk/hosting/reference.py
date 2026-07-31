@@ -39,7 +39,10 @@ from chulk.sessions import (
     ConversationRecord,
     ConversationSummaryRecord,
     MessageRecord,
+    SessionHit,
+    SessionMessage,
     SessionSearchPage,
+    SessionWindow,
 )
 from chulk.sessions.sqlite_store import _turn_from_dict
 from chulk.skills.registry import (
@@ -56,8 +59,11 @@ from chulk.usage import (
     ReservationState,
     ResourceKind,
     RunBudget,
+    UsageAggregate,
     UsageDimensions,
     UsageEntry,
+    UsageGroupBy,
+    UsagePage,
 )
 
 
@@ -67,6 +73,27 @@ def _now() -> datetime:
 
 def _now_text() -> str:
     return _now().isoformat()
+
+
+def _usage_group_key(
+    entry: UsageEntry,
+    group_by: UsageGroupBy,
+) -> str:
+    if group_by is UsageGroupBy.RESOURCE_KIND:
+        return entry.resource_kind.value
+    if group_by is UsageGroupBy.MODEL:
+        return entry.model or "unknown"
+    if group_by is UsageGroupBy.TOOL_SERVICE:
+        return entry.tool_or_service or entry.purpose
+    field_name = {
+        UsageGroupBy.PROFILE: "profile_id",
+        UsageGroupBy.CHANNEL: "channel",
+        UsageGroupBy.CONVERSATION: "conversation_id",
+        UsageGroupBy.GOAL: "goal_id",
+        UsageGroupBy.JOB: "job_id",
+        UsageGroupBy.CHILD_TASK: "child_task_id",
+    }[group_by]
+    return getattr(entry.dimensions, field_name) or "unassigned"
 
 
 class _AsyncServiceAdapter:
@@ -367,13 +394,115 @@ class InMemoryMemoryService:
     def profile_memories(self, limit: int = 50) -> list[Any]:
         return list(self._records.values())[:limit]
 
-    def search_memory(self, query: str, limit: int = 5) -> list[Any]:
+    def search_memory(
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        include_archived: bool = False,
+    ) -> list[Any]:
         terms = query.casefold().split()
         return [
             record
             for record in self._records.values()
-            if any(term in record.content.casefold() for term in terms)
+            if (include_archived or record.archived_at is None)
+            and any(term in record.content.casefold() for term in terms)
         ][:limit]
+
+    def list_memories(
+        self,
+        limit: int = 50,
+        *,
+        include_archived: bool = False,
+    ) -> list[MemoryRecord]:
+        return [
+            record
+            for record in self._records.values()
+            if include_archived or record.archived_at is None
+        ][:limit]
+
+    def delete_memory(self, memory_id: str) -> bool:
+        return self._records.pop(memory_id, None) is not None
+
+    def update_memory(
+        self,
+        memory_id: str,
+        **updates: Any,
+    ) -> bool:
+        record = self._records.get(memory_id)
+        if record is None:
+            return False
+        values = {
+            key: value
+            for key, value in updates.items()
+            if value is not None
+        }
+        values["updated_at"] = _now_text()
+        self._records[memory_id] = replace(record, **values)
+        return True
+
+    def summarize_memories(
+        self,
+        query: str | None = None,
+        limit: int = 10,
+    ) -> str:
+        records = (
+            self.search_memory(query, limit=limit)
+            if query
+            else self.list_memories(limit=limit)
+        )
+        if not records:
+            return "No memories found."
+        return "\n".join(f"- {record.content}" for record in records)
+
+    def archive_memory(self, memory_id: str) -> bool:
+        record = self._records.get(memory_id)
+        if record is None or record.archived_at is not None:
+            return False
+        self._records[memory_id] = replace(
+            record,
+            archived_at=_now_text(),
+            updated_at=_now_text(),
+        )
+        return True
+
+    def restore_memory(self, memory_id: str) -> bool:
+        record = self._records.get(memory_id)
+        if record is None or record.archived_at is None:
+            return False
+        self._records[memory_id] = replace(
+            record,
+            archived_at=None,
+            updated_at=_now_text(),
+        )
+        return True
+
+    def compact_memories(self) -> int:
+        return 0
+
+    def import_markdown(self, path: Any) -> list[str]:
+        memory_ids = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            content = line.strip().removeprefix("-").strip()
+            if content:
+                memory_ids.append(self.save_memory(content))
+        return memory_ids
+
+    def export_markdown(
+        self,
+        path: Any,
+        *,
+        include_archived: bool = False,
+    ) -> int:
+        records = self.list_memories(
+            limit=max(len(self._records), 1),
+            include_archived=include_archived,
+        )
+        path.write_text(
+            "".join(f"- {record.content}\n" for record in records),
+            encoding="utf-8",
+        )
+        return len(records)
 
     def get_memory(
         self,
@@ -788,7 +917,61 @@ class InMemorySessionSearch:
         limit: int = 10,
         cursor: str | None = None,
     ) -> SessionSearchPage:
-        return SessionSearchPage(query=query, hits=())
+        del cursor
+        normalized = query.casefold()
+        hits = []
+        for conversation_id, records in self.store._messages.items():
+            for record in records:
+                if normalized not in record.content.casefold():
+                    continue
+                hits.append(
+                    SessionHit(
+                        message_id=record.id,
+                        conversation_id=conversation_id,
+                        ordinal=record.ordinal,
+                        role=record.role,
+                        snippet=record.content,
+                        created_at=record.created_at,
+                        turn_id=record.turn_id,
+                    )
+                )
+        return SessionSearchPage(query=query, hits=tuple(hits[:limit]))
+
+    def read_window(
+        self,
+        conversation_id: str,
+        *,
+        ordinal: int,
+        before: int = 3,
+        after: int = 3,
+        limit: int = 20,
+        cursor: str | None = None,
+        include_sensitive: bool = False,
+    ) -> SessionWindow:
+        del cursor, include_sensitive
+        start = ordinal - before
+        end = ordinal + after
+        records = [
+            record
+            for record in self.store._messages.get(conversation_id, ())
+            if start <= record.ordinal <= end
+        ][:limit]
+        return SessionWindow(
+            conversation_id=conversation_id,
+            anchor_ordinal=ordinal,
+            messages=tuple(
+                SessionMessage(
+                    message_id=record.id,
+                    conversation_id=record.conversation_id,
+                    ordinal=record.ordinal,
+                    role=record.role,
+                    content=record.content,
+                    created_at=record.created_at,
+                    turn_id=record.turn_id,
+                )
+                for record in records
+            ),
+        )
 
 
 class InMemorySkillService:
@@ -999,6 +1182,7 @@ class InMemoryUsageService:
         self.scope = scope
         self._reservations: dict[tuple[str, int, str], BudgetReservation] = {}
         self._media_reservations: dict[str, BudgetReservation] = {}
+        self._entries: list[UsageEntry] = []
 
     def reserve_model_request(
         self,
@@ -1020,7 +1204,9 @@ class InMemoryUsageService:
         reservation = self._reservations.pop(
             (turn_id, request_index, ResourceKind.MODEL.value)
         )
-        return (self._entry(reservation, purpose=purpose),)
+        entry = self._entry(reservation, purpose=purpose)
+        self._entries.append(entry)
+        return (entry,)
 
     def release_model_request(
         self,
@@ -1053,7 +1239,9 @@ class InMemoryUsageService:
         reservation = self._reservations.pop(
             (turn_id, tool_call_index, ResourceKind.TOOL.value)
         )
-        return (self._entry(reservation, purpose=tool_name),)
+        entry = self._entry(reservation, purpose=tool_name)
+        self._entries.append(entry)
+        return (entry,)
 
     def release_tool_call(
         self,
@@ -1093,7 +1281,9 @@ class InMemoryUsageService:
         for key, value in tuple(self._reservations.items()):
             if value.id == reservation.id:
                 self._reservations.pop(key, None)
-        return (self._entry(reservation, purpose=processor),)
+        entry = self._entry(reservation, purpose=processor)
+        self._entries.append(entry)
+        return (entry,)
 
     def release_media_transform(
         self,
@@ -1104,6 +1294,110 @@ class InMemoryUsageService:
             if value.id == reservation.id:
                 self._reservations.pop(key, None)
         return released
+
+    def query(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        resource_kind: ResourceKind | None = None,
+        channel: str | None = None,
+        conversation_id: str | None = None,
+        goal_id: str | None = None,
+        job_id: str | None = None,
+        child_task_id: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> UsagePage:
+        del cursor
+        entries = [
+            entry
+            for entry in self._entries
+            if (start is None or entry.occurred_at >= start)
+            and (end is None or entry.occurred_at < end)
+            and (
+                resource_kind is None
+                or entry.resource_kind is ResourceKind(resource_kind)
+            )
+            and (
+                channel is None
+                or entry.dimensions.channel == channel
+            )
+            and (
+                conversation_id is None
+                or entry.dimensions.conversation_id == conversation_id
+            )
+            and (
+                goal_id is None
+                or entry.dimensions.goal_id == goal_id
+            )
+            and (
+                job_id is None
+                or entry.dimensions.job_id == job_id
+            )
+            and (
+                child_task_id is None
+                or entry.dimensions.child_task_id == child_task_id
+            )
+        ]
+        return UsagePage(entries=tuple(entries[:limit]))
+
+    def group(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        group_by = UsageGroupBy(group_by)
+        entries = self.query(**kwargs).entries
+        grouped: dict[str, list[UsageEntry]] = {}
+        for entry in entries:
+            key = _usage_group_key(entry, group_by)
+            grouped.setdefault(key, []).append(entry)
+        aggregates = []
+        for key, records in sorted(grouped.items()):
+            known_costs = [
+                record.cost.amount
+                for record in records
+                if record.cost.pricing_known
+                and record.cost.amount is not None
+            ]
+            unknown_cost_entries = sum(
+                not record.cost.pricing_known for record in records
+            )
+            aggregates.append(
+                UsageAggregate(
+                    key=key,
+                    entry_count=len(records),
+                    model_calls=sum(
+                        record.resource_kind is ResourceKind.MODEL
+                        for record in records
+                    ),
+                    tool_calls=sum(
+                        record.resource_kind is ResourceKind.TOOL
+                        for record in records
+                    ),
+                    total_tokens=int(
+                        sum(
+                            sum(
+                                amount
+                                for unit, amount in record.units.items()
+                                if "token" in unit
+                            )
+                            for record in records
+                        )
+                    ),
+                    cost=ExactCost(
+                        (
+                            sum(known_costs, Decimal("0"))
+                            if not unknown_cost_entries
+                            else None
+                        ),
+                        pricing_known=not unknown_cost_entries,
+                    ),
+                    unknown_cost_entries=unknown_cost_entries,
+                )
+            )
+        return tuple(aggregates)
 
     def _reserve(
         self,
@@ -1202,6 +1496,12 @@ class InMemoryPluginService:
 
     def verify_startup(self) -> PluginAuditReport:
         return PluginAuditReport(profile_id=self.profile_id)
+
+    def list(self) -> tuple[Any, ...]:
+        return ()
+
+    def audit(self) -> PluginAuditReport:
+        return self.verify_startup()
 
 
 class InMemoryContentService:

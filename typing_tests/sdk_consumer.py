@@ -14,8 +14,13 @@ from chulk import (
     AgentDefinition,
     AgentDefinitionRuntime,
     AsyncHostedRuntime,
+    AsyncLearningProposalService,
+    AsyncLearningReviewer,
+    AsyncPluginService,
     AsyncRuntimeServices,
     AsyncServiceBinding,
+    AsyncSkillLifecycleService,
+    AsyncSkillLifecycleStore,
     AsyncSkillService,
     Capabilities,
     ChildRunRecord,
@@ -225,6 +230,11 @@ assert HostedRuntime is not None
 assert AsyncHostedRuntime is not None
 assert AsyncRuntimeServices is not None
 assert AsyncServiceBinding is not None
+assert AsyncLearningProposalService is not None
+assert AsyncLearningReviewer is not None
+assert AsyncPluginService is not None
+assert AsyncSkillLifecycleService is not None
+assert AsyncSkillLifecycleStore is not None
 assert AsyncSkillService is not None
 assert DurableHostedExecutor is not None
 assert GatewayStore is not None

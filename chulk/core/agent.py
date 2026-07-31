@@ -683,6 +683,7 @@ class Agent:
             execution_context = await self.tool_context_lifecycle.open_async(
                 execution_context
             )
+        self._tool_contexts[turn.turn_id] = execution_context
         self.state.current_turn_id = turn.turn_id
         self.state.available_tool_names = turn.available_tool_names
         self.state.turns.append(turn)
@@ -733,7 +734,6 @@ class Agent:
             TraceEvent.USER_MESSAGE,
             {"turn_id": turn.turn_id, "content": clean_message},
         )
-        self._tool_contexts[turn.turn_id] = execution_context
         await self._flush_async_services()
         return turn
 
@@ -1994,6 +1994,57 @@ class Agent:
             )
         return tuple(records)
 
+    async def confirm_skill_success_async(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[SkillLifecycleRecord, ...]:
+        """Await host-confirmed success recording for exact skill versions."""
+
+        if self.skill_lifecycle_store is None:
+            raise RuntimeError("skill lifecycle is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.status != "completed":
+            raise ValueError("skill success requires a completed host run")
+        raw_versions = selected_turn.extension_metadata.get(
+            "loaded_skill_versions",
+            [],
+        )
+        if not isinstance(raw_versions, list):
+            return ()
+        records: list[SkillLifecycleRecord] = []
+        for item in raw_versions:
+            if not isinstance(item, dict):
+                continue
+            required = ("name", "scope", "version", "digest")
+            if not all(isinstance(item.get(key), str) for key in required):
+                continue
+            records.append(
+                await call_async_service(
+                    self.skill_lifecycle_store,
+                    "record_usage",
+                    name=item["name"],
+                    scope=item["scope"],
+                    version=item["version"],
+                    digest=item["digest"],
+                    kind=SkillUsageKind.SUCCESS,
+                    source_event_id=(
+                        f"{selected_turn.turn_id}:host-success"
+                    ),
+                    host_confirmed=True,
+                )
+            )
+        return tuple(records)
+
     def review_learning(
         self,
         *,
@@ -2040,6 +2091,64 @@ class Agent:
                 host_confirmed_success=host_confirmed_success,
                 current_skill_manifests=manifests,
             )
+        )
+
+    async def review_learning_async(
+        self,
+        *,
+        trigger: LearningReviewTrigger | str = LearningReviewTrigger.MANUAL,
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReviewOutcome:
+        """Await a restricted learning review through hosted services."""
+
+        if self.learning_reviewer is None:
+            raise RuntimeError("learning reviewer is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.final_answer is None:
+            raise ValueError("learning review requires a finished turn")
+        visible_skills = (
+            await call_async_service(
+                self.async_skill_registry,
+                "list_visible_skills",
+            )
+            if self.async_skill_registry is not None
+            else ()
+        )
+        manifests = tuple(
+            skill.manifest.to_dict()
+            for skill in visible_skills
+            if skill.manifest is not None
+        )
+        return cast(
+            LearningReviewOutcome,
+            await call_async_service(
+                self.learning_reviewer,
+                "review",
+                LearningReviewContext(
+                    trigger=LearningReviewTrigger(trigger),
+                    user_message=selected_turn.user_message,
+                    assistant_response=selected_turn.final_answer,
+                    turn_id=selected_turn.turn_id,
+                    source_trace=(
+                        str(self.trace_logger.path)
+                        if self.trace_logger is not None
+                        else None
+                    ),
+                    tool_call_count=selected_turn.tool_call_count,
+                    host_confirmed_success=host_confirmed_success,
+                    current_skill_manifests=manifests,
+                ),
+            ),
         )
 
     def _turn_started_after(self, previous_turn_count: int) -> TurnState | None:

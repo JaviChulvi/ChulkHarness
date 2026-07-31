@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,8 +26,10 @@ from chulk import (
     ToolPolicyHooks,
     ToolRisk,
     ToolConcurrency,
+    UsageGroupBy,
     DataClassification,
 )
+from chulk.core.state import TurnState
 from chulk.hosting.reference import InMemoryServiceHub
 from chulk.hosting.services import (
     ServiceBinding,
@@ -33,7 +37,25 @@ from chulk.hosting.services import (
     SkillRuntimeServices,
 )
 from chulk.llm import LLMClient
+from chulk.plugins import PluginAuditReport
+from chulk.skills import LearningReviewOutcome
 from chulk.tools import ToolExecutionContext, ToolRegistry, ToolResult
+from chulk.tools import (
+    archive_memory as archive_memory_ref,
+    compact_memories as compact_memories_ref,
+    delete_memory as delete_memory_ref,
+    export_memories as export_memories_ref,
+    import_memories as import_memories_ref,
+    list_memories as list_memories_ref,
+    read_trace_artifact as read_trace_artifact_ref,
+    restore_memory as restore_memory_ref,
+    save_memory as save_memory_ref,
+    search_memory as search_memory_ref,
+    session_read as session_read_ref,
+    session_search as session_search_ref,
+    summarize_memories as summarize_memories_ref,
+    update_memory as update_memory_ref,
+)
 from chulk.tools.registry import Tool
 
 
@@ -760,12 +782,18 @@ async def test_async_hosted_runtime_awaits_all_turn_services_natively(
     artifact_read = await agent.read_artifact(artifact["artifact_id"])
     search_page = await agent.search_sessions("native")
     proposals = await agent.list_memory_proposals()
+    usage = await agent.query_usage()
+    grouped_usage = await agent.group_usage(UsageGroupBy.RESOURCE_KIND)
+    plugins = await agent.list_plugins()
 
     assert result.content == "native complete"
     assert "native redacted result" in result.observations[0].content
     assert "TAIL" in artifact_read["content"]
     assert search_page.query == "native"
     assert proposals == ()
+    assert usage.entries
+    assert grouped_usage
+    assert plugins == ()
     assert {loop_id for _service, _method, loop_id in calls} == {id(loop)}
 
     invoked = {(service, method) for service, method, _loop_id in calls}
@@ -790,6 +818,9 @@ async def test_async_hosted_runtime_awaits_all_turn_services_natively(
         ("usage", "commit_model_request"),
         ("usage", "reserve_tool_call"),
         ("usage", "commit_tool_call"),
+        ("usage", "query"),
+        ("usage", "group"),
+        ("plugins", "list"),
         ("artifacts", "write"),
         ("artifacts", "read"),
         ("traces", "log"),
@@ -800,6 +831,454 @@ async def test_async_hosted_runtime_awaits_all_turn_services_natively(
         ("tool_policy", "redact"),
     }
     assert expected <= invoked
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_tool_refs_await_native_services(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    calls: list[tuple[str, str, int]] = []
+    hub = InMemoryServiceHub()
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[
+            archive_memory_ref,
+            compact_memories_ref,
+            delete_memory_ref,
+            export_memories_ref,
+            import_memories_ref,
+            list_memories_ref,
+            read_trace_artifact_ref,
+            restore_memory_ref,
+            save_memory_ref,
+            search_memory_ref,
+            session_read_ref,
+            session_search_ref,
+            summarize_memories_ref,
+            update_memory_ref,
+        ],
+        skills=[],
+        services=_loop_bound_async_services(hub, calls),
+        execution_scope=_scope(),
+    )
+    resolved = agent._resolved_async_services()
+    artifact = await resolved.artifacts.write("native", "artifact body")
+    await resolved.sessions.store.save_message(
+        agent.conversation_id,
+        role="user",
+        content="native session evidence",
+    )
+
+    save_result = await agent.tool_registry.run_async(
+        "save_memory",
+        {"content": "native memory"},
+    )
+    memory_id = save_result.metadata["memory_id"]
+    artifact_result = await agent.tool_registry.run_async(
+        "read_trace_artifact",
+        {"artifact_id": artifact.artifact_id},
+    )
+    memory_result = await agent.tool_registry.run_async(
+        "search_memory",
+        {"query": "native"},
+    )
+    session_result = await agent.tool_registry.run_async(
+        "session_search",
+        {"query": "native"},
+    )
+    session_read_result = await agent.tool_registry.run_async(
+        "session_read",
+        {"conversation_id": agent.conversation_id, "ordinal": 1},
+    )
+    list_result = await agent.tool_registry.run_async(
+        "list_memories",
+        {},
+    )
+    update_result = await agent.tool_registry.run_async(
+        "update_memory",
+        {"memory_id": memory_id, "content": "updated native memory"},
+    )
+    missing_update = await agent.tool_registry.run_async(
+        "update_memory",
+        {"memory_id": "missing", "content": "missing"},
+    )
+    summary_result = await agent.tool_registry.run_async(
+        "summarize_memories",
+        {"query": "updated"},
+    )
+    archive_result = await agent.tool_registry.run_async(
+        "archive_memory",
+        {"memory_id": memory_id},
+    )
+    duplicate_archive = await agent.tool_registry.run_async(
+        "archive_memory",
+        {"memory_id": memory_id},
+    )
+    restore_result = await agent.tool_registry.run_async(
+        "restore_memory",
+        {"memory_id": memory_id},
+    )
+    duplicate_restore = await agent.tool_registry.run_async(
+        "restore_memory",
+        {"memory_id": memory_id},
+    )
+    export_result = await agent.tool_registry.run_async(
+        "export_memories",
+        {"path": "memories.md"},
+    )
+    import_result = await agent.tool_registry.run_async(
+        "import_memories",
+        {"path": "memories.md"},
+    )
+    compact_result = await agent.tool_registry.run_async(
+        "compact_memories",
+        {},
+    )
+    delete_result = await agent.tool_registry.run_async(
+        "delete_memory",
+        {"memory_id": memory_id},
+    )
+    missing_delete = await agent.tool_registry.run_async(
+        "delete_memory",
+        {"memory_id": memory_id},
+    )
+
+    assert save_result.success
+    assert artifact_result.success
+    assert "artifact body" in artifact_result.observation
+    assert memory_result.success
+    assert "native memory" in memory_result.observation
+    assert session_result.success
+    assert "native session evidence" in session_result.observation
+    assert session_read_result.success
+    assert "native session evidence" in session_read_result.observation
+    assert list_result.success
+    assert update_result.success
+    assert not missing_update.success
+    assert summary_result.success
+    assert "updated native memory" in summary_result.observation
+    assert archive_result.success
+    assert not duplicate_archive.success
+    assert restore_result.success
+    assert not duplicate_restore.success
+    assert export_result.success
+    assert import_result.success
+    assert compact_result.success
+    assert delete_result.success
+    assert not missing_delete.success
+    relevant = {
+        (service, method, loop_id)
+        for service, method, loop_id in calls
+        if (service, method)
+        in {
+            ("artifacts", "read"),
+            ("memory", "search_memory"),
+            ("sessions.search", "search"),
+            ("sessions.search", "read_window"),
+        }
+    }
+    assert relevant == {
+        ("artifacts", "read", id(loop)),
+        ("memory", "search_memory", id(loop)),
+        ("sessions.search", "search", id(loop)),
+        ("sessions.search", "read_window", id(loop)),
+    }
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_learning_facade_awaits_proposal_service(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    calls: list[tuple[str, int]] = []
+    proposal = {
+        "id": "proposal-1",
+        "profile_id": "default",
+        "kind": "memory",
+        "status": "pending",
+    }
+    skill = {
+        "profile_id": "default",
+        "scope": "project",
+        "name": "review",
+        "version": "1.0.0",
+        "digest": "sha256:skill",
+        "source": "host",
+        "trust": "reviewed",
+        "status": "active",
+        "active_revision_id": "revision-1",
+    }
+
+    class ProposalService:
+        async def list(self, **_kwargs):
+            calls.append(("proposals.list", id(asyncio.get_running_loop())))
+            return [proposal]
+
+        async def get(self, _proposal_id):
+            calls.append(("proposals.get", id(asyncio.get_running_loop())))
+            return proposal
+
+        async def approve(self, _proposal_id, **_kwargs):
+            calls.append(("proposals.approve", id(asyncio.get_running_loop())))
+            return {**proposal, "status": "approved"}
+
+        async def reject(self, _proposal_id, **_kwargs):
+            calls.append(("proposals.reject", id(asyncio.get_running_loop())))
+            return {**proposal, "status": "rejected"}
+
+    class LifecycleStore:
+        async def list_skills(self, **_kwargs):
+            calls.append(("skills.list", id(asyncio.get_running_loop())))
+            return [
+                SimpleNamespace(
+                    name=skill["name"],
+                    scope=skill["scope"],
+                    version=skill["version"],
+                    digest=skill["digest"],
+                )
+            ]
+
+        async def list_revisions(self, _name, **_kwargs):
+            calls.append(("skills.revisions", id(asyncio.get_running_loop())))
+            return [{**skill, "id": "revision-1"}]
+
+        async def record_usage(self, **_kwargs):
+            calls.append(("skills.usage", id(asyncio.get_running_loop())))
+            return skill
+
+    class Lifecycle:
+        async def rollback(self, _revision_id, **_kwargs):
+            calls.append(("skills.rollback", id(asyncio.get_running_loop())))
+            return skill
+
+    class Reviewer:
+        async def review(self, _context):
+            calls.append(("learning.review", id(asyncio.get_running_loop())))
+            return LearningReviewOutcome(
+                skipped=False,
+                rationale="reviewed",
+                proposal_ids=("proposal-1",),
+                review_run_id="review-run-1",
+            )
+
+    class Plugins:
+        profile_id = "default"
+
+        async def verify_startup(self):
+            return PluginAuditReport(profile_id=self.profile_id)
+
+        async def inspect(self, _path):
+            calls.append(("plugins.inspect", id(asyncio.get_running_loop())))
+            return "inspection"
+
+        async def register_local(self, _path, **_kwargs):
+            calls.append(("plugins.register", id(asyncio.get_running_loop())))
+            return "registered"
+
+        async def install(self, _path, **_kwargs):
+            calls.append(("plugins.install", id(asyncio.get_running_loop())))
+            return "installed"
+
+        async def plan_update(self, _path):
+            calls.append(("plugins.plan", id(asyncio.get_running_loop())))
+            return "plan"
+
+        async def update(self, _path, **_kwargs):
+            calls.append(("plugins.update", id(asyncio.get_running_loop())))
+            return "updated"
+
+        async def uninstall(self, _name, **_kwargs):
+            calls.append(("plugins.uninstall", id(asyncio.get_running_loop())))
+            return "uninstalled"
+
+        async def rollback(self, _name, **_kwargs):
+            calls.append(("plugins.rollback", id(asyncio.get_running_loop())))
+            return "rolled-back"
+
+        async def revoke(self, _name, **_kwargs):
+            calls.append(("plugins.revoke", id(asyncio.get_running_loop())))
+            return "revoked"
+
+        async def list(self):
+            calls.append(("plugins.list", id(asyncio.get_running_loop())))
+            return ["listed"]
+
+        async def audit(self):
+            calls.append(("plugins.audit", id(asyncio.get_running_loop())))
+            return PluginAuditReport(profile_id=self.profile_id)
+
+        async def load_entry_point(self, *_args, **_kwargs):
+            calls.append(("plugins.load", id(asyncio.get_running_loop())))
+            return "entry-point"
+
+    class Usage:
+        async def query(self, **_kwargs):
+            calls.append(("usage.query", id(asyncio.get_running_loop())))
+            from chulk.usage import UsagePage
+
+            return UsagePage(entries=())
+
+        async def group(self, _group_by, **_kwargs):
+            calls.append(("usage.group", id(asyncio.get_running_loop())))
+            return []
+
+    hub = InMemoryServiceHub()
+    services = hub.async_services()
+    proposal_service = ProposalService()
+    skill_binding = services.skills
+
+    async def skills(scope: ExecutionScope) -> SkillRuntimeServices:
+        assert isinstance(skill_binding, AsyncServiceBinding)
+        resolved = await skill_binding.resolve(scope)
+        return replace(
+            resolved,
+            lifecycle_store=LifecycleStore(),
+            lifecycle=Lifecycle(),
+            learning_proposals=proposal_service,
+            learning_reviewer=Reviewer(),
+        )
+
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["skills"] = AsyncServiceBinding.scoped(
+        skills,
+        ownership="host",
+    )
+    fields["plugins"] = AsyncServiceBinding.host(Plugins())
+    fields["usage"] = AsyncServiceBinding.host(Usage())
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+
+    turn = TurnState(user_message="completed")
+    turn.extension_metadata["loaded_skill_versions"] = [
+        {
+            "name": skill["name"],
+            "scope": skill["scope"],
+            "version": skill["version"],
+            "digest": skill["digest"],
+        }
+    ]
+    turn.complete("done")
+    agent.state.turns.append(turn)
+
+    assert (await agent.list_learning_proposals())[0].id == "proposal-1"
+    assert (await agent.get_learning_proposal("proposal-1")).id == "proposal-1"
+    assert (
+        await agent.approve_learning_proposal("proposal-1")
+    ).status == "approved"
+    assert (
+        await agent.reject_learning_proposal("proposal-1")
+    ).status == "rejected"
+    assert (await agent.review_learning()).review_run_id == "review-run-1"
+    assert (await agent.list_governed_skills())[0].name == "review"
+    assert (await agent.rollback_skill("revision-1")).name == "review"
+    assert (
+        await agent.list_skill_revisions("review")
+    )[0].id == "revision-1"
+    assert (await agent.confirm_skill_success())[0].name == "review"
+    assert await agent.inspect_plugin(tmp_path) == "inspection"
+    assert await agent.register_local_plugin(
+        tmp_path,
+        approved_by="host",
+        acknowledge_host_authority=True,
+    ) == "registered"
+    assert await agent.install_plugin(
+        tmp_path,
+        approved_by="host",
+        acknowledge_host_authority=True,
+    ) == "installed"
+    assert await agent.plan_plugin_update(tmp_path) == "plan"
+    assert await agent.update_plugin(
+        tmp_path,
+        approved_by="host",
+        acknowledge_host_authority=True,
+    ) == "updated"
+    assert await agent.uninstall_plugin(
+        "plugin",
+        approved_by="host",
+    ) == "uninstalled"
+    assert await agent.rollback_plugin(
+        "plugin",
+        approved_by="host",
+    ) == "rolled-back"
+    assert await agent.revoke_plugin(
+        "plugin",
+        reason="test",
+        revoked_by="host",
+    ) == "revoked"
+    assert await agent.list_plugins() == ("listed",)
+    assert (await agent.audit_plugins()).profile_id == "default"
+    assert await agent.load_plugin_entry_point(
+        "plugin",
+        "tools",
+        "entry",
+    ) == "entry-point"
+    assert (await agent.query_usage()).entries == ()
+    assert await agent.group_usage("resource_kind") == ()
+    assert {loop_id for _name, loop_id in calls} == {id(loop)}
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_preparation_failure_closes_open_execution_context(
+    tmp_path: Path,
+) -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class Execution:
+        def __init__(self) -> None:
+            self.session = Session()
+
+        async def open_session_async(self, _request):
+            return self.session
+
+    class FailingMemory:
+        namespace = "failing"
+
+        async def profile_memories(self, *, limit: int = 50):
+            del limit
+            raise RuntimeError("memory preparation failed")
+
+    hub = InMemoryServiceHub()
+    services = hub.async_services()
+    execution = Execution()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["execution"] = AsyncServiceBinding.host(execution)
+    fields["memory"] = AsyncServiceBinding.host(FailingMemory())
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+
+    with pytest.raises(Exception, match="memory preparation failed"):
+        await agent.run("fail after opening the execution context")
+
+    assert execution.session.closed
+    assert agent.runtime._tool_contexts == {}
     await agent.close()
 
 

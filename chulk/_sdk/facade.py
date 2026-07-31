@@ -2061,6 +2061,34 @@ class AsyncHostedRuntime(AsyncAgent):
             raise RuntimeError("Agent is closed")
         return resolved
 
+    async def _call_hosted_service(
+        self,
+        operation: str,
+        service_name: str,
+        method_name: str,
+        /,
+        *args: Any,
+        serialized: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        async def call() -> Any:
+            service = getattr(
+                self._resolved_async_services(),
+                service_name,
+            )
+            return await call_async_service(
+                service,
+                method_name,
+                *args,
+                **kwargs,
+            )
+
+        return await self._invoke_async(
+            operation,
+            call,
+            serialized=serialized,
+        )
+
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         async def operation() -> tuple[MemoryProposal, ...]:
             policy = self.runtime.async_memory_policy
@@ -2096,6 +2124,449 @@ class AsyncHostedRuntime(AsyncAgent):
             return memory_proposal_snapshot(await policy.reject(proposal_id))
 
         return await self._invoke_async("reject_memory_proposal", operation)
+
+    async def list_learning_proposals(
+        self,
+        *,
+        status: str | None = "pending",
+        limit: int = 100,
+    ) -> tuple[LearningProposal, ...]:
+        async def operation() -> tuple[LearningProposal, ...]:
+            service = self._resolved_async_services().skills.learning_proposals
+            if service is None:
+                return ()
+            normalized = (
+                None if status is None else LearningProposalStatus(status)
+            )
+            records = await call_async_service(
+                service,
+                "list",
+                status=normalized,
+                limit=limit,
+            )
+            return tuple(
+                learning_proposal_snapshot(item) for item in records
+            )
+
+        return await self._invoke_async(
+            "list_learning_proposals",
+            operation,
+        )
+
+    async def get_learning_proposal(
+        self,
+        proposal_id: str,
+    ) -> LearningProposal:
+        async def operation() -> LearningProposal:
+            service = self._resolved_async_services().skills.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            record = await call_async_service(service, "get", proposal_id)
+            return learning_proposal_snapshot(record)
+
+        return await self._invoke_async("get_learning_proposal", operation)
+
+    async def approve_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        approved_by: str = "sdk-host",
+    ) -> LearningProposal:
+        async def operation() -> LearningProposal:
+            service = self._resolved_async_services().skills.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            record = await call_async_service(
+                service,
+                "approve",
+                proposal_id,
+                approved_by=approved_by,
+            )
+            return learning_proposal_snapshot(record)
+
+        return await self._invoke_async(
+            "approve_learning_proposal",
+            operation,
+        )
+
+    async def review_learning(
+        self,
+        *,
+        trigger: str = "manual",
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReview:
+        async def operation() -> LearningReview:
+            outcome = await self.runtime.review_learning_async(
+                trigger=trigger,
+                turn_id=turn_id,
+                host_confirmed_success=host_confirmed_success,
+            )
+            service = self._resolved_async_services().skills.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            proposals = []
+            for proposal_id in outcome.proposal_ids:
+                proposals.append(
+                    learning_proposal_snapshot(
+                        await call_async_service(
+                            service,
+                            "get",
+                            proposal_id,
+                        )
+                    )
+                )
+            return LearningReview(
+                skipped=outcome.skipped,
+                rationale=outcome.rationale,
+                proposals=tuple(proposals),
+                review_run_id=outcome.review_run_id,
+            )
+
+        return await self._invoke_async(
+            "review_learning",
+            operation,
+            serialized=True,
+        )
+
+    async def reject_learning_proposal(
+        self,
+        proposal_id: str,
+        *,
+        rejected_by: str = "sdk-host",
+    ) -> LearningProposal:
+        async def operation() -> LearningProposal:
+            service = self._resolved_async_services().skills.learning_proposals
+            if service is None:
+                raise RuntimeError("learning proposals are not configured")
+            record = await call_async_service(
+                service,
+                "reject",
+                proposal_id,
+                rejected_by=rejected_by,
+            )
+            return learning_proposal_snapshot(record)
+
+        return await self._invoke_async(
+            "reject_learning_proposal",
+            operation,
+        )
+
+    async def list_governed_skills(
+        self,
+        *,
+        scope: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        async def operation() -> tuple[GovernedSkill, ...]:
+            store = self._resolved_async_services().skills.lifecycle_store
+            if store is None:
+                return ()
+            records = await call_async_service(
+                store,
+                "list_skills",
+                scope=scope,
+            )
+            event_id = f"sdk-view:{uuid4()}"
+            viewed = []
+            for record in records:
+                viewed.append(
+                    await call_async_service(
+                        store,
+                        "record_usage",
+                        name=record.name,
+                        scope=record.scope,
+                        version=record.version,
+                        digest=record.digest,
+                        kind=SkillUsageKind.VIEW,
+                        source_event_id=event_id,
+                    )
+                )
+            return tuple(
+                governed_skill_snapshot(item) for item in viewed
+            )
+
+        return await self._invoke_async("list_governed_skills", operation)
+
+    async def rollback_skill(
+        self,
+        revision_id: str,
+        *,
+        scope: str = "project",
+        approved_by: str = "sdk-host",
+    ) -> GovernedSkill:
+        async def operation() -> GovernedSkill:
+            lifecycle = self._resolved_async_services().skills.lifecycle
+            if lifecycle is None:
+                raise RuntimeError("skill lifecycle is not configured")
+            if scope not in {"project", "profile"}:
+                raise ValueError("scope must be project or profile")
+            record = await call_async_service(
+                lifecycle,
+                "rollback",
+                revision_id,
+                scope=cast(SkillScope, scope),
+                approved_by=approved_by,
+            )
+            return governed_skill_snapshot(record)
+
+        return await self._invoke_async("rollback_skill", operation)
+
+    async def list_skill_revisions(
+        self,
+        name: str,
+        *,
+        scope: str = "project",
+        limit: int = 100,
+    ) -> tuple[GovernedSkillRevision, ...]:
+        async def operation() -> tuple[GovernedSkillRevision, ...]:
+            store = self._resolved_async_services().skills.lifecycle_store
+            if store is None:
+                return ()
+            records = await call_async_service(
+                store,
+                "list_revisions",
+                name,
+                scope=scope,
+                limit=limit,
+            )
+            return tuple(
+                governed_skill_revision_snapshot(item)
+                for item in records
+            )
+
+        return await self._invoke_async("list_skill_revisions", operation)
+
+    async def confirm_skill_success(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[GovernedSkill, ...]:
+        async def operation() -> tuple[GovernedSkill, ...]:
+            records = await self.runtime.confirm_skill_success_async(
+                turn_id=turn_id
+            )
+            return tuple(
+                governed_skill_snapshot(item) for item in records
+            )
+
+        return await self._invoke_async("confirm_skill_success", operation)
+
+    async def inspect_plugin(
+        self,
+        path: Path | str,
+    ) -> PluginInspection:
+        return cast(
+            PluginInspection,
+            await self._call_hosted_service(
+                "inspect_plugin",
+                "plugins",
+                "inspect",
+                path,
+            ),
+        )
+
+    async def register_local_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLockEntry:
+        return cast(
+            PluginLockEntry,
+            await self._call_hosted_service(
+            "register_local_plugin",
+                "plugins",
+                "register_local",
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+                serialized=True,
+            ),
+        )
+
+    async def install_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] = (),
+    ) -> PluginLifecycleReceipt:
+        return cast(
+            PluginLifecycleReceipt,
+            await self._call_hosted_service(
+                "install_plugin",
+                "plugins",
+                "install",
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+                serialized=True,
+            ),
+        )
+
+    async def plan_plugin_update(
+        self,
+        path: Path | str,
+    ) -> PluginUpdatePlan:
+        return cast(
+            PluginUpdatePlan,
+            await self._call_hosted_service(
+                "plan_plugin_update",
+                "plugins",
+                "plan_update",
+                path,
+            ),
+        )
+
+    async def update_plugin(
+        self,
+        path: Path | str,
+        *,
+        approved_by: str,
+        acknowledge_host_authority: bool,
+        granted_capabilities: tuple[str, ...] | None = None,
+        approve_authority_changes: bool = False,
+    ) -> PluginLifecycleReceipt:
+        return cast(
+            PluginLifecycleReceipt,
+            await self._call_hosted_service(
+                "update_plugin",
+                "plugins",
+                "update",
+                path,
+                approved_by=approved_by,
+                acknowledge_host_authority=acknowledge_host_authority,
+                granted_capabilities=granted_capabilities,
+                approve_authority_changes=approve_authority_changes,
+                serialized=True,
+            ),
+        )
+
+    async def uninstall_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        return cast(
+            PluginLifecycleReceipt,
+            await self._call_hosted_service(
+                "uninstall_plugin",
+                "plugins",
+                "uninstall",
+                plugin_name,
+                approved_by=approved_by,
+                serialized=True,
+            ),
+        )
+
+    async def rollback_plugin(
+        self,
+        plugin_name: str,
+        *,
+        approved_by: str,
+    ) -> PluginLifecycleReceipt:
+        return cast(
+            PluginLifecycleReceipt,
+            await self._call_hosted_service(
+                "rollback_plugin",
+                "plugins",
+                "rollback",
+                plugin_name,
+                approved_by=approved_by,
+                serialized=True,
+            ),
+        )
+
+    async def revoke_plugin(
+        self,
+        plugin_name: str,
+        *,
+        reason: str,
+        revoked_by: str,
+    ) -> PluginLifecycleReceipt:
+        return cast(
+            PluginLifecycleReceipt,
+            await self._call_hosted_service(
+                "revoke_plugin",
+                "plugins",
+                "revoke",
+                plugin_name,
+                reason=reason,
+                revoked_by=revoked_by,
+                serialized=True,
+            ),
+        )
+
+    async def list_plugins(self) -> tuple[PluginLockEntry, ...]:
+        records = await self._call_hosted_service(
+            "list_plugins",
+            "plugins",
+            "list",
+        )
+        return tuple(records)
+
+    async def audit_plugins(self) -> PluginAuditReport:
+        return cast(
+            PluginAuditReport,
+            await self._call_hosted_service(
+                "audit_plugins",
+                "plugins",
+                "audit",
+            ),
+        )
+
+    async def load_plugin_entry_point(
+        self,
+        plugin_name: str,
+        category: PluginCategory | str,
+        entry_name: str,
+        *,
+        available_capabilities: tuple[str, ...] = (),
+    ) -> LoadedPluginEntryPoint:
+        return cast(
+            LoadedPluginEntryPoint,
+            await self._call_hosted_service(
+                "load_plugin_entry_point",
+                "plugins",
+                "load_entry_point",
+                plugin_name,
+                category,
+                entry_name,
+                available_capabilities=available_capabilities,
+                serialized=True,
+            ),
+        )
+
+    async def query_usage(self, **kwargs: Any) -> UsagePage:
+        return cast(
+            UsagePage,
+            await self._call_hosted_service(
+                "query_usage",
+                "usage",
+                "query",
+                **kwargs,
+            ),
+        )
+
+    async def group_usage(
+        self,
+        group_by: UsageGroupBy,
+        **kwargs: Any,
+    ) -> tuple[UsageAggregate, ...]:
+        records = await self._call_hosted_service(
+            "group_usage",
+            "usage",
+            "group",
+            group_by,
+            **kwargs,
+        )
+        return tuple(records)
 
     async def search_sessions(
         self,

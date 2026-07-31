@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from chulk.hosting.async_utils import call_async_service
 from chulk.memory import SQLiteMemoryStore
 from chulk.tools.files import resolve_inside_root, safe_write_error
 from chulk.tools.permissions import ToolPermissionLevel
@@ -233,6 +235,305 @@ def export_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
         run_in_executor=True,
         permission_level=ToolPermissionLevel.MEMORY,
     )
+
+
+def async_save_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memory_id = await call_async_service(
+            memory_store,
+            "save_memory",
+            arguments["content"],
+            tags=arguments.get("tags") or [],
+            metadata=arguments.get("metadata") or {},
+            importance=arguments.get("importance", 1),
+            source=arguments.get("source", "manual"),
+            confidence=arguments.get("confidence", 1.0),
+        )
+        return ToolResult(
+            "save_memory",
+            True,
+            f"Saved memory {memory_id}.",
+            metadata={"memory_id": memory_id},
+        )
+
+    return _native_async_memory_tool(
+        save_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_search_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memories = await call_async_service(
+            memory_store,
+            "search_memory",
+            arguments["query"],
+            limit=arguments.get("limit", 5),
+            include_archived=arguments.get("include_archived", False),
+        )
+        return ToolResult(
+            "search_memory",
+            True,
+            _format_memories(memories),
+            metadata={"count": len(memories)},
+        )
+
+    return _native_async_memory_tool(
+        search_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_list_memories_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memories = await call_async_service(
+            memory_store,
+            "list_memories",
+            limit=arguments.get("limit", 50),
+            include_archived=arguments.get("include_archived", False),
+        )
+        return ToolResult(
+            "list_memories",
+            True,
+            _format_memories(memories),
+            metadata={"count": len(memories)},
+        )
+
+    return _native_async_memory_tool(
+        list_memories_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_delete_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memory_id = arguments["memory_id"]
+        deleted = await call_async_service(
+            memory_store,
+            "delete_memory",
+            memory_id,
+        )
+        if not deleted:
+            return ToolResult(
+                "delete_memory",
+                False,
+                f"Memory not found: {memory_id}",
+                error="not_found",
+            )
+        return ToolResult(
+            "delete_memory",
+            True,
+            f"Deleted memory {memory_id}.",
+            metadata={"memory_id": memory_id},
+        )
+
+    return _native_async_memory_tool(
+        delete_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_update_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memory_id = arguments["memory_id"]
+        updated = await call_async_service(
+            memory_store,
+            "update_memory",
+            memory_id,
+            content=arguments.get("content"),
+            tags=arguments.get("tags"),
+            metadata=arguments.get("metadata"),
+            importance=arguments.get("importance"),
+            source=arguments.get("source"),
+            confidence=arguments.get("confidence"),
+        )
+        if not updated:
+            return ToolResult(
+                "update_memory",
+                False,
+                f"Memory not found: {memory_id}",
+                error="not_found",
+            )
+        return ToolResult(
+            "update_memory",
+            True,
+            f"Updated memory {memory_id}.",
+            metadata={"memory_id": memory_id},
+        )
+
+    return _native_async_memory_tool(
+        update_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_summarize_memories_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        summary = await call_async_service(
+            memory_store,
+            "summarize_memories",
+            query=arguments.get("query"),
+            limit=arguments.get("limit", 10),
+        )
+        return ToolResult("summarize_memories", True, summary)
+
+    return _native_async_memory_tool(
+        summarize_memories_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_archive_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memory_id = arguments["memory_id"]
+        archived = await call_async_service(
+            memory_store,
+            "archive_memory",
+            memory_id,
+        )
+        if not archived:
+            return ToolResult(
+                "archive_memory",
+                False,
+                f"Memory not found or already archived: {memory_id}",
+                error="not_found",
+            )
+        return ToolResult(
+            "archive_memory",
+            True,
+            f"Archived memory {memory_id}.",
+            metadata={"memory_id": memory_id},
+        )
+
+    return _native_async_memory_tool(
+        archive_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_restore_memory_tool(memory_store: object) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        memory_id = arguments["memory_id"]
+        restored = await call_async_service(
+            memory_store,
+            "restore_memory",
+            memory_id,
+        )
+        if not restored:
+            return ToolResult(
+                "restore_memory",
+                False,
+                f"Memory not found or not archived: {memory_id}",
+                error="not_found",
+            )
+        return ToolResult(
+            "restore_memory",
+            True,
+            f"Restored memory {memory_id}.",
+            metadata={"memory_id": memory_id},
+        )
+
+    return _native_async_memory_tool(
+        restore_memory_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_compact_memories_tool(memory_store: object) -> Tool:
+    async def invoke(_arguments: dict[str, Any]) -> ToolResult:
+        archived_count = await call_async_service(
+            memory_store,
+            "compact_memories",
+        )
+        return ToolResult(
+            "compact_memories",
+            True,
+            f"Archived {archived_count} duplicate memories.",
+        )
+
+    return _native_async_memory_tool(
+        compact_memories_tool(memory_store),  # type: ignore[arg-type]
+        invoke,
+    )
+
+
+def async_import_memories_tool(
+    memory_store: object,
+    project_root: Path,
+) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        path = resolve_inside_root(project_root, arguments["path"])
+        memory_ids = await call_async_service(
+            memory_store,
+            "import_markdown",
+            path,
+        )
+        return ToolResult(
+            "import_memories",
+            True,
+            f"Imported {len(memory_ids)} memories.",
+            metadata={
+                "memory_ids": memory_ids,
+                "path": str(path.relative_to(project_root)),
+            },
+        )
+
+    return _native_async_memory_tool(
+        import_memories_tool(
+            cast(SQLiteMemoryStore, memory_store),
+            project_root,
+        ),
+        invoke,
+    )
+
+
+def async_export_memories_tool(
+    memory_store: object,
+    project_root: Path,
+) -> Tool:
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        path = resolve_inside_root(project_root, arguments["path"])
+        safety_error = safe_write_error(path, project_root)
+        if safety_error:
+            return ToolResult(
+                "export_memories",
+                False,
+                safety_error,
+                error="unsafe_path",
+                metadata={
+                    "path": str(path.relative_to(project_root.resolve()))
+                },
+            )
+        count = await call_async_service(
+            memory_store,
+            "export_markdown",
+            path,
+            include_archived=arguments.get("include_archived", False),
+        )
+        return ToolResult(
+            "export_memories",
+            True,
+            f"Exported {count} memories.",
+            metadata={
+                "path": str(path.relative_to(project_root)),
+                "count": count,
+            },
+        )
+
+    return _native_async_memory_tool(
+        export_memories_tool(
+            cast(SQLiteMemoryStore, memory_store),
+            project_root,
+        ),
+        invoke,
+    )
+
+
+def _native_async_memory_tool(
+    base: Tool,
+    callable: Any,
+) -> Tool:
+    return replace(base, callable=callable, run_in_executor=False)
 
 
 def save_memory(arguments: dict[str, Any], memory_store: SQLiteMemoryStore) -> ToolResult:
