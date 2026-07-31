@@ -14,6 +14,7 @@ from chulk import (
     AgentDefinition,
     AgentDefinitionRuntime,
     Capabilities,
+    ChildRunRecord,
     ChulkError,
     ConfigurationError,
     CompiledAgentPackage,
@@ -41,6 +42,8 @@ from chulk import (
     PlanStatus,
     PlanStep,
     PlanStepStatus,
+    ParentRunPolicy,
+    ParentRunRecord,
     PluginLifecycleReceipt,
     PluginUpdatePlan,
     SafetyError,
@@ -57,11 +60,13 @@ from chulk import (
     Tools,
     TraceError,
     RunCompletedPayload,
+    RunBudget,
     RunRecord,
     RunStore,
     RunSubmission,
     RunResult,
     RunStatus,
+    BudgetScope,
     RuntimeProfile,
     SkillActivationRecord,
     StepDefinition,
@@ -235,6 +240,42 @@ def consume_durable_run(
 ) -> DurableRunStatus:
     record: RunRecord = store.get(scope, scope.run_id)
     return record.status
+
+
+def consume_parent_child_runs(
+    store: RunStore,
+    parent_scope: ExecutionScope,
+    child_scope: ExecutionScope,
+) -> tuple[ParentRunRecord, ChildRunRecord]:
+    policy = ParentRunPolicy(
+        required_children=1,
+        max_children=2,
+        budget=RunBudget(
+            scope=BudgetScope.CHILD_TASK,
+            max_model_calls=4,
+        ),
+    )
+    parent = store.submit_parent(
+        parent_scope,
+        durable_submission,
+        policy=policy,
+    )
+    child = store.submit_child(
+        parent_scope,
+        child_scope,
+        RunSubmission(
+            idempotency_key="child-trigger",
+            input_digest="sha256:child-input",
+            definition_digest="sha256:child-definition",
+            steps=(StepDefinition(id="agent", name="Agent turn"),),
+            budget=RunBudget(
+                scope=BudgetScope.CHILD_TASK,
+                max_model_calls=1,
+            ).to_dict(),
+        ),
+        definition_revision=child_scope.agent_version,
+    )
+    return parent, child
 
 
 def consume_approval_contracts(

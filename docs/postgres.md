@@ -42,6 +42,11 @@ start. Migrations are ordered and forward-only. Test upgrades against a restored
 production backup; rollback means restoring that backup and its matching
 application release.
 
+Revision `0003` adds the parent policy, child lineage/progress, and parent
+completion outbox tables. Deploy it before enabling parent/child API calls.
+The migration is additive; existing ordinary runs remain unchanged and are
+not inferred as parents from `ExecutionScope.parent_run_id`.
+
 Use `ingest_and_submit_run(...)` to commit inbound acceptance and durable run
 submission together. Use `complete_run_and_enqueue(...)` to commit a terminal
 run and outbound delivery together. Native-async equivalents are included. If
@@ -84,6 +89,11 @@ gateway FIFO and reconciliation, and due schedules/triggers. Run and gateway
 claims use PostgreSQL row locks with `SKIP LOCKED`; all transitions retain the
 existing revisions, leases, uniqueness, and stale-worker checks.
 
+Parent child submission locks the parent row before checking cumulative budget
+and fan-out. Parent completion claims use `SKIP LOCKED`; an expired claim is
+quarantined as `unknown` because its external delivery outcome may be
+ambiguous.
+
 Idempotency uniqueness uses SHA-256 expression indexes over the complete owner
 scope and key. The original text remains stored and is compared on every
 replay, while companion hash indexes keep equality lookups bounded even for
@@ -99,7 +109,8 @@ measurement; never remove the shipped uniqueness indexes.
   objectives; verify restores before upgrades.
 - Record application version, Alembic revision, and backup timestamp together.
 - Never delete active leases, pending approvals, unresolved effects, queued
-  inbox records, pending deliveries, or reconciliation-required outcomes.
+  inbox records, pending parent completions, unknown deliveries, or
+  reconciliation-required outcomes.
 - Apply retention only to terminal aggregates after audit/support requirements.
   Delete in bounded batches and preserve foreign-key order.
 - Monitor old leases, unknown effects, reconciliation queues, approvals, dead
@@ -118,4 +129,7 @@ CHULK_POSTGRES_TEST_URL="postgresql+psycopg://postgres:postgres@localhost/chulk"
 
 The gate covers migration, sync/async parity, scope isolation, duplicates,
 concurrent workers, leases, effect reconciliation, ordered delivery, and atomic
-ownership transfer.
+ownership transfer. It also runs the reusable sync and native-async
+parent/child contract, including scope isolation, progress ordering,
+approval and retry/resume, bidirectional cancellation, aggregation, and
+exactly-once parent delivery.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -29,6 +30,18 @@ from chulk.runs.models import (
     RunSubmission,
     StepRecord,
     StepStatus,
+)
+from chulk.runs.parent_child import (
+    ChildRunProgress,
+    ChildRunRecord,
+    ParentAggregationStatus,
+    ParentCompletion,
+    ParentCompletionClaim,
+    ParentCompletionStatus,
+    ParentRunPolicy,
+    ParentRunRecord,
+    run_budget_from_dict,
+    validate_child_budget_allocation,
 )
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
@@ -67,6 +80,10 @@ class SQLiteRunStore:
         """Return backend-specific locking for expired run workers."""
         return ""
 
+    def _parent_completion_claim_lock_clause(self) -> str:
+        """Return backend-specific locking for parent completion claims."""
+        return ""
+
     def submit(
         self,
         scope: ExecutionScope,
@@ -78,100 +95,1005 @@ class SQLiteRunStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            duplicate = conn.execute(
+            return _submit_run(
+                conn,
+                scope,
+                submission,
+                actor=actor,
+                now=now,
+            )
+
+    def submit_parent(
+        self,
+        scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        policy: ParentRunPolicy,
+        actor: str = "host",
+    ) -> ParentRunRecord:
+        """Atomically submit a run and freeze its child fan-out policy."""
+        actor = _required(actor, "actor")
+        if scope.parent_run_id is not None:
+            raise InvalidRunTransitionError(
+                "a child run cannot be configured as a parent"
+            )
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = _idempotent_run_row(conn, scope, submission)
+            run = _submit_run(
+                conn,
+                scope,
+                submission,
+                actor=actor,
+                now=now,
+            )
+            parent_row = conn.execute(
                 """
-                SELECT * FROM durable_runs
-                WHERE tenant_id = ? AND workspace_id = ?
-                  AND idempotency_key = ?
+                SELECT * FROM durable_run_parents WHERE parent_run_id = ?
+                """,
+                (run.id,),
+            ).fetchone()
+            if parent_row is not None:
+                stored_policy = ParentRunPolicy.from_dict(
+                    _object(parent_row["policy_json"])
+                )
+                if stored_policy != policy:
+                    raise RunConflictError(
+                        "parent run idempotency key was reused with another policy"
+                    )
+                return _parent_from_conn(conn, parent_row)
+            if duplicate is not None:
+                raise RunConflictError(
+                    "an existing ordinary run cannot be changed into a parent"
+                )
+            conn.execute(
+                """
+                INSERT INTO durable_run_parents (
+                    parent_run_id, policy_json, aggregation_status,
+                    aggregation_revision, created_at, updated_at
+                ) VALUES (?, ?, 'open', 0, ?, ?)
                 """,
                 (
-                    scope.tenant_id,
-                    scope.workspace_id,
-                    submission.idempotency_key,
+                    run.id,
+                    _json(policy.to_dict()),
+                    _iso(now),
+                    _iso(now),
                 ),
+            )
+            _set_run_state(
+                conn,
+                run.id,
+                RunStatus.WAITING_FOR_CHILDREN,
+                now=now,
+                waiting_reason="waiting for required child runs",
+            )
+            _insert_event(
+                conn,
+                run.id,
+                name="run.waiting_for_children",
+                actor=actor,
+                payload={"policy": policy.to_dict()},
+                idempotency_key=f"parent:{submission.idempotency_key}",
+                now=now,
+            )
+            return _parent_from_conn(
+                conn,
+                _parent_row(conn, run.id),
+            )
+
+    def submit_child(
+        self,
+        parent_scope: ExecutionScope,
+        child_scope: ExecutionScope,
+        submission: RunSubmission,
+        *,
+        definition_revision: str,
+        actor: str = "host",
+    ) -> ChildRunRecord:
+        """Atomically validate, submit, and link one bounded child run."""
+        definition_revision = _required(
+            definition_revision,
+            "child definition revision",
+        )
+        if definition_revision != child_scope.agent_version:
+            raise ValueError(
+                "child definition revision must match its execution scope "
+                "agent_version"
+            )
+        actor = _required(actor, "actor")
+        child_budget = run_budget_from_dict(submission.budget)
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _parent_from_conn(
+                conn,
+                _parent_row(conn, parent_scope.run_id),
+            )
+            _assert_parent_scope(parent_scope, parent.run.scope)
+            _assert_child_scope(parent.run.scope, child_scope)
+            if (
+                parent.aggregation_status is not ParentAggregationStatus.OPEN
+                or parent.run.terminal
+                or parent.run.cancellation_requested
+            ):
+                raise InvalidRunTransitionError(
+                    "terminal or cancelling parent cannot accept child runs"
+                )
+            duplicate = conn.execute(
+                """
+                SELECT * FROM durable_child_runs
+                WHERE parent_run_id = ? AND idempotency_key = ?
+                """,
+                (parent.run.id, submission.idempotency_key),
             ).fetchone()
             if duplicate is not None:
-                existing = _run_from_conn(
-                    conn,
-                    _run_row(conn, str(duplicate["id"])),
-                )
-                _assert_scope(scope, existing.scope)
+                existing = _child_from_row(conn, duplicate)
                 if (
-                    existing.input_digest != submission.input_digest
-                    or existing.definition_digest != submission.definition_digest
+                    existing.run.scope.key != child_scope.key
+                    or existing.run.input_digest != submission.input_digest
+                    or existing.run.definition_digest
+                    != submission.definition_digest
+                    or existing.definition_revision != definition_revision
+                    or dict(existing.run.budget) != dict(submission.budget)
                 ):
                     raise RunConflictError(
-                        "run idempotency key was reused for different input or definition"
+                        "child idempotency key was reused for different work"
                     )
                 return existing
+            storage_idempotency_key = _child_storage_idempotency_key(
+                parent.run.id,
+                submission.idempotency_key,
+            )
+            if (
+                _idempotent_run_row(
+                    conn,
+                    child_scope,
+                    submission,
+                    storage_idempotency_key=storage_idempotency_key,
+                )
+                is not None
+            ):
+                raise RunConflictError(
+                    "child idempotency key already belongs to an unlinked run"
+                )
+            child_rows = _child_rows(conn, parent.run.id)
+            if len(child_rows) >= parent.policy.max_children:
+                raise InvalidRunTransitionError(
+                    "parent child fan-out limit has been reached"
+                )
+            existing_budgets = tuple(
+                run_budget_from_dict(_object(row["budget_json"]))
+                for row in child_rows
+            )
+            validate_child_budget_allocation(
+                parent.policy.budget,
+                child_budget,
+                existing_budgets,
+                observed_at=now,
+            )
+            child_run = _submit_run(
+                conn,
+                child_scope,
+                submission,
+                actor=actor,
+                now=now,
+                storage_idempotency_key=storage_idempotency_key,
+            )
+            ordinal = len(child_rows) + 1
             try:
                 conn.execute(
                     """
-                    INSERT INTO durable_runs (
-                        id, tenant_id, workspace_id, agent_id, agent_version,
-                        scope_key, scope_json, idempotency_key, input_digest,
-                        definition_digest, status, revision,
-                        cancellation_requested, budget_json, metadata_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
-                              ?, ?, ?, ?)
+                    INSERT INTO durable_child_runs (
+                        child_run_id, parent_run_id, ordinal, idempotency_key,
+                        definition_revision, definition_digest, input_digest,
+                        budget_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        scope.run_id,
-                        scope.tenant_id,
-                        scope.workspace_id,
-                        scope.agent_id,
-                        scope.agent_version,
-                        scope.key,
-                        _json(scope.to_dict()),
+                        child_run.id,
+                        parent.run.id,
+                        ordinal,
                         submission.idempotency_key,
-                        submission.input_digest,
+                        definition_revision,
                         submission.definition_digest,
+                        submission.input_digest,
                         _json(submission.budget),
-                        _json(submission.metadata),
                         _iso(now),
                         _iso(now),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise RunConflictError(
-                    f"durable run {scope.run_id!r} already exists"
+                    "child run changed during concurrent submission"
                 ) from exc
-            for step in submission.steps:
+            _insert_event(
+                conn,
+                parent.run.id,
+                name="child.submitted",
+                actor=actor,
+                payload={
+                    "child_run_id": child_run.id,
+                    "ordinal": ordinal,
+                    "definition_revision": definition_revision,
+                    "definition_digest": submission.definition_digest,
+                    "input_digest": submission.input_digest,
+                },
+                idempotency_key=f"child:{submission.idempotency_key}",
+                now=now,
+            )
+            return _child_from_row(
+                conn,
+                _child_row(conn, child_run.id),
+            )
+
+    def get_parent(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentRunRecord:
+        with self._connect() as conn:
+            parent = _parent_from_conn(conn, _parent_row(conn, parent_run_id))
+        _assert_parent_scope(scope, parent.run.scope)
+        return parent
+
+    def children(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> tuple[ChildRunRecord, ...]:
+        return self.get_parent(scope, parent_run_id).children
+
+    def get_child(
+        self,
+        scope: ExecutionScope,
+        child_run_id: str,
+    ) -> ChildRunRecord:
+        with self._connect() as conn:
+            child_row = _child_row(conn, child_run_id)
+            parent = _run_from_conn(
+                conn,
+                _run_row(conn, str(child_row["parent_run_id"])),
+            )
+            child = _child_from_row(conn, child_row)
+        _assert_parent_or_child_scope(scope, parent.scope, child.run.scope)
+        return child
+
+    def record_child_progress(
+        self,
+        scope: ExecutionScope,
+        claim: RunClaim,
+        *,
+        sequence: int,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> ChildRunProgress:
+        """Append progress only from the child's current live lease."""
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 1
+        ):
+            raise ValueError("child progress sequence must be positive")
+        idempotency_key = _required(
+            idempotency_key,
+            "child progress idempotency key",
+        )
+        safe_payload = _safe_payload(payload)
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            child_row = _child_row(conn, claim.run_id)
+            parent_run_id = str(child_row["parent_run_id"])
+            _run_row(conn, parent_run_id)
+            _owned_run(conn, scope, claim, now=now)
+            duplicate = conn.execute(
+                """
+                SELECT * FROM durable_child_progress
+                WHERE child_run_id = ? AND idempotency_key = ?
+                """,
+                (claim.run_id, idempotency_key),
+            ).fetchone()
+            if duplicate is not None:
+                existing = _progress_from_row(duplicate)
+                if (
+                    existing.sequence != sequence
+                    or dict(existing.payload) != safe_payload
+                    or existing.actor != claim.worker_id
+                ):
+                    raise RunConflictError(
+                        "child progress idempotency key was reused"
+                    )
+                return existing
+            expected = int(
                 conn.execute(
                     """
-                    INSERT INTO durable_run_steps (
-                        run_id, id, name, status, revision, attempt_count,
-                        retry_json, metadata_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'queued', 0, 0, ?, ?, ?, ?)
+                    SELECT COALESCE(MAX(sequence), 0) + 1
+                    FROM durable_child_progress WHERE child_run_id = ?
+                    """,
+                    (claim.run_id,),
+                ).fetchone()[0]
+            )
+            if sequence != expected:
+                raise RunConflictError(
+                    f"child progress sequence must be {expected}, got {sequence}"
+                )
+            conn.execute(
+                """
+                INSERT INTO durable_child_progress (
+                    child_run_id, sequence, payload_json, actor,
+                    idempotency_key, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    claim.run_id,
+                    sequence,
+                    _json(safe_payload),
+                    claim.worker_id,
+                    idempotency_key,
+                    _iso(now),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE durable_child_runs
+                SET updated_at = ? WHERE child_run_id = ?
+                """,
+                (_iso(now), claim.run_id),
+            )
+            _insert_event(
+                conn,
+                claim.run_id,
+                name="child.progressed",
+                actor=claim.worker_id,
+                payload={"sequence": sequence, "progress": safe_payload},
+                idempotency_key=f"progress:{idempotency_key}",
+                now=now,
+            )
+            _insert_event(
+                conn,
+                parent_run_id,
+                name="child.progressed",
+                actor=claim.worker_id,
+                payload={
+                    "child_run_id": claim.run_id,
+                    "sequence": sequence,
+                    "progress": safe_payload,
+                },
+                idempotency_key=f"progress:{claim.run_id}:{idempotency_key}",
+                now=now,
+            )
+            return _progress_from_row(
+                conn.execute(
+                    """
+                    SELECT * FROM durable_child_progress
+                    WHERE child_run_id = ? AND sequence = ?
+                    """,
+                    (claim.run_id, sequence),
+                ).fetchone()
+            )
+
+    def request_child_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        child_run_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ChildRunRecord:
+        """Request one child cancellation through the owning parent."""
+        actor = _required(actor, "cancellation actor")
+        reason = _required(reason, "cancellation reason")
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _parent_from_conn(
+                conn,
+                _parent_row(conn, parent_scope.run_id),
+            )
+            _assert_parent_scope(parent_scope, parent.run.scope)
+            row = _child_row(conn, child_run_id)
+            if str(row["parent_run_id"]) != parent.run.id:
+                raise RunNotFoundError(
+                    "child run does not belong to this parent scope"
+                )
+            _request_child_cancellation(
+                conn,
+                parent.run.id,
+                child_run_id,
+                actor=actor,
+                reason=reason,
+                now=now,
+            )
+            return _child_from_row(conn, _child_row(conn, child_run_id))
+
+    def request_parent_cancellation(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        reason: str,
+    ) -> ParentRunRecord:
+        """Cancel the parent intent and propagate it to every live child."""
+        actor = _required(actor, "cancellation actor")
+        reason = _required(reason, "cancellation reason")
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _parent_from_conn(
+                conn,
+                _parent_row(conn, parent_scope.run_id),
+            )
+            _assert_parent_scope(parent_scope, parent.run.scope)
+            if parent.aggregation_status is ParentAggregationStatus.COMPLETED:
+                return parent
+            changed = conn.execute(
+                """
+                UPDATE durable_runs
+                SET cancellation_requested = 1, revision = revision + 1,
+                    updated_at = ?
+                WHERE id = ? AND cancellation_requested = 0
+                """,
+                (_iso(now), parent.run.id),
+            )
+            for child in parent.children:
+                _request_child_cancellation(
+                    conn,
+                    parent.run.id,
+                    child.run.id,
+                    actor=actor,
+                    reason=reason,
+                    now=now,
+                )
+            if changed.rowcount == 1:
+                _insert_event(
+                    conn,
+                    parent.run.id,
+                    name="run.cancellation_requested",
+                    actor=actor,
+                    payload={
+                        "reason": reason,
+                        "status": parent.run.status.value,
+                        "child_run_ids": [
+                            child.run.id for child in parent.children
+                        ],
+                    },
+                    idempotency_key="parent-cancellation",
+                    now=now,
+                )
+            return _parent_from_conn(
+                conn,
+                _parent_row(conn, parent.run.id),
+            )
+
+    def aggregate_children(
+        self,
+        parent_scope: ExecutionScope,
+        *,
+        actor: str,
+        idempotency_key: str,
+    ) -> ParentRunRecord:
+        """Terminalize a parent once all required child outcomes are durable."""
+        actor = _required(actor, "aggregation actor")
+        idempotency_key = _required(
+            idempotency_key,
+            "aggregation idempotency key",
+        )
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _parent_from_conn(
+                conn,
+                _parent_row(conn, parent_scope.run_id),
+            )
+            _assert_parent_scope(parent_scope, parent.run.scope)
+            if parent.aggregation_status is ParentAggregationStatus.COMPLETED:
+                return parent
+            if (
+                not parent.run.cancellation_requested
+                and len(parent.children) < parent.policy.required_children
+            ):
+                raise InvalidRunTransitionError(
+                    "parent does not yet have its required child set"
+                )
+            nonterminal = [
+                child.run.id for child in parent.children if not child.run.terminal
+            ]
+            if nonterminal:
+                raise InvalidRunTransitionError(
+                    "parent cannot aggregate nonterminal children: "
+                    + ", ".join(nonterminal)
+                )
+            if not parent.children and not parent.run.cancellation_requested:
+                raise InvalidRunTransitionError(
+                    "parent cannot aggregate an empty child set"
+                )
+            evidence: list[dict[str, Any]] = []
+            for child in parent.children:
+                terminal_evidence = _terminal_child_evidence(conn, child.run)
+                conn.execute(
+                    """
+                    UPDATE durable_child_runs
+                    SET terminal_evidence_json = ?, updated_at = ?
+                    WHERE child_run_id = ?
                     """,
                     (
-                        scope.run_id,
-                        step.id,
-                        step.name,
-                        _json(step.retry_policy.to_dict()),
-                        _json(step.metadata),
+                        _json(terminal_evidence),
                         _iso(now),
-                        _iso(now),
+                        child.run.id,
                     ),
+                )
+                evidence.append(
+                    {
+                        "child_run_id": child.run.id,
+                        "ordinal": child.ordinal,
+                        "status": child.run.status.value,
+                        "result": (
+                            dict(child.run.result)
+                            if child.run.result is not None
+                            else None
+                        ),
+                        "error": child.run.error,
+                        "terminal_evidence": terminal_evidence,
+                    }
+                )
+            if parent.run.cancellation_requested:
+                status = RunStatus.CANCELLED
+                reason = "parent cancellation completed after child settlement"
+            elif all(
+                child.run.status is RunStatus.COMPLETED
+                for child in parent.children
+            ):
+                status = RunStatus.COMPLETED
+                reason = None
+            else:
+                status = RunStatus.FAILED
+                reason = "one or more child runs did not complete successfully"
+            aggregate = {
+                "parent_run_id": parent.run.id,
+                "status": status.value,
+                "children": evidence,
+            }
+            step_status = {
+                RunStatus.COMPLETED: StepStatus.COMPLETED,
+                RunStatus.FAILED: StepStatus.FAILED,
+                RunStatus.CANCELLED: StepStatus.CANCELLED,
+            }[status]
+            conn.execute(
+                """
+                UPDATE durable_run_steps
+                SET status = ?, revision = revision + 1, error = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE run_id = ? AND status != 'completed'
+                """,
+                (
+                    step_status.value,
+                    reason,
+                    _iso(now),
+                    _iso(now),
+                    parent.run.id,
+                ),
+            )
+            _set_run_state(
+                conn,
+                parent.run.id,
+                status,
+                now=now,
+                result=aggregate if status is RunStatus.COMPLETED else None,
+                error=reason,
+                clear_lease=True,
+                completed=True,
+            )
+            conn.execute(
+                """
+                UPDATE durable_run_parents
+                SET aggregation_status = 'completed',
+                    aggregation_revision = aggregation_revision + 1,
+                    aggregation_key = ?, aggregate_result_json = ?,
+                    updated_at = ?
+                WHERE parent_run_id = ? AND aggregation_status = 'open'
+                """,
+                (
+                    idempotency_key,
+                    _json(aggregate),
+                    _iso(now),
+                    parent.run.id,
+                ),
+            )
+            _insert_event(
+                conn,
+                parent.run.id,
+                name="run.children_aggregated",
+                actor=actor,
+                payload=aggregate,
+                idempotency_key=f"aggregate:{idempotency_key}",
+                now=now,
+            )
+            _insert_event(
+                conn,
+                parent.run.id,
+                name={
+                    RunStatus.COMPLETED: "run.completed",
+                    RunStatus.FAILED: "run.failed",
+                    RunStatus.CANCELLED: "run.cancelled",
+                }[status],
+                actor=actor,
+                payload=(
+                    {"result": aggregate}
+                    if status is RunStatus.COMPLETED
+                    else {"reason": reason, "children": evidence}
+                ),
+                idempotency_key="parent-terminal",
+                now=now,
+            )
+            conn.execute(
+                """
+                INSERT INTO durable_parent_completion_outbox (
+                    id, parent_run_id, status, payload_json, attempt_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'pending', ?, 0, ?, ?)
+                """,
+                (
+                    uuid4().hex,
+                    parent.run.id,
+                    _json(aggregate),
+                    _iso(now),
+                    _iso(now),
+                ),
+            )
+            return _parent_from_conn(
+                conn,
+                _parent_row(conn, parent.run.id),
+            )
+
+    def parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+    ) -> ParentCompletion | None:
+        """Inspect the terminal parent delivery without claiming it."""
+        self.get_parent(scope, parent_run_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM durable_parent_completion_outbox
+                WHERE parent_run_id = ?
+                """,
+                (parent_run_id,),
+            ).fetchone()
+        return _completion_from_row(row) if row is not None else None
+
+    def claim_parent_completion(
+        self,
+        scope: ExecutionScope,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+        parent_run_id: str | None = None,
+    ) -> ParentCompletionClaim | None:
+        """Claim one pending completion; expired ambiguous claims fail closed."""
+        worker_id = _required(worker_id, "completion worker id")
+        _positive_seconds(lease_seconds)
+        if scope.parent_run_id is not None:
+            raise RunNotFoundError(
+                "parent completion cannot be claimed from a child scope"
+            )
+        target_parent_run_id = parent_run_id or scope.run_id
+        if target_parent_run_id != scope.run_id:
+            raise RunNotFoundError(
+                "parent completion does not belong to this execution scope"
+            )
+        now = _utc_now()
+        lease_until = now + timedelta(seconds=lease_seconds)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _run_from_conn(
+                conn,
+                _run_row(conn, target_parent_run_id),
+            )
+            _assert_parent_scope(scope, parent.scope)
+            expired = conn.execute(
+                f"""
+                SELECT outbox.* FROM durable_parent_completion_outbox AS outbox
+                JOIN durable_runs AS run ON run.id = outbox.parent_run_id
+                WHERE run.tenant_id = ? AND run.workspace_id = ?
+                  AND run.agent_id = ? AND run.agent_version = ?
+                  AND outbox.parent_run_id = ?
+                  AND outbox.status = 'claimed'
+                  AND outbox.lease_until IS NOT NULL
+                  AND outbox.lease_until <= ?
+                ORDER BY outbox.created_at, outbox.id
+                LIMIT 1 {self._parent_completion_claim_lock_clause()}
+                """,
+                (
+                    scope.tenant_id,
+                    scope.workspace_id,
+                    scope.agent_id,
+                    scope.agent_version,
+                    target_parent_run_id,
+                    _iso(now),
+                ),
+            ).fetchone()
+            if expired is not None:
+                conn.execute(
+                    """
+                    UPDATE durable_parent_completion_outbox
+                    SET status = 'unknown', worker_id = NULL,
+                        lease_token = NULL, lease_until = NULL,
+                        last_error = ?, updated_at = ?
+                    WHERE id = ? AND status = 'claimed'
+                    """,
+                    (
+                        "delivery lease expired with unknown outcome",
+                        _iso(now),
+                        str(expired["id"]),
+                    ),
+                )
+                _insert_event(
+                    conn,
+                    str(expired["parent_run_id"]),
+                    name="parent.completion_unknown",
+                    actor="recovery",
+                    payload={
+                        "completion_id": str(expired["id"]),
+                        "reason": "delivery lease expired with unknown outcome",
+                    },
+                    idempotency_key=f"completion-expired:{expired['id']}",
+                    now=now,
+                )
+            clauses = [
+                "run.tenant_id = ?",
+                "run.workspace_id = ?",
+                "run.agent_id = ?",
+                "run.agent_version = ?",
+                "outbox.parent_run_id = ?",
+                "outbox.status = 'pending'",
+            ]
+            values: list[Any] = [
+                scope.tenant_id,
+                scope.workspace_id,
+                scope.agent_id,
+                scope.agent_version,
+                target_parent_run_id,
+            ]
+            row = conn.execute(
+                f"""
+                SELECT outbox.* FROM durable_parent_completion_outbox AS outbox
+                JOIN durable_runs AS run ON run.id = outbox.parent_run_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY outbox.created_at, outbox.id
+                LIMIT 1 {self._parent_completion_claim_lock_clause()}
+                """,
+                tuple(values),
+            ).fetchone()
+            if row is None:
+                return None
+            token = uuid4().hex
+            cursor = conn.execute(
+                """
+                UPDATE durable_parent_completion_outbox
+                SET status = 'claimed', attempt_count = attempt_count + 1,
+                    worker_id = ?, lease_token = ?, lease_until = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (
+                    worker_id,
+                    token,
+                    _iso(lease_until),
+                    _iso(now),
+                    str(row["id"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RunConflictError(
+                    "parent completion changed during claim"
                 )
             _insert_event(
                 conn,
-                scope.run_id,
-                name="run.queued",
-                actor=actor,
-                payload={
-                    "definition_digest": submission.definition_digest,
-                    "input_digest": submission.input_digest,
-                    "source_event_id": submission.source_event_id,
-                },
-                correlation_id=submission.correlation_id,
-                idempotency_key=f"submit:{submission.idempotency_key}",
+                parent.id,
+                name="parent.completion_claimed",
+                actor=worker_id,
+                payload={"completion_id": str(row["id"])},
                 now=now,
             )
-            return _run_from_conn(
+            completion = _completion_from_row(
+                _completion_row(conn, str(row["id"]))
+            )
+            return ParentCompletionClaim(
+                completion=completion,
+                worker_id=worker_id,
+                lease_token=token,
+                lease_until=lease_until,
+            )
+
+    def complete_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+    ) -> ParentCompletion:
+        """Acknowledge a definitely delivered parent completion."""
+        return self._transition_parent_completion_claim(
+            scope,
+            claim,
+            status=ParentCompletionStatus.DELIVERED,
+            event_name="parent.completion_delivered",
+            reason=None,
+        )
+
+    def fail_parent_completion(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion:
+        """Release a claim after a definite pre-delivery failure."""
+        return self._transition_parent_completion_claim(
+            scope,
+            claim,
+            status=ParentCompletionStatus.PENDING,
+            event_name="parent.completion_failed",
+            reason=_required(reason, "completion failure reason"),
+        )
+
+    def mark_parent_completion_unknown(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        reason: str,
+    ) -> ParentCompletion:
+        """Quarantine an ambiguous delivery until host reconciliation."""
+        return self._transition_parent_completion_claim(
+            scope,
+            claim,
+            status=ParentCompletionStatus.UNKNOWN,
+            event_name="parent.completion_unknown",
+            reason=_required(reason, "completion uncertainty reason"),
+        )
+
+    def reconcile_parent_completion(
+        self,
+        scope: ExecutionScope,
+        parent_run_id: str,
+        *,
+        delivered: bool,
+        actor: str,
+        reason: str,
+    ) -> ParentCompletion:
+        """Resolve an ambiguous delivery without allowing blind replay."""
+        actor = _required(actor, "completion reconciliation actor")
+        reason = _required(reason, "completion reconciliation reason")
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = _parent_from_conn(
                 conn,
-                _run_row(conn, scope.run_id),
+                _parent_row(conn, parent_run_id),
+            )
+            _assert_parent_scope(scope, parent.run.scope)
+            row = conn.execute(
+                """
+                SELECT * FROM durable_parent_completion_outbox
+                WHERE parent_run_id = ?
+                """,
+                (parent_run_id,),
+            ).fetchone()
+            if row is None:
+                raise RunNotFoundError(
+                    "parent completion delivery was not found"
+                )
+            completion = _completion_from_row(row)
+            if completion.status is not ParentCompletionStatus.UNKNOWN:
+                raise InvalidRunTransitionError(
+                    "only unknown parent completion can be reconciled"
+                )
+            status = (
+                ParentCompletionStatus.DELIVERED
+                if delivered
+                else ParentCompletionStatus.PENDING
+            )
+            conn.execute(
+                """
+                UPDATE durable_parent_completion_outbox
+                SET status = ?, worker_id = NULL, lease_token = NULL,
+                    lease_until = NULL, last_error = ?, updated_at = ?,
+                    delivered_at = CASE WHEN ? THEN ? ELSE NULL END
+                WHERE id = ? AND status = 'unknown'
+                """,
+                (
+                    status.value,
+                    reason,
+                    _iso(now),
+                    int(delivered),
+                    _iso(now),
+                    completion.id,
+                ),
+            )
+            _insert_event(
+                conn,
+                parent_run_id,
+                name="parent.completion_reconciled",
+                actor=actor,
+                payload={
+                    "completion_id": completion.id,
+                    "delivered": delivered,
+                    "reason": reason,
+                },
+                now=now,
+            )
+            return _completion_from_row(
+                _completion_row(conn, completion.id)
+            )
+
+    def _transition_parent_completion_claim(
+        self,
+        scope: ExecutionScope,
+        claim: ParentCompletionClaim,
+        *,
+        status: ParentCompletionStatus,
+        event_name: str,
+        reason: str | None,
+    ) -> ParentCompletion:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = _completion_row(conn, claim.completion.id)
+            parent = _parent_from_conn(
+                conn,
+                _parent_row(conn, str(row["parent_run_id"])),
+            )
+            _assert_parent_scope(scope, parent.run.scope)
+            if (
+                str(row["status"]) != ParentCompletionStatus.CLAIMED.value
+                or row["lease_token"] != claim.lease_token
+                or row["worker_id"] != claim.worker_id
+            ):
+                raise RunLeaseError(
+                    "parent completion claim is absent or stale"
+                )
+            if (
+                status is not ParentCompletionStatus.UNKNOWN
+                and _decode(str(row["lease_until"])) <= now
+            ):
+                raise RunLeaseError("parent completion claim has expired")
+            delivered = status is ParentCompletionStatus.DELIVERED
+            updated = conn.execute(
+                """
+                UPDATE durable_parent_completion_outbox
+                SET status = ?, worker_id = NULL, lease_token = NULL,
+                    lease_until = NULL, last_error = ?, updated_at = ?,
+                    delivered_at = CASE WHEN ? THEN ? ELSE delivered_at END
+                WHERE id = ? AND status = 'claimed' AND lease_token = ?
+                """,
+                (
+                    status.value,
+                    reason,
+                    _iso(now),
+                    int(delivered),
+                    _iso(now),
+                    claim.completion.id,
+                    claim.lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RunLeaseError(
+                    "parent completion claim is absent or stale"
+                )
+            _insert_event(
+                conn,
+                parent.run.id,
+                name=event_name,
+                actor=claim.worker_id,
+                payload={
+                    "completion_id": claim.completion.id,
+                    "reason": reason,
+                },
+                now=now,
+            )
+            return _completion_from_row(
+                _completion_row(conn, claim.completion.id)
             )
 
     def get(self, scope: ExecutionScope, run_id: str) -> RunRecord:
@@ -312,10 +1234,25 @@ class SQLiteRunStore:
     ) -> RunClaim | None:
         worker_id = _required(worker_id, "worker id")
         _positive_seconds(lease_seconds)
+        if scope.parent_run_id is not None:
+            if run_id is not None and run_id != scope.run_id:
+                raise RunNotFoundError(
+                    "child scope cannot claim a sibling run"
+                )
+            run_id = scope.run_id
         now = _utc_now()
         lease_until = now + timedelta(seconds=lease_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            preflight_run_id = run_id
+            if preflight_run_id is not None and _expire_linked_child_run_if_due(
+                conn,
+                scope,
+                preflight_run_id,
+                actor=worker_id,
+                now=now,
+            ):
+                return None
             parameters: list[Any] = [
                 scope.tenant_id,
                 scope.workspace_id,
@@ -324,9 +1261,17 @@ class SQLiteRunStore:
                 _iso(now),
             ]
             run_clause = ""
+            queue_scope_clause = ""
             if run_id is not None:
                 run_clause = "AND id = ?"
                 parameters.append(run_id)
+            else:
+                queue_scope_clause = """
+                  AND NOT EXISTS (
+                    SELECT 1 FROM durable_child_runs AS linked_child
+                    WHERE linked_child.child_run_id = durable_runs.id
+                  )
+                """
             row = conn.execute(
                 f"""
                 SELECT * FROM durable_runs
@@ -341,6 +1286,7 @@ class SQLiteRunStore:
                         AND next_retry_at <= ?
                     )
                   )
+                  {queue_scope_clause}
                   {run_clause}
                 ORDER BY created_at, id
                 LIMIT 1
@@ -351,6 +1297,17 @@ class SQLiteRunStore:
                 return None
             persisted_scope = ExecutionScope.from_dict(_object(row["scope_json"]))
             _assert_scope(scope, persisted_scope)
+            if (
+                str(row["id"]) != preflight_run_id
+                and _expire_linked_child_run_if_due(
+                    conn,
+                    scope,
+                    str(row["id"]),
+                    actor=worker_id,
+                    now=now,
+                )
+            ):
+                return None
             token = uuid4().hex
             revision = int(row["revision"]) + 1
             cursor = conn.execute(
@@ -896,9 +1853,14 @@ class SQLiteRunStore:
                         "confirmed reconciliation requires a result digest"
                     )
             elif decision is ReconciliationDecision.RETRY:
-                new_effect_status = EffectStatus.INTENDED
-                new_step_status = StepStatus.QUEUED
-                new_run_status = RunStatus.QUEUED
+                if run.cancellation_requested:
+                    new_effect_status = EffectStatus.CANCELLED
+                    new_step_status = StepStatus.CANCELLED
+                    new_run_status = RunStatus.CANCELLED
+                else:
+                    new_effect_status = EffectStatus.INTENDED
+                    new_step_status = StepStatus.QUEUED
+                    new_run_status = RunStatus.QUEUED
             elif decision is ReconciliationDecision.FAILED:
                 new_effect_status = EffectStatus.FAILED
                 new_step_status = StepStatus.FAILED
@@ -1048,7 +2010,7 @@ class SQLiteRunStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            _owned_run(conn, scope, claim, now=now)
+            owned = _owned_run(conn, scope, claim, now=now)
             step = _step_from_row(_step_row(conn, claim.run_id, step_id))
             _active_attempt(conn, claim.run_id, step_id)
             if conn.execute(
@@ -1062,14 +2024,6 @@ class SQLiteRunStore:
                 raise InvalidRunTransitionError(
                     "uncertain effects must be reconciled before retry or failure"
                 )
-            _mark_active_attempt(
-                conn,
-                claim.run_id,
-                step_id,
-                AttemptStatus.FAILED,
-                now,
-                reason,
-            )
             counted_attempts = int(
                 conn.execute(
                     """
@@ -1082,6 +2036,26 @@ class SQLiteRunStore:
             can_retry = (
                 retryable
                 and counted_attempts < step.retry_policy.max_attempts
+            )
+            if can_retry and bool(owned["cancellation_requested"]):
+                _settle_run_cancellation(
+                    conn,
+                    claim.run_id,
+                    actor=claim.worker_id,
+                    reason=(
+                        "cancellation settled after retryable step failure: "
+                        f"{reason}"
+                    ),
+                    now=now,
+                )
+                return _run_from_conn(conn, _run_row(conn, claim.run_id))
+            _mark_active_attempt(
+                conn,
+                claim.run_id,
+                step_id,
+                AttemptStatus.FAILED,
+                now,
+                reason,
             )
             if can_retry:
                 next_retry = now + step.retry_policy.delay_for_attempt(
@@ -1181,6 +2155,17 @@ class SQLiteRunStore:
             conn.execute("BEGIN IMMEDIATE")
             _owned_run(conn, scope, claim, now=now)
             attempt = _active_attempt(conn, claim.run_id, step_id)
+            if conn.execute(
+                """
+                SELECT 1 FROM durable_effects
+                WHERE run_id = ? AND step_id = ?
+                  AND status IN ('executing', 'unknown')
+                """,
+                (claim.run_id, step_id),
+            ).fetchone():
+                raise InvalidRunTransitionError(
+                    "uncertain effects must be reconciled before approval pause"
+                )
             sequence = _next_checkpoint_sequence(conn, claim.run_id)
             checkpoint_id = uuid4().hex
             conn.execute(
@@ -1312,6 +2297,11 @@ class SQLiteRunStore:
             conn.execute("BEGIN IMMEDIATE")
             run = _run_from_conn(conn, _run_row(conn, run_id))
             _assert_scope(scope, run.scope)
+            _reject_direct_parent_transition(
+                conn,
+                run_id,
+                "request_parent_cancellation",
+            )
             if run.status is RunStatus.COMPLETED:
                 raise InvalidRunTransitionError("completed run cannot be cancelled")
             if run.status is RunStatus.CANCELLED:
@@ -1398,6 +2388,11 @@ class SQLiteRunStore:
             conn.execute("BEGIN IMMEDIATE")
             run = _run_from_conn(conn, _run_row(conn, run_id))
             _assert_scope(scope, run.scope)
+            _reject_direct_parent_transition(
+                conn,
+                run_id,
+                "request_parent_cancellation",
+            )
             if run.status is RunStatus.COMPLETED:
                 raise InvalidRunTransitionError("completed run cannot be cancelled")
             if run.status is RunStatus.CANCELLED:
@@ -1648,6 +2643,11 @@ class SQLiteRunStore:
             conn.execute("BEGIN IMMEDIATE")
             run = _run_from_conn(conn, _run_row(conn, run_id))
             _assert_scope(scope, run.scope)
+            _reject_direct_parent_transition(
+                conn,
+                run_id,
+                "aggregate_children",
+            )
             if run.status is RunStatus.COMPLETED:
                 raise InvalidRunTransitionError(
                     "completed run cannot be dead-lettered"
@@ -1817,7 +2817,18 @@ class SQLiteRunStore:
                     unsafe_effect is None and non_intent_checkpoint is None
                 )
                 if safe_to_requeue:
-                    if active_attempt is not None:
+                    if bool(current["cancellation_requested"]):
+                        _settle_run_cancellation(
+                            conn,
+                            run_id,
+                            actor="reconciler",
+                            reason=(
+                                "cancellation settled after the worker lease "
+                                "expired before an unsafe effect"
+                            ),
+                            now=observed,
+                        )
+                    elif active_attempt is not None:
                         conn.execute(
                             """
                             UPDATE durable_run_attempts
@@ -1828,7 +2839,10 @@ class SQLiteRunStore:
                             """,
                             (_iso(observed), str(active_attempt["id"])),
                         )
-                    if active_step is not None:
+                    if (
+                        not bool(current["cancellation_requested"])
+                        and active_step is not None
+                    ):
                         conn.execute(
                             """
                             UPDATE durable_run_steps
@@ -1842,21 +2856,24 @@ class SQLiteRunStore:
                                 str(active_step["id"]),
                             ),
                         )
-                    _set_run_state(
-                        conn,
-                        run_id,
-                        RunStatus.QUEUED,
-                        now=observed,
-                        clear_lease=True,
-                    )
-                    _insert_event(
-                        conn,
-                        run_id,
-                        name="run.requeued",
-                        actor="reconciler",
-                        payload={"reason": "lease expired before work started"},
-                        now=observed,
-                    )
+                    if not bool(current["cancellation_requested"]):
+                        _set_run_state(
+                            conn,
+                            run_id,
+                            RunStatus.QUEUED,
+                            now=observed,
+                            clear_lease=True,
+                        )
+                        _insert_event(
+                            conn,
+                            run_id,
+                            name="run.requeued",
+                            actor="reconciler",
+                            payload={
+                                "reason": "lease expired before work started"
+                            },
+                            now=observed,
+                        )
                 else:
                     if unsafe_effect is not None and str(
                         unsafe_effect["status"]
@@ -2064,6 +3081,665 @@ class SQLiteRunStore:
             return _run_from_conn(conn, _run_row(conn, claim.run_id))
 
 
+def _submit_run(
+    conn: sqlite3.Connection,
+    scope: ExecutionScope,
+    submission: RunSubmission,
+    *,
+    actor: str,
+    now: datetime,
+    storage_idempotency_key: str | None = None,
+) -> RunRecord:
+    duplicate = _idempotent_run_row(
+        conn,
+        scope,
+        submission,
+        storage_idempotency_key=storage_idempotency_key,
+    )
+    if duplicate is not None:
+        return _run_from_conn(
+            conn,
+            _run_row(conn, str(duplicate["id"])),
+        )
+    try:
+        conn.execute(
+            """
+            INSERT INTO durable_runs (
+                id, tenant_id, workspace_id, agent_id, agent_version,
+                scope_key, scope_json, idempotency_key, input_digest,
+                definition_digest, status, revision,
+                cancellation_requested, budget_json, metadata_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
+                      ?, ?, ?, ?)
+            """,
+            (
+                scope.run_id,
+                scope.tenant_id,
+                scope.workspace_id,
+                scope.agent_id,
+                scope.agent_version,
+                scope.key,
+                _json(scope.to_dict()),
+                storage_idempotency_key or submission.idempotency_key,
+                submission.input_digest,
+                submission.definition_digest,
+                _json(submission.budget),
+                _json(submission.metadata),
+                _iso(now),
+                _iso(now),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise RunConflictError(
+            f"durable run {scope.run_id!r} already exists"
+        ) from exc
+    for step in submission.steps:
+        conn.execute(
+            """
+            INSERT INTO durable_run_steps (
+                run_id, id, name, status, revision, attempt_count,
+                retry_json, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'queued', 0, 0, ?, ?, ?, ?)
+            """,
+            (
+                scope.run_id,
+                step.id,
+                step.name,
+                _json(step.retry_policy.to_dict()),
+                _json(step.metadata),
+                _iso(now),
+                _iso(now),
+            ),
+        )
+    _insert_event(
+        conn,
+        scope.run_id,
+        name="run.queued",
+        actor=actor,
+        payload={
+            "definition_digest": submission.definition_digest,
+            "input_digest": submission.input_digest,
+            "source_event_id": submission.source_event_id,
+        },
+        correlation_id=submission.correlation_id,
+        idempotency_key=f"submit:{submission.idempotency_key}",
+        now=now,
+    )
+    return _run_from_conn(conn, _run_row(conn, scope.run_id))
+
+
+def _idempotent_run_row(
+    conn: sqlite3.Connection,
+    scope: ExecutionScope,
+    submission: RunSubmission,
+    *,
+    storage_idempotency_key: str | None = None,
+) -> sqlite3.Row | None:
+    duplicate = conn.execute(
+        """
+        SELECT * FROM durable_runs
+        WHERE tenant_id = ? AND workspace_id = ?
+          AND idempotency_key = ?
+        """,
+        (
+            scope.tenant_id,
+            scope.workspace_id,
+            storage_idempotency_key or submission.idempotency_key,
+        ),
+    ).fetchone()
+    if duplicate is None:
+        return None
+    existing = _run_from_conn(
+        conn,
+        _run_row(conn, str(duplicate["id"])),
+    )
+    _assert_scope(scope, existing.scope)
+    if (
+        existing.input_digest != submission.input_digest
+        or existing.definition_digest != submission.definition_digest
+        or dict(existing.budget) != dict(submission.budget)
+    ):
+        raise RunConflictError(
+            "run idempotency key was reused for different input, definition, "
+            "or budget"
+        )
+    return duplicate
+
+
+def _child_storage_idempotency_key(
+    parent_run_id: str,
+    idempotency_key: str,
+) -> str:
+    value = json.dumps(
+        [parent_run_id, idempotency_key],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return f"child:{hashlib.sha256(value).hexdigest()}"
+
+
+def _parent_row(conn: sqlite3.Connection, parent_run_id: str) -> sqlite3.Row:
+    _run_row(conn, parent_run_id)
+    row = conn.execute(
+        """
+        SELECT * FROM durable_run_parents WHERE parent_run_id = ?
+        """,
+        (parent_run_id,),
+    ).fetchone()
+    if row is None:
+        raise RunNotFoundError(
+            f"durable parent run {parent_run_id!r} was not found"
+        )
+    return row
+
+
+def _child_row(conn: sqlite3.Connection, child_run_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT * FROM durable_child_runs WHERE child_run_id = ?
+        """,
+        (child_run_id,),
+    ).fetchone()
+    if row is None:
+        raise RunNotFoundError(
+            f"durable child run {child_run_id!r} was not found"
+        )
+    return row
+
+
+def _child_rows(
+    conn: sqlite3.Connection,
+    parent_run_id: str,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM durable_child_runs
+        WHERE parent_run_id = ? ORDER BY ordinal
+        """,
+        (parent_run_id,),
+    ).fetchall()
+
+
+def _parent_from_conn(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> ParentRunRecord:
+    parent_run_id = str(row["parent_run_id"])
+    aggregate_value = row["aggregate_result_json"]
+    return ParentRunRecord(
+        run=_run_from_conn(conn, _run_row(conn, parent_run_id)),
+        policy=ParentRunPolicy.from_dict(_object(row["policy_json"])),
+        children=tuple(
+            _child_from_row(conn, child)
+            for child in _child_rows(conn, parent_run_id)
+        ),
+        aggregation_status=ParentAggregationStatus(
+            str(row["aggregation_status"])
+        ),
+        aggregation_revision=int(row["aggregation_revision"]),
+        aggregate_result=(
+            _object(aggregate_value) if aggregate_value is not None else None
+        ),
+    )
+
+
+def _child_from_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> ChildRunRecord:
+    child_run_id = str(row["child_run_id"])
+    progress_rows = conn.execute(
+        """
+        SELECT * FROM durable_child_progress
+        WHERE child_run_id = ? ORDER BY sequence
+        """,
+        (child_run_id,),
+    ).fetchall()
+    evidence_value = row["terminal_evidence_json"]
+    return ChildRunRecord(
+        parent_run_id=str(row["parent_run_id"]),
+        run=_run_from_conn(
+            conn,
+            _run_row(conn, child_run_id),
+            idempotency_key=str(row["idempotency_key"]),
+        ),
+        ordinal=int(row["ordinal"]),
+        definition_revision=str(row["definition_revision"]),
+        progress=tuple(_progress_from_row(item) for item in progress_rows),
+        terminal_evidence=(
+            _object(evidence_value) if evidence_value is not None else None
+        ),
+        created_at=_decode(str(row["created_at"])),
+        updated_at=_decode(str(row["updated_at"])),
+    )
+
+
+def _progress_from_row(row: sqlite3.Row) -> ChildRunProgress:
+    return ChildRunProgress(
+        child_run_id=str(row["child_run_id"]),
+        sequence=int(row["sequence"]),
+        payload=_object(row["payload_json"]),
+        actor=str(row["actor"]),
+        idempotency_key=str(row["idempotency_key"]),
+        created_at=_decode(str(row["created_at"])),
+    )
+
+
+def _completion_row(
+    conn: sqlite3.Connection,
+    completion_id: str,
+) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT * FROM durable_parent_completion_outbox WHERE id = ?
+        """,
+        (completion_id,),
+    ).fetchone()
+    if row is None:
+        raise RunNotFoundError(
+            f"parent completion {completion_id!r} was not found"
+        )
+    return row
+
+
+def _completion_from_row(row: sqlite3.Row) -> ParentCompletion:
+    return ParentCompletion(
+        id=str(row["id"]),
+        parent_run_id=str(row["parent_run_id"]),
+        status=ParentCompletionStatus(str(row["status"])),
+        payload=_object(row["payload_json"]),
+        attempt_count=int(row["attempt_count"]),
+        worker_id=str(row["worker_id"]) if row["worker_id"] is not None else None,
+        lease_token=(
+            str(row["lease_token"]) if row["lease_token"] is not None else None
+        ),
+        lease_until=_optional_datetime(row["lease_until"]),
+        last_error=(
+            str(row["last_error"]) if row["last_error"] is not None else None
+        ),
+        created_at=_decode(str(row["created_at"])),
+        updated_at=_decode(str(row["updated_at"])),
+        delivered_at=_optional_datetime(row["delivered_at"]),
+    )
+
+
+def _expire_linked_child_run_if_due(
+    conn: sqlite3.Connection,
+    scope: ExecutionScope,
+    run_id: str,
+    *,
+    actor: str,
+    now: datetime,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT runs.scope_json, children.budget_json
+        FROM durable_runs AS runs
+        JOIN durable_child_runs AS children
+          ON children.child_run_id = runs.id
+        WHERE runs.id = ?
+          AND runs.tenant_id = ? AND runs.workspace_id = ?
+          AND runs.agent_id = ? AND runs.agent_version = ?
+          AND runs.cancellation_requested = 0
+          AND runs.status IN (
+              'queued', 'waiting_for_approval', 'waiting_for_retry'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM durable_effects AS effects
+              WHERE effects.run_id = runs.id
+                AND effects.status IN ('executing', 'unknown')
+          )
+        """,
+        (
+            run_id,
+            scope.tenant_id,
+            scope.workspace_id,
+            scope.agent_id,
+            scope.agent_version,
+        ),
+    ).fetchone()
+    if row is None:
+        return False
+    persisted_scope = ExecutionScope.from_dict(_object(row["scope_json"]))
+    _assert_scope(scope, persisted_scope)
+    budget = run_budget_from_dict(_object(row["budget_json"]))
+    if budget.deadline is None or budget.deadline > now:
+        return False
+    current = _run_row(conn, run_id)
+    if (
+        not bool(current["cancellation_requested"])
+        and str(current["status"])
+        in {
+            RunStatus.QUEUED.value,
+            RunStatus.WAITING_FOR_APPROVAL.value,
+            RunStatus.WAITING_FOR_RETRY.value,
+        }
+    ):
+        current_budget = run_budget_from_dict(_object(current["budget_json"]))
+        if (
+            current_budget.deadline is not None
+            and current_budget.deadline <= now
+        ):
+            _fail_expired_child_run(
+                conn,
+                run_id,
+                actor=actor,
+                deadline=current_budget.deadline,
+                now=now,
+            )
+    return True
+
+
+def _fail_expired_child_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str,
+    deadline: datetime,
+    now: datetime,
+) -> None:
+    reason = "child run budget deadline expired before claim"
+    conn.execute(
+        """
+        UPDATE durable_run_steps
+        SET status = 'failed', revision = revision + 1, error = ?,
+            updated_at = ?, completed_at = ?
+        WHERE run_id = ?
+          AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
+        """,
+        (reason, _iso(now), _iso(now), run_id),
+    )
+    _set_run_state(
+        conn,
+        run_id,
+        RunStatus.FAILED,
+        now=now,
+        error=reason,
+        clear_lease=True,
+        completed=True,
+    )
+    _insert_event(
+        conn,
+        run_id,
+        name="run.failed",
+        actor=actor,
+        payload={
+            "reason": reason,
+            "deadline": _iso(deadline),
+        },
+        now=now,
+    )
+
+
+def _settle_run_cancellation(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    actor: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    conn.execute(
+        """
+        UPDATE durable_run_attempts
+        SET status = 'cancelled', error = ?, completed_at = ?
+        WHERE run_id = ? AND status = 'running'
+        """,
+        (reason, _iso(now), run_id),
+    )
+    conn.execute(
+        """
+        UPDATE durable_run_steps
+        SET status = 'cancelled', revision = revision + 1, error = ?,
+            next_retry_at = NULL, updated_at = ?, completed_at = ?
+        WHERE run_id = ?
+          AND status NOT IN ('completed', 'failed', 'cancelled', 'dead_letter')
+        """,
+        (reason, _iso(now), _iso(now), run_id),
+    )
+    _set_run_state(
+        conn,
+        run_id,
+        RunStatus.CANCELLED,
+        now=now,
+        error=reason,
+        clear_lease=True,
+        completed=True,
+    )
+    _insert_event(
+        conn,
+        run_id,
+        name="run.cancelled",
+        actor=actor,
+        payload={"reason": reason},
+        now=now,
+    )
+
+
+def _request_child_cancellation(
+    conn: sqlite3.Connection,
+    parent_run_id: str,
+    child_run_id: str,
+    *,
+    actor: str,
+    reason: str,
+    now: datetime,
+) -> None:
+    row = _run_row(conn, child_run_id)
+    run = _run_from_conn(conn, row)
+    if run.terminal:
+        return
+    if run.cancellation_requested and run.status in {
+        RunStatus.RUNNING,
+        RunStatus.UNKNOWN,
+    }:
+        return
+    if run.status in {
+        RunStatus.QUEUED,
+        RunStatus.WAITING_FOR_APPROVAL,
+        RunStatus.WAITING_FOR_RETRY,
+    }:
+        conn.execute(
+            """
+            UPDATE durable_run_attempts
+            SET status = 'cancelled', error = ?, completed_at = ?
+            WHERE run_id = ? AND status = 'running'
+            """,
+            (reason, _iso(now), child_run_id),
+        )
+        conn.execute(
+            """
+            UPDATE durable_run_steps
+            SET status = CASE
+                    WHEN status != 'completed' THEN 'cancelled'
+                    ELSE status
+                END,
+                revision = revision + 1, error = ?, updated_at = ?,
+                completed_at = CASE
+                    WHEN status != 'completed' THEN ?
+                    ELSE completed_at
+                END
+            WHERE run_id = ?
+            """,
+            (reason, _iso(now), _iso(now), child_run_id),
+        )
+        _set_run_state(
+            conn,
+            child_run_id,
+            RunStatus.CANCELLED,
+            now=now,
+            error=reason,
+            clear_lease=True,
+            completed=True,
+        )
+        conn.execute(
+            """
+            UPDATE durable_runs
+            SET cancellation_requested = 1 WHERE id = ?
+            """,
+            (child_run_id,),
+        )
+        child_event = "run.cancelled"
+    else:
+        conn.execute(
+            """
+            UPDATE durable_runs
+            SET cancellation_requested = 1, revision = revision + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (_iso(now), child_run_id),
+        )
+        child_event = "run.cancellation_requested"
+    _insert_event(
+        conn,
+        child_run_id,
+        name=child_event,
+        actor=actor,
+        payload={"reason": reason, "parent_run_id": parent_run_id},
+        now=now,
+    )
+    _insert_event(
+        conn,
+        parent_run_id,
+        name="child.cancellation_requested",
+        actor=actor,
+        payload={"child_run_id": child_run_id, "reason": reason},
+        now=now,
+    )
+
+
+def _terminal_child_evidence(
+    conn: sqlite3.Connection,
+    run: RunRecord,
+) -> dict[str, Any]:
+    terminal = conn.execute(
+        """
+        SELECT * FROM durable_run_events
+        WHERE run_id = ?
+          AND name IN (
+              'run.completed', 'run.failed', 'run.cancelled',
+              'run.dead_lettered', 'effect.reconciled'
+          )
+        ORDER BY sequence DESC LIMIT 1
+        """,
+        (run.id,),
+    ).fetchone()
+    if terminal is None:
+        raise InvalidRunTransitionError(
+            f"child run {run.id!r} has no terminal evidence event"
+        )
+    effects = conn.execute(
+        """
+        SELECT id, logical_key, status, result_digest, reconciliation
+        FROM durable_effects WHERE run_id = ? ORDER BY created_at, id
+        """,
+        (run.id,),
+    ).fetchall()
+    progress = conn.execute(
+        """
+        SELECT COALESCE(MAX(sequence), 0)
+        FROM durable_child_progress WHERE child_run_id = ?
+        """,
+        (run.id,),
+    ).fetchone()
+    return {
+        "terminal_event_id": str(terminal["id"]),
+        "terminal_event_sequence": int(terminal["sequence"]),
+        "status": run.status.value,
+        "definition_digest": run.definition_digest,
+        "input_digest": run.input_digest,
+        "result": dict(run.result) if run.result is not None else None,
+        "error": run.error,
+        "last_progress_sequence": int(progress[0]),
+        "effects": [
+            {
+                "id": str(effect["id"]),
+                "logical_key": str(effect["logical_key"]),
+                "status": str(effect["status"]),
+                "result_digest": (
+                    str(effect["result_digest"])
+                    if effect["result_digest"] is not None
+                    else None
+                ),
+                "reconciliation": (
+                    str(effect["reconciliation"])
+                    if effect["reconciliation"] is not None
+                    else None
+                ),
+            }
+            for effect in effects
+        ],
+    }
+
+
+def _reject_direct_parent_transition(
+    conn: sqlite3.Connection,
+    run_id: str,
+    owner: str,
+) -> None:
+    configured = conn.execute(
+        """
+        SELECT 1 FROM durable_run_parents WHERE parent_run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    if configured is not None:
+        raise InvalidRunTransitionError(
+            f"configured parent transitions are owned by {owner}"
+        )
+
+
+def _assert_parent_scope(
+    requested: ExecutionScope,
+    persisted: ExecutionScope,
+) -> None:
+    try:
+        requested.assert_resumable(persisted)
+    except ExecutionScopeError as exc:
+        raise RunNotFoundError(
+            "durable parent run does not belong to this execution scope"
+        ) from exc
+    if requested.parent_run_id is not None or persisted.parent_run_id is not None:
+        raise RunNotFoundError("parent run scope cannot be a child scope")
+
+
+def _assert_child_scope(
+    parent: ExecutionScope,
+    child: ExecutionScope,
+) -> None:
+    if child.parent_run_id != parent.run_id:
+        raise RunNotFoundError("child scope does not name the selected parent")
+    if (
+        child.tenant_id != parent.tenant_id
+        or child.workspace_id != parent.workspace_id
+        or child.actor_id != parent.actor_id
+    ):
+        raise RunNotFoundError(
+            "child scope crosses the parent authority boundary"
+        )
+    if not child.grants.issubset(parent.grants):
+        raise RunNotFoundError("child scope broadens parent grants")
+    if child.run_id == parent.run_id:
+        raise RunConflictError("child run id must differ from parent run id")
+
+
+def _assert_parent_or_child_scope(
+    requested: ExecutionScope,
+    parent: ExecutionScope,
+    child: ExecutionScope,
+) -> None:
+    if requested.run_id == parent.run_id:
+        _assert_parent_scope(requested, parent)
+        return
+    if requested.key == child.key:
+        return
+    raise RunNotFoundError(
+        "child run is visible only to its parent or its exact child scope"
+    )
+
+
 def _run_row(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row:
     lock = getattr(conn, "_lock_run", None)
     if lock is not None:
@@ -2109,7 +3785,20 @@ def _effect_row(conn: sqlite3.Connection, effect_id: str) -> sqlite3.Row:
 def _run_from_conn(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
+    *,
+    idempotency_key: str | None = None,
 ) -> RunRecord:
+    stored_idempotency_key = str(row["idempotency_key"])
+    if idempotency_key is None and stored_idempotency_key.startswith("child:"):
+        child = conn.execute(
+            """
+            SELECT idempotency_key FROM durable_child_runs
+            WHERE child_run_id = ?
+            """,
+            (str(row["id"]),),
+        ).fetchone()
+        if child is not None:
+            idempotency_key = str(child["idempotency_key"])
     step_rows = conn.execute(
         """
         SELECT * FROM durable_run_steps
@@ -2121,7 +3810,11 @@ def _run_from_conn(
     return RunRecord(
         id=str(row["id"]),
         scope=ExecutionScope.from_dict(_object(row["scope_json"])),
-        idempotency_key=str(row["idempotency_key"]),
+        idempotency_key=(
+            idempotency_key
+            if idempotency_key is not None
+            else stored_idempotency_key
+        ),
         input_digest=str(row["input_digest"]),
         definition_digest=str(row["definition_digest"]),
         status=RunStatus(str(row["status"])),
@@ -2492,6 +4185,13 @@ def _assert_scope(requested: ExecutionScope, persisted: ExecutionScope) -> None:
         raise RunNotFoundError(
             "durable run does not belong to this execution scope"
         ) from exc
+    if (
+        requested.parent_run_id is not None
+        or persisted.parent_run_id is not None
+    ) and requested.key != persisted.key:
+        raise RunNotFoundError(
+            "linked child run requires its exact execution scope"
+        )
 
 
 def _safe_payload(value: Mapping[str, Any]) -> dict[str, Any]:

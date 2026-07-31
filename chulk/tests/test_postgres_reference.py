@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, local
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +23,7 @@ pytest.importorskip("alembic")
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+import chulk.postgres._compat as postgres_compat_module
 from chulk.approvals import ApprovalDecision, ApprovalSubmission
 from chulk.gateway import (
     AuthenticationState,
@@ -57,8 +58,11 @@ from chulk.postgres import (
 from chulk.runs import (
     EffectConflictError,
     InvalidRunTransitionError,
+    ParentCompletionStatus,
+    ParentRunPolicy,
     ReconciliationDecision,
     RunConflictError,
+    RunLeaseError,
     RunNotFoundError,
     RunSubmission,
     StepDefinition,
@@ -71,9 +75,12 @@ from chulk.scheduling import (
 from chulk.testing import (
     assert_async_durable_execution_contract,
     assert_async_gateway_store_contract,
+    assert_async_parent_child_run_contract,
     assert_durable_execution_contract,
     assert_gateway_store_contract,
+    assert_parent_child_run_contract,
 )
+from chulk.usage import BudgetScope, RunBudget
 
 
 @dataclass
@@ -144,6 +151,67 @@ def _submission(
     )
 
 
+def _submit_parent_with_child(
+    store: PostgreSQLRunStore,
+    parent_scope: ExecutionScope,
+) -> ExecutionScope:
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+    )
+    store.submit_parent(
+        parent_scope,
+        _submission(
+            idempotency_key=f"{parent_scope.run_id}-parent-key",
+        ),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=child_budget,
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id=f"{parent_scope.run_id}-child",
+        agent_version="published-1",
+    )
+    store.submit_child(
+        parent_scope,
+        child_scope,
+        RunSubmission(
+            idempotency_key=f"{parent_scope.run_id}-child-key",
+            input_digest=f"sha256:{parent_scope.run_id}-child-input",
+            definition_digest=f"sha256:{parent_scope.run_id}-child-definition",
+            steps=(StepDefinition(id="agent", name="Agent turn"),),
+            budget=child_budget.to_dict(),
+        ),
+        definition_revision=child_scope.agent_version,
+    )
+    return child_scope
+
+
+def _enqueue_parent_completion(
+    store: PostgreSQLRunStore,
+    parent_scope: ExecutionScope,
+) -> None:
+    child_scope = _submit_parent_with_child(store, parent_scope)
+    child_claim = store.claim(
+        child_scope,
+        worker_id="child-worker",
+        run_id=child_scope.run_id,
+    )
+    assert child_claim is not None
+    store.start_step(child_scope, child_claim, "agent")
+    store.complete_step(child_scope, child_claim, "agent")
+    store.complete(child_scope, child_claim, result={"ok": True})
+    store.aggregate_children(
+        parent_scope,
+        actor="host",
+        idempotency_key=f"{parent_scope.run_id}-aggregate",
+    )
+
+
 def _inbound(key: str = "event") -> InboundEnvelope:
     return InboundEnvelope(
         event_id=key,
@@ -179,8 +247,8 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
                 "WHERE table_schema = current_schema()"
             )
         ).scalar_one()
-    assert revision == "0002"
-    assert table_count == 21
+    assert revision == "0003"
+    assert table_count == 25
 
 
 def test_upgrade_from_0001_preserves_idempotency_rows(
@@ -209,7 +277,7 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert revision == "0002"
+        assert revision == "0003"
     finally:
         engine.dispose()
         with admin.begin() as connection:
@@ -367,6 +435,10 @@ def test_sync_public_contracts_and_scope_isolation(
     scope = _scope()
 
     assert assert_durable_execution_contract(runs, approvals, scope=scope).passed
+    assert assert_parent_child_run_contract(
+        runs,
+        scope=_scope(run_id="parent-child-contract"),
+    ).passed
     assert assert_gateway_store_contract(
         gateway,
         target=_target(_scope(run_id="gateway-contract-run")),
@@ -397,6 +469,12 @@ async def test_native_async_public_contracts(
                 AsyncPostgreSQLRunStore(engine),
                 AsyncPostgreSQLApprovalStore(engine),
                 scope=_scope(),
+            )
+        ).passed
+        assert (
+            await assert_async_parent_child_run_contract(
+                AsyncPostgreSQLRunStore(engine),
+                scope=_scope(run_id="async-parent-child-contract"),
             )
         ).passed
         assert (
@@ -510,6 +588,385 @@ async def test_async_stores_retry_concurrent_idempotency_collisions(
         assert sum(result is not None for result in updated) == 1
     finally:
         await engine.dispose()
+
+
+def test_parent_child_fanout_is_serialized_across_postgres_workers(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    parent_scope = _scope(run_id="concurrent-parent-child")
+    stores[0].submit_parent(
+        parent_scope,
+        _submission(idempotency_key="concurrent-parent"),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=RunBudget(
+                scope=BudgetScope.CHILD_TASK,
+                max_model_calls=1,
+                max_tool_calls=1,
+                max_tokens=100,
+            ),
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id="concurrent-child",
+        agent_version="published-1",
+    )
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+    )
+    child_submission = RunSubmission(
+        idempotency_key="concurrent-child-key",
+        input_digest="sha256:concurrent-child-input",
+        definition_digest="sha256:concurrent-child-definition",
+        steps=(StepDefinition(id="agent", name="Agent turn"),),
+        budget=child_budget.to_dict(),
+    )
+    barrier = Barrier(2)
+
+    def submit(store: PostgreSQLRunStore) -> str:
+        barrier.wait()
+        return store.submit_child(
+            parent_scope,
+            child_scope,
+            child_submission,
+            definition_revision="published-1",
+        ).run.id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        children = tuple(pool.map(submit, stores))
+
+    assert children == (child_scope.run_id, child_scope.run_id)
+    assert len(stores[0].children(parent_scope, parent_scope.run_id)) == 1
+
+    with pytest.raises(InvalidRunTransitionError, match="fan-out"):
+        stores[1].submit_child(
+            parent_scope,
+            parent_scope.child(
+                run_id="competing-child",
+                agent_version="published-2",
+            ),
+            RunSubmission(
+                idempotency_key="competing-child-key",
+                input_digest="sha256:competing-child-input",
+                definition_digest="sha256:competing-child-definition",
+                steps=(StepDefinition(id="agent", name="Agent turn"),),
+                budget=child_budget.to_dict(),
+            ),
+            definition_revision="published-2",
+        )
+
+
+@pytest.mark.parametrize(
+    "pause_for_approval",
+    (False, True),
+    ids=("queued", "waiting-for-approval"),
+)
+def test_expired_postgres_child_fails_before_claim(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    pause_for_approval: bool,
+) -> None:
+    store = PostgreSQLRunStore(postgres_database.engine)
+    observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    child_budget = RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=1,
+        max_tool_calls=1,
+        max_tokens=100,
+        deadline=observed[0] + timedelta(minutes=1),
+    )
+    parent_scope = _scope(run_id="postgres-deadline-parent")
+    store.submit_parent(
+        parent_scope,
+        _submission(idempotency_key="postgres-deadline-parent-key"),
+        policy=ParentRunPolicy(
+            required_children=1,
+            max_children=1,
+            budget=child_budget,
+        ),
+    )
+    child_scope = parent_scope.child(
+        run_id="postgres-deadline-child",
+        agent_version="published-1",
+    )
+    store.submit_child(
+        parent_scope,
+        child_scope,
+        RunSubmission(
+            idempotency_key="postgres-deadline-child-key",
+            input_digest="sha256:postgres-deadline-child-input",
+            definition_digest="sha256:postgres-deadline-child-definition",
+            steps=(StepDefinition(id="agent", name="Agent turn"),),
+            budget=child_budget.to_dict(),
+        ),
+        definition_revision=child_scope.agent_version,
+    )
+    if pause_for_approval:
+        claim = store.claim(
+            child_scope,
+            worker_id="approval-worker",
+            run_id=child_scope.run_id,
+        )
+        assert claim is not None
+        store.start_step(child_scope, claim, "agent")
+        effect = store.begin_effect(
+            child_scope,
+            claim,
+            "agent",
+            logical_key="postgres-deadline-effect",
+            tool_name="write",
+            tool_version="1",
+            schema_version="1",
+            arguments_digest="sha256:postgres-deadline",
+        )
+        store.mark_effect_started(child_scope, claim, effect.id)
+        with pytest.raises(
+            InvalidRunTransitionError,
+            match="reconciled before approval pause",
+        ):
+            store.pause_for_approval(
+                child_scope,
+                claim,
+                "agent",
+                approval_id="postgres-unsafe-deadline-approval",
+                payload={"reason": "operator review"},
+            )
+        store.fail_effect(
+            child_scope,
+            claim,
+            effect.id,
+            reason="effect stopped before approval pause",
+        )
+        paused = store.pause_for_approval(
+            child_scope,
+            claim,
+            "agent",
+            approval_id="postgres-deadline-approval",
+            payload={"reason": "operator review"},
+        )
+        assert paused.status.value == "waiting_for_approval"
+
+    observed[0] += timedelta(minutes=2)
+    assert store.claim(
+        child_scope,
+        worker_id="late-worker",
+        run_id=child_scope.run_id,
+    ) is None
+    expired = store.get(child_scope, child_scope.run_id)
+    assert expired.status.value == "failed"
+    assert expired.error == "child run budget deadline expired before claim"
+
+
+def test_parent_completion_transition_rejects_a_stale_postgres_cas(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stores = tuple(
+        PostgreSQLRunStore(postgres_database.engine) for _index in range(2)
+    )
+    parent_scope = _scope(run_id="completion-cas-parent")
+    _enqueue_parent_completion(stores[0], parent_scope)
+    completion_claim = stores[0].claim_parent_completion(
+        parent_scope,
+        worker_id="delivery-worker",
+        parent_run_id=parent_scope.run_id,
+    )
+    assert completion_claim is not None
+
+    initial_reads = Barrier(2)
+    failure_committed = Event()
+    transition_kind = local()
+    original_completion_row = run_store_module._completion_row
+
+    def coordinated_completion_row(conn: Any, completion_id: str) -> Any:
+        row = original_completion_row(conn, completion_id)
+        if str(row["status"]) == ParentCompletionStatus.CLAIMED.value:
+            initial_reads.wait()
+            if transition_kind.value == "complete":
+                assert failure_committed.wait(timeout=5)
+        return row
+
+    monkeypatch.setattr(
+        run_store_module,
+        "_completion_row",
+        coordinated_completion_row,
+    )
+
+    def fail_delivery() -> ParentCompletionStatus:
+        transition_kind.value = "fail"
+        completion = stores[0].fail_parent_completion(
+            parent_scope,
+            completion_claim,
+            reason="delivery did not start",
+        )
+        failure_committed.set()
+        return completion.status
+
+    def complete_delivery() -> str:
+        transition_kind.value = "complete"
+        try:
+            stores[1].complete_parent_completion(
+                parent_scope,
+                completion_claim,
+            )
+        except RunLeaseError:
+            return "stale"
+        return "delivered"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed = executor.submit(fail_delivery)
+        completed = executor.submit(complete_delivery)
+        assert failed.result(timeout=10) is ParentCompletionStatus.PENDING
+        assert completed.result(timeout=10) == "stale"
+
+    events = stores[0].events(parent_scope, parent_scope.run_id)
+    assert [event.name for event in events].count(
+        "parent.completion_failed"
+    ) == 1
+    assert all(event.name != "parent.completion_delivered" for event in events)
+
+    monkeypatch.setattr(
+        run_store_module,
+        "_completion_row",
+        original_completion_row,
+    )
+    retry_claim = stores[0].claim_parent_completion(
+        parent_scope,
+        worker_id="retry-delivery-worker",
+        parent_run_id=parent_scope.run_id,
+    )
+    assert retry_claim is not None
+    delivered = stores[0].complete_parent_completion(parent_scope, retry_claim)
+    assert delivered.status is ParentCompletionStatus.DELIVERED
+
+
+def test_parent_completion_recovery_locks_parent_before_outbox(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgreSQLRunStore(postgres_database.engine)
+    parent_scope = _scope(run_id="completion-lock-order-parent")
+    observed = [datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(run_store_module, "_utc_now", lambda: observed[0])
+    _enqueue_parent_completion(store, parent_scope)
+    completion_claim = store.claim_parent_completion(
+        parent_scope,
+        worker_id="delivery-worker",
+        lease_seconds=1,
+        parent_run_id=parent_scope.run_id,
+    )
+    assert completion_claim is not None
+    observed[0] += timedelta(seconds=2)
+
+    parent_lock_attempted = Event()
+    original_lock_run = postgres_compat_module.PostgreSQLConnection._lock_run
+
+    def signal_parent_lock(
+        connection: postgres_compat_module.PostgreSQLConnection,
+        run_id: str,
+    ) -> None:
+        if run_id == parent_scope.run_id:
+            parent_lock_attempted.set()
+        original_lock_run(connection, run_id)
+
+    monkeypatch.setattr(
+        postgres_compat_module.PostgreSQLConnection,
+        "_lock_run",
+        signal_parent_lock,
+    )
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM durable_runs WHERE id = :id FOR UPDATE"),
+                {"id": parent_scope.run_id},
+            )
+            recovery = executor.submit(
+                store.claim_parent_completion,
+                parent_scope,
+                worker_id="recovery-worker",
+                parent_run_id=parent_scope.run_id,
+            )
+            assert parent_lock_attempted.wait(timeout=5)
+            locked_completion_id = connection.execute(
+                text(
+                    "SELECT id FROM durable_parent_completion_outbox "
+                    "WHERE parent_run_id = :parent_run_id FOR UPDATE NOWAIT"
+                ),
+                {"parent_run_id": parent_scope.run_id},
+            ).scalar_one()
+            assert locked_completion_id == completion_claim.completion.id
+
+        assert recovery.result(timeout=10) is None
+    finally:
+        executor.shutdown(wait=True)
+
+    completion = store.parent_completion(parent_scope, parent_scope.run_id)
+    assert completion is not None
+    assert completion.status is ParentCompletionStatus.UNKNOWN
+
+
+def test_get_child_locks_parent_before_child(
+    postgres_database: PostgreSQLTestDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgreSQLRunStore(postgres_database.engine)
+    parent_scope = _scope(run_id="get-child-lock-order-parent")
+    child_scope = _submit_parent_with_child(store, parent_scope)
+
+    parent_lock_attempted = Event()
+    original_lock_run = postgres_compat_module.PostgreSQLConnection._lock_run
+
+    def signal_parent_lock(
+        connection: postgres_compat_module.PostgreSQLConnection,
+        run_id: str,
+    ) -> None:
+        if run_id == parent_scope.run_id:
+            parent_lock_attempted.set()
+        original_lock_run(connection, run_id)
+
+    monkeypatch.setattr(
+        postgres_compat_module.PostgreSQLConnection,
+        "_lock_run",
+        signal_parent_lock,
+    )
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with postgres_database.engine.begin() as connection:
+            connection.execute(
+                text("SELECT id FROM durable_runs WHERE id = :id FOR UPDATE"),
+                {"id": parent_scope.run_id},
+            )
+            child_read = executor.submit(
+                store.get_child,
+                parent_scope,
+                child_scope.run_id,
+            )
+            assert parent_lock_attempted.wait(timeout=5)
+            locked_child_id = connection.execute(
+                text(
+                    "SELECT id FROM durable_runs WHERE id = :id "
+                    "FOR UPDATE NOWAIT"
+                ),
+                {"id": child_scope.run_id},
+            ).scalar_one()
+            assert locked_child_id == child_scope.run_id
+
+        child = child_read.result(timeout=10)
+    finally:
+        executor.shutdown(wait=True)
+
+    assert child.run.id == child_scope.run_id
 
 
 def test_concurrent_workers_claim_distinct_runs_and_schedules(

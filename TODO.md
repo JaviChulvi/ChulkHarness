@@ -216,7 +216,7 @@ Acceptance criteria:
   records.
 - [x] Add retry policies and transaction boundaries across provider, tool,
   approval, and host-service failures.
-- [ ] Extend durable parent/child orchestration with scoped definitions,
+- [x] Extend durable parent/child orchestration with scoped definitions,
   budgets, progress, and bounded fan-out.
 
 ### US-H4: Finish Gateway Resilience And Hosted Acceptance

@@ -43,6 +43,7 @@ lowercase names are the compatibility-stable catalog:
 | durable `step.*` transitions | `StepLifecyclePayload` | Step attempts and committed checkpoints. |
 | durable `effect.*` transitions | `EffectLifecyclePayload` or `ReconciliationPayload` | Effect intent, dispatch, outcome, retry, and operator reconciliation. |
 | durable `approval.*` transitions | `ApprovalLifecyclePayload` | Request, decision, consumption, invalidation, and expiry. |
+| durable `child.*` and `parent.completion.*` transitions | `SerializedEventPayload` | Explicit child submission/progress/cancellation and parent completion outbox state. |
 | `delivery.started`, `delivery.completed`, `delivery.failed` | `DeliveryPayload` | An outbound delivery was claimed and reached a known outcome. |
 | `delivery.unknown`, `delivery.reconciled`, `delivery.dead_lettered` | `DeliveryPayload` | An ambiguous outcome awaits evidence, was reconciled, or became terminal. |
 
@@ -74,6 +75,12 @@ Application sinks can therefore deduplicate and reconstruct deterministically.
 `AsyncRunEventPublisher` awaits async sinks directly. Hosted gateway events use
 the same scope, source-event, correlation, and idempotency fields as their
 durable run.
+
+Configured parent runs add `run.waiting_for_children` and
+`run.children_aggregated` lifecycle events. Child progress is recorded on both
+the child and parent streams with the child run ID and monotonic sequence.
+Terminal parent delivery events remain separate from `run.completed` so an
+application can distinguish durable execution from external notification.
 
 ```python
 async for event in agent.run_events_async("Explain the change"):

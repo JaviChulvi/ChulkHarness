@@ -111,12 +111,15 @@ offline gates in `chulk.testing`:
   `assert_async_hosted_services_contract`;
 - `assert_durable_execution_contract` and
   `assert_async_durable_execution_contract`; and
+- `assert_parent_child_run_contract` and
+  `assert_async_parent_child_run_contract`;
 - `assert_gateway_store_contract` and
   `assert_async_gateway_store_contract`.
 
 They check scope isolation, duplicate triggers and logical effects, approval
 restart behavior, unknown-effect reconciliation, deterministic event order,
-durable outbox ownership, and ambiguous delivery reconciliation.
+bounded parent/child fan-out and progress, durable outbox ownership, and
+ambiguous delivery reconciliation.
 
 See [events](events.md) for generator cleanup and ordering,
 [configuration](configuration.md) for runtime ownership, and the

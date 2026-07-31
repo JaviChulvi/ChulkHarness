@@ -149,6 +149,88 @@ reuse these same run, approval, gateway, and schedule state owners and add
 forward-only Alembic migrations plus atomic inbox/run and run/outbox ownership
 transfers.
 
+## Durable parent and child runs
+
+Parent/child execution is an explicit host operation. A child-shaped
+`ExecutionScope` or model output never creates lineage by itself.
+`submit_parent(...)` atomically submits the parent in
+`waiting_for_children` and freezes a `ParentRunPolicy` containing the required
+child count, fan-out ceiling, and aggregate `RunBudget`. The parent stays out
+of the ordinary worker claim queue.
+
+```python
+from chulk import (
+    BudgetScope,
+    ParentRunPolicy,
+    RunBudget,
+)
+
+policy = ParentRunPolicy(
+    required_children=2,
+    max_children=4,
+    budget=RunBudget(
+        scope=BudgetScope.CHILD_TASK,
+        max_model_calls=8,
+        max_tool_calls=16,
+        max_tokens=20_000,
+    ),
+)
+parent = runs.submit_parent(
+    parent_scope,
+    parent_submission,
+    policy=policy,
+)
+
+child_scope = parent_scope.child(
+    run_id="child-1",
+    agent_id="reviewer",
+    agent_version="published-7",
+    grants=frozenset({"repository:read"}),
+)
+child = runs.submit_child(
+    parent_scope,
+    child_scope,
+    child_submission,
+    definition_revision="published-7",
+)
+```
+
+Child creation fails closed unless tenant, workspace, and actor match the
+parent, grants are a subset, the published definition revision is explicit,
+matches `child_scope.agent_version`, and the cumulative child allocations fit
+the parent budget. Parent-row serialization makes the fan-out and budget checks
+safe across multiple workers. A child can inspect only its exact run; siblings
+remain invisible. Parentless queue discovery excludes linked children, which
+workers claim through their exact child scopes.
+
+Workers use the ordinary child run lease for steps, approvals, effects,
+retry/resume, and reconciliation. `record_child_progress(...)` additionally
+requires that live lease and commits strictly increasing progress sequences to
+both the child and parent event streams. Stale workers cannot append progress.
+
+`aggregate_children(...)` refuses nonterminal, approval-waiting, or unknown
+children. After every required outcome is completed, failed, cancelled, or
+reconciled, it atomically:
+
+1. snapshots terminal events, results, errors, effect reconciliation, and the
+   last progress sequence as child evidence;
+2. terminalizes the parent once; and
+3. creates one `ParentCompletion` outbox record.
+
+Parent cancellation is explicit through `request_parent_cancellation(...)`;
+it marks running children for cooperative cancellation and immediately
+cancels children that have not started. Aggregation emits a cancelled parent
+only after all children settle. A failed or cancelled child otherwise makes
+the parent aggregate fail rather than claim unsupported success.
+
+Claim parent completions with `claim_parent_completion(...)`. A definite
+pre-delivery failure can be released with `fail_parent_completion(...)`.
+Ambiguous delivery must be quarantined with
+`mark_parent_completion_unknown(...)` and resolved through
+`reconcile_parent_completion(...)`; expired claims also become `unknown`
+instead of being blindly replayed. See the credential-free
+[`parent_child_app.py`](../examples/hosted_runtime/parent_child_app.py).
+
 ## Durable approvals
 
 When the permission policy returns `ASK`, the durable executors first commit
@@ -157,7 +239,9 @@ the logical effect intent, then `DurableApprovalService` (or
 checkpoint, clears the worker lease, moves the run to
 `waiting_for_approval`, and invokes the optional budget-release hook. The SDK
 turn is left waiting rather than failed. Another process can record a decision
-and resume the run later.
+and resume the run later. An approval pause is rejected after an effect becomes
+`executing` or `unknown`; that effect must finish or be reconciled before the
+lease can be released.
 
 Resume revalidates the exact execution scope, authority, credentials, tool and
 schema versions, arguments digest, and policy version. Changed facts invalidate

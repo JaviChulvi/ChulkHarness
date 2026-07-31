@@ -9,6 +9,7 @@ Run them from the repository root:
 python examples/00_sdk_quickstart.py
 python examples/repo_review_bot/app.py
 python examples/hosted_runtime/hosted_app.py
+python examples/hosted_runtime/parent_child_app.py
 python examples/hosted_runtime/resilience_contract.py
 # Requires CHULK_POSTGRES_URL and the optional postgres extra:
 python examples/hosted_runtime/postgres_app.py
@@ -70,6 +71,9 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `00_sdk_quickstart.py` is deterministic by default and supports explicit live-provider opt-in.
 - `repo_review_bot/app.py` is a complete deterministic, read-only embedded application with a scrubbed trace walkthrough.
 - `hosted_runtime/hosted_app.py` proves sync and async tenant-scoped embedding with in-memory services and zero local runtime files.
+- `hosted_runtime/parent_child_app.py` runs bounded durable child work, ordered
+  progress, parent aggregation, and exactly-once completion delivery entirely
+  in memory.
 - `hosted_runtime/resilience_contract.py` runs the reusable isolation, durable effect/approval, and gateway recovery gates without credentials or external infrastructure.
 - `hosted_runtime/postgres_app.py` composes the optional PostgreSQL run,
   approval, gateway, and schedule stores and verifies a native-async read.
