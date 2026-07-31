@@ -363,6 +363,55 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
 
 
 @pytest.mark.asyncio
+async def test_async_durable_effect_cleanup_preserves_cancellation():
+    started = asyncio.Event()
+    failed_with: list[BaseException] = []
+
+    @Tool
+    async def cancellable() -> str:
+        """Wait until cancelled."""
+        started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    class DurableEffects:
+        async def prepare_async(self, **_kwargs):
+            return "effect-1"
+
+        async def started_async(self, _token):
+            return None
+
+        async def failed_async(self, _token, error):
+            failed_with.append(error)
+            raise RuntimeError("effect quarantine failed")
+
+    registry = ToolRegistry()
+    registry.register(cancellable)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda _name, _payload=None: None,
+        get_context=lambda _turn: ToolExecutionContext(),
+        durable_effects=DurableEffects(),
+    )
+    task = asyncio.create_task(
+        executor.execute_async("cancellable", {}, TurnState("cancel"))
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert failed_with == [error.value]
+    assert any(
+        "effect quarantine failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_tool_flushes_authorization_before_dispatch():
     tool_calls = 0
     trace_events: list[str] = []

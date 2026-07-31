@@ -386,8 +386,11 @@ class ToolExecutor:
                             self.durable_effects is not None
                             and durable_token is not None
                         ):
-                            await self.durable_effects.failed_async(
-                                durable_token,
+                            await await_cleanup_after_error(
+                                self.durable_effects.failed_async(
+                                    durable_token,
+                                    exc,
+                                ),
                                 exc,
                             )
                         raise

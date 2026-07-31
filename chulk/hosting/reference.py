@@ -51,7 +51,14 @@ from chulk.sessions import (
     SessionSearchPage,
     SessionWindow,
 )
-from chulk.sessions.sqlite_store import _turn_from_dict
+from chulk.sessions.search import (
+    _message_is_sensitive,
+    _window_message_visible,
+)
+from chulk.sessions.sqlite_store import (
+    _message_is_search_eligible,
+    _turn_from_dict,
+)
 from chulk.skills.registry import (
     Skill,
     SkillRouteDecision,
@@ -1016,6 +1023,11 @@ class InMemorySessionSearch:
         hits = []
         for conversation_id, records in self.store._messages.items():
             for record in records:
+                if not _message_is_search_eligible(
+                    record.role,
+                    record.metadata,
+                ):
+                    continue
                 if normalized not in record.content.casefold():
                     continue
                 hits.append(
@@ -1042,13 +1054,18 @@ class InMemorySessionSearch:
         cursor: str | None = None,
         include_sensitive: bool = False,
     ) -> SessionWindow:
-        del cursor, include_sensitive
+        del cursor
         start = ordinal - before
         end = ordinal + after
         records = [
             record
             for record in self.store._messages.get(conversation_id, ())
             if start <= record.ordinal <= end
+            and _window_message_visible(
+                record.role,
+                record.metadata,
+                include_sensitive=include_sensitive,
+            )
         ][:limit]
         return SessionWindow(
             conversation_id=conversation_id,
@@ -1062,6 +1079,7 @@ class InMemorySessionSearch:
                     content=record.content,
                     created_at=record.created_at,
                     turn_id=record.turn_id,
+                    sensitive=_message_is_sensitive(record.metadata),
                 )
                 for record in records
             ),

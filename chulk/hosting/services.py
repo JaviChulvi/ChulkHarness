@@ -670,9 +670,10 @@ class AsyncRuntimeServices:
                     if isinstance(binding, AsyncServiceBinding):
                         resource = await binding.resolve(scope)
                     elif isinstance(binding, ServiceBinding):
-                        resource = await asyncio.to_thread(
-                            binding.resolve,
+                        resource = await _resolve_sync_binding_async(
+                            binding,
                             scope,
+                            owned_ids=owned_ids,
                         )
                     else:
                         raise TypeError(
@@ -759,6 +760,59 @@ async def _aclose_resources(resources: Any) -> None:
                 )
     if failure is not None:
         raise failure
+
+
+async def _resolve_sync_binding_async(
+    binding: ServiceBinding[Any],
+    scope: ExecutionScope,
+    *,
+    owned_ids: set[int],
+) -> Any:
+    """Resolve a sync compatibility binding without leaking on cancellation."""
+
+    resolution = asyncio.create_task(
+        asyncio.to_thread(binding.resolve, scope)
+    )
+    try:
+        return await asyncio.shield(resolution)
+    except asyncio.CancelledError as cancellation:
+        cleanup = asyncio.create_task(
+            _reclaim_cancelled_sync_resolution(
+                resolution,
+                binding.ownership,
+                owned_ids=owned_ids,
+            )
+        )
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            try:
+                await cleanup
+            except BaseException as cleanup_error:
+                cancellation.add_note(
+                    "cancelled sync service resolution cleanup also failed "
+                    f"with {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        except BaseException as cleanup_error:
+            cancellation.add_note(
+                "cancelled sync service resolution cleanup also failed "
+                f"with {type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        raise
+
+
+async def _reclaim_cancelled_sync_resolution(
+    resolution: asyncio.Task[Any],
+    ownership: ResourceOwnership,
+    *,
+    owned_ids: set[int],
+) -> None:
+    resource = await resolution
+    if (
+        ownership is ResourceOwnership.RUNTIME
+        and id(resource) not in owned_ids
+    ):
+        await _aclose_resources((resource,))
 
 
 # Compatibility names retained for applications using the phase-A API.

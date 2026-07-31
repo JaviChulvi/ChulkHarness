@@ -8,6 +8,7 @@ from decimal import Decimal
 import inspect
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -358,6 +359,40 @@ async def test_async_service_resolution_closes_every_owned_resource_on_failure()
         "sessions close failed" in note
         for note in getattr(error.value, "__notes__", ())
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_service_resolution_reclaims_late_resource() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    class Resource:
+        def close(self) -> None:
+            closed.set()
+
+    def resolve(_scope: ExecutionScope) -> Resource:
+        started.set()
+        if not release.wait(timeout=1):
+            raise TimeoutError("test did not release service factory")
+        return Resource()
+
+    base = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(base, name)
+        for name in base.__dataclass_fields__
+    }
+    fields["memory"] = ServiceBinding.scoped(resolve)
+    services = AsyncRuntimeServices(**fields)
+    task = asyncio.create_task(services.resolve_async(_scope()))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -1420,6 +1455,78 @@ async def test_async_hosted_tool_refs_await_native_services(
         ("sessions.search", "search", id(loop)),
         ("sessions.search", "read_window", id(loop)),
     }
+    await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"sensitive": True},
+        {"contains_secrets": True},
+        {"content_class": "sensitive"},
+    ],
+)
+async def test_reference_session_windows_fail_closed_for_sensitive_messages(
+    tmp_path: Path,
+    metadata: dict[str, object],
+) -> None:
+    hub = InMemoryServiceHub()
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[session_read_ref, session_search_ref],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=_scope(),
+    )
+    store = agent._resolved_async_services().sessions.store
+    await store.save_message(
+        agent.conversation_id,
+        role="user",
+        content="safe session evidence",
+    )
+    await store.save_message(
+        agent.conversation_id,
+        role="assistant",
+        content="sensitive customer token",
+        metadata=metadata,
+    )
+
+    default_window = await agent.read_session_window(
+        agent.conversation_id,
+        ordinal=2,
+        before=1,
+        after=0,
+    )
+    explicit_window = await agent.read_session_window(
+        agent.conversation_id,
+        ordinal=2,
+        before=1,
+        after=0,
+        include_sensitive=True,
+    )
+    tool_window = await agent.tool_registry.run_async(
+        "session_read",
+        {
+            "conversation_id": agent.conversation_id,
+            "ordinal": 2,
+            "before": 1,
+            "after": 0,
+        },
+    )
+    search = await agent.search_sessions("sensitive customer token")
+
+    assert [message.content for message in default_window.messages] == [
+        "safe session evidence"
+    ]
+    assert [message.content for message in explicit_window.messages] == [
+        "safe session evidence",
+        "sensitive customer token",
+    ]
+    assert explicit_window.messages[-1].sensitive is True
+    assert "sensitive customer token" not in tool_window.observation
+    assert search.hits == ()
     await agent.close()
 
 
