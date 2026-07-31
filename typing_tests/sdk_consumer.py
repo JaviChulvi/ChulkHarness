@@ -13,6 +13,10 @@ from chulk import (
     ApprovalValidation,
     AgentDefinition,
     AgentDefinitionRuntime,
+    AsyncHostedRuntime,
+    AsyncRuntimeServices,
+    AsyncServiceBinding,
+    AsyncSkillService,
     Capabilities,
     ChildRunRecord,
     ChulkError,
@@ -218,6 +222,10 @@ hosted_identity: ToolIdentity = ToolIdentity.from_schemas(
     input_schema={"type": "object", "properties": {}},
 )
 assert HostedRuntime is not None
+assert AsyncHostedRuntime is not None
+assert AsyncRuntimeServices is not None
+assert AsyncServiceBinding is not None
+assert AsyncSkillService is not None
 assert DurableHostedExecutor is not None
 assert GatewayStore is not None
 assert GatewayScopeResolver is not None

@@ -22,10 +22,18 @@ from chulk.execution import (
 )
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import (
+    AsyncRuntimeServices,
     ExecutionScope,
     RuntimeServices,
     SessionRuntimeServices,
     SkillRuntimeServices,
+)
+from chulk.hosting.async_utils import call_async_service, close_async_resource
+from chulk.hosting.services import ResolvedRuntimeServices
+from chulk.hosting.sinks import (
+    BufferedAsyncAuditSink,
+    BufferedAsyncEventSink,
+    BufferedAsyncTraceSink,
 )
 from chulk.llm import (
     LLMClient,
@@ -43,11 +51,17 @@ from chulk.llm.capabilities import (
 )
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.media import ContentStore, LocalTextExtractor, MediaProcessorRegistry
-from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
+from chulk.memory import (
+    AsyncMemoryPolicy,
+    ConversationMemory,
+    MemoryPolicy,
+    SQLiteMemoryStore,
+)
 from chulk.plugins import LocalPluginRegistry
 from chulk.redaction import redact_text
 from chulk.sessions import (
     ConversationSummaryRecord,
+    AsyncSessionRecorder,
     SessionSearchService,
     SQLiteSessionStore,
     SessionRecorder,
@@ -707,6 +721,399 @@ def create_agent(
     return agent
 
 
+async def create_async_hosted_agent(
+    config: Config,
+    *,
+    services: AsyncRuntimeServices,
+    execution_scope: ExecutionScope,
+    conversation_id: str | None = None,
+    conversation_metadata: dict[str, object] | None = None,
+    runtime_metadata: dict | None = None,
+    llm_client: LLMClient | None = None,
+    tool_specs: Iterable[object] | None = None,
+    skill_specs: object | Iterable[object] | None = None,
+    system_prompt: str | None = None,
+    permission_callback: Callable[
+        [PermissionRequest, PermissionDecisionRecord],
+        PermissionDecision | bool,
+    ]
+    | None = None,
+    mcp_servers: Iterable[MCPServerConfig] | None = None,
+    redaction_callback: Callable[[str, str, dict], str] | None = None,
+    redaction_fail_closed: bool = False,
+    capabilities: Capabilities | None = None,
+    deps: object | None = None,
+    run_budget: RunBudget | None = None,
+    usage_dimensions: UsageDimensions | None = None,
+    goal_execution: GoalExecutionContext | None = None,
+    profile_id: str | None = None,
+) -> tuple[Agent, ResolvedRuntimeServices]:
+    """Assemble a hosted agent without invoking async services synchronously."""
+
+    if tool_specs is None:
+        raise ValueError("hosted runtime requires an explicit tools collection")
+    if skill_specs is None:
+        raise ValueError("hosted runtime requires an explicit skills collection")
+    requested_conversation_id = (
+        conversation_id or execution_scope.conversation_id
+    )
+    if (
+        conversation_id is not None
+        and execution_scope.conversation_id not in {None, conversation_id}
+    ):
+        raise ValueError(
+            "execution scope conversation_id does not match conversation_id"
+        )
+    hosted_state: AgentState | None = None
+    if requested_conversation_id is None:
+        hosted_state = AgentState()
+        requested_conversation_id = hosted_state.conversation_id
+    execution_scope = execution_scope.with_conversation(
+        requested_conversation_id
+    )
+    load_conversation_id = (
+        requested_conversation_id if hosted_state is None else None
+    )
+    resolved = await services.resolve_async(execution_scope)
+    client: LLMClient | None = None
+    client_is_owned = False
+    try:
+        if not isinstance(resolved.sessions, SessionRuntimeServices):
+            raise TypeError(
+                "hosted sessions service must be SessionRuntimeServices"
+            )
+        if not isinstance(resolved.skills, SkillRuntimeServices):
+            raise TypeError(
+                "hosted skills service must be SkillRuntimeServices"
+            )
+        effective_profile_id = profile_id or config.profile_id
+        goal_snapshot = (
+            goal_execution.assert_boundary()
+            if goal_execution is not None
+            else None
+        )
+        if (
+            goal_snapshot is not None
+            and goal_snapshot.profile_id != effective_profile_id
+        ):
+            raise ValueError(
+                "goal execution profile does not match runtime profile"
+            )
+        if (
+            goal_snapshot is not None
+            and run_budget is not None
+            and run_budget != goal_snapshot.budget
+        ):
+            raise ValueError(
+                "run_budget does not match the claimed goal budget"
+            )
+        if (
+            goal_snapshot is not None
+            and usage_dimensions is not None
+            and usage_dimensions.goal_id not in {None, goal_snapshot.id}
+        ):
+            raise ValueError(
+                "usage dimensions do not match the claimed goal"
+            )
+
+        plugin_registry = resolved.plugins
+        plugin_profile_id = getattr(
+            plugin_registry,
+            "profile_id",
+            effective_profile_id,
+        )
+        if plugin_profile_id != effective_profile_id:
+            raise ValueError(
+                "plugin registry profile does not match the runtime profile"
+            )
+        plugin_audit_report = await call_async_service(
+            plugin_registry,
+            "verify_startup",
+        )
+
+        effective_metadata = dict(conversation_metadata or {})
+        metadata_profile_id = effective_metadata.get("profile_id")
+        if (
+            metadata_profile_id is not None
+            and metadata_profile_id != effective_profile_id
+        ):
+            raise ValueError(
+                "conversation metadata profile_id does not match the "
+                "runtime profile"
+            )
+        effective_metadata["profile_id"] = effective_profile_id
+        effective_metadata["execution_scope"] = execution_scope.to_dict()
+        effective_metadata["execution_scope_key"] = execution_scope.key
+
+        session_store = resolved.sessions.store
+        session_search_service = resolved.sessions.search
+        skill_registry = resolved.skills.registry
+        memory_store = resolved.memory
+        selected_capabilities = capabilities or Capabilities.full()
+        memory_policy = AsyncMemoryPolicy(
+            memory_store,
+            selected_capabilities.memory,
+        )
+        state = hosted_state or await _create_agent_state_async(
+            session_store,
+            load_conversation_id,
+            execution_scope=execution_scope,
+        )
+
+        trace_logger = BufferedAsyncTraceSink(resolved.traces)
+        audit_sink = BufferedAsyncAuditSink(resolved.audit)
+        event_sink = BufferedAsyncEventSink(resolved.events)
+
+        await call_async_service(skill_registry, "load_metadata")
+        skill_resolution = await _resolve_skill_specs_async(
+            skill_registry,
+            skill_specs,
+        )
+        for warning_payload in skill_resolution.warnings:
+            warnings.warn(
+                warning_payload["message"],
+                UserWarning,
+                stacklevel=2,
+            )
+            trace_logger.log("skill_config_warning", warning_payload)
+
+        conversation_memory = ConversationMemory(
+            max_messages=config.history_limit
+        )
+        if load_conversation_id is not None:
+            latest_summary = await call_async_service(
+                session_store,
+                "load_latest_summary",
+                state.conversation_id,
+            )
+            recent_messages = await call_async_service(
+                session_store,
+                "load_recent_messages",
+                state.conversation_id,
+                config.history_limit,
+                after_ordinal=_summary_source_ordinal(latest_summary),
+            )
+            conversation_memory.replace(
+                recent_messages,
+                conversation_summary=(
+                    latest_summary.content
+                    if latest_summary is not None
+                    else None
+                ),
+                summary_message_count=(
+                    latest_summary.source_message_count
+                    if latest_summary is not None
+                    else 0
+                ),
+            )
+            state.messages = conversation_memory.recent()
+            state.conversation_summary = (
+                conversation_memory.conversation_summary
+            )
+        session_recorder = AsyncSessionRecorder(
+            session_store,
+            state.conversation_id,
+            provider=config.llm_provider,
+            model=config.model,
+            trace_path=trace_logger.path,
+            lazy=(
+                load_conversation_id is None
+                and not conversation_metadata
+            ),
+            metadata=effective_metadata,
+        )
+        await session_recorder.initialize()
+
+        client_is_owned = llm_client is None
+        client = (
+            llm_client
+            if llm_client is not None
+            else _default_llm_client_factory(config)
+        )
+        if hasattr(client, "bind_config"):
+            client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
+        selection_result = getattr(client, "selection_result", None)
+        effective_runtime_metadata = dict(runtime_metadata or {})
+        if selection_result is not None and hasattr(
+            selection_result,
+            "to_dict",
+        ):
+            effective_runtime_metadata["model_selection"] = (
+                selection_result.to_dict()
+            )
+        model_capabilities = _client_model_capabilities(client, config)
+        context_budget = ContextBudget(
+            max_prompt_tokens=model_capabilities.context_window_tokens,
+            response_reserve_tokens=(
+                model_capabilities.default_response_reserve_tokens
+            ),
+            max_input_tokens=model_capabilities.max_input_tokens,
+        )
+
+        configured_mcp_servers = (
+            tuple(mcp_servers)
+            if mcp_servers is not None
+            else config.mcp_servers
+        )
+        active_mcp_servers = (
+            configured_mcp_servers
+            if selected_capabilities.external_services
+            else ()
+        )
+        execution_lifecycle = ExecutionContextLifecycle(
+            resolved.execution
+        )
+        tool_registry, mcp_bridge_tool_names = _create_tool_registry(
+            config,
+            cast(SQLiteMemoryStore, memory_store),
+            tool_specs,
+            active_mcp_servers,
+            llm_client=client,
+            capabilities=selected_capabilities,
+            memory_policy=cast(MemoryPolicy, memory_policy),
+            session_search_service=cast(
+                SessionSearchService,
+                session_search_service,
+            ),
+            deps=deps,
+            shell_execution_policy=None,
+            require_shell_containment=False,
+            artifact_store=cast(TraceArtifactStore, resolved.artifacts),
+        )
+        available_tool_names = {
+            tool.name for tool in tool_registry.list_tools()
+        }
+        skill_capabilities = _skill_capability_names(
+            selected_capabilities
+        )
+        if available_tool_names:
+            skill_capabilities.add("tools")
+        await call_async_service(
+            skill_registry,
+            "configure_environment",
+            available_tools=available_tool_names,
+            capabilities=skill_capabilities,
+        )
+
+        owned_resources: list[object] = (
+            [client] if client_is_owned else []
+        )
+
+        def hosted_audit(event_type: str, payload: dict) -> None:
+            audit_sink.record(
+                event_type,
+                payload,
+                scope=execution_scope,
+            )
+
+        agent = Agent(
+            client,
+            state=state,
+            memory=conversation_memory,
+            memory_store=None,
+            memory_policy=None,
+            skill_registry=cast(SkillRegistry, skill_registry),
+            trace_logger=cast(JSONLTraceLogger, trace_logger),
+            tool_registry=tool_registry,
+            max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+            max_skills_per_turn=config.max_skills_per_turn,
+            max_skill_content_chars=config.max_skill_content_chars,
+            trace_max_prompt_chars=config.trace_max_prompt_chars,
+            max_observation_chars=config.max_observation_chars,
+            max_tool_stdout_chars=config.max_tool_stdout_chars,
+            max_tool_stderr_chars=config.max_tool_stderr_chars,
+            max_reflection_attempts=config.max_reflection_attempts,
+            permission_policy=permission_policy_for_profile(
+                config.permission_profile
+            ),
+            permission_callback=permission_callback,
+            context_budget=context_budget,
+            max_model_output_tokens=(
+                model_capabilities.max_output_tokens
+                or model_capabilities.default_response_reserve_tokens
+            ),
+            event_callback=session_recorder.callback,
+            audit_callback=hosted_audit,
+            redaction_callback=redaction_callback,
+            redaction_fail_closed=redaction_fail_closed,
+            pinned_skill_names=skill_resolution.pinned_skill_names,
+            system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
+            mcp_servers=active_mcp_servers,
+            mcp_bridge_tool_names=mcp_bridge_tool_names,
+            owned_resources=owned_resources,
+            default_tool_context=(
+                ToolExecutionContext(deps=deps)
+                if deps is not None
+                else None
+            ),
+            runtime_metadata=effective_runtime_metadata,
+            tool_context_lifecycle=execution_lifecycle,
+            profile_id=effective_profile_id,
+            usage_accounting=None,
+            skill_lifecycle_store=resolved.skills.lifecycle_store,
+            skill_lifecycle=resolved.skills.lifecycle,
+            learning_proposals=resolved.skills.learning_proposals,
+            learning_reviewer=resolved.skills.learning_reviewer,
+            plugin_registry=cast(LocalPluginRegistry, plugin_registry),
+            plugin_audit_report=plugin_audit_report,
+            goal_execution=goal_execution,
+            content_store=cast(ContentStore, resolved.content),
+            media_processors=cast(
+                MediaProcessorRegistry,
+                resolved.media,
+            ),
+            execution_scope=execution_scope,
+            tool_policy_hooks=cast(
+                ToolPolicyHooks,
+                resolved.tool_policy,
+            ),
+            close_trace_logger=False,
+            restore_plan_context=False,
+        )
+        agent.memory_store = cast(SQLiteMemoryStore, memory_store)
+        agent.memory_policy = cast(MemoryPolicy, memory_policy)
+        agent.async_memory_store = memory_store
+        agent.async_memory_policy = memory_policy
+        agent.async_skill_registry = skill_registry
+        agent.async_usage_accounting = resolved.usage
+        agent.async_artifact_store = resolved.artifacts
+        agent.async_content_store = resolved.content
+        agent.async_media_processors = resolved.media
+        agent.async_flushables = (
+            trace_logger,
+            session_recorder,
+            audit_sink,
+            event_sink,
+        )
+        agent.session_store = session_store
+        agent.session_recorder = session_recorder
+        agent.session_search_service = session_search_service
+        agent.run_store = resolved.runs
+        agent.approval_store = resolved.approvals
+        agent.public_event_sink = event_sink
+        agent._refresh_action_runtime()
+        await agent.restore_plan_turn_context_async()
+        await agent._flush_async_services()
+        return agent, resolved
+    except BaseException as exc:
+        cleanup_resources: list[object] = []
+        if client_is_owned and client is not None:
+            cleanup_resources.append(client)
+        cleanup_resources.append(resolved)
+        for resource in cleanup_resources:
+            try:
+                if isinstance(resource, ResolvedRuntimeServices):
+                    await resource.aclose_owned()
+                else:
+                    await close_async_resource(resource)
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "async hosted construction cleanup also failed with "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        raise
+
+
 def _session_result_redactor(
     callback: Callable[[str, str, dict], str] | None,
     *,
@@ -834,6 +1241,230 @@ def _create_agent_state(
     elif latest_turn.can_continue_approved_plan():
         state.active_plan = latest_turn.active_plan
     return state
+
+
+async def _create_agent_state_async(
+    session_store: object,
+    conversation_id: str | None,
+    *,
+    execution_scope: ExecutionScope,
+) -> AgentState:
+    """Restore hosted state exclusively through awaited session operations."""
+
+    if conversation_id is None:
+        return AgentState()
+    conversation = await call_async_service(
+        session_store,
+        "get_conversation",
+        conversation_id,
+    )
+    raw_scope = conversation.metadata.get("execution_scope")
+    if not isinstance(raw_scope, dict):
+        raise ValueError("hosted conversation has no persisted execution scope")
+    execution_scope.assert_resumable(ExecutionScope.from_dict(raw_scope))
+    state = AgentState(conversation_id=conversation.id)
+    state.turns = list(
+        await call_async_service(
+            session_store,
+            "load_turns",
+            conversation.id,
+        )
+    )
+    if not state.turns:
+        return state
+
+    latest_turn = state.turns[-1]
+    if latest_turn.status in {"in_progress", "waiting_for_approval"}:
+        terminal_message = await call_async_service(
+            session_store,
+            "load_terminal_turn_message",
+            conversation.id,
+            latest_turn.turn_id,
+        )
+        if terminal_message is not None:
+            content = terminal_message["content"]
+            kind = terminal_message["kind"]
+            if kind == "final":
+                latest_turn.complete(content)
+            elif kind == "plan_rejected":
+                latest_turn.reject_plan(content)
+            elif kind == "failed":
+                plan_status = (
+                    latest_turn.active_plan.status()
+                    if latest_turn.active_plan is not None
+                    else None
+                )
+                if conversation.status == "cancelled":
+                    latest_turn.cancel(content)
+                elif (
+                    conversation.status == "blocked"
+                    or plan_status == "blocked"
+                ):
+                    latest_turn.block(content)
+                else:
+                    latest_turn.fail(content)
+            await call_async_service(
+                session_store,
+                "save_turn_snapshot",
+                conversation.id,
+                latest_turn.to_dict(),
+            )
+
+    plan = latest_turn.active_plan
+    if (
+        latest_turn.status == "in_progress"
+        and plan is not None
+        and plan.status() == "blocked"
+    ):
+        blocked_step = next(
+            (step for step in plan.steps if step.status == "blocked"),
+            None,
+        )
+        if blocked_step is not None:
+            reason = blocked_step.blocked_reason or "Step blocked."
+            message = (
+                f"Plan step blocked: {blocked_step.title}. {reason}"
+            )
+            latest_turn.block(message)
+            await _save_recovery_terminal_async(
+                session_store,
+                conversation.id,
+                latest_turn,
+                message,
+                message_key_suffix="blocked_plan_checkpoint",
+                metadata={"recovery": "blocked_plan_checkpoint"},
+            )
+
+    if latest_turn.status == "in_progress":
+        hosted_requests = await call_async_service(
+            session_store,
+            "load_uncheckpointed_hosted_mcp_requests",
+            conversation.id,
+            latest_turn.turn_id,
+            checkpointed_request_count=latest_turn.model_request_count,
+        )
+        if hosted_requests:
+            latest = hosted_requests[-1]
+            raw_request_index = latest.get("request_index")
+            request_index = (
+                raw_request_index
+                if isinstance(raw_request_index, int)
+                and not isinstance(raw_request_index, bool)
+                else 0
+            )
+            reason = (
+                "Turn execution stopped after restart because hosted MCP "
+                f"request {request_index} may have executed a remote operation "
+                "without a durable checkpoint. Chulk will not replay it "
+                "automatically; inspect remote state before retrying."
+            )
+            active_step = (
+                plan.active_step() if plan is not None else None
+            )
+            if active_step is not None:
+                active_step.block(reason)
+            latest_turn.block(reason)
+            await _save_recovery_terminal_async(
+                session_store,
+                conversation.id,
+                latest_turn,
+                reason,
+                message_key_suffix="uncertain_hosted_mcp",
+                metadata={
+                    "recovery": "uncertain_hosted_mcp",
+                    "request_index": request_index,
+                },
+            )
+        else:
+            unresolved_calls = [
+                record.to_dict()
+                for record in latest_turn.tool_calls
+                if record.success is None or record.ended_at is None
+            ]
+            if not unresolved_calls:
+                unresolved_calls = await call_async_service(
+                    session_store,
+                    "load_tool_calls_without_observations",
+                    conversation.id,
+                    latest_turn.turn_id,
+                )
+            if unresolved_calls:
+                latest = unresolved_calls[-1]
+                tool_name = str(latest.get("tool_name") or "tool")
+                raw_iteration = latest.get("iteration")
+                iteration = (
+                    raw_iteration
+                    if isinstance(raw_iteration, int)
+                    and not isinstance(raw_iteration, bool)
+                    else 0
+                )
+                reason = (
+                    "Turn execution stopped after restart because tool call "
+                    f"{tool_name} (iteration {iteration}) has no matching "
+                    "persisted observation. Chulk will not replay it "
+                    "automatically; inspect external state before retrying."
+                )
+                active_step = (
+                    plan.active_step() if plan is not None else None
+                )
+                if active_step is not None:
+                    active_step.block(reason)
+                latest_turn.block(reason)
+                await _save_recovery_terminal_async(
+                    session_store,
+                    conversation.id,
+                    latest_turn,
+                    reason,
+                    message_key_suffix="unresolved_tool_intent",
+                    metadata={"recovery": "unresolved_tool_intent"},
+                )
+
+    state.current_turn_id = latest_turn.turn_id
+    state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
+    state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
+    state.loaded_skill_names = list(latest_turn.loaded_skill_names)
+    state.available_tool_names = list(latest_turn.available_tool_names)
+    state.errors = [error for turn in state.turns for error in turn.errors]
+    state.final_answer = latest_turn.final_answer
+    if latest_turn.context_reports:
+        state.last_context_report = latest_turn.context_reports[-1]
+    if latest_turn.model_usage_totals:
+        state.last_usage_report = latest_turn.model_usage_totals
+    if (
+        latest_turn.status == "waiting_for_approval"
+        and latest_turn.active_plan is not None
+        and not latest_turn.plan_approved
+    ):
+        state.active_plan = latest_turn.active_plan
+        state.pending_plan_turn_id = latest_turn.turn_id
+    elif latest_turn.can_continue_approved_plan():
+        state.active_plan = latest_turn.active_plan
+    return state
+
+
+async def _save_recovery_terminal_async(
+    session_store: object,
+    conversation_id: str,
+    turn: TurnState,
+    message: str,
+    *,
+    message_key_suffix: str,
+    metadata: dict[str, object],
+) -> None:
+    saved = await call_async_service(
+        session_store,
+        "save_terminal_turn_bundle",
+        conversation_id,
+        turn_id=turn.turn_id,
+        content=message,
+        message_key=f"{turn.turn_id}:assistant:{message_key_suffix}",
+        turn=turn.to_dict(),
+        metadata=metadata,
+    )
+    if not saved:
+        raise RuntimeError(
+            "hosted session store did not persist a terminal recovery bundle"
+        )
 
 
 def _reconcile_terminal_turn_message(
@@ -1266,6 +1897,113 @@ def _resolve_skill_specs(
     return SkillSpecResolution(
         pinned_skill_names=pinned_skill_names, warnings=warning_payloads
     )
+
+
+async def _resolve_skill_specs_async(
+    registry: object,
+    skill_specs: object | Iterable[object] | None,
+) -> SkillSpecResolution:
+    specs = _coerce_skill_specs(skill_specs)
+    if specs is None:
+        return SkillSpecResolution(pinned_skill_names=[], warnings=[])
+    if not specs:
+        await call_async_service(registry, "clear")
+        return SkillSpecResolution(pinned_skill_names=[], warnings=[])
+
+    allowlist_requests: list[str] = []
+    pin_requests: list[str] = []
+    warning_payloads: list[dict[str, str]] = []
+    has_allowlist = False
+    for spec in specs:
+        if isinstance(spec, SkillAllowlistRef):
+            has_allowlist = True
+            allowlist_requests.extend(spec.names)
+            continue
+        if isinstance(spec, SkillPinRef):
+            pin_requests.extend(spec.names)
+            continue
+        if isinstance(spec, SkillDirectoryRef):
+            await call_async_service(
+                registry,
+                "register_directory",
+                spec.skills_dir,
+            )
+            continue
+        if isinstance(spec, SkillRef):
+            if spec.skill_path is not None:
+                skill = await call_async_service(
+                    registry,
+                    "register_path",
+                    spec.skill_path,
+                )
+                pin_requests.append(skill.name)
+                continue
+            if spec.name is not None:
+                pin_requests.append(spec.name)
+                continue
+            raise ValueError("SkillRef must include name or skill_path")
+        register_async = getattr(spec, "register_async", None)
+        if callable(register_async):
+            pinned_name = await register_async(registry)
+            if pinned_name:
+                pin_requests.append(str(pinned_name))
+            continue
+        if isinstance(spec, str):
+            pin_requests.append(spec)
+            continue
+        raise TypeError(
+            "native async hosted skills require SkillRef values or an "
+            "async register_async(registry) implementation"
+        )
+
+    allowlisted_names = await _resolve_existing_skill_names_async(
+        registry,
+        allowlist_requests,
+        kind="allowlist",
+        warning_payloads=warning_payloads,
+    )
+    pinned_skill_names = await _resolve_existing_skill_names_async(
+        registry,
+        pin_requests,
+        kind="pin",
+        warning_payloads=warning_payloads,
+    )
+    if has_allowlist:
+        await call_async_service(
+            registry,
+            "restrict_to",
+            [*allowlisted_names, *pinned_skill_names],
+        )
+    return SkillSpecResolution(
+        pinned_skill_names=pinned_skill_names,
+        warnings=warning_payloads,
+    )
+
+
+async def _resolve_existing_skill_names_async(
+    registry: object,
+    names: Iterable[str],
+    *,
+    kind: str,
+    warning_payloads: list[dict[str, str]],
+) -> list[str]:
+    resolved_names: list[str] = []
+    for requested_name in names:
+        skill = await call_async_service(
+            registry,
+            "get_skill",
+            requested_name,
+        )
+        if skill is None:
+            _append_missing_skill_warning(
+                kind,
+                requested_name,
+                warning_payloads,
+            )
+            continue
+        if skill.name not in resolved_names:
+            resolved_names.append(skill.name)
+    return resolved_names
 
 
 def _coerce_skill_specs(

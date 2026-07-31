@@ -106,13 +106,14 @@ async def run_action_loop_async(
 ) -> str:
     """Drive a turn through async model, tool, and reflection transports."""
     while True:
-        preparation = _apply_signal(
+        preparation = await _apply_signal_async(
             runtime,
             turn,
             require_plan=require_plan,
             signal=PrepareIterationSignal(),
         )
         if preparation.outcome == TransitionOutcome.STOP:
+            await _flush(runtime)
             return _response(preparation)
         if preparation.outcome != TransitionOutcome.PROCEED:
             raise RuntimeError("Plan preparation must proceed or stop")
@@ -128,7 +129,7 @@ async def run_action_loop_async(
             prompt,
             require_plan=require_plan,
         )
-        application = _apply_signal(
+        application = await _apply_signal_async(
             runtime,
             turn,
             require_plan=require_plan,
@@ -137,12 +138,13 @@ async def run_action_loop_async(
         if application.outcome == TransitionOutcome.AWAIT_RESULT:
             pending = application.pending
             if isinstance(pending, PendingToolExecution):
+                await _flush(runtime)
                 result = await runtime.tools.execute_async(
                     pending.effect.action.tool_name,
                     pending.effect.action.arguments,
                     turn,
                 )
-                application = _apply_signal(
+                application = await _apply_signal_async(
                     runtime,
                     turn,
                     require_plan=require_plan,
@@ -151,11 +153,12 @@ async def run_action_loop_async(
                     tool_result=result,
                 )
             elif isinstance(pending, PendingReflection):
+                await _flush(runtime)
                 reflection = await runtime.model.reflect_async(
                     pending.proposed_answer,
                     turn,
                 )
-                application = _apply_signal(
+                application = await _apply_signal_async(
                     runtime,
                     turn,
                     require_plan=require_plan,
@@ -170,9 +173,11 @@ async def run_action_loop_async(
                 raise RuntimeError("Unknown pending action-loop operation")
 
         if application.outcome == TransitionOutcome.STOP:
+            await _flush(runtime)
             return _response(application)
         if application.outcome != TransitionOutcome.CONTINUE:
             raise RuntimeError("Action transition must continue, await a result, or stop")
+        await _flush(runtime)
 
 
 def _apply_signal(
@@ -192,6 +197,30 @@ def _apply_signal(
         pending=pending,
         tool_result=tool_result,
     )
+
+
+async def _apply_signal_async(
+    runtime: ActionLoopPort,
+    turn: TurnState,
+    *,
+    require_plan: bool,
+    signal: TransitionSignal,
+    pending: PendingToolExecution | None = None,
+    tool_result=None,
+) -> TransitionApplication:
+    snapshot = runtime.effects.snapshot(turn, require_plan=require_plan)
+    transition = reduce_transition(snapshot, signal)
+    return await runtime.effects.apply_async(
+        turn,
+        transition,
+        pending=pending,
+        tool_result=tool_result,
+    )
+
+
+async def _flush(runtime: ActionLoopPort) -> None:
+    if runtime.async_flush is not None:
+        await runtime.async_flush()
 
 
 def _model_signal(result: AgentAction | ProtocolFailure) -> TransitionSignal:

@@ -84,10 +84,42 @@ work.
 Async hosts may use `AsyncServiceBinding.host(...)`,
 `AsyncServiceBinding.runtime(...)`, or `AsyncServiceBinding.scoped(...)`.
 Await native async factories with `await AsyncHostedRuntime.create(...)`.
-Factories and runtime-owned `aclose()` methods run on the caller event loop;
-synchronous compatibility bindings are isolated from it. Direct
-`AsyncHostedRuntime(...)` construction remains available when every binding is
-synchronous.
+Factories, service methods, policy hooks, and runtime-owned `aclose()` methods
+run on the caller event loop. A native async service is never sent through its
+synchronous compatibility methods. Explicit `ServiceBinding` compatibility
+resources remain supported and are isolated in worker threads. Direct
+`AsyncHostedRuntime(...)` construction remains available only when every
+binding is synchronous.
+
+```python
+runtime = await AsyncHostedRuntime.create(
+    config=config,
+    llm=client,
+    tools=[],
+    skills=[],
+    services=services,
+    execution_scope=scope,
+)
+async with runtime:
+    result = await runtime.run_result("Handle the request.")
+```
+
+Trace, session, audit, and public-event journals preserve emission order and
+are drained before model requests, tool effects, approval pauses, and terminal
+returns. Artifact writes and usage reservations are awaited at the transition
+that owns them. A sink or persistence failure therefore fails closed before a
+later external effect can overtake uncommitted evidence.
+
+Cancellation propagates as `asyncio.CancelledError`. Model, tool, and media
+reservations are released when their result is unavailable; a durable
+mutating effect cancelled after dispatch is quarantined as `unknown` rather
+than replayed. Terminal cancellation evidence is flushed before control
+returns. Apply an application timeout with `asyncio.timeout(...)` or
+`asyncio.wait_for(...)`, then always await `runtime.close()` (or use the async
+context manager). Close drains remaining journals, closes turn-scoped
+execution sessions, and finalizes runtime-owned resources once in reverse
+resolution order. Host-owned resources remain the application's
+responsibility.
 
 The protocols exported from `chulk.hosting` do not expose SQLite paths or
 filesystem implementation types. The in-memory objects under

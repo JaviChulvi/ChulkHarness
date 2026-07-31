@@ -91,6 +91,12 @@ class ToolContextLifecycle(Protocol):
     def open(self, context: ToolExecutionContext[Any]) -> ToolExecutionContext[Any]:
         """Attach resources to a newly-created turn context."""
 
+    async def open_async(
+        self,
+        context: ToolExecutionContext[Any],
+    ) -> ToolExecutionContext[Any]:
+        """Attach resources without blocking the async caller."""
+
     def close(self, context: ToolExecutionContext[Any]) -> None:
         """Release resources attached to a terminal turn context."""
 

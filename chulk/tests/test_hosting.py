@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from chulk import (
     AgentConfig,
     AsyncHostedRuntime,
+    AsyncRuntimeServices,
     AsyncServiceBinding,
     ConfigurationError,
     ExecutionScope,
@@ -25,7 +27,11 @@ from chulk import (
     DataClassification,
 )
 from chulk.hosting.reference import InMemoryServiceHub
-from chulk.hosting.services import ServiceBinding, SessionRuntimeServices
+from chulk.hosting.services import (
+    ServiceBinding,
+    SessionRuntimeServices,
+    SkillRuntimeServices,
+)
 from chulk.llm import LLMClient
 from chulk.tools import ToolExecutionContext, ToolRegistry, ToolResult
 from chulk.tools.registry import Tool
@@ -41,6 +47,106 @@ class FakeLLM(LLMClient):
         if len(self.responses) == 1:
             return self.responses[0]
         return self.responses.pop(0)
+
+
+class _LoopBoundService:
+    """Expose only awaitable methods and record their event-loop affinity."""
+
+    def __init__(
+        self,
+        name: str,
+        service: object,
+        calls: list[tuple[str, str, int]],
+    ) -> None:
+        self._name = name
+        self._service = service
+        self._calls = calls
+
+    def __getattr__(self, name: str):
+        value = getattr(self._service, name)
+        if not callable(value):
+            return value
+
+        def invoke(*args, **kwargs):
+            loop = asyncio.get_running_loop()
+            self._calls.append(
+                (self._name, name, id(loop))
+            )
+            result = value(*args, **kwargs)
+
+            async def resolve():
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+            return resolve()
+
+        return inspect.markcoroutinefunction(invoke)
+
+
+async def _resolve_async_binding(binding, scope: ExecutionScope):
+    if isinstance(binding, AsyncServiceBinding):
+        return await binding.resolve(scope)
+    return await asyncio.to_thread(binding.resolve, scope)
+
+
+def _loop_bound_async_services(
+    hub: InMemoryServiceHub,
+    calls: list[tuple[str, str, int]],
+    *,
+    policy_hooks: ToolPolicyHooks | None = None,
+) -> AsyncRuntimeServices:
+    base = hub.async_services(policy_hooks=policy_hooks)
+    bindings = {}
+
+    for service_name in base.__dataclass_fields__:
+        binding = getattr(base, service_name)
+        if service_name == "tool_policy":
+            bindings[service_name] = AsyncServiceBinding.host(
+                policy_hooks or ToolPolicyHooks()
+            )
+            continue
+
+        async def resolve(
+            scope: ExecutionScope,
+            *,
+            name: str = service_name,
+            source=binding,
+        ):
+            service = await _resolve_async_binding(source, scope)
+            if isinstance(service, SessionRuntimeServices):
+                return SessionRuntimeServices(
+                    store=_LoopBoundService(
+                        "sessions.store",
+                        service.store,
+                        calls,
+                    ),
+                    search=_LoopBoundService(
+                        "sessions.search",
+                        service.search,
+                        calls,
+                    ),
+                )
+            if isinstance(service, SkillRuntimeServices):
+                return SkillRuntimeServices(
+                    registry=_LoopBoundService(
+                        "skills.registry",
+                        service.registry,
+                        calls,
+                    ),
+                    lifecycle_store=service.lifecycle_store,
+                    lifecycle=service.lifecycle,
+                    learning_proposals=service.learning_proposals,
+                    learning_reviewer=service.learning_reviewer,
+                )
+            return _LoopBoundService(name, service, calls)
+
+        bindings[service_name] = AsyncServiceBinding.scoped(
+            resolve,
+            ownership="host",
+        )
+
+    return AsyncRuntimeServices(**bindings)
 
 
 def _final(content: str = "hosted ok") -> str:
@@ -188,6 +294,45 @@ def test_service_resolution_closes_runtime_owned_resources_on_failure() -> None:
         services.resolve(_scope())
 
     assert closed == 1
+
+
+@pytest.mark.asyncio
+async def test_async_service_resolution_closes_every_owned_resource_on_failure() -> None:
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} close failed")
+
+    async def fail_factory(_scope: ExecutionScope):
+        raise LookupError("service unavailable")
+
+    base = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(base, name)
+        for name in base.__dataclass_fields__
+    }
+    fields["memory"] = AsyncServiceBinding.runtime(Resource("memory"))
+    fields["sessions"] = AsyncServiceBinding.runtime(
+        Resource("sessions", fail=True)
+    )
+    fields["skills"] = AsyncServiceBinding.scoped(fail_factory)
+    services = AsyncRuntimeServices(**fields)
+
+    with pytest.raises(ValueError, match=r"skills.*LookupError") as error:
+        await services.resolve_async(_scope())
+
+    assert closed == ["sessions", "memory"]
+    assert any(
+        "sessions close failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
 
 
 def test_hosted_service_failure_maps_to_redacted_configuration_error(
@@ -352,7 +497,7 @@ async def test_async_host_policy_authorizes_before_credentials_and_hides_secrets
         policy=policy,
     )
     hub = InMemoryServiceHub()
-    agent = AsyncHostedRuntime(
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_tool_call("catalog_lookup"), _final("done")]),
         tools=[tool],
@@ -418,7 +563,7 @@ async def test_async_host_events_are_awaited_on_the_running_loop(
         for name in services.__dataclass_fields__
     }
     fields["events"] = ServiceBinding.host(sink)
-    agent = AsyncHostedRuntime(
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_final("async events")]),
         tools=[],
@@ -550,6 +695,272 @@ async def test_async_hosted_runtime_awaits_native_trace_and_audit_sinks(
     await agent.close()
 
 
+@pytest.mark.asyncio
+async def test_async_hosted_runtime_awaits_all_turn_services_natively(
+    tmp_path: Path,
+) -> None:
+    loop = asyncio.get_running_loop()
+    calls: list[tuple[str, str, int]] = []
+
+    async def authorize(*_args) -> bool:
+        calls.append(("tool_policy", "authorize", id(asyncio.get_running_loop())))
+        return True
+
+    async def effect_key(*_args) -> str:
+        calls.append(
+            ("tool_policy", "derive_effect_key", id(asyncio.get_running_loop()))
+        )
+        return "native:verbose"
+
+    async def redact(*_args) -> str:
+        calls.append(("tool_policy", "redact", id(asyncio.get_running_loop())))
+        return "native redacted result"
+
+    tool = Tool(
+        name="verbose",
+        description="Return output large enough to require an artifact.",
+        args_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        callable=lambda _arguments: ToolResult(
+            tool_name="verbose",
+            success=True,
+            observation="native result",
+            stdout="HEAD-" + ("native-output-" * 20) + "TAIL",
+        ),
+        policy=ToolPolicy(
+            effect=ToolEffect.READ,
+            required_grants=frozenset({"catalog:read"}),
+        ),
+    )
+    hub = InMemoryServiceHub()
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(
+            project_root=tmp_path,
+            max_tool_stdout_chars=32,
+        ),
+        llm=FakeLLM([_tool_call("verbose"), _final("native complete")]),
+        tools=[tool],
+        skills=[],
+        services=_loop_bound_async_services(
+            hub,
+            calls,
+            policy_hooks=ToolPolicyHooks(
+                authorize=authorize,
+                derive_effect_key=effect_key,
+                redact=redact,
+            ),
+        ),
+        execution_scope=_scope(grants=frozenset({"catalog:read"})),
+    )
+
+    result = await agent.run_result("run the native service contract")
+    output = agent.state.observations[0]["output_metadata"]
+    artifact = next(
+        item for item in output["artifacts"] if item["field"] == "stdout"
+    )
+    artifact_read = await agent.read_artifact(artifact["artifact_id"])
+    search_page = await agent.search_sessions("native")
+    proposals = await agent.list_memory_proposals()
+
+    assert result.content == "native complete"
+    assert "native redacted result" in result.observations[0].content
+    assert "TAIL" in artifact_read["content"]
+    assert search_page.query == "native"
+    assert proposals == ()
+    assert {loop_id for _service, _method, loop_id in calls} == {id(loop)}
+
+    invoked = {(service, method) for service, method, _loop_id in calls}
+    expected = {
+        ("plugins", "verify_startup"),
+        ("skills.registry", "load_metadata"),
+        ("skills.registry", "configure_environment"),
+        ("skills.registry", "load_selected_skills"),
+        ("memory", "profile_memories"),
+        ("memory", "search_memory"),
+        ("sessions.store", "create_conversation"),
+        ("sessions.store", "save_turn_snapshot"),
+        ("sessions.store", "save_message"),
+        ("sessions.store", "save_model_request"),
+        ("sessions.store", "save_model_response"),
+        ("sessions.store", "save_tool_call"),
+        ("sessions.store", "save_tool_observation_bundle"),
+        ("sessions.store", "save_terminal_turn_bundle"),
+        ("sessions.search", "search"),
+        ("execution", "open_session_async"),
+        ("usage", "reserve_model_request"),
+        ("usage", "commit_model_request"),
+        ("usage", "reserve_tool_call"),
+        ("usage", "commit_tool_call"),
+        ("artifacts", "write"),
+        ("artifacts", "read"),
+        ("traces", "log"),
+        ("audit", "record"),
+        ("events", "emit"),
+        ("tool_policy", "authorize"),
+        ("tool_policy", "derive_effect_key"),
+        ("tool_policy", "redact"),
+    }
+    assert expected <= invoked
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_hosted_turns_have_observable_parity(
+    tmp_path: Path,
+) -> None:
+    tool = Tool(
+        name="lookup",
+        description="Return one deterministic lookup.",
+        args_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        callable=lambda _arguments: ToolResult(
+            tool_name="lookup",
+            success=True,
+            observation="lookup complete",
+            value={"found": True},
+        ),
+    )
+    sync_hub = InMemoryServiceHub()
+    sync_agent = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_tool_call("lookup"), _final("parity")]),
+        tools=[tool],
+        skills=[],
+        services=sync_hub.services(),
+        execution_scope=_scope(),
+    )
+    sync_result = sync_agent.run_result("compare hosted paths")
+
+    async_hub = InMemoryServiceHub()
+    async_agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_tool_call("lookup"), _final("parity")]),
+        tools=[tool],
+        skills=[],
+        services=async_hub.async_services(),
+        execution_scope=_scope(),
+    )
+    async_result = await async_agent.run_result("compare hosted paths")
+
+    def result_signature(result):
+        return {
+            "content": result.content,
+            "status": result.status,
+            "errors": result.errors,
+            "tools": tuple(
+                (
+                    call.tool_name,
+                    dict(call.arguments),
+                    call.phase,
+                    call.success,
+                    call.failure_kind,
+                )
+                for call in result.tool_calls
+            ),
+            "observations": tuple(
+                (observation.tool_name, observation.content)
+                for observation in result.observations
+            ),
+            "skills": result.loaded_skill_names,
+        }
+
+    assert result_signature(async_result) == result_signature(sync_result)
+    assert [
+        event["type"]
+        for event in async_hub.trace_events(async_agent.execution_scope)
+    ] == [
+        event["type"]
+        for event in sync_hub.trace_events(sync_agent.execution_scope)
+    ]
+    await async_agent.close()
+    sync_agent.close()
+
+
+class _HangingAsyncLLM(LLMClient):
+    def __init__(self, started: asyncio.Event) -> None:
+        self.started = started
+
+    def complete(self, messages, **kwargs) -> str:
+        raise AssertionError("the synchronous model path must not run")
+
+    async def acomplete_action(self, messages, **kwargs):
+        self.started.set()
+        await asyncio.Future()
+        raise AssertionError(f"unreachable: {messages!r} {kwargs!r}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["cancel", "timeout"])
+async def test_async_hosted_interruption_releases_leases_and_flushes_terminal_state(
+    tmp_path: Path,
+    interruption: str,
+) -> None:
+    started = asyncio.Event()
+    hub = InMemoryServiceHub()
+    calls: list[tuple[str, str, int]] = []
+
+    class OwnedAudit:
+        def __init__(self) -> None:
+            self.records = []
+            self.closed = False
+
+        async def record(self, event_type, payload, *, scope) -> None:
+            self.records.append((event_type, payload, scope))
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    audit = OwnedAudit()
+    services = _loop_bound_async_services(hub, calls)
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["audit"] = AsyncServiceBinding.runtime(audit)
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_HangingAsyncLLM(started),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+    task = asyncio.create_task(agent.run("wait for interruption"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    scope = agent.execution_scope
+    assert ("sessions.store", "save_model_request") in {
+        (service, method) for service, method, _loop_id in calls
+    }
+    assert hub.active_usage_reservations(scope)
+
+    if interruption == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(task, timeout=0.01)
+
+    assert hub.active_usage_reservations(scope) == ()
+    assert agent.state.turns[-1].status == "cancelled"
+    assert agent.state.turns[-1].ended_at is not None
+    assert [event["type"] for event in hub.trace_events(scope)][-2:] == [
+        "turn_failed",
+        "turn_finished",
+    ]
+    assert hub.public_events(scope)[-1].name == "run.failed"
+    await agent.close()
+    assert audit.records[-2][0] == "turn_failed"
+    assert audit.records[-1][0] == "turn_finished"
+    assert audit.closed
+
+
 def test_tool_registry_rejects_schema_identity_mismatch() -> None:
     registry = ToolRegistry()
     tool = Tool(
@@ -636,7 +1047,7 @@ async def test_denied_host_tool_never_resolves_credentials(
         policy=ToolPolicy(required_grants=frozenset({"catalog:read"})),
     )
     hub = InMemoryServiceHub()
-    agent = AsyncHostedRuntime(
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_tool_call("denied_lookup"), _final()]),
         tools=[tool],
@@ -682,7 +1093,7 @@ async def test_secret_classified_tool_output_is_withheld_everywhere(
         ),
     )
     hub = InMemoryServiceHub()
-    agent = AsyncHostedRuntime(
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_tool_call("secret_lookup"), _final()]),
         tools=[tool],

@@ -9,6 +9,7 @@ from chulk.memory.models import (
     normalize_memory_namespace,
 )
 from chulk.memory.policy import MemoryPolicy, MemoryPolicyResult
+from chulk.memory.async_policy import AsyncMemoryPolicy
 from chulk.memory.retrieval import text_to_embedding
 from chulk.memory.security import MemorySecretError
 from chulk.memory.sqlite_store import SQLiteMemoryStore, select_memories_for_prompt
@@ -21,6 +22,7 @@ __all__ = [
     "MemoryExtractionCandidate",
     "MemoryPolicy",
     "MemoryPolicyResult",
+    "AsyncMemoryPolicy",
     "MemoryProposalRecord",
     "MemoryRecord",
     "normalize_memory_namespace",

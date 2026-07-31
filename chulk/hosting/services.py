@@ -235,20 +235,176 @@ class SkillRuntimeServices:
 
 @runtime_checkable
 class AsyncMemoryService(Protocol):
+    namespace: str
+
     async def profile_memories(self, limit: int = 50) -> list[Any]: ...
 
     async def search_memory(self, query: str, limit: int = 5) -> list[Any]: ...
+
+    async def get_memory(
+        self,
+        memory_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> Any: ...
+
+    async def save_memory(self, content: str, **kwargs: Any) -> str: ...
+
+    async def create_memory_proposal(
+        self,
+        content: str,
+        **kwargs: Any,
+    ) -> str: ...
+
+    async def list_memory_proposals(self, **kwargs: Any) -> list[Any]: ...
+
+    async def approve_memory_proposal(self, proposal_id: str) -> Any: ...
+
+    async def reject_memory_proposal(self, proposal_id: str) -> Any: ...
 
 
 @runtime_checkable
 class AsyncSessionService(Protocol):
     async def create_conversation(self, conversation_id: str, **kwargs: Any) -> Any: ...
 
+    async def get_conversation(self, conversation_id_or_prefix: str) -> Any: ...
+
     async def load_turns(self, conversation_id: str) -> list[Any]: ...
+
+    async def load_latest_summary(self, conversation_id: str) -> Any: ...
+
+    async def load_recent_messages(
+        self,
+        conversation_id: str,
+        limit: int,
+        *,
+        after_ordinal: int = 0,
+    ) -> list[dict[str, str]]: ...
+
+    async def save_turn_snapshot(
+        self,
+        conversation_id: str,
+        turn: dict[str, Any],
+    ) -> None: ...
+
+    async def save_conversation_summary(
+        self,
+        conversation_id: str,
+        **kwargs: Any,
+    ) -> Any: ...
+
+    async def save_message(self, conversation_id: str, **kwargs: Any) -> None: ...
+
+    async def save_model_request(
+        self,
+        conversation_id: str,
+        payload: dict[str, Any],
+    ) -> None: ...
+
+    async def save_model_response(
+        self,
+        conversation_id: str,
+        payload: dict[str, Any],
+    ) -> None: ...
+
+    async def save_tool_call(
+        self,
+        conversation_id: str,
+        payload: dict[str, Any],
+    ) -> None: ...
+
+    async def save_tool_observation_bundle(
+        self,
+        conversation_id: str,
+        **kwargs: Any,
+    ) -> None: ...
+
+    async def max_observation_index(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> int: ...
+
+    async def save_terminal_turn_bundle(
+        self,
+        conversation_id: str,
+        **kwargs: Any,
+    ) -> bool: ...
+
+    async def update_conversation_status(
+        self,
+        conversation_id: str,
+        status: str,
+    ) -> None: ...
+
+    async def load_terminal_turn_message(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> Any: ...
+
+    async def load_uncheckpointed_hosted_mcp_requests(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        *,
+        checkpointed_request_count: int,
+    ) -> list[dict[str, Any]]: ...
+
+    async def load_tool_calls_without_observations(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class AsyncSkillService(Protocol):
+    last_routing_result: Any
+
+    async def load_metadata(self) -> None: ...
+
+    async def clear(self) -> None: ...
+
+    async def register(self, skill: Any, *, replace: bool = False) -> None: ...
+
+    async def register_path(self, path: Any) -> Any: ...
+
+    async def register_directory(self, path: Any) -> list[Any]: ...
+
+    async def configure_environment(
+        self,
+        *,
+        available_tools: set[str],
+        capabilities: set[str],
+    ) -> None: ...
+
+    async def restrict_to(self, names: list[str]) -> None: ...
+
+    async def list_visible_skills(self) -> list[Any]: ...
+
+    async def load_selected_skills(
+        self,
+        user_request: str,
+        *,
+        pinned_names: tuple[str, ...] | list[str] = (),
+        limit: int | None = None,
+    ) -> list[Any]: ...
+
+    async def get_skill(
+        self,
+        name: str,
+        *,
+        visible_only: bool = False,
+    ) -> Any: ...
+
+    async def load_content(self, name: str) -> str: ...
 
 
 @runtime_checkable
 class AsyncTraceSink(Protocol):
+    path: Any
+
     async def log(
         self,
         event_type: str,
@@ -256,6 +412,8 @@ class AsyncTraceSink(Protocol):
         *,
         turn_id: str | None = None,
     ) -> None: ...
+
+    async def activate(self) -> None: ...
 
 
 @runtime_checkable
@@ -286,6 +444,24 @@ class AsyncUsageService(Protocol):
     async def reserve_model_request(self, **kwargs: Any) -> Any: ...
 
     async def commit_model_request(self, **kwargs: Any) -> list[Any]: ...
+
+    async def release_model_request(self, **kwargs: Any) -> Any: ...
+
+    async def reserve_tool_call(self, **kwargs: Any) -> Any: ...
+
+    async def commit_tool_call(self, **kwargs: Any) -> list[Any]: ...
+
+    async def release_tool_call(self, **kwargs: Any) -> Any: ...
+
+    async def reserve_media_transform(self, **kwargs: Any) -> Any: ...
+
+    async def commit_media_transform(
+        self,
+        reservation: Any,
+        **kwargs: Any,
+    ) -> list[Any]: ...
+
+    async def release_media_transform(self, reservation: Any) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,8 +596,14 @@ class AsyncRuntimeServices:
                 ):
                     owned.append(resource)
                     owned_ids.add(id(resource))
-        except BaseException:
-            await _aclose_resources(reversed(owned))
+        except BaseException as exc:
+            try:
+                await _aclose_resources(reversed(owned))
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "async service resolution cleanup also failed with "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
             raise
         return ResolvedRuntimeServices(
             **values,
@@ -463,14 +645,26 @@ class ResolvedRuntimeServices:
 
 
 async def _aclose_resources(resources: Any) -> None:
+    failure: BaseException | None = None
     for resource in resources:
-        aclose = getattr(resource, "aclose", None)
-        if callable(aclose):
-            await aclose()
-            continue
-        close = getattr(resource, "close", None)
-        if callable(close):
-            await asyncio.to_thread(close)
+        try:
+            aclose = getattr(resource, "aclose", None)
+            if callable(aclose):
+                await aclose()
+                continue
+            close = getattr(resource, "close", None)
+            if callable(close):
+                await asyncio.to_thread(close)
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+            else:
+                failure.add_note(
+                    "another async resource close failed with "
+                    f"{type(exc).__name__}: {exc}"
+                )
+    if failure is not None:
+        raise failure
 
 
 # Compatibility names retained for applications using the phase-A API.

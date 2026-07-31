@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-import asyncio
-import inspect
 from typing import Any, cast
 
 from chulk.events import AgentEvent
+from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.scope import ExecutionScope
 from chulk.hosting.services import AsyncAuditSink, AsyncTraceSink
 from chulk.redaction import redact_data
@@ -58,13 +57,7 @@ class BufferedAsyncEventSink:
     async def flush(self) -> None:
         while self._pending:
             event = self._pending[0]
-            emit = getattr(self.sink, "emit")
-            if inspect.iscoroutinefunction(emit):
-                await emit(event)
-            else:
-                delivered = await asyncio.to_thread(emit, event)
-                if inspect.isawaitable(delivered):
-                    await delivered
+            await call_async_service(self.sink, "emit", event)
             self._pending.pop(0)
 
 
@@ -104,7 +97,13 @@ class BufferedAsyncTraceSink:
     async def flush(self) -> None:
         while self._pending:
             event_type, payload, turn_id = self._pending[0]
-            await self.sink.log(event_type, payload, turn_id=turn_id)
+            await call_async_service(
+                self.sink,
+                "log",
+                event_type,
+                payload,
+                turn_id=turn_id,
+            )
             self._pending.pop(0)
 
 
@@ -127,7 +126,13 @@ class BufferedAsyncAuditSink:
     async def flush(self) -> None:
         while self._pending:
             event_type, payload, scope = self._pending[0]
-            await self.sink.record(event_type, payload, scope=scope)
+            await call_async_service(
+                self.sink,
+                "record",
+                event_type,
+                payload,
+                scope=scope,
+            )
             self._pending.pop(0)
 
 

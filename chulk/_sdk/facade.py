@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
 from contextlib import suppress
-import inspect
 from pathlib import Path
 import threading
 from typing import Any, Callable, TypeVar, cast
@@ -39,6 +38,7 @@ from chulk.hosting import (
     ExecutionScope,
     RuntimeServices,
 )
+from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
@@ -67,7 +67,10 @@ from chulk.skills import (
     SkillScope,
     SkillUsageKind,
 )
-from chulk.runtime import create_agent as create_runtime_agent
+from chulk.runtime import (
+    create_agent as create_runtime_agent,
+    create_async_hosted_agent,
+)
 from chulk.sessions import (
     SessionSearchPage,
     SessionSearchService,
@@ -550,8 +553,7 @@ class AsyncAgentHandle:
         return self.handle._run_result(content)
 
     async def reject(self) -> str:
-        self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.reject)
+        return (await self.reject_result()).content
 
     async def reject_result(
         self,
@@ -560,7 +562,22 @@ class AsyncAgentHandle:
         on_event: EventCallback | None = None,
     ) -> RunResult:
         self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.reject_result, on_delta=on_delta, on_event=on_event)
+        has_plan_to_cancel = (
+            self.runtime.has_pending_plan()
+            or self.runtime.has_resumable_plan()
+        )
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.reject_plan_async()
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        if not has_plan_to_cancel:
+            return self.handle._no_pending_plan_result(content)
+        return self.handle._run_result(content)
 
     async def close(self) -> None:
         await self.handle.aclose()
@@ -1933,41 +1950,91 @@ class AsyncHostedRuntime(AsyncAgent):
         execution_scope: ExecutionScope,
         **kwargs: Any,
     ) -> "AsyncHostedRuntime":
-        """Resolve async factories without blocking, then construct the runtime."""
-        resolved = await services.resolve_async(execution_scope)
-        bindings = resolved.host_bindings()
-        flushables: list[object] = []
-        fields = {
-            name: getattr(bindings, name)
-            for name in bindings.__dataclass_fields__
-        }
-        from chulk.hosting.sinks import (
-            BufferedAsyncAuditSink,
-            BufferedAsyncTraceSink,
-        )
+        """Build a native async hosted runtime without a sync service bridge."""
 
-        if _has_async_method(resolved.traces, "log"):
-            trace_sink = BufferedAsyncTraceSink(resolved.traces)
-            fields["traces"] = type(bindings.traces).host(trace_sink)
-            flushables.append(trace_sink)
-        if _has_async_method(resolved.audit, "record"):
-            audit_sink = BufferedAsyncAuditSink(resolved.audit)
-            fields["audit"] = type(bindings.audit).host(audit_sink)
-            flushables.append(audit_sink)
-        compatibility = AsyncRuntimeServices(
-            **fields
+        config_arg = kwargs.get("config")
+        preset = kwargs.get("preset")
+        capabilities = _selected_capabilities(
+            config_arg,
+            kwargs.get("capabilities"),
+            kwargs.get("memory_mode"),
         )
-        try:
-            runtime = cls(
-                services=compatibility,
-                execution_scope=execution_scope,
-                **kwargs,
+        conflicts = [
+            name
+            for name in (
+                "execution_backend",
+                "plugin_registry",
+                "content_store",
+                "media_processors",
+                "memory_namespace",
             )
-        except BaseException:
-            await resolved.aclose_owned()
-            raise
+            if kwargs.get(name) is not None
+        ]
+        if conflicts:
+            raise ValueError(
+                "hosted services cannot be combined with individual runtime "
+                "injections: " + ", ".join(conflicts)
+            )
+        selected_tools = kwargs.get("tools")
+        if selected_tools is None and preset is not None:
+            selected_tools = preset.tools
+        selected_skills = kwargs.get("skills")
+        if selected_skills is None and preset is not None:
+            selected_skills = preset.skills
+        selected_prompt = kwargs.get("system_prompt")
+        if selected_prompt is None and preset is not None:
+            selected_prompt = preset.system_prompt
+        try:
+            core, resolved = await create_async_hosted_agent(
+                coerce_config(config_arg),
+                services=services,
+                execution_scope=execution_scope,
+                conversation_id=kwargs.get("conversation_id"),
+                conversation_metadata=kwargs.get("conversation_metadata"),
+                runtime_metadata=kwargs.get("runtime_metadata"),
+                llm_client=kwargs.get("llm"),
+                tool_specs=selected_tools,
+                skill_specs=selected_skills,
+                system_prompt=selected_prompt,
+                permission_callback=kwargs.get("permission_callback"),
+                mcp_servers=(
+                    tuple(kwargs["mcp"])
+                    if kwargs.get("mcp") is not None
+                    else None
+                ),
+                redaction_callback=kwargs.get("redaction_callback"),
+                redaction_fail_closed=bool(
+                    kwargs.get("redaction_fail_closed", False)
+                ),
+                capabilities=capabilities,
+                deps=kwargs.get("deps"),
+                run_budget=kwargs.get("run_budget"),
+                usage_dimensions=kwargs.get("usage_dimensions"),
+                goal_execution=kwargs.get("goal_execution"),
+            )
+        except Exception as exc:
+            mapped = map_public_error(
+                exc,
+                config=config_arg,
+                operation="construct",
+            )
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+        handle = AgentHandle(core, on_event=kwargs.get("on_event"))
+        sync_facade = Agent.__new__(Agent)
+        sync_facade._handle = handle
+        sync_facade._run_gate = RunGate()
+        sync_facade._capabilities = capabilities
+        sync_facade._deps = kwargs.get("deps")
+
+        runtime = cls.__new__(cls)
+        runtime._agent = sync_facade
+        runtime._handle = AsyncAgentHandle(handle)
+        runtime._async_run_gate = asyncio.Lock()
         runtime._async_owned_services = resolved
-        runtime._async_host_flushables = tuple(flushables)
+        runtime._async_host_flushables = ()
         return runtime
 
     async def _invoke_async(
@@ -1988,18 +2055,149 @@ class AsyncHostedRuntime(AsyncAgent):
                 flush = getattr(flushable, "flush")
                 await flush()
 
+    def _resolved_async_services(self) -> ResolvedRuntimeServices:
+        resolved = self._async_owned_services
+        if resolved is None:
+            raise RuntimeError("Agent is closed")
+        return resolved
+
+    async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
+        async def operation() -> tuple[MemoryProposal, ...]:
+            policy = self.runtime.async_memory_policy
+            if policy is None:
+                return ()
+            return tuple(
+                memory_proposal_snapshot(item)
+                for item in await policy.list_pending()
+            )
+
+        return await self._invoke_async("list_memory_proposals", operation)
+
+    async def approve_memory_proposal(
+        self,
+        proposal_id: str,
+    ) -> MemoryProposal:
+        async def operation() -> MemoryProposal:
+            policy = self.runtime.async_memory_policy
+            if policy is None:
+                raise RuntimeError("Memory is not configured")
+            return memory_proposal_snapshot(await policy.approve(proposal_id))
+
+        return await self._invoke_async("approve_memory_proposal", operation)
+
+    async def reject_memory_proposal(
+        self,
+        proposal_id: str,
+    ) -> MemoryProposal:
+        async def operation() -> MemoryProposal:
+            policy = self.runtime.async_memory_policy
+            if policy is None:
+                raise RuntimeError("Memory is not configured")
+            return memory_proposal_snapshot(await policy.reject(proposal_id))
+
+        return await self._invoke_async("reject_memory_proposal", operation)
+
+    async def search_sessions(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> SessionSearchPage:
+        async def operation() -> SessionSearchPage:
+            search = self._resolved_async_services().sessions.search
+            return cast(
+                SessionSearchPage,
+                await call_async_service(
+                    search,
+                    "search",
+                    query,
+                    limit=limit,
+                    cursor=cursor,
+                ),
+            )
+
+        return await self._invoke_async("search_sessions", operation)
+
+    async def read_session_window(
+        self,
+        conversation_id: str,
+        *,
+        ordinal: int,
+        before: int = 3,
+        after: int = 3,
+        limit: int = 20,
+        cursor: str | None = None,
+        include_sensitive: bool = False,
+    ) -> SessionWindow:
+        async def operation() -> SessionWindow:
+            search = self._resolved_async_services().sessions.search
+            return cast(
+                SessionWindow,
+                await call_async_service(
+                    search,
+                    "read_window",
+                    conversation_id,
+                    ordinal=ordinal,
+                    before=before,
+                    after=after,
+                    limit=limit,
+                    cursor=cursor,
+                    include_sensitive=include_sensitive,
+                ),
+            )
+
+        return await self._invoke_async("read_session_window", operation)
+
+    async def read_artifact(
+        self,
+        artifact_id: str,
+        *,
+        mode: ArtifactReadMode = "head_tail",
+        offset: int = 0,
+        max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            record = await call_async_service(
+                self._resolved_async_services().artifacts,
+                "read",
+                artifact_id,
+                mode=mode,
+                offset=offset,
+                max_bytes=max_bytes,
+            )
+            if isinstance(record, dict):
+                return dict(record)
+            to_dict = getattr(record, "to_dict", None)
+            if callable(to_dict):
+                return cast(dict[str, Any], to_dict())
+            raise TypeError("async artifact store returned an unsupported read")
+
+        return await self._invoke_async("read_artifact", operation)
+
     async def close(self) -> None:
         owned = self._async_owned_services
-        try:
-            await super().close()
-        finally:
-            if owned is not None:
-                self._async_owned_services = None
-                await owned.aclose_owned()
-
-
-def _has_async_method(value: object, name: str) -> bool:
-    return inspect.iscoroutinefunction(getattr(value, name, None))
+        self._async_owned_services = None
+        failure: BaseException | None = None
+        operations: list[Callable[[], Awaitable[object]]] = [
+            self.runtime._flush_async_services,
+            super().close,
+        ]
+        if owned is not None:
+            operations.append(owned.aclose_owned)
+        for operation in operations:
+            try:
+                await operation()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "async close also failed with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        if failure is not None:
+            raise failure
 
 
 def _build_handle(

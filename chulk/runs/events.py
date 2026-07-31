@@ -15,6 +15,7 @@ from chulk.events import (
     SerializedEventPayload,
     StepLifecyclePayload,
 )
+from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.scope import ExecutionScope
 from chulk.hosting.services import AsyncEventSink, EventSink
 from chulk.runs.models import RunEvent
@@ -176,6 +177,8 @@ class AsyncRunEventPublisher:
                 await delivered
             self.sequence = int(event.extensions["durable_sequence"])
             self.last_event_id = event.event_id
+        if callable(getattr(self.sink, "flush", None)):
+            await call_async_service(self.sink, "flush")
         return public
 
 

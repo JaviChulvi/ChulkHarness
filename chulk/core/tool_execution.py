@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 import inspect
 import time
@@ -13,6 +13,7 @@ from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
 from chulk.goals.models import GoalActionCheckpoint
 from chulk.hosting import ExecutionScope
+from chulk.hosting.async_utils import call_async_service
 from chulk.tools import ToolRegistry
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -142,6 +143,10 @@ class ToolExecutor:
     durable_approvals: DurableApprovalPort | None = None
     execution_scope: ExecutionScope | None = None
     policy_hooks: ToolPolicyHooks | None = None
+    get_context_async: (
+        Callable[[TurnState], Awaitable[ToolExecutionContext | None]] | None
+    ) = None
+    async_usage_accounting: object | None = None
 
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
@@ -290,7 +295,7 @@ class ToolExecutor:
         result: ToolResult | None = None
         for attempt_number in range(1, max_attempts + 1):
             started_at = utc_now()
-            self._reserve_tool_attempt(
+            await self._reserve_tool_attempt_async(
                 turn,
                 tool_name=tool_name,
                 attempt=attempt_number,
@@ -302,7 +307,10 @@ class ToolExecutor:
                     attempt=attempt_number,
                 )
             except BaseException:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                await self._release_tool_attempt_async(
+                    turn,
+                    attempt=attempt_number,
+                )
                 raise
             try:
                 result = await self._authorization_result_async(tool, arguments)
@@ -390,19 +398,25 @@ class ToolExecutor:
                     result,
                 )
             except BaseException as exc:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                await self._release_tool_attempt_async(
+                    turn,
+                    attempt=attempt_number,
+                )
                 self._abort_goal_tool(goal_checkpoint, exc)
                 raise
             try:
                 self._finish_goal_tool(goal_checkpoint, result)
-                self._commit_tool_attempt(
+                await self._commit_tool_attempt_async(
                     turn,
                     tool_name=tool_name,
                     attempt=attempt_number,
                     result=result,
                 )
             except BaseException:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                await self._release_tool_attempt_async(
+                    turn,
+                    attempt=attempt_number,
+                )
                 raise
             retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
             record = _attempt_payload(
@@ -745,7 +759,7 @@ class ToolExecutor:
         arguments: Mapping[str, object],
         turn: TurnState,
     ) -> ToolExecutionContext:
-        context = self.get_context(turn) or ToolExecutionContext()
+        context = await self._get_context_async(turn)
         if tool is None or self.execution_scope is None:
             return context
         credentials: Mapping[str, object] = {}
@@ -786,7 +800,7 @@ class ToolExecutor:
         arguments: Mapping[str, object],
         turn: TurnState,
     ) -> ToolExecutionContext:
-        context = self.get_context(turn) or ToolExecutionContext()
+        context = await self._get_context_async(turn)
         if tool is None or self.execution_scope is None:
             return context
         effect_key: str | None = None
@@ -1058,6 +1072,147 @@ class ToolExecutor:
                     "reason": "tool_result_unavailable",
                 },
             )
+
+    async def _reserve_tool_attempt_async(
+        self,
+        turn: TurnState,
+        *,
+        tool_name: str,
+        attempt: int,
+    ) -> None:
+        service = self.async_usage_accounting
+        if service is None:
+            await asyncio.to_thread(
+                self._reserve_tool_attempt,
+                turn,
+                tool_name=tool_name,
+                attempt=attempt,
+            )
+            return
+        try:
+            reservation = await call_async_service(
+                service,
+                "reserve_tool_call",
+                turn_id=turn.turn_id,
+                tool_call_index=turn.tool_call_count,
+                attempt=attempt,
+                tool_name=tool_name,
+            )
+        except BudgetExceededError as exc:
+            payload = {
+                "turn_id": turn.turn_id,
+                "tool_name": tool_name,
+                "tool_call_index": turn.tool_call_count,
+                "attempt": attempt,
+                "resource_kind": "tool",
+                "scope": exc.scope.value,
+                "dimension": exc.dimension,
+                "limit": exc.limit,
+                "committed": exc.committed,
+                "reserved": exc.reserved,
+                "requested": exc.requested,
+                "message": str(exc),
+            }
+            turn.extension_metadata["budget_exhausted"] = payload
+            self.trace(TraceEvent.BUDGET_EXHAUSTED, payload)
+            raise
+        self.trace(
+            TraceEvent.BUDGET_RESERVED,
+            {
+                "turn_id": turn.turn_id,
+                "tool_name": tool_name,
+                "tool_call_index": turn.tool_call_count,
+                "attempt": attempt,
+                "resource_kind": "tool",
+                "scope": reservation.budget.scope.value,
+                "reservation_id": reservation.id,
+                "reserved_tool_calls": reservation.reserved_tool_calls,
+            },
+        )
+
+    async def _commit_tool_attempt_async(
+        self,
+        turn: TurnState,
+        *,
+        tool_name: str,
+        attempt: int,
+        result: ToolResult,
+    ) -> None:
+        service = self.async_usage_accounting
+        if service is None:
+            await asyncio.to_thread(
+                self._commit_tool_attempt,
+                turn,
+                tool_name=tool_name,
+                attempt=attempt,
+                result=result,
+            )
+            return
+        entries = await call_async_service(
+            service,
+            "commit_tool_call",
+            turn_id=turn.turn_id,
+            tool_call_index=turn.tool_call_count,
+            attempt=attempt,
+            tool_name=tool_name,
+            success=result.success,
+            failure_kind=result.failure_kind,
+        )
+        self.trace(
+            TraceEvent.BUDGET_COMMITTED,
+            {
+                "turn_id": turn.turn_id,
+                "tool_name": tool_name,
+                "tool_call_index": turn.tool_call_count,
+                "attempt": attempt,
+                "resource_kind": "tool",
+                "entry_ids": [item.id for item in entries],
+            },
+        )
+
+    async def _release_tool_attempt_async(
+        self,
+        turn: TurnState,
+        *,
+        attempt: int,
+    ) -> None:
+        service = self.async_usage_accounting
+        if service is None:
+            await asyncio.to_thread(
+                self._release_tool_attempt,
+                turn,
+                attempt=attempt,
+            )
+            return
+        reservation = await call_async_service(
+            service,
+            "release_tool_call",
+            turn_id=turn.turn_id,
+            tool_call_index=turn.tool_call_count,
+            attempt=attempt,
+        )
+        if reservation is not None:
+            self.trace(
+                TraceEvent.BUDGET_RELEASED,
+                {
+                    "turn_id": turn.turn_id,
+                    "tool_call_index": turn.tool_call_count,
+                    "attempt": attempt,
+                    "resource_kind": "tool",
+                    "reservation_id": reservation.id,
+                    "reason": "tool_result_unavailable",
+                },
+            )
+
+    async def _get_context_async(
+        self,
+        turn: TurnState,
+    ) -> ToolExecutionContext:
+        if self.get_context_async is not None:
+            return await self.get_context_async(turn) or ToolExecutionContext()
+        return await asyncio.to_thread(
+            lambda: self.get_context(turn) or ToolExecutionContext()
+        )
 
     async def _permission_result_async(
         self,

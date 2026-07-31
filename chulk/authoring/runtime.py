@@ -21,6 +21,7 @@ from chulk.authoring.catalog import (
 from chulk.authoring.models import VersionedReference
 from chulk.config import Config
 from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
+from chulk.hosting.async_utils import call_async_service
 from chulk.skills.publication import PortableSkill
 from chulk.skills.registry import Skill, SkillRegistry
 from chulk.usage import BudgetScope, ExactCost, RunBudget
@@ -71,6 +72,23 @@ class _PortableSkillSpec:
             digest=self.skill.digest,
         )
         registry.register(runtime_skill)
+        return runtime_skill.name
+
+    async def register_async(self, registry: object) -> str:
+        runtime_skill = Skill(
+            name=self.skill.name,
+            description=self.skill.description,
+            path=Path(f".hosted-skill-{self.skill.name}.md"),
+            metadata={
+                "version": self.skill.version,
+                "digest": self.skill.digest,
+                "source": "hosted",
+            },
+            keywords=[self.skill.name],
+            loaded_content=self.skill.instructions,
+            digest=self.skill.digest,
+        )
+        await call_async_service(registry, "register", runtime_skill)
         return runtime_skill.name
 
 
@@ -186,7 +204,7 @@ class AgentDefinitionRuntime:
             **kwargs,
         )
 
-    def create_async_hosted(
+    async def create_async_hosted(
         self,
         *,
         scope: ExecutionScope,
@@ -196,7 +214,7 @@ class AgentDefinitionRuntime:
         **kwargs: Any,
     ) -> AsyncHostedRuntime:
         resolved = self.resolve(scope, expected_digest=expected_digest)
-        return AsyncHostedRuntime(
+        return await AsyncHostedRuntime.create(
             services=services,
             execution_scope=scope,
             config=_apply_runtime_policies(config, resolved),

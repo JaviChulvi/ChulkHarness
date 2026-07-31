@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import inspect
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from chulk.execution import ExecutionSessionRequest
 from chulk.hosting.scope import ExecutionScope
 from chulk.hosting.services import (
     AsyncRuntimeServices,
+    AsyncServiceBinding,
     ResourceOwnership,
     RuntimeServices,
     ServiceBinding,
@@ -30,6 +32,7 @@ from chulk.hosting.sinks import (
     safe_audit_payload,
 )
 from chulk.media import MediaProcessorRegistry
+from chulk.memory.models import MemoryProposalRecord, MemoryRecord
 from chulk.plugins import PluginAuditReport
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.sessions import (
@@ -66,6 +69,30 @@ def _now_text() -> str:
     return _now().isoformat()
 
 
+class _AsyncServiceAdapter:
+    """Expose one in-memory reference service through async-only methods."""
+
+    def __init__(self, service: object) -> None:
+        self._service = service
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._service, name)
+        if not callable(value):
+            return value
+
+        async def invoke(*args: Any, **kwargs: Any) -> Any:
+            result = value(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        return invoke
+
+
+async def _async_value(value: Any) -> Any:
+    return value
+
+
 class InMemoryServiceHub:
     """Share isolated in-memory service state across hosted scopes."""
 
@@ -75,6 +102,7 @@ class InMemoryServiceHub:
         self._artifacts: dict[str, InMemoryArtifactService] = {}
         self._traces: dict[str, InMemoryTraceService] = {}
         self._audit: dict[str, InMemoryAuditService] = {}
+        self._usage: dict[str, InMemoryUsageService] = {}
         self._runs: dict[str, InMemoryRunStore] = {}
         self._approvals: dict[str, InMemoryApprovalStore] = {}
         self._events: dict[str, InMemoryEventSink] = {}
@@ -141,7 +169,12 @@ class InMemoryServiceHub:
             ),
             traces=host_factory(traces),
             artifacts=host_factory(artifacts),
-            usage=host_factory(InMemoryUsageService),
+            usage=host_factory(
+                lambda scope: self._usage.setdefault(
+                    scope.key,
+                    InMemoryUsageService(scope),
+                )
+            ),
             audit=host_factory(
                 lambda scope: self._audit.setdefault(
                     scope.key,
@@ -174,14 +207,57 @@ class InMemoryServiceHub:
     ) -> AsyncRuntimeServices:
         """Return the corresponding bundle for ``AsyncHostedRuntime``."""
         services = self.services(policy_hooks=policy_hooks)
-        def async_runs(scope: ExecutionScope) -> AsyncInMemoryRunStore:
+
+        async def memory(scope: ExecutionScope) -> object:
+            return _AsyncServiceAdapter(services.memory.resolve(scope))
+
+        async def sessions(
+            scope: ExecutionScope,
+        ) -> SessionRuntimeServices:
+            resolved = services.sessions.resolve(scope)
+            return SessionRuntimeServices(
+                store=_AsyncServiceAdapter(resolved.store),
+                search=_AsyncServiceAdapter(resolved.search),
+            )
+
+        async def skills(scope: ExecutionScope) -> SkillRuntimeServices:
+            resolved = services.skills.resolve(scope)
+            return SkillRuntimeServices(
+                registry=_AsyncServiceAdapter(resolved.registry),
+                lifecycle_store=(
+                    _AsyncServiceAdapter(resolved.lifecycle_store)
+                    if resolved.lifecycle_store is not None
+                    else None
+                ),
+                lifecycle=resolved.lifecycle,
+                learning_proposals=(
+                    _AsyncServiceAdapter(resolved.learning_proposals)
+                    if resolved.learning_proposals is not None
+                    else None
+                ),
+                learning_reviewer=(
+                    _AsyncServiceAdapter(resolved.learning_reviewer)
+                    if resolved.learning_reviewer is not None
+                    else None
+                ),
+            )
+
+        async def adapt(
+            binding: ServiceBinding[Any],
+            scope: ExecutionScope,
+        ) -> object:
+            return _AsyncServiceAdapter(binding.resolve(scope))
+
+        async def async_runs(
+            scope: ExecutionScope,
+        ) -> AsyncInMemoryRunStore:
             sync = self._runs.setdefault(scope.key, InMemoryRunStore())
             return self._async_runs.setdefault(
                 scope.key,
                 AsyncInMemoryRunStore(sync),
             )
 
-        def async_approvals(
+        async def async_approvals(
             scope: ExecutionScope,
         ) -> AsyncInMemoryApprovalStore:
             sync_runs = self._runs.setdefault(scope.key, InMemoryRunStore())
@@ -195,30 +271,65 @@ class InMemoryServiceHub:
             )
 
         return AsyncRuntimeServices(
-            memory=services.memory,
-            sessions=services.sessions,
-            skills=services.skills,
-            traces=services.traces,
-            artifacts=services.artifacts,
-            usage=services.usage,
-            audit=services.audit,
-            execution=services.execution,
-            plugins=services.plugins,
-            content=services.content,
-            media=services.media,
+            memory=AsyncServiceBinding.scoped(
+                memory,
+                ownership=ResourceOwnership.HOST,
+            ),
+            sessions=AsyncServiceBinding.scoped(
+                sessions,
+                ownership=ResourceOwnership.HOST,
+            ),
+            skills=AsyncServiceBinding.scoped(
+                skills,
+                ownership=ResourceOwnership.HOST,
+            ),
+            traces=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.traces, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            artifacts=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.artifacts, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            usage=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.usage, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            audit=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.audit, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            execution=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.execution, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            plugins=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.plugins, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            content=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.content, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
+            media=AsyncServiceBinding.scoped(
+                lambda scope: adapt(services.media, scope),
+                ownership=ResourceOwnership.HOST,
+            ),
             tool_policy=services.tool_policy,
-            runs=ServiceBinding.scoped(
+            runs=AsyncServiceBinding.scoped(
                 async_runs,
                 ownership=ResourceOwnership.HOST,
             ),
-            approvals=ServiceBinding.scoped(
+            approvals=AsyncServiceBinding.scoped(
                 async_approvals,
                 ownership=ResourceOwnership.HOST,
             ),
-            events=ServiceBinding.scoped(
-                lambda scope: self._async_events.setdefault(
+            events=AsyncServiceBinding.scoped(
+                lambda scope: _async_value(
+                    self._async_events.setdefault(
                     scope.key,
                     AsyncInMemoryEventSink(scope),
+                    )
                 ),
                 ownership=ResourceOwnership.HOST,
             ),
@@ -236,12 +347,22 @@ class InMemoryServiceHub:
         sink = self._events.get(scope.key) or self._async_events.get(scope.key)
         return tuple(sink.events) if sink is not None else ()
 
+    def active_usage_reservations(
+        self,
+        scope: ExecutionScope,
+    ) -> tuple[BudgetReservation, ...]:
+        service = self._usage.get(scope.key)
+        if service is None:
+            return ()
+        return tuple(service._reservations.values())
+
 
 class InMemoryMemoryService:
     def __init__(self, scope: ExecutionScope) -> None:
         self.scope = scope
         self.namespace = f"scope:{scope.key}"
-        self._records: dict[str, Any] = {}
+        self._records: dict[str, MemoryRecord] = {}
+        self._proposals: dict[str, MemoryProposalRecord] = {}
 
     def profile_memories(self, limit: int = 50) -> list[Any]:
         return list(self._records.values())[:limit]
@@ -260,7 +381,124 @@ class InMemoryMemoryService:
         *,
         include_archived: bool = False,
     ) -> Any:
-        return self._records.get(memory_id)
+        record = self._records.get(memory_id)
+        if (
+            record is not None
+            and record.archived_at is not None
+            and not include_archived
+        ):
+            return None
+        return record
+
+    def save_memory(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual",
+        confidence: float = 1.0,
+        **_kwargs: Any,
+    ) -> str:
+        memory_id = f"memory_{uuid4().hex}"
+        now = _now_text()
+        self._records[memory_id] = MemoryRecord(
+            id=memory_id,
+            content=content,
+            created_at=now,
+            updated_at=now,
+            tags=list(tags or ()),
+            metadata=dict(metadata or {}),
+            importance=importance,
+            source=source,
+            confidence=confidence,
+            namespace=self.namespace,
+        )
+        return memory_id
+
+    def create_memory_proposal(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual_review",
+        confidence: float = 1.0,
+        evidence: str | None = None,
+        conversation_id: str | None = None,
+        turn_id: str | None = None,
+        **_kwargs: Any,
+    ) -> str:
+        proposal_id = f"memory_proposal_{uuid4().hex}"
+        self._proposals[proposal_id] = MemoryProposalRecord(
+            id=proposal_id,
+            content=content,
+            tags=list(tags or ()),
+            metadata=dict(metadata or {}),
+            importance=importance,
+            source=source,
+            confidence=confidence,
+            evidence=evidence,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            status="pending",
+            created_at=_now_text(),
+            namespace=self.namespace,
+        )
+        return proposal_id
+
+    def list_memory_proposals(
+        self,
+        *,
+        status: str | None = "pending",
+        **_kwargs: Any,
+    ) -> list[MemoryProposalRecord]:
+        return [
+            proposal
+            for proposal in self._proposals.values()
+            if status is None or proposal.status == status
+        ]
+
+    def approve_memory_proposal(
+        self,
+        proposal_id: str,
+    ) -> MemoryProposalRecord:
+        proposal = self._proposals[proposal_id]
+        if proposal.status != "pending":
+            return proposal
+        memory_id = self.save_memory(
+            proposal.content,
+            tags=proposal.tags,
+            metadata=proposal.metadata,
+            importance=proposal.importance,
+            source=proposal.source,
+            confidence=proposal.confidence,
+        )
+        reviewed = replace(
+            proposal,
+            status="approved",
+            reviewed_at=_now_text(),
+            accepted_memory_id=memory_id,
+        )
+        self._proposals[proposal_id] = reviewed
+        return reviewed
+
+    def reject_memory_proposal(
+        self,
+        proposal_id: str,
+    ) -> MemoryProposalRecord:
+        proposal = self._proposals[proposal_id]
+        if proposal.status != "pending":
+            return proposal
+        reviewed = replace(
+            proposal,
+            status="rejected",
+            reviewed_at=_now_text(),
+        )
+        self._proposals[proposal_id] = reviewed
+        return reviewed
 
 
 class InMemorySessionStore:
@@ -760,6 +998,7 @@ class InMemoryUsageService:
     def __init__(self, scope: ExecutionScope) -> None:
         self.scope = scope
         self._reservations: dict[tuple[str, int, str], BudgetReservation] = {}
+        self._media_reservations: dict[str, BudgetReservation] = {}
 
     def reserve_model_request(
         self,
@@ -827,6 +1066,44 @@ class InMemoryUsageService:
             (turn_id, tool_call_index, ResourceKind.TOOL.value),
             None,
         )
+
+    def reserve_media_transform(
+        self,
+        *,
+        turn_id: str,
+        operation_index: int,
+        **kwargs: Any,
+    ) -> BudgetReservation:
+        reservation = self._reserve(
+            turn_id,
+            operation_index,
+            ResourceKind.MEDIA,
+        )
+        self._media_reservations[reservation.id] = reservation
+        return reservation
+
+    def commit_media_transform(
+        self,
+        reservation: BudgetReservation,
+        *,
+        processor: str,
+        **kwargs: Any,
+    ) -> tuple[UsageEntry, ...]:
+        self._media_reservations.pop(reservation.id, None)
+        for key, value in tuple(self._reservations.items()):
+            if value.id == reservation.id:
+                self._reservations.pop(key, None)
+        return (self._entry(reservation, purpose=processor),)
+
+    def release_media_transform(
+        self,
+        reservation: BudgetReservation,
+    ) -> BudgetReservation | None:
+        released = self._media_reservations.pop(reservation.id, None)
+        for key, value in tuple(self._reservations.items()):
+            if value.id == reservation.id:
+                self._reservations.pop(key, None)
+        return released
 
     def _reserve(
         self,

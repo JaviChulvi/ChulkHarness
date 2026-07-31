@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -16,6 +17,7 @@ class ActionLoopPort(Protocol):
     model: ModelTransport
     tools: ToolExecutor
     effects: TurnEffects
+    async_flush: Callable[[], Awaitable[None]] | None
 
 
 @dataclass
@@ -25,3 +27,4 @@ class ActionLoopRuntime:
     model: ModelTransport
     tools: ToolExecutor
     effects: TurnEffects
+    async_flush: Callable[[], Awaitable[None]] | None = None
