@@ -41,6 +41,7 @@ from chulk.memory.markdown import parse_markdown_memory_line
 from chulk.memory.models import MemoryProposalRecord, MemoryRecord
 from chulk.memory.security import ensure_memory_payload_safe
 from chulk.plugins import PluginAuditReport
+from chulk.redaction import redact_text
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.sessions import (
     ConversationRecord,
@@ -52,7 +53,17 @@ from chulk.sessions import (
     SessionWindow,
 )
 from chulk.sessions.search import (
+    MAX_SESSION_SEARCH_LIMIT,
+    MAX_SESSION_WINDOW_LIMIT,
+    MAX_SESSION_WINDOW_RADIUS,
+    _bounded_int,
+    _decode_search_cursor,
+    _decode_window_cursor,
+    _encode_cursor,
     _message_is_sensitive,
+    _parse_query,
+    _shape_hash,
+    _snippet,
     _window_message_visible,
 )
 from chulk.sessions.sqlite_store import (
@@ -1010,6 +1021,7 @@ class InMemorySessionSearch:
     def __init__(self, store: InMemorySessionStore) -> None:
         self.store = store
         self.profile_id = store.scope.actor_id or "hosted"
+        self.redactor = redact_text
 
     def search(
         self,
@@ -1018,9 +1030,19 @@ class InMemorySessionSearch:
         limit: int = 10,
         cursor: str | None = None,
     ) -> SessionSearchPage:
-        del cursor
-        normalized = query.casefold()
-        hits = []
+        clean_query, terms = _parse_query(query)
+        clean_limit = _bounded_int(
+            "session search limit",
+            limit,
+            maximum=MAX_SESSION_SEARCH_LIMIT,
+        )
+        shape = _shape_hash("search", self.profile_id, clean_query)
+        offset = (
+            _decode_search_cursor(cursor, shape=shape)
+            if cursor
+            else 0
+        )
+        candidates: list[tuple[str, MessageRecord]] = []
         for conversation_id, records in self.store._messages.items():
             for record in records:
                 if not _message_is_search_eligible(
@@ -1028,20 +1050,59 @@ class InMemorySessionSearch:
                     record.metadata,
                 ):
                     continue
-                if normalized not in record.content.casefold():
+                if not any(
+                    term in record.content.casefold()
+                    for term in terms
+                ):
                     continue
-                hits.append(
-                    SessionHit(
-                        message_id=record.id,
-                        conversation_id=conversation_id,
-                        ordinal=record.ordinal,
-                        role=record.role,
-                        snippet=record.content,
-                        created_at=record.created_at,
-                        turn_id=record.turn_id,
-                    )
-                )
-        return SessionSearchPage(query=query, hits=tuple(hits[:limit]))
+                candidates.append((conversation_id, record))
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1].ordinal,
+                item[1].id,
+            )
+        )
+        candidates.sort(
+            key=lambda item: item[1].created_at,
+            reverse=True,
+        )
+        candidates = candidates[:10_000]
+        page_records = candidates[
+            offset : offset + clean_limit + 1
+        ]
+        has_more = len(page_records) > clean_limit
+        page_records = page_records[:clean_limit]
+        hits = tuple(
+            SessionHit(
+                message_id=record.id,
+                conversation_id=conversation_id,
+                ordinal=record.ordinal,
+                role=record.role,
+                snippet=self.redactor(
+                    _snippet(record.content, terms)
+                ),
+                created_at=record.created_at,
+                turn_id=record.turn_id,
+            )
+            for conversation_id, record in page_records
+        )
+        next_cursor = (
+            _encode_cursor(
+                {
+                    "kind": "search",
+                    "shape": shape,
+                    "offset": offset + len(hits),
+                }
+            )
+            if has_more
+            else None
+        )
+        return SessionSearchPage(
+            query=clean_query,
+            hits=hits,
+            next_cursor=next_cursor,
+        )
 
     def read_window(
         self,
@@ -1054,35 +1115,95 @@ class InMemorySessionSearch:
         cursor: str | None = None,
         include_sensitive: bool = False,
     ) -> SessionWindow:
-        del cursor
-        start = ordinal - before
-        end = ordinal + after
+        self.store._assert_conversation(conversation_id)
+        anchor = _bounded_int(
+            "session ordinal",
+            ordinal,
+            maximum=2_147_483_647,
+        )
+        clean_before = _bounded_int(
+            "session window before",
+            before,
+            maximum=MAX_SESSION_WINDOW_RADIUS,
+            minimum=0,
+        )
+        clean_after = _bounded_int(
+            "session window after",
+            after,
+            maximum=MAX_SESSION_WINDOW_RADIUS,
+            minimum=0,
+        )
+        clean_limit = _bounded_int(
+            "session window limit",
+            limit,
+            maximum=MAX_SESSION_WINDOW_LIMIT,
+        )
+        lower = max(1, anchor - clean_before)
+        upper = anchor + clean_after
+        shape = _shape_hash(
+            "window",
+            self.profile_id,
+            conversation_id,
+            str(anchor),
+            str(clean_before),
+            str(clean_after),
+            str(include_sensitive),
+        )
+        next_ordinal = (
+            _decode_window_cursor(
+                cursor,
+                shape=shape,
+                conversation_id=conversation_id,
+            )
+            if cursor
+            else lower
+        )
         records = [
             record
             for record in self.store._messages.get(conversation_id, ())
-            if start <= record.ordinal <= end
+            if next_ordinal <= record.ordinal <= upper
             and _window_message_visible(
                 record.role,
                 record.metadata,
                 include_sensitive=include_sensitive,
             )
-        ][:limit]
+        ][: clean_limit + 1]
+        has_more = len(records) > clean_limit
+        records = records[:clean_limit]
+        messages = tuple(
+            SessionMessage(
+                message_id=record.id,
+                conversation_id=record.conversation_id,
+                ordinal=record.ordinal,
+                role=record.role,
+                content=(
+                    record.content
+                    if include_sensitive
+                    else self.redactor(record.content)
+                ),
+                created_at=record.created_at,
+                turn_id=record.turn_id,
+                sensitive=_message_is_sensitive(record.metadata),
+            )
+            for record in records
+        )
+        next_cursor = (
+            _encode_cursor(
+                {
+                    "kind": "window",
+                    "shape": shape,
+                    "conversation_id": conversation_id,
+                    "next_ordinal": messages[-1].ordinal + 1,
+                }
+            )
+            if has_more and messages
+            else None
+        )
         return SessionWindow(
             conversation_id=conversation_id,
-            anchor_ordinal=ordinal,
-            messages=tuple(
-                SessionMessage(
-                    message_id=record.id,
-                    conversation_id=record.conversation_id,
-                    ordinal=record.ordinal,
-                    role=record.role,
-                    content=record.content,
-                    created_at=record.created_at,
-                    turn_id=record.turn_id,
-                    sensitive=_message_is_sensitive(record.metadata),
-                )
-                for record in records
-            ),
+            anchor_ordinal=anchor,
+            messages=messages,
+            next_cursor=next_cursor,
         )
 
 

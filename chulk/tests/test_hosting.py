@@ -1531,6 +1531,98 @@ async def test_reference_session_windows_fail_closed_for_sensitive_messages(
 
 
 @pytest.mark.asyncio
+async def test_reference_session_results_redact_and_paginate(
+    tmp_path: Path,
+) -> None:
+    raw_secret = "unclassified-secret-value"
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[session_read_ref, session_search_ref],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    store = agent._resolved_async_services().sessions.store
+    await store.save_message(
+        agent.conversation_id,
+        role="user",
+        content=f"pagination api_key={raw_secret}",
+    )
+    await store.save_message(
+        agent.conversation_id,
+        role="assistant",
+        content="pagination follow-up",
+    )
+
+    first_search = await agent.search_sessions("pagination", limit=1)
+    assert first_search.next_cursor is not None
+    second_search = await agent.search_sessions(
+        "pagination",
+        limit=1,
+        cursor=first_search.next_cursor,
+    )
+    assert second_search.next_cursor is None
+    search_hits = (*first_search.hits, *second_search.hits)
+    with pytest.raises(ConfigurationError, match="does not match"):
+        await agent.search_sessions(
+            "different",
+            limit=1,
+            cursor=first_search.next_cursor,
+        )
+
+    first_window = await agent.read_session_window(
+        agent.conversation_id,
+        ordinal=1,
+        before=0,
+        after=1,
+        limit=1,
+    )
+    assert first_window.next_cursor is not None
+    second_window = await agent.read_session_window(
+        agent.conversation_id,
+        ordinal=1,
+        before=0,
+        after=1,
+        limit=1,
+        cursor=first_window.next_cursor,
+    )
+    assert second_window.next_cursor is None
+    window_messages = (
+        *first_window.messages,
+        *second_window.messages,
+    )
+
+    tool_search = await agent.tool_registry.run_async(
+        "session_search",
+        {"query": "pagination"},
+    )
+    tool_window = await agent.tool_registry.run_async(
+        "session_read",
+        {
+            "conversation_id": agent.conversation_id,
+            "ordinal": 1,
+            "before": 0,
+            "after": 0,
+        },
+    )
+
+    assert len({hit.message_id for hit in search_hits}) == 2
+    assert len({message.message_id for message in window_messages}) == 2
+    serialized = json.dumps(
+        {
+            "search": [hit.to_dict() for hit in search_hits],
+            "window": [message.to_dict() for message in window_messages],
+            "tool_search": tool_search.observation,
+            "tool_window": tool_window.observation,
+        }
+    )
+    assert raw_secret not in serialized
+    assert "[redacted]" in serialized
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_management_fails_closed_without_services(
     tmp_path: Path,
 ) -> None:
