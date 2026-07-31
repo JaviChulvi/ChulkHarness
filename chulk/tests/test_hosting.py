@@ -631,17 +631,32 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
     assert model.resource_kind is ResourceKind.MODEL
     assert tool.resource_kind is ResourceKind.TOOL
     usage_entries = usage.query(limit=10).entries
-    assert usage_entries[0].units["total_tokens"] == Decimal(7)
-    assert usage_entries[0].cost.amount == Decimal("0.025")
-    assert usage_entries[0].provider == "reference"
-    assert usage_entries[0].model == "test-model"
-    assert usage_entries[1].units["tool_calls"] == Decimal(1)
-    assert usage_entries[1].tool_or_service == "lookup"
-    assert usage_entries[1].metadata["attempt"] == 2
-    assert usage_entries[2].units["bytes"] == Decimal(128)
-    assert usage_entries[2].units["images"] == Decimal(2)
-    assert usage_entries[2].cost.amount == Decimal("0.02")
-    assert usage_entries[2].provider == "reference-media"
+    model_entry = next(
+        entry
+        for entry in usage_entries
+        if entry.resource_kind is ResourceKind.MODEL
+    )
+    tool_entry = next(
+        entry
+        for entry in usage_entries
+        if entry.resource_kind is ResourceKind.TOOL
+    )
+    media_entry = next(
+        entry
+        for entry in usage_entries
+        if entry.resource_kind is ResourceKind.MEDIA
+    )
+    assert model_entry.units["total_tokens"] == Decimal(7)
+    assert model_entry.cost.amount == Decimal("0.025")
+    assert model_entry.provider == "reference"
+    assert model_entry.model == "test-model"
+    assert tool_entry.units["tool_calls"] == Decimal(1)
+    assert tool_entry.tool_or_service == "lookup"
+    assert tool_entry.metadata["attempt"] == 2
+    assert media_entry.units["bytes"] == Decimal(128)
+    assert media_entry.units["images"] == Decimal(2)
+    assert media_entry.cost.amount == Decimal("0.02")
+    assert media_entry.provider == "reference-media"
     aggregates = usage.group(UsageGroupBy.RESOURCE_KIND)
     model_aggregate = next(item for item in aggregates if item.key == "model")
     assert model_aggregate.total_tokens == 7
