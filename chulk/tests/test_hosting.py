@@ -1543,6 +1543,55 @@ async def test_reference_profile_memories_exclude_archived_and_general_records(
 
 
 @pytest.mark.asyncio
+async def test_reference_session_resume_excludes_prompt_only_messages(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    scope = _scope()
+    first = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+    )
+    conversation_id = first.conversation_id
+    assert await first.run("persist conversation") == "hosted ok"
+    store = first._resolved_async_services().sessions.store
+    await store.save_message(
+        conversation_id,
+        role="user",
+        content="visible historical question",
+    )
+    await store.save_message(
+        conversation_id,
+        role="assistant",
+        content="hidden plan display",
+        metadata={"prompt_excluded": True},
+    )
+    await first.close()
+
+    llm = FakeLLM([_final("resumed")])
+    resumed = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+        conversation_id=conversation_id,
+    )
+
+    assert await resumed.run("continue") == "resumed"
+
+    requests = json.dumps(llm.requests)
+    assert "visible historical question" in requests
+    assert "hidden plan display" not in requests
+    await resumed.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata",
     [
@@ -1830,6 +1879,102 @@ async def test_async_hosted_close_preserves_first_failure_and_finishes_cleanup(
         for note in getattr(failure, "__notes__", ())
     )
     assert agent._async_owned_services is None
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_close_can_retry_after_cancellation(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    entered = asyncio.Event()
+    context = object()
+
+    class Lifecycle:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed: list[object] = []
+
+        async def aclose(self, current: object) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await asyncio.Future()
+            self.closed.append(current)
+
+    lifecycle = Lifecycle()
+    agent.runtime.tool_context_lifecycle = lifecycle
+    agent.runtime._tool_contexts["cancelled-close"] = context
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert not agent.closed
+    assert not agent.runtime.closed
+    assert agent._async_owned_services is not None
+
+    await agent.close()
+
+    assert lifecycle.calls == 2
+    assert lifecycle.closed == [context]
+    assert agent.runtime._tool_contexts == {}
+    assert agent._async_owned_services is None
+    assert agent.closed
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_close_retries_cancelled_core_resource(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    entered = asyncio.Event()
+
+    class Resource:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await asyncio.Future()
+            self.closed = True
+
+    resource = Resource()
+    agent.runtime._owned_resources.append(resource)
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert not agent.closed
+    assert agent.runtime._owned_resources == [resource]
+
+    await agent.close()
+
+    assert resource.calls == 2
+    assert resource.closed
+    assert agent.runtime._owned_resources == []
+    assert agent.closed
 
 
 @pytest.mark.asyncio

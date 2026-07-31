@@ -326,8 +326,11 @@ class AgentHandle:
         """Close owned runtime resources exactly once from an async host."""
         if self._closed:
             return
-        self._closed = True
-        await self.runtime.aclose()
+        try:
+            await self.runtime.aclose()
+        finally:
+            if self.runtime.closed:
+                self._closed = True
 
     def __enter__(self) -> "AgentHandle":
         self._ensure_open()
@@ -2667,7 +2670,6 @@ class AsyncHostedRuntime(AsyncAgent):
     async def close(self) -> None:
         async def operation() -> None:
             owned = self._async_owned_services
-            self._async_owned_services = None
             failure: BaseException | None = None
             operations: list[Callable[[], Awaitable[object]]] = [
                 self.runtime._flush_async_services,
@@ -2686,6 +2688,8 @@ class AsyncHostedRuntime(AsyncAgent):
                             "async close also failed with "
                             f"{type(exc).__name__}: {exc}"
                         )
+            if not isinstance(failure, asyncio.CancelledError):
+                self._async_owned_services = None
             if failure is not None:
                 raise failure
 

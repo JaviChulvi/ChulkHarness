@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from chulk.capabilities import MemoryMode
 from chulk.hosting.async_utils import call_async_service
 from chulk.memory.models import MemoryExtractionCandidate
@@ -96,16 +98,33 @@ class AsyncMemoryPolicy:
 
     async def approve(self, proposal_id: str) -> object:
         for proposal in await self.list_pending():
-            if getattr(proposal, "id", None) != proposal_id:
+            values = (
+                proposal
+                if isinstance(proposal, Mapping)
+                else {
+                    name: getattr(proposal, name, None)
+                    for name in (
+                        "id",
+                        "content",
+                        "tags",
+                        "metadata",
+                        "source",
+                        "evidence",
+                        "conversation_id",
+                        "turn_id",
+                    )
+                }
+            )
+            if values.get("id") != proposal_id:
                 continue
             ensure_memory_payload_safe(
-                content=getattr(proposal, "content", None),
-                tags=getattr(proposal, "tags", ()),
-                metadata=getattr(proposal, "metadata", {}),
-                source=getattr(proposal, "source", None),
-                evidence=getattr(proposal, "evidence", None),
-                conversation_id=getattr(proposal, "conversation_id", None),
-                turn_id=getattr(proposal, "turn_id", None),
+                content=values.get("content"),
+                tags=values.get("tags") or (),
+                metadata=values.get("metadata") or {},
+                source=values.get("source"),
+                evidence=values.get("evidence"),
+                conversation_id=values.get("conversation_id"),
+                turn_id=values.get("turn_id"),
             )
             break
         return await call_async_service(

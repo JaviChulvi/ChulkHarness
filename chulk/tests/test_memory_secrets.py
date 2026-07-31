@@ -306,3 +306,39 @@ async def test_async_memory_policy_rechecks_proposal_before_hosted_approval():
 
     assert secret not in str(exc_info.value)
     assert not store.approve_called
+
+
+@pytest.mark.asyncio
+async def test_async_memory_policy_rechecks_mapping_proposal_before_approval():
+    secret = "sk-proj-FakeHostedMappingCredential123456789"
+
+    class ProposalStore:
+        def __init__(self) -> None:
+            self.approve_called = False
+
+        async def list_memory_proposals(self, **_kwargs):
+            return [
+                {
+                    "id": "proposal-1",
+                    "content": f"OPENAI_API_KEY={secret}",
+                    "tags": [],
+                    "metadata": {},
+                    "source": "manual_review",
+                    "evidence": "legacy proposal",
+                    "conversation_id": "conversation-id",
+                    "turn_id": "turn-id",
+                }
+            ]
+
+        async def approve_memory_proposal(self, _proposal_id):
+            self.approve_called = True
+            raise AssertionError("unsafe hosted proposal approval")
+
+    store = ProposalStore()
+    policy = AsyncMemoryPolicy(store, "manual")
+
+    with pytest.raises(MemorySecretError) as exc_info:
+        await policy.approve("proposal-1")
+
+    assert secret not in str(exc_info.value)
+    assert not store.approve_called

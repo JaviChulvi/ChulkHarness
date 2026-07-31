@@ -343,21 +343,23 @@ class Agent:
         """Finalize owned closeable resources exactly once from an async host."""
         if self._closed:
             return
-        self._closed = True
         failures: list[Exception] = []
-        for context in tuple(self._tool_contexts.values()):
+        for context_id, context in tuple(self._tool_contexts.items()):
             if context is None or self.tool_context_lifecycle is None:
+                self._tool_contexts.pop(context_id, None)
                 continue
             try:
                 await self.tool_context_lifecycle.aclose(context)
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
-        self._tool_contexts.clear()
-        for resource in reversed(self._owned_resources):
+            self._tool_contexts.pop(context_id, None)
+        while self._owned_resources:
+            resource = self._owned_resources[-1]
             try:
                 await aclose_resources((resource,))
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
+            self._owned_resources.pop()
         if self.trace_logger is not None and self._close_trace_logger:
             try:
                 self.trace_logger.close()
@@ -366,6 +368,7 @@ class Agent:
         self.event_callback = None
         self.event_sink = None
         self.audit_callback = None
+        self._closed = True
         if failures:
             raise RuntimeError(
                 f"Failed to close {len(failures)} owned agent resource(s)"

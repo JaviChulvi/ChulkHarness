@@ -42,6 +42,7 @@ from chulk.memory.markdown import parse_markdown_memory_line
 from chulk.memory.models import MemoryProposalRecord, MemoryRecord
 from chulk.memory.retrieval import resolve_profile_conflicts
 from chulk.memory.security import ensure_memory_payload_safe
+from chulk.memory.store import select_recent_conversation_messages
 from chulk.plugins import PluginAuditReport
 from chulk.redaction import redact_text
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
@@ -882,12 +883,17 @@ class InMemorySessionStore:
         *,
         after_ordinal: int = 0,
     ) -> list[dict[str, str]]:
-        records = self.list_messages(
-            conversation_id,
-            limit=limit,
-            after_ordinal=after_ordinal,
+        self._assert_conversation(conversation_id)
+        messages = [
+            {"role": item.role, "content": item.content}
+            for item in self._messages.get(conversation_id, [])
+            if item.ordinal > after_ordinal
+            and item.metadata.get("prompt_excluded") is not True
+        ]
+        return select_recent_conversation_messages(
+            messages,
+            max_messages=max(1, min(limit, 500)),
         )
-        return [{"role": item.role, "content": item.content} for item in records]
 
     def list_messages(
         self,
