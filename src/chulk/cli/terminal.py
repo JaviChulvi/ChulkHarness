@@ -85,12 +85,8 @@ class TerminalUI:
             [self.accent(lines[0]), *[self.muted(line) for line in lines[1:]]]
         )
 
-    def help_text(self, commands: Iterable[object] | None = None) -> str:
+    def help_text(self, commands: Iterable[object]) -> str:
         """Return grouped help generated from the command registry."""
-        if commands is None:
-            from chulk.cli.commands import CLI_COMMANDS
-
-            commands = CLI_COMMANDS
         command_list = list(commands)
         lines = [self.heading("Commands")]
         categories = list(dict.fromkeys(str(getattr(command, "category")) for command in command_list))

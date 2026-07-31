@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any
 
 
 SUPPORTED_JSON_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
+
+
+def schema_digest(schema: Mapping[str, Any]) -> str:
+    """Return the canonical SHA-256 digest for a JSON-compatible schema."""
+    encoded = json.dumps(
+        schema,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class ToolValidationError(ValueError):

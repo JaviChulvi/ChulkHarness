@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-import hashlib
-import json
 import re
 from typing import Any
 import types
@@ -15,6 +13,7 @@ from packaging.version import InvalidVersion, Version
 
 from chulk.hosting.scope import ExecutionScope
 from chulk.tools.permissions import ToolPermissionLevel
+from chulk.tools.schema import schema_digest
 
 
 _SEMANTIC_VERSION_PATTERN = re.compile(
@@ -288,16 +287,6 @@ class ToolPolicyHooks:
     compensate: ToolPolicyHook | None = None
     redact: ToolPolicyHook | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
-def schema_digest(schema: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        schema,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def validate_tool_contract(

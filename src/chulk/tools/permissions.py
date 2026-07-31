@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from chulk.tools.schema import schema_digest
+
 
 class ToolPermissionLevel(str, Enum):
     """Coarse permission level for a tool."""
@@ -131,8 +133,6 @@ class ToolPermissionPolicy:
         }
 
     def request_for_tool(self, tool, arguments: dict[str, Any]) -> PermissionRequest:
-        from chulk.tools.policy import schema_digest
-
         level = normalize_permission_level(getattr(tool, "permission_level", ToolPermissionLevel.READ))
         reason = (
             "tool requires confirmation"

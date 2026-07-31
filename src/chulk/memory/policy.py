@@ -3,11 +3,50 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from chulk.capabilities import MemoryMode
 from chulk.memory.models import MemoryExtractionCandidate, MemoryProposalRecord
 from chulk.memory.security import MemorySecretError, ensure_memory_payload_safe
-from chulk.memory.sqlite_store import SQLiteMemoryStore
+
+
+class _MemoryPolicyStore(Protocol):
+    def save_memory(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual",
+        confidence: float = 1.0,
+        embedding: list[float] | None = None,
+        dedupe: bool = True,
+    ) -> str: ...
+
+    def create_memory_proposal(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        importance: int = 1,
+        source: str = "manual_review",
+        confidence: float = 1.0,
+        evidence: str | None = None,
+        conversation_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> str: ...
+
+    def list_memory_proposals(
+        self,
+        *,
+        status: str | None = "pending",
+    ) -> list[MemoryProposalRecord]: ...
+
+    def approve_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord: ...
+
+    def reject_memory_proposal(self, proposal_id: str) -> MemoryProposalRecord: ...
 
 
 @dataclass(frozen=True)
@@ -19,7 +58,7 @@ class MemoryPolicyResult:
 class MemoryPolicy:
     """Apply one memory mode to retrieval and proposed writes."""
 
-    def __init__(self, store: SQLiteMemoryStore, mode: MemoryMode | str) -> None:
+    def __init__(self, store: _MemoryPolicyStore, mode: MemoryMode | str) -> None:
         self.store = store
         self.mode = MemoryMode(mode)
 

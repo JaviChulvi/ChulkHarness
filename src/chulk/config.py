@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
-from chulk.llm import supported_llm_providers
 from chulk.llm.capabilities import (
     LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
     LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
 )
+from chulk.llm.factory import supported_llm_providers
 from chulk.llm.providers.compatible import DEFAULT_OPENROUTER_BASE_URL
 from chulk.mcp import MCPServerConfig, load_mcp_servers
 from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile

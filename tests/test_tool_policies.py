@@ -11,6 +11,8 @@ import pytest
 from chulk import Agent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
 from chulk.llm import LLMClient
 from chulk.tools import ToolExecutionContext, ToolRegistry
+from chulk.tools.policy import schema_digest as policy_schema_digest
+from chulk.tools.schema import schema_digest
 
 
 OUTPUT_SCHEMA = {
@@ -19,6 +21,10 @@ OUTPUT_SCHEMA = {
     "required": ["count"],
     "additionalProperties": False,
 }
+
+
+def test_schema_digest_compatibility_export_uses_schema_owner() -> None:
+    assert policy_schema_digest is schema_digest
 
 
 class FakeLLM(LLMClient):
