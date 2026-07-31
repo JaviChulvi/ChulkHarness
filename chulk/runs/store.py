@@ -786,6 +786,11 @@ class SQLiteRunStore:
         lease_until = now + timedelta(seconds=lease_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            parent = _run_from_conn(
+                conn,
+                _run_row(conn, target_parent_run_id),
+            )
+            _assert_parent_scope(scope, parent.scope)
             expired = conn.execute(
                 f"""
                 SELECT outbox.* FROM durable_parent_completion_outbox AS outbox
@@ -862,11 +867,6 @@ class SQLiteRunStore:
             ).fetchone()
             if row is None:
                 return None
-            parent = _run_from_conn(
-                conn,
-                _run_row(conn, str(row["parent_run_id"])),
-            )
-            _assert_parent_scope(scope, parent.scope)
             token = uuid4().hex
             cursor = conn.execute(
                 """
