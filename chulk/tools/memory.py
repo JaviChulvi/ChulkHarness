@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, cast
 
 from chulk.hosting.async_utils import call_async_service
 from chulk.memory import SQLiteMemoryStore
+from chulk.memory.markdown import parse_markdown_memory_line
+from chulk.memory.security import ensure_memory_payload_safe
 from chulk.tools.files import resolve_inside_root, safe_write_error
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.registry import Tool, ToolResult
@@ -239,6 +242,12 @@ def export_memories_tool(memory_store: SQLiteMemoryStore, project_root: Path) ->
 
 def async_save_memory_tool(memory_store: object) -> Tool:
     async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        ensure_memory_payload_safe(
+            content=arguments["content"],
+            tags=arguments.get("tags") or [],
+            metadata=arguments.get("metadata") or {},
+            source=arguments.get("source", "manual"),
+        )
         memory_id = await call_async_service(
             memory_store,
             "save_memory",
@@ -336,6 +345,13 @@ def async_delete_memory_tool(memory_store: object) -> Tool:
 def async_update_memory_tool(memory_store: object) -> Tool:
     async def invoke(arguments: dict[str, Any]) -> ToolResult:
         memory_id = arguments["memory_id"]
+        ensure_memory_payload_safe(
+            **{
+                field: arguments[field]
+                for field in ("content", "tags", "metadata", "source")
+                if field in arguments
+            }
+        )
         updated = await call_async_service(
             memory_store,
             "update_memory",
@@ -463,6 +479,7 @@ def async_import_memories_tool(
 ) -> Tool:
     async def invoke(arguments: dict[str, Any]) -> ToolResult:
         path = resolve_inside_root(project_root, arguments["path"])
+        await asyncio.to_thread(_preflight_memory_markdown, path)
         memory_ids = await call_async_service(
             memory_store,
             "import_markdown",
@@ -534,6 +551,21 @@ def _native_async_memory_tool(
     callable: Any,
 ) -> Tool:
     return replace(base, callable=callable, run_in_executor=False)
+
+
+def _preflight_memory_markdown(path: Path) -> None:
+    """Reject an unsafe import before the hosted persistence call begins."""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parsed = parse_markdown_memory_line(line)
+        if parsed is None:
+            continue
+        content, tags = parsed
+        ensure_memory_payload_safe(
+            content=content,
+            tags=tags,
+            metadata={"path": str(path)},
+            source="memory_md",
+        )
 
 
 def save_memory(arguments: dict[str, Any], memory_store: SQLiteMemoryStore) -> ToolResult:

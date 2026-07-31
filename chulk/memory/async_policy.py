@@ -6,7 +6,7 @@ from chulk.capabilities import MemoryMode
 from chulk.hosting.async_utils import call_async_service
 from chulk.memory.models import MemoryExtractionCandidate
 from chulk.memory.policy import MemoryPolicyResult
-from chulk.memory.security import MemorySecretError
+from chulk.memory.security import MemorySecretError, ensure_memory_payload_safe
 
 
 class AsyncMemoryPolicy:
@@ -34,6 +34,15 @@ class AsyncMemoryPolicy:
             proposal_ids: list[str] = []
             for candidate in candidates:
                 try:
+                    ensure_memory_payload_safe(
+                        content=candidate.content,
+                        tags=candidate.tags,
+                        metadata=candidate.metadata,
+                        source=candidate.source,
+                        evidence=evidence,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                    )
                     proposal_ids.append(
                         await call_async_service(
                             self.store,
@@ -56,6 +65,12 @@ class AsyncMemoryPolicy:
         memory_ids: list[str] = []
         for candidate in candidates:
             try:
+                ensure_memory_payload_safe(
+                    content=candidate.content,
+                    tags=candidate.tags,
+                    metadata=candidate.metadata,
+                    source=candidate.source,
+                )
                 memory_ids.append(
                     await call_async_service(
                         self.store,
@@ -80,6 +95,19 @@ class AsyncMemoryPolicy:
         )
 
     async def approve(self, proposal_id: str) -> object:
+        for proposal in await self.list_pending():
+            if getattr(proposal, "id", None) != proposal_id:
+                continue
+            ensure_memory_payload_safe(
+                content=getattr(proposal, "content", None),
+                tags=getattr(proposal, "tags", ()),
+                metadata=getattr(proposal, "metadata", {}),
+                source=getattr(proposal, "source", None),
+                evidence=getattr(proposal, "evidence", None),
+                conversation_id=getattr(proposal, "conversation_id", None),
+                turn_id=getattr(proposal, "turn_id", None),
+            )
+            break
         return await call_async_service(
             self.store,
             "approve_memory_proposal",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -31,8 +32,11 @@ from chulk.hosting.sinks import (
     InMemoryEventSink,
     safe_audit_payload,
 )
+from chulk.llm import LLMCost, LLMUsage
 from chulk.media import MediaProcessorRegistry
+from chulk.memory.markdown import parse_markdown_memory_line
 from chulk.memory.models import MemoryProposalRecord, MemoryRecord
+from chulk.memory.security import ensure_memory_payload_safe
 from chulk.plugins import PluginAuditReport
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.sessions import (
@@ -438,7 +442,14 @@ class InMemoryMemoryService:
             if value is not None
         }
         values["updated_at"] = _now_text()
-        self._records[memory_id] = replace(record, **values)
+        updated = replace(record, **values)
+        ensure_memory_payload_safe(
+            content=updated.content,
+            tags=updated.tags,
+            metadata=updated.metadata,
+            source=updated.source,
+        )
+        self._records[memory_id] = updated
         return True
 
     def summarize_memories(
@@ -481,11 +492,30 @@ class InMemoryMemoryService:
         return 0
 
     def import_markdown(self, path: Any) -> list[str]:
-        memory_ids = []
+        parsed_memories: list[tuple[str, list[str]]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
-            content = line.strip().removeprefix("-").strip()
-            if content:
-                memory_ids.append(self.save_memory(content))
+            parsed = parse_markdown_memory_line(line)
+            if parsed is None:
+                continue
+            content, tags = parsed
+            ensure_memory_payload_safe(
+                content=content,
+                tags=tags,
+                metadata={"path": str(path)},
+                source="memory_md",
+            )
+            parsed_memories.append((content, tags))
+        memory_ids = []
+        for content, tags in parsed_memories:
+            memory_ids.append(
+                self.save_memory(
+                    content,
+                    tags=tags,
+                    metadata={"path": str(path)},
+                    source="memory_md",
+                    confidence=0.8,
+                )
+            )
         return memory_ids
 
     def export_markdown(
@@ -530,6 +560,12 @@ class InMemoryMemoryService:
         confidence: float = 1.0,
         **_kwargs: Any,
     ) -> str:
+        ensure_memory_payload_safe(
+            content=content,
+            tags=tags or (),
+            metadata=metadata or {},
+            source=source,
+        )
         memory_id = f"memory_{uuid4().hex}"
         now = _now_text()
         self._records[memory_id] = MemoryRecord(
@@ -560,6 +596,15 @@ class InMemoryMemoryService:
         turn_id: str | None = None,
         **_kwargs: Any,
     ) -> str:
+        ensure_memory_payload_safe(
+            content=content,
+            tags=tags or (),
+            metadata=metadata or {},
+            source=source,
+            evidence=evidence,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
         proposal_id = f"memory_proposal_{uuid4().hex}"
         self._proposals[proposal_id] = MemoryProposalRecord(
             id=proposal_id,
@@ -597,6 +642,15 @@ class InMemoryMemoryService:
         proposal = self._proposals[proposal_id]
         if proposal.status != "pending":
             return proposal
+        ensure_memory_payload_safe(
+            content=proposal.content,
+            tags=proposal.tags,
+            metadata=proposal.metadata,
+            source=proposal.source,
+            evidence=proposal.evidence,
+            conversation_id=proposal.conversation_id,
+            turn_id=proposal.turn_id,
+        )
         memory_id = self.save_memory(
             proposal.content,
             tags=proposal.tags,
@@ -1199,14 +1253,54 @@ class InMemoryUsageService:
         turn_id: str,
         request_index: int,
         purpose: str,
-        **kwargs: Any,
+        usage: LLMUsage | None = None,
+        cost: LLMCost | None = None,
+        fallback_attempts: object = None,
+        **_kwargs: Any,
     ) -> tuple[UsageEntry, ...]:
         reservation = self._reservations.pop(
             (turn_id, request_index, ResourceKind.MODEL.value)
         )
-        entry = self._entry(reservation, purpose=purpose)
-        self._entries.append(entry)
-        return (entry,)
+        attempts = (
+            tuple(fallback_attempts)
+            if isinstance(fallback_attempts, (list, tuple))
+            else ()
+        )
+        entries = tuple(
+            self._model_entry(
+                reservation,
+                purpose=purpose,
+                usage=_attempt_usage(attempt),
+                cost=_attempt_cost(attempt),
+                provider=_optional_text(_attempt_value(attempt, "provider")),
+                model=_optional_text(_attempt_value(attempt, "model")),
+                model_profile_id=_optional_text(
+                    _attempt_value(attempt, "model_profile_id")
+                ),
+                source_event_id=(
+                    f"{reservation.source_event_id}:attempt:{index}"
+                ),
+                metadata={
+                    "attempt": index,
+                    "success": bool(_attempt_value(attempt, "success")),
+                    "error_code": _optional_text(
+                        _attempt_value(attempt, "error_code")
+                    ),
+                },
+            )
+            for index, attempt in enumerate(attempts, start=1)
+        ) or (
+            self._model_entry(
+                reservation,
+                purpose=purpose,
+                usage=usage,
+                cost=cost,
+                provider=cost.provider if cost is not None else None,
+                model=cost.model if cost is not None else None,
+            ),
+        )
+        self._entries.extend(entries)
+        return entries
 
     def release_model_request(
         self,
@@ -1239,7 +1333,19 @@ class InMemoryUsageService:
         reservation = self._reservations.pop(
             (turn_id, tool_call_index, ResourceKind.TOOL.value)
         )
-        entry = self._entry(reservation, purpose=tool_name)
+        entry = self._entry(
+            reservation,
+            purpose="agent_tool",
+            units={"tool_calls": Decimal(1)},
+            cost=ExactCost(Decimal(0), pricing_known=True),
+            tool_or_service=tool_name,
+            metadata={
+                "tool_call_index": tool_call_index,
+                "attempt": kwargs.get("attempt"),
+                "success": kwargs.get("success"),
+                "failure_kind": kwargs.get("failure_kind"),
+            },
+        )
         self._entries.append(entry)
         return (entry,)
 
@@ -1262,10 +1368,28 @@ class InMemoryUsageService:
         operation_index: int,
         **kwargs: Any,
     ) -> BudgetReservation:
+        network_access = bool(kwargs.get("network_access"))
+        pricing_per_unit = kwargs.get("pricing_per_unit")
+        units = int(kwargs.get("units", 1))
+        if operation_index < 1 or units < 0:
+            raise ValueError("media usage quantities cannot be negative")
+        reserved_cost = (
+            ExactCost(
+                Decimal(str(pricing_per_unit)) * Decimal(units),
+                pricing_known=True,
+                estimated=True,
+            )
+            if pricing_per_unit is not None
+            else ExactCost(
+                Decimal(0) if not network_access else None,
+                pricing_known=not network_access,
+            )
+        )
         reservation = self._reserve(
             turn_id,
             operation_index,
             ResourceKind.MEDIA,
+            reserved_cost=reserved_cost,
         )
         self._media_reservations[reservation.id] = reservation
         return reservation
@@ -1281,7 +1405,24 @@ class InMemoryUsageService:
         for key, value in tuple(self._reservations.items()):
             if value.id == reservation.id:
                 self._reservations.pop(key, None)
-        entry = self._entry(reservation, purpose=processor)
+        unit_name = str(kwargs.get("unit_name") or "request")
+        entry = self._entry(
+            reservation,
+            purpose="media_transform",
+            units={
+                "requests": Decimal(1),
+                "bytes": Decimal(int(kwargs.get("byte_length", 0))),
+                unit_name: Decimal(int(kwargs.get("units", 1))),
+            },
+            cost=reservation.reserved_cost,
+            provider=_optional_text(kwargs.get("provider")),
+            tool_or_service=processor,
+            metadata={
+                "content_ref": kwargs.get("content_ref"),
+                "network_access": bool(kwargs.get("network_access")),
+                "retains_data": bool(kwargs.get("retains_data")),
+            },
+        )
         self._entries.append(entry)
         return (entry,)
 
@@ -1378,10 +1519,9 @@ class InMemoryUsageService:
                     ),
                     total_tokens=int(
                         sum(
-                            sum(
-                                amount
-                                for unit, amount in record.units.items()
-                                if "token" in unit
+                            record.units.get(
+                                "total_tokens",
+                                Decimal(0),
                             )
                             for record in records
                         )
@@ -1404,6 +1544,8 @@ class InMemoryUsageService:
         turn_id: str,
         index: int,
         kind: ResourceKind,
+        *,
+        reserved_cost: ExactCost | None = None,
     ) -> BudgetReservation:
         reservation_id = f"reservation_{uuid4().hex}"
         reservation = BudgetReservation(
@@ -1422,7 +1564,8 @@ class InMemoryUsageService:
             reserved_model_calls=1 if kind is ResourceKind.MODEL else 0,
             reserved_tool_calls=1 if kind is ResourceKind.TOOL else 0,
             reserved_tokens=0,
-            reserved_cost=ExactCost(Decimal("0"), pricing_known=True),
+            reserved_cost=reserved_cost
+            or ExactCost(Decimal("0"), pricing_known=True),
             created_at=_now(),
         )
         self._reservations[(turn_id, index, kind.value)] = reservation
@@ -1433,17 +1576,138 @@ class InMemoryUsageService:
         reservation: BudgetReservation,
         *,
         purpose: str,
+        source_event_id: str | None = None,
+        units: Mapping[str, Decimal] | None = None,
+        cost: ExactCost | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        tool_or_service: str | None = None,
+        model_profile_id: str | None = None,
+        usage_estimated: bool = False,
+        metadata: Mapping[str, Any] | None = None,
     ) -> UsageEntry:
         occurred_at = _now()
         return UsageEntry(
             id=f"usage_{uuid4().hex}",
             resource_kind=reservation.resource_kind,
-            source_event_id=reservation.source_event_id,
+            source_event_id=source_event_id or reservation.source_event_id,
             dimensions=reservation.dimensions,
             occurred_at=occurred_at,
             billing_period=occurred_at.strftime("%Y-%m"),
             purpose=purpose,
+            units=units or {},
+            cost=cost or ExactCost(None),
+            provider=provider,
+            model=model,
+            tool_or_service=tool_or_service,
+            model_profile_id=model_profile_id,
+            usage_estimated=usage_estimated,
+            metadata=metadata or {},
         )
+
+    def _model_entry(
+        self,
+        reservation: BudgetReservation,
+        *,
+        purpose: str,
+        usage: LLMUsage | None,
+        cost: LLMCost | None,
+        provider: str | None = None,
+        model: str | None = None,
+        model_profile_id: str | None = None,
+        source_event_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> UsageEntry:
+        units = {
+            "model_calls": Decimal(1),
+            "input_tokens": Decimal(
+                usage.input_tokens if usage is not None else 0
+            ),
+            "output_tokens": Decimal(
+                usage.output_tokens if usage is not None else 0
+            ),
+            "total_tokens": Decimal(
+                usage.total_tokens if usage is not None else 0
+            ),
+            "cached_input_tokens": Decimal(
+                usage.cached_input_tokens if usage is not None else 0
+            ),
+            "cache_hit_input_tokens": Decimal(
+                usage.cache_hit_input_tokens if usage is not None else 0
+            ),
+            "cache_write_input_tokens": Decimal(
+                usage.cache_write_input_tokens if usage is not None else 0
+            ),
+            "cache_miss_input_tokens": Decimal(
+                usage.cache_miss_input_tokens if usage is not None else 0
+            ),
+            "reasoning_tokens": Decimal(
+                usage.reasoning_tokens if usage is not None else 0
+            ),
+        }
+        exact_cost = (
+            ExactCost(
+                cost.amount,
+                currency=cost.currency,
+                pricing_known=cost.pricing_known,
+                estimated=cost.estimated,
+            )
+            if cost is not None
+            else ExactCost(None)
+        )
+        return self._entry(
+            reservation,
+            purpose=purpose,
+            source_event_id=source_event_id,
+            units=units,
+            cost=exact_cost,
+            provider=provider,
+            model=model,
+            model_profile_id=model_profile_id,
+            usage_estimated=usage.estimated if usage is not None else False,
+            metadata=metadata,
+        )
+
+
+def _attempt_value(attempt: object, name: str) -> object:
+    if isinstance(attempt, Mapping):
+        return attempt.get(name)
+    return getattr(attempt, name, None)
+
+
+def _attempt_usage(attempt: object) -> LLMUsage | None:
+    value = _attempt_value(attempt, "usage")
+    if isinstance(value, LLMUsage):
+        return value
+    if isinstance(value, Mapping):
+        return LLMUsage(**dict(value))
+    return None
+
+
+def _attempt_cost(attempt: object) -> LLMCost | None:
+    value = _attempt_value(attempt, "cost")
+    if isinstance(value, LLMCost):
+        return value
+    if isinstance(value, Mapping):
+        payload = dict(value)
+        for name in (
+            "amount",
+            "input_cost",
+            "cached_input_cost",
+            "cache_write_input_cost",
+            "output_cost",
+        ):
+            if payload.get(name) is not None:
+                payload[name] = Decimal(str(payload[name]))
+        return LLMCost(**payload)
+    return None
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 class InMemoryExecutionBackend:

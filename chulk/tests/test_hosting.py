@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from decimal import Decimal
 import inspect
 import json
 from pathlib import Path
@@ -38,7 +39,8 @@ from chulk.hosting.services import (
     SessionRuntimeServices,
     SkillRuntimeServices,
 )
-from chulk.llm import LLMClient
+from chulk.llm import LLMCost, LLMClient, LLMUsage
+from chulk.memory.security import MemorySecretError
 from chulk.plugins import PluginAuditReport
 from chulk.runtime import create_async_hosted_agent
 from chulk.skills import LearningReviewOutcome, Skill, SkillManifest
@@ -547,6 +549,25 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
         "approved",
         include_archived=True,
     )
+    original = memory.get_memory(
+        approved.accepted_memory_id,
+        include_archived=True,
+    )
+    with pytest.raises(MemorySecretError):
+        memory.update_memory(
+            approved.accepted_memory_id,
+            content=(
+                "OPENAI_API_KEY="
+                "sk-proj-FakeReferenceCredential123456789"
+            ),
+        )
+    assert (
+        memory.get_memory(
+            approved.accepted_memory_id,
+            include_archived=True,
+        )
+        == original
+    )
 
     usage = services.usage
     model = usage.reserve_model_request(turn_id="turn-1", request_index=0)
@@ -554,18 +575,46 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
         turn_id="turn-1",
         request_index=0,
         purpose="model",
+        usage=LLMUsage(
+            input_tokens=4,
+            output_tokens=3,
+            total_tokens=7,
+            cached_input_tokens=2,
+        ),
+        cost=LLMCost(
+            Decimal("0.025"),
+            pricing_known=True,
+            provider="reference",
+            model="test-model",
+        ),
     )
     tool = usage.reserve_tool_call(turn_id="turn-1", tool_call_index=1)
     usage.commit_tool_call(
         turn_id="turn-1",
         tool_call_index=1,
         tool_name="lookup",
+        attempt=2,
+        success=False,
+        failure_kind="environment_failure",
     )
     media = usage.reserve_media_transform(
         turn_id="turn-1",
         operation_index=2,
+        pricing_per_unit=Decimal("0.01"),
+        units=2,
+        network_access=True,
     )
-    usage.commit_media_transform(media, processor="resize")
+    usage.commit_media_transform(
+        media,
+        processor="resize",
+        provider="reference-media",
+        content_ref="content:1",
+        byte_length=128,
+        units=2,
+        unit_name="images",
+        network_access=True,
+        retains_data=False,
+    )
     released_media = usage.reserve_media_transform(
         turn_id="turn-1",
         operation_index=3,
@@ -581,8 +630,62 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
     ) is None
     assert model.resource_kind is ResourceKind.MODEL
     assert tool.resource_kind is ResourceKind.TOOL
+    usage_entries = usage.query(limit=10).entries
+    assert usage_entries[0].units["total_tokens"] == Decimal(7)
+    assert usage_entries[0].cost.amount == Decimal("0.025")
+    assert usage_entries[0].provider == "reference"
+    assert usage_entries[0].model == "test-model"
+    assert usage_entries[1].units["tool_calls"] == Decimal(1)
+    assert usage_entries[1].tool_or_service == "lookup"
+    assert usage_entries[1].metadata["attempt"] == 2
+    assert usage_entries[2].units["bytes"] == Decimal(128)
+    assert usage_entries[2].units["images"] == Decimal(2)
+    assert usage_entries[2].cost.amount == Decimal("0.02")
+    assert usage_entries[2].provider == "reference-media"
+    aggregates = usage.group(UsageGroupBy.RESOURCE_KIND)
+    model_aggregate = next(item for item in aggregates if item.key == "model")
+    assert model_aggregate.total_tokens == 7
     for group_by in UsageGroupBy:
         assert usage.group(group_by)
+    usage.reserve_model_request(turn_id="turn-1", request_index=4)
+    fallback_entries = usage.commit_model_request(
+        turn_id="turn-1",
+        request_index=4,
+        purpose="fallback",
+        fallback_attempts=[
+            SimpleNamespace(
+                provider="first",
+                model="model-a",
+                model_profile_id="profile-a",
+                success=False,
+                error_code="rate_limited",
+                usage=LLMUsage(input_tokens=2, output_tokens=1),
+                cost=LLMCost(Decimal("0.01"), pricing_known=True),
+            ),
+            {
+                "provider": "second",
+                "model": "model-b",
+                "model_profile_id": "profile-b",
+                "success": True,
+                "error_code": None,
+                "usage": LLMUsage(
+                    input_tokens=3,
+                    output_tokens=2,
+                ).to_dict(),
+                "cost": LLMCost(
+                    Decimal("0.02"),
+                    pricing_known=True,
+                ).to_dict(),
+            },
+        ],
+    )
+    assert len(fallback_entries) == 2
+    assert fallback_entries[0].units["total_tokens"] == Decimal(3)
+    assert fallback_entries[0].cost.amount == Decimal("0.01")
+    assert fallback_entries[0].metadata["success"] is False
+    assert fallback_entries[1].units["total_tokens"] == Decimal(5)
+    assert fallback_entries[1].cost.amount == Decimal("0.02")
+    assert fallback_entries[1].provider == "second"
 
     skills = services.skills.registry
     first_skill = Skill(
