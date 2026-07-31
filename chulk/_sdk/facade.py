@@ -2044,16 +2044,18 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         serialized: bool = False,
     ) -> T:
-        try:
-            return await super()._invoke_async(
-                operation,
-                call,
-                serialized=serialized,
-            )
-        finally:
-            for flushable in self._async_host_flushables:
-                flush = getattr(flushable, "flush")
-                await flush()
+        del serialized
+        async with self._async_run_gate:
+            try:
+                return await super()._invoke_async(
+                    operation,
+                    call,
+                    serialized=False,
+                )
+            finally:
+                for flushable in self._async_host_flushables:
+                    flush = getattr(flushable, "flush")
+                    await flush()
 
     def _resolved_async_services(self) -> ResolvedRuntimeServices:
         resolved = self._async_owned_services

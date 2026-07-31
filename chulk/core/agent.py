@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
+from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.model_transport import ModelTransport
@@ -601,7 +602,7 @@ class Agent:
             if turn is not None:
                 turn.status = "waiting_for_approval"
                 await self._flush_async_services_after_error(exc)
-                await _await_cleanup_after_error(
+                await await_cleanup_after_error(
                     self._release_tool_context_async(turn),
                     exc,
                 )
@@ -611,7 +612,7 @@ class Agent:
             if turn is not None:
                 self._terminalize_exception(turn, exc)
                 await self._flush_async_services_after_error(exc)
-                await _await_cleanup_after_error(
+                await await_cleanup_after_error(
                     self._release_tool_context_async(turn),
                     exc,
                 )
@@ -1110,7 +1111,7 @@ class Agent:
                     self.async_usage_accounting is not None
                     and usage_reservation is not None
                 ):
-                    await _await_cleanup_after_error(
+                    await await_cleanup_after_error(
                         call_async_service(
                             self.async_usage_accounting,
                             "release_media_transform",
@@ -1173,7 +1174,7 @@ class Agent:
             if turn is not None:
                 self._terminalize_exception(turn, exc)
                 await self._flush_async_services_after_error(exc)
-                await _await_cleanup_after_error(
+                await await_cleanup_after_error(
                     self._release_tool_context_async(turn),
                     exc,
                 )
@@ -1299,7 +1300,7 @@ class Agent:
             )
             await self._flush_async_services()
         except BaseException as exc:
-            await _await_cleanup_after_error(
+            await await_cleanup_after_error(
                 self._release_tool_context_async(turn),
                 exc,
             )
@@ -2684,50 +2685,28 @@ class Agent:
         raise TypeError("async artifact store returned an unsupported record")
 
     async def _flush_async_services(self) -> None:
+        failure: BaseException | None = None
         for service in self.async_flushables:
-            await call_async_service(service, "flush")
+            try:
+                await call_async_service(service, "flush")
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "async journal flush also failed with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        if failure is not None:
+            raise failure
 
     async def _flush_async_services_after_error(
         self,
         original: BaseException,
     ) -> None:
-        await _await_cleanup_after_error(
+        await await_cleanup_after_error(
             self._flush_async_services(),
             original,
-        )
-
-
-async def _await_cleanup_after_error(
-    cleanup: Awaitable[object],
-    original: BaseException,
-) -> None:
-    """Complete required cleanup without replacing the triggering exception."""
-
-    if not isinstance(original, asyncio.CancelledError):
-        try:
-            await cleanup
-        except BaseException as cleanup_error:
-            original.add_note(
-                "async cleanup also failed with "
-                f"{type(cleanup_error).__name__}: {cleanup_error}"
-            )
-        return
-
-    task = asyncio.ensure_future(cleanup)
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await task
-        except BaseException as cleanup_error:
-            original.add_note(
-                "async cleanup also failed with "
-                f"{type(cleanup_error).__name__}: {cleanup_error}"
-            )
-    except BaseException as cleanup_error:
-        original.add_note(
-            "async cleanup also failed with "
-            f"{type(cleanup_error).__name__}: {cleanup_error}"
         )
 
 

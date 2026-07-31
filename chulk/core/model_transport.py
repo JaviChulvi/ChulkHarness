@@ -9,6 +9,7 @@ import json
 import re
 
 from chulk.core.actions import AgentAction, action_json_schema_for
+from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import AgentPrompt, ContextBudget
 from chulk.core.events import TraceEvent
 from chulk.core.prompt_builder import build_agent_prompt
@@ -318,11 +319,14 @@ class ModelTransport:
             )
         except LLMActionError as exc:
             return await self._record_protocol_failure_async(turn, exc)
-        except BaseException:
-            await self._release_accounting_async(
-                turn,
-                request_index=turn.model_request_count,
-                reason="model_transport_failed",
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=turn.model_request_count,
+                    reason="model_transport_failed",
+                ),
+                exc,
             )
             raise
         return await self._record_action_result_async(turn, result)
@@ -396,11 +400,14 @@ class ModelTransport:
                 raw_response=None,
                 request_index=request_index,
             )
-        except BaseException:
-            await self._release_accounting_async(
-                turn,
-                request_index=request_index,
-                reason="reflection_transport_failed",
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=request_index,
+                    reason="reflection_transport_failed",
+                ),
+                exc,
             )
             raise
         await self._record_reflection_response_async(
@@ -486,11 +493,14 @@ class ModelTransport:
                 request_index,
                 exc,
             )
-        except BaseException:
-            await self._release_accounting_async(
-                turn,
-                request_index=request_index,
-                reason="context_summary_transport_failed",
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=request_index,
+                    reason="context_summary_transport_failed",
+                ),
+                exc,
             )
             raise
         return await self._finish_summary_async(

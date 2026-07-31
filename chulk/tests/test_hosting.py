@@ -1397,6 +1397,102 @@ async def test_async_hosted_close_waits_for_active_serialized_operation(
 
 
 @pytest.mark.asyncio
+async def test_async_hosted_close_waits_for_active_management_operation(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class ArtifactStore:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def read(self, _artifact_id: str, **_kwargs):
+            entered.set()
+            await release.wait()
+            return {"artifact_id": "artifact-1"}
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    artifacts = ArtifactStore()
+    services = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["artifacts"] = AsyncServiceBinding.runtime(artifacts)
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+
+    read_task = asyncio.create_task(agent.read_artifact("artifact-1"))
+    await entered.wait()
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+
+    assert not close_task.done()
+    assert not artifacts.closed
+    assert not agent.closed
+
+    release.set()
+    assert await read_task == {"artifact_id": "artifact-1"}
+    await close_task
+
+    assert artifacts.closed
+    assert agent.closed
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_flush_attempts_every_journal(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    calls: list[str] = []
+
+    class Journal:
+        def __init__(self, name: str, *, error: str | None = None) -> None:
+            self.name = name
+            self.error = error
+
+        async def flush(self) -> None:
+            calls.append(self.name)
+            if self.error is not None:
+                raise RuntimeError(self.error)
+
+    agent.runtime.async_flushables = (
+        Journal("traces", error="trace flush failed"),
+        Journal("sessions"),
+        Journal("audit", error="audit flush failed"),
+        Journal("events"),
+    )
+
+    with pytest.raises(RuntimeError, match="trace flush failed") as error:
+        await agent.runtime._flush_async_services()
+
+    assert calls == ["traces", "sessions", "audit", "events"]
+    assert any(
+        "audit flush failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+
+    agent.runtime.async_flushables = ()
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_learning_facade_awaits_proposal_service(
     tmp_path: Path,
 ) -> None:
@@ -1775,6 +1871,63 @@ class _HangingAsyncLLM(LLMClient):
         self.started.set()
         await asyncio.Future()
         raise AssertionError(f"unreachable: {messages!r} {kwargs!r}")
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_cancellation_survives_usage_release_failure(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    hub = InMemoryServiceHub()
+    services = hub.async_services()
+    usage_binding = services.usage
+
+    class FailingReleaseUsage:
+        def __init__(self, delegate: object) -> None:
+            self.delegate = delegate
+
+        def __getattr__(self, name: str):
+            return getattr(self.delegate, name)
+
+        async def release_model_request(self, **kwargs):
+            await self.delegate.release_model_request(**kwargs)
+            raise RuntimeError("usage release failed")
+
+    async def usage(scope: ExecutionScope) -> FailingReleaseUsage:
+        resolved = await _resolve_async_binding(usage_binding, scope)
+        return FailingReleaseUsage(resolved)
+
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["usage"] = AsyncServiceBinding.scoped(
+        usage,
+        ownership="host",
+    )
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_HangingAsyncLLM(started),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+    task = asyncio.create_task(agent.run("wait for cancellation"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    scope = agent.execution_scope
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert hub.active_usage_reservations(scope) == ()
+    assert agent.state.turns[-1].status == "cancelled"
+    assert any(
+        "usage release failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+    await agent.close()
 
 
 @pytest.mark.asyncio
