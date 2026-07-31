@@ -54,6 +54,7 @@ from chulk.tools import (
     list_memories as list_memories_ref,
     read_trace_artifact as read_trace_artifact_ref,
     restore_memory as restore_memory_ref,
+    run_cmd as run_cmd_ref,
     save_memory as save_memory_ref,
     search_memory as search_memory_ref,
     session_read as session_read_ref,
@@ -62,6 +63,7 @@ from chulk.tools import (
     update_memory as update_memory_ref,
 )
 from chulk.tools.registry import Tool
+from chulk.tools.shell import ShellExecutionDecision, ShellExecutionRequest
 
 
 class FakeLLM(LLMClient):
@@ -984,6 +986,48 @@ async def test_async_host_events_are_awaited_on_the_running_loop(
     assert sink.events
     assert set(sink.loop_ids) == {id(loop)}
     assert all(event.execution_scope is not None for event in sink.events)
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_shell_binding_preserves_host_safety_options(
+    tmp_path: Path,
+) -> None:
+    requests: list[ShellExecutionRequest] = []
+
+    class UncontainedPolicy:
+        def prepare(
+            self,
+            request: ShellExecutionRequest,
+        ) -> ShellExecutionDecision:
+            requests.append(request)
+            return ShellExecutionDecision.allow(
+                request.command,
+                policy_name="test-uncontained",
+                shell=True,
+                containment_applied=False,
+            )
+
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("unused")]),
+        tools=[run_cmd_ref],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+        shell_execution_policy=UncontainedPolicy(),
+        require_shell_containment=True,
+    )
+
+    result = await agent.runtime.tool_registry.run_async(
+        "run_cmd",
+        {"command": "printf must-not-run"},
+    )
+
+    assert result.error == "containment_required"
+    assert len(requests) == 1
+    assert requests[0].command == "printf must-not-run"
+    assert result.metadata["child_process_started"] is False
     await agent.close()
 
 

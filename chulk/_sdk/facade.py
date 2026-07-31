@@ -2008,6 +2008,12 @@ class AsyncHostedRuntime(AsyncAgent):
                 ),
                 capabilities=capabilities,
                 deps=kwargs.get("deps"),
+                shell_execution_policy=kwargs.get(
+                    "shell_execution_policy"
+                ),
+                require_shell_containment=bool(
+                    kwargs.get("require_shell_containment", False)
+                ),
                 run_budget=kwargs.get("run_budget"),
                 usage_dimensions=kwargs.get("usage_dimensions"),
                 goal_execution=kwargs.get("goal_execution"),
