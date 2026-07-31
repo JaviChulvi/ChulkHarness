@@ -242,6 +242,7 @@ class Agent:
             policy_hooks=tool_policy_hooks,
             get_context_async=self._tool_context_for_turn_async,
             async_usage_accounting=self.async_usage_accounting,
+            flush_async=self._flush_async_services,
         )
         self._plan_execution = PlanExecution(
             state=self.state,
@@ -1363,6 +1364,7 @@ class Agent:
         tools.usage_accounting = self.usage_accounting
         tools.async_usage_accounting = self.async_usage_accounting
         tools.goal_execution = self.goal_execution
+        tools.flush_async = self._flush_async_services
 
         self._plan_execution.state = self.state
         self._plan_execution.memory = self.memory

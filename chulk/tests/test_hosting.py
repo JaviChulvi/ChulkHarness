@@ -1708,6 +1708,8 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(
     turn.complete("done")
     agent.state.turns.append(turn)
 
+    assert isinstance(agent.usage_ledger, Usage)
+    assert agent.session_search is not None
     assert (await agent.list_learning_proposals())[0].id == "proposal-1"
     assert (await agent.get_learning_proposal("proposal-1")).id == "proposal-1"
     assert (

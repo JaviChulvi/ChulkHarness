@@ -360,3 +360,40 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
         "tool release failed" in note
         for note in getattr(error.value, "__notes__", ())
     )
+
+
+@pytest.mark.asyncio
+async def test_async_tool_flushes_authorization_before_dispatch():
+    tool_calls = 0
+    trace_events: list[str] = []
+
+    @Tool
+    async def side_effect() -> str:
+        """Perform one external side effect."""
+        nonlocal tool_calls
+        tool_calls += 1
+        return "done"
+
+    async def reject_authorization_journal() -> None:
+        assert "tool_permission_decided" in trace_events
+        raise RuntimeError("authorization journal unavailable")
+
+    registry = ToolRegistry()
+    registry.register(side_effect)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda name, _payload=None: trace_events.append(name),
+        get_context=lambda _turn: None,
+        flush_async=reject_authorization_journal,
+    )
+
+    with pytest.raises(RuntimeError, match="authorization journal unavailable"):
+        await executor.execute_async(
+            "side_effect",
+            {},
+            TurnState("run side effect"),
+        )
+
+    assert tool_calls == 0

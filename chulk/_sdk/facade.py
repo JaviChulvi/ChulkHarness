@@ -2063,6 +2063,16 @@ class AsyncHostedRuntime(AsyncAgent):
             raise RuntimeError("Agent is closed")
         return resolved
 
+    @property
+    def usage_ledger(self) -> Any:
+        """Return the native async usage service bound to this runtime."""
+        return self._resolved_async_services().usage
+
+    @property
+    def session_search(self) -> Any:
+        """Return the native async session-search service for this runtime."""
+        return self._resolved_async_services().sessions.search
+
     async def _call_hosted_service(
         self,
         operation: str,

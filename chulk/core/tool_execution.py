@@ -148,6 +148,7 @@ class ToolExecutor:
         Callable[[TurnState], Awaitable[ToolExecutionContext | None]] | None
     ) = None
     async_usage_accounting: object | None = None
+    flush_async: Callable[[], Awaitable[None]] | None = None
 
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
@@ -365,6 +366,8 @@ class ToolExecutor:
                     ):
                         await self.durable_effects.started_async(durable_token)
                     try:
+                        if self.flush_async is not None:
+                            await self.flush_async()
                         result = await self.registry.run_async(
                             tool_name,
                             arguments,
