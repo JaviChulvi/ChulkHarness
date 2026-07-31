@@ -1332,15 +1332,68 @@ async def test_async_hosted_close_preserves_first_failure_and_finishes_cleanup(
     monkeypatch.setattr(agent.runtime, "_flush_async_services", fail_flush)
     agent._async_owned_services = Owned()
 
-    with pytest.raises(RuntimeError, match="flush failed") as error:
+    with pytest.raises(Exception, match="flush failed") as error:
         await agent.close()
 
     assert closed == ["flush", "owned"]
+    failure = error.value.__cause__ or error.value
     assert any(
         "owned close failed" in note
-        for note in getattr(error.value, "__notes__", ())
+        for note in getattr(failure, "__notes__", ())
     )
     assert agent._async_owned_services is None
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_close_waits_for_active_serialized_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    flushes: list[str] = []
+
+    async def active_operation() -> None:
+        entered.set()
+        await release.wait()
+
+    async def tracked_flush() -> None:
+        flushes.append("flush")
+
+    monkeypatch.setattr(
+        agent.runtime,
+        "_flush_async_services",
+        tracked_flush,
+    )
+    active_task = asyncio.create_task(
+        agent._invoke_async(
+            "active_operation",
+            active_operation,
+            serialized=True,
+        )
+    )
+    await entered.wait()
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.sleep(0)
+
+    assert not close_task.done()
+    assert flushes == []
+    assert not agent.closed
+
+    release.set()
+    await active_task
+    await close_task
+
+    assert flushes
+    assert agent.closed
 
 
 @pytest.mark.asyncio

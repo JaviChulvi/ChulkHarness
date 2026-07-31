@@ -2647,28 +2647,31 @@ class AsyncHostedRuntime(AsyncAgent):
         return await self._invoke_async("read_artifact", operation)
 
     async def close(self) -> None:
-        owned = self._async_owned_services
-        self._async_owned_services = None
-        failure: BaseException | None = None
-        operations: list[Callable[[], Awaitable[object]]] = [
-            self.runtime._flush_async_services,
-            super().close,
-        ]
-        if owned is not None:
-            operations.append(owned.aclose_owned)
-        for operation in operations:
-            try:
-                await operation()
-            except BaseException as exc:
-                if failure is None:
-                    failure = exc
-                else:
-                    failure.add_note(
-                        "async close also failed with "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-        if failure is not None:
-            raise failure
+        async def operation() -> None:
+            owned = self._async_owned_services
+            self._async_owned_services = None
+            failure: BaseException | None = None
+            operations: list[Callable[[], Awaitable[object]]] = [
+                self.runtime._flush_async_services,
+                self._handle.close,
+            ]
+            if owned is not None:
+                operations.append(owned.aclose_owned)
+            for close_operation in operations:
+                try:
+                    await close_operation()
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
+                    else:
+                        failure.add_note(
+                            "async close also failed with "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+            if failure is not None:
+                raise failure
+
+        await self._invoke_async("close", operation, serialized=True)
 
 
 def _build_handle(
