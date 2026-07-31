@@ -41,7 +41,7 @@ from chulk.hosting.services import (
 from chulk.llm import LLMClient
 from chulk.plugins import PluginAuditReport
 from chulk.runtime import create_async_hosted_agent
-from chulk.skills import LearningReviewOutcome, Skill
+from chulk.skills import LearningReviewOutcome, Skill, SkillManifest
 from chulk.tools import ToolExecutionContext, ToolRegistry, ToolResult
 from chulk.tools import (
     archive_memory as archive_memory_ref,
@@ -1493,6 +1493,38 @@ async def test_async_hosted_flush_attempts_every_journal(
 
 
 @pytest.mark.asyncio
+async def test_async_hosted_predispatch_flush_failure_releases_reservation(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    llm = FakeLLM([_final()])
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=_scope(),
+    )
+
+    class FailingJournal:
+        async def flush(self) -> None:
+            raise RuntimeError("journal unavailable")
+
+    agent.runtime.async_flushables = (FailingJournal(),)
+
+    with pytest.raises(Exception, match="journal unavailable"):
+        await agent.run("fail before model dispatch")
+
+    assert llm.requests == []
+    assert hub.active_usage_reservations(agent.execution_scope) == ()
+    assert agent.state.turns[-1].status == "failed"
+
+    agent.runtime.async_flushables = ()
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_learning_facade_awaits_proposal_service(
     tmp_path: Path,
 ) -> None:
@@ -1731,6 +1763,99 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(
     assert (await agent.query_usage()).entries == ()
     assert await agent.group_usage("resource_kind") == ()
     assert {loop_id for _name, loop_id in calls} == {id(loop)}
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_skill_usage_uses_hosted_scope_metadata(
+    tmp_path: Path,
+) -> None:
+    skill = Skill(
+        name="review",
+        description="Review the current change.",
+        path=Path("hosted/review/SKILL.md"),
+        metadata={"scope": "project"},
+        loaded_content="Review the change.",
+        manifest=SkillManifest(
+            name="review",
+            version="1.0.0",
+            description="Review the current change.",
+            source="host",
+            trust="reviewed",
+        ),
+        digest="sha256:review",
+        root=Path("hosted/review"),
+    )
+    recorded: list[dict[str, object]] = []
+
+    class LifecycleStore:
+        async def get_skill(self, name: str, *, scope: str):
+            assert (name, scope) == ("review", "project")
+            return SimpleNamespace(
+                name=name,
+                scope=scope,
+                version="1.0.0",
+                digest="sha256:review",
+            )
+
+        async def record_usage(self, **kwargs):
+            recorded.append(kwargs)
+
+    class Lifecycle:
+        async def rollback(self, _revision_id: str, **_kwargs):
+            raise AssertionError("rollback is not expected")
+
+    hub = InMemoryServiceHub()
+    services = hub.async_services()
+    skill_binding = services.skills
+
+    async def skills(scope: ExecutionScope) -> SkillRuntimeServices:
+        resolved = await _resolve_async_binding(skill_binding, scope)
+        await resolved.registry.register(skill)
+        return replace(
+            resolved,
+            lifecycle_store=LifecycleStore(),
+            lifecycle=Lifecycle(),
+        )
+
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["skills"] = AsyncServiceBinding.scoped(
+        skills,
+        ownership="host",
+    )
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=["review"],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+
+    assert await agent.run("review this") == "hosted ok"
+    assert recorded == [
+        {
+            "name": "review",
+            "version": "1.0.0",
+            "digest": "sha256:review",
+            "kind": "use",
+            "source_event_id": agent.state.turns[-1].turn_id,
+            "scope": "project",
+        }
+    ]
+    assert agent.state.turns[-1].extension_metadata[
+        "loaded_skill_versions"
+    ] == [
+        {
+            "name": "review",
+            "scope": "project",
+            "version": "1.0.0",
+            "digest": "sha256:review",
+        }
+    ]
     await agent.close()
 
 

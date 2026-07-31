@@ -1825,23 +1825,8 @@ class Agent:
         for selection in self._selected_skills:
             manifest = selection.skill.manifest
             digest = selection.skill.digest
-            root = selection.skill.root
-            if (
-                manifest is None
-                or digest is None
-                or root is None
-                or self.skill_lifecycle is None
-            ):
-                continue
-            resolved_root = root.resolve()
-            if resolved_root.parent == self.skill_lifecycle.project_skills_dir:
-                scope = "project"
-            elif (
-                resolved_root.parent
-                == self.skill_lifecycle.profile_skills_dir
-            ):
-                scope = "profile"
-            else:
+            scope = self._selected_skill_scope(selection)
+            if manifest is None or digest is None or scope is None:
                 continue
             try:
                 matched = self.skill_lifecycle_store.get_skill(
@@ -1890,23 +1875,8 @@ class Agent:
         for selection in self._selected_skills:
             manifest = selection.skill.manifest
             digest = selection.skill.digest
-            root = selection.skill.root
-            if (
-                manifest is None
-                or digest is None
-                or root is None
-                or self.skill_lifecycle is None
-            ):
-                continue
-            resolved_root = root.resolve()
-            if resolved_root.parent == self.skill_lifecycle.project_skills_dir:
-                scope = "project"
-            elif (
-                resolved_root.parent
-                == self.skill_lifecycle.profile_skills_dir
-            ):
-                scope = "profile"
-            else:
+            scope = self._selected_skill_scope(selection)
+            if manifest is None or digest is None or scope is None:
                 continue
             try:
                 matched = await call_async_service(
@@ -1948,6 +1918,45 @@ class Agent:
             )
         if versions:
             turn.extension_metadata["loaded_skill_versions"] = versions
+
+    def _selected_skill_scope(
+        self,
+        selection: SkillSelection,
+    ) -> str | None:
+        metadata_scope = selection.skill.metadata.get("scope")
+        if isinstance(metadata_scope, str) and metadata_scope in {
+            "project",
+            "profile",
+        }:
+            return metadata_scope
+        root = selection.skill.root
+        lifecycle = self.skill_lifecycle
+        if root is None or lifecycle is None:
+            return None
+        project_skills_dir = getattr(
+            lifecycle,
+            "project_skills_dir",
+            None,
+        )
+        profile_skills_dir = getattr(
+            lifecycle,
+            "profile_skills_dir",
+            None,
+        )
+        if project_skills_dir is None and profile_skills_dir is None:
+            return None
+        resolved_parent = root.resolve().parent
+        if (
+            project_skills_dir is not None
+            and resolved_parent == project_skills_dir
+        ):
+            return "project"
+        if (
+            profile_skills_dir is not None
+            and resolved_parent == profile_skills_dir
+        ):
+            return "profile"
+        return None
 
     def confirm_skill_success(
         self,

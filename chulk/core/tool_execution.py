@@ -9,6 +9,7 @@ import inspect
 import time
 from typing import Any, Protocol
 
+from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
 from chulk.goals.models import GoalActionCheckpoint
@@ -306,10 +307,13 @@ class ToolExecutor:
                     tool_name=tool_name,
                     attempt=attempt_number,
                 )
-            except BaseException:
-                await self._release_tool_attempt_async(
-                    turn,
-                    attempt=attempt_number,
+            except BaseException as exc:
+                await await_cleanup_after_error(
+                    self._release_tool_attempt_async(
+                        turn,
+                        attempt=attempt_number,
+                    ),
+                    exc,
                 )
                 raise
             try:
@@ -398,9 +402,12 @@ class ToolExecutor:
                     result,
                 )
             except BaseException as exc:
-                await self._release_tool_attempt_async(
-                    turn,
-                    attempt=attempt_number,
+                await await_cleanup_after_error(
+                    self._release_tool_attempt_async(
+                        turn,
+                        attempt=attempt_number,
+                    ),
+                    exc,
                 )
                 self._abort_goal_tool(goal_checkpoint, exc)
                 raise
@@ -412,10 +419,13 @@ class ToolExecutor:
                     attempt=attempt_number,
                     result=result,
                 )
-            except BaseException:
-                await self._release_tool_attempt_async(
-                    turn,
-                    attempt=attempt_number,
+            except BaseException as exc:
+                await await_cleanup_after_error(
+                    self._release_tool_attempt_async(
+                        turn,
+                        attempt=attempt_number,
+                    ),
+                    exc,
                 )
                 raise
             retry = _should_retry(result, retry_policy, attempt_number, max_attempts)

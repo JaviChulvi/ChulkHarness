@@ -557,30 +557,43 @@ class ModelTransport:
         )
         turn.model_request_count += 1
         request_index = turn.model_request_count
-        await self._reserve_accounting_async(
-            turn,
-            request_index=request_index,
-            messages=summary_messages,
-            purpose="context_summary",
-        )
-        payload = format_model_request_trace(
-            summary_messages,
-            max_prompt_chars=self.trace_max_prompt_chars,
-            request_index=request_index,
-            turn_id=turn.turn_id,
-            loaded_memory_ids=self.state.loaded_memory_ids,
-            loaded_skill_names=self.state.loaded_skill_names,
-            available_tool_names=turn.available_tool_names,
-            context_report={
-                "purpose": "context_summary",
-                "source_message_count": len(messages),
-                "existing_summary": self.memory.conversation_summary is not None,
-            },
-        )
-        payload["purpose"] = "context_summary"
-        payload["summary_source_message_count"] = len(messages)
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
-        await self._flush_async()
+        try:
+            await self._reserve_accounting_async(
+                turn,
+                request_index=request_index,
+                messages=summary_messages,
+                purpose="context_summary",
+            )
+            payload = format_model_request_trace(
+                summary_messages,
+                max_prompt_chars=self.trace_max_prompt_chars,
+                request_index=request_index,
+                turn_id=turn.turn_id,
+                loaded_memory_ids=self.state.loaded_memory_ids,
+                loaded_skill_names=self.state.loaded_skill_names,
+                available_tool_names=turn.available_tool_names,
+                context_report={
+                    "purpose": "context_summary",
+                    "source_message_count": len(messages),
+                    "existing_summary": (
+                        self.memory.conversation_summary is not None
+                    ),
+                },
+            )
+            payload["purpose"] = "context_summary"
+            payload["summary_source_message_count"] = len(messages)
+            self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+            await self._flush_async()
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=request_index,
+                    reason="context_summary_setup_failed",
+                ),
+                exc,
+            )
+            raise
         return summary_messages, request_index
 
     def _summary_failure(
@@ -769,40 +782,53 @@ class ModelTransport:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         turn.model_request_count += 1
-        await self._reserve_accounting_async(
-            turn,
-            request_index=turn.model_request_count,
-            messages=messages,
-            purpose="agent_action",
-            repair_attempts=self.max_json_repair_attempts,
-        )
-        payload = format_model_request_trace(
-            messages,
-            max_prompt_chars=self.trace_max_prompt_chars,
-            request_index=turn.model_request_count,
-            turn_id=turn.turn_id,
-            loaded_memory_ids=self.state.loaded_memory_ids,
-            loaded_skill_names=self.state.loaded_skill_names,
-            available_tool_names=turn.available_tool_names,
-            context_report=context_report,
-        )
-        payload["action_transport"] = prompt.action_transport
-        payload["hosted_mcp_enabled"] = hosted_mcp_enabled
-        payload["hosted_mcp_server_labels"] = (
-            [server.label for server in self.mcp_servers]
-            if hosted_mcp_enabled
-            else []
-        )
-        payload["native_tool_names"] = [
-            str(declaration.get("name", ""))
-            for declaration in prompt.native_tool_declarations
-        ]
-        payload["native_tool_declarations"] = _bounded_native_tool_declarations(
-            prompt.native_tool_declarations,
-            max_chars=self.trace_max_prompt_chars,
-        )
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
-        await self._flush_async()
+        try:
+            await self._reserve_accounting_async(
+                turn,
+                request_index=turn.model_request_count,
+                messages=messages,
+                purpose="agent_action",
+                repair_attempts=self.max_json_repair_attempts,
+            )
+            payload = format_model_request_trace(
+                messages,
+                max_prompt_chars=self.trace_max_prompt_chars,
+                request_index=turn.model_request_count,
+                turn_id=turn.turn_id,
+                loaded_memory_ids=self.state.loaded_memory_ids,
+                loaded_skill_names=self.state.loaded_skill_names,
+                available_tool_names=turn.available_tool_names,
+                context_report=context_report,
+            )
+            payload["action_transport"] = prompt.action_transport
+            payload["hosted_mcp_enabled"] = hosted_mcp_enabled
+            payload["hosted_mcp_server_labels"] = (
+                [server.label for server in self.mcp_servers]
+                if hosted_mcp_enabled
+                else []
+            )
+            payload["native_tool_names"] = [
+                str(declaration.get("name", ""))
+                for declaration in prompt.native_tool_declarations
+            ]
+            payload["native_tool_declarations"] = (
+                _bounded_native_tool_declarations(
+                    prompt.native_tool_declarations,
+                    max_chars=self.trace_max_prompt_chars,
+                )
+            )
+            self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+            await self._flush_async()
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=turn.model_request_count,
+                    reason="model_request_setup_failed",
+                ),
+                exc,
+            )
+            raise
         return messages
 
     def _record_protocol_failure(
@@ -1037,39 +1063,50 @@ class ModelTransport:
         messages = build_reflection_messages(turn, proposed_answer)
         turn.model_request_count += 1
         request_index = turn.model_request_count
-        await self._reserve_accounting_async(
-            turn,
-            request_index=request_index,
-            messages=messages,
-            purpose="reflection",
-        )
-        context_report = {
-            "purpose": "reflection",
-            "reflection_attempt": attempt,
-            "proposed_answer_chars": len(proposed_answer),
-        }
-        self.trace(
-            TraceEvent.REFLECTION_STARTED,
-            {
-                "turn_id": turn.turn_id,
+        try:
+            await self._reserve_accounting_async(
+                turn,
+                request_index=request_index,
+                messages=messages,
+                purpose="reflection",
+            )
+            context_report = {
+                "purpose": "reflection",
                 "reflection_attempt": attempt,
-                "proposed_answer": proposed_answer,
-            },
-        )
-        request_payload = format_model_request_trace(
-            messages,
-            max_prompt_chars=self.trace_max_prompt_chars,
-            request_index=request_index,
-            turn_id=turn.turn_id,
-            loaded_memory_ids=self.state.loaded_memory_ids,
-            loaded_skill_names=self.state.loaded_skill_names,
-            available_tool_names=turn.available_tool_names,
-            context_report=context_report,
-        )
-        request_payload["purpose"] = "reflection"
-        request_payload["reflection_attempt"] = attempt
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
-        await self._flush_async()
+                "proposed_answer_chars": len(proposed_answer),
+            }
+            self.trace(
+                TraceEvent.REFLECTION_STARTED,
+                {
+                    "turn_id": turn.turn_id,
+                    "reflection_attempt": attempt,
+                    "proposed_answer": proposed_answer,
+                },
+            )
+            request_payload = format_model_request_trace(
+                messages,
+                max_prompt_chars=self.trace_max_prompt_chars,
+                request_index=request_index,
+                turn_id=turn.turn_id,
+                loaded_memory_ids=self.state.loaded_memory_ids,
+                loaded_skill_names=self.state.loaded_skill_names,
+                available_tool_names=turn.available_tool_names,
+                context_report=context_report,
+            )
+            request_payload["purpose"] = "reflection"
+            request_payload["reflection_attempt"] = attempt
+            self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+            await self._flush_async()
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn,
+                    request_index=request_index,
+                    reason="reflection_setup_failed",
+                ),
+                exc,
+            )
+            raise
         return attempt, messages, request_index
 
     def _record_reflection_response(

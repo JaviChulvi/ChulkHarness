@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import time
 
 import pytest
 
 from chulk import Agent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
+from chulk.core.state import TurnState
+from chulk.core.tool_execution import ToolExecutor
 from chulk.llm import LLMClient
 from chulk.tools import ToolExecutionContext, ToolRegistry
+from chulk.tools.permissions import ToolPermissionPolicy
 
 
 OUTPUT_SCHEMA = {
@@ -289,3 +293,70 @@ async def test_async_cancellation_is_not_converted_or_retried():
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
+    started = asyncio.Event()
+    released = False
+    aborted: list[BaseException] = []
+
+    @Tool
+    async def cancellable() -> str:
+        """Wait until cancelled."""
+        started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    class Usage:
+        async def reserve_tool_call(self, **_kwargs):
+            return SimpleNamespace(
+                id="reservation-1",
+                budget=SimpleNamespace(
+                    scope=SimpleNamespace(value="turn"),
+                ),
+                reserved_tool_calls=1,
+            )
+
+        async def release_tool_call(self, **_kwargs):
+            nonlocal released
+            released = True
+            raise RuntimeError("tool release failed")
+
+    class Goal:
+        def begin_tool(self, **_kwargs):
+            return object()
+
+        def finish_tool(self, _checkpoint, _result):
+            raise AssertionError("cancelled tools cannot finish")
+
+        def abort_tool(self, checkpoint, error):
+            aborted.append(error)
+            return checkpoint
+
+    registry = ToolRegistry()
+    registry.register(cancellable)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda _name, _payload=None: None,
+        get_context=lambda _turn: None,
+        goal_execution=Goal(),
+        async_usage_accounting=Usage(),
+    )
+    task = asyncio.create_task(
+        executor.execute_async("cancellable", {}, TurnState("cancel"))
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert released
+    assert aborted == [error.value]
+    assert any(
+        "tool release failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
