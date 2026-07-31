@@ -24,12 +24,14 @@ from chulk import (
     ToolIdentity,
     ToolPolicy,
     ToolPolicyHooks,
+    ResourceKind,
     ToolRisk,
     ToolConcurrency,
     UsageGroupBy,
     DataClassification,
 )
 from chulk.core.state import TurnState
+from chulk._sdk.config import coerce_config
 from chulk.hosting.reference import InMemoryServiceHub
 from chulk.hosting.services import (
     ServiceBinding,
@@ -38,7 +40,8 @@ from chulk.hosting.services import (
 )
 from chulk.llm import LLMClient
 from chulk.plugins import PluginAuditReport
-from chulk.skills import LearningReviewOutcome
+from chulk.runtime import create_async_hosted_agent
+from chulk.skills import LearningReviewOutcome, Skill
 from chulk.tools import ToolExecutionContext, ToolRegistry, ToolResult
 from chulk.tools import (
     archive_memory as archive_memory_ref,
@@ -353,6 +356,53 @@ async def test_async_service_resolution_closes_every_owned_resource_on_failure()
     )
 
 
+@pytest.mark.asyncio
+async def test_async_hosted_construction_closes_owned_resources_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+
+    class Client:
+        def bind_config(self, _config):
+            raise RuntimeError("client bind failed")
+
+        async def aclose(self) -> None:
+            closed.append("client")
+
+    class Resource:
+        async def aclose(self) -> None:
+            closed.append("resource")
+            raise RuntimeError("resource close failed")
+
+    client = Client()
+    monkeypatch.setattr(
+        "chulk.runtime._default_llm_client_factory",
+        lambda _config: client,
+    )
+    base = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(base, name)
+        for name in base.__dataclass_fields__
+    }
+    fields["content"] = AsyncServiceBinding.runtime(Resource())
+
+    with pytest.raises(RuntimeError, match="client bind failed") as error:
+        await create_async_hosted_agent(
+            coerce_config(AgentConfig(project_root=tmp_path)),
+            services=AsyncRuntimeServices(**fields),
+            execution_scope=_scope(),
+            tool_specs=[],
+            skill_specs=[],
+        )
+
+    assert closed == ["client", "resource"]
+    assert any(
+        "resource close failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+
+
 def test_hosted_service_failure_maps_to_redacted_configuration_error(
     tmp_path: Path,
 ) -> None:
@@ -406,6 +456,185 @@ def test_in_memory_services_isolate_identical_resource_ids_by_tenant() -> None:
     first_artifact = first_services.artifacts.write("private", "tenant-a")
     with pytest.raises(KeyError):
         second_services.artifacts.read(first_artifact.artifact_id)
+
+
+@pytest.mark.asyncio
+async def test_in_memory_reference_services_cover_management_edges() -> None:
+    hub = InMemoryServiceHub()
+    scope = _scope(conversation_id="conversation")
+
+    assert hub.audit_events(scope) == ()
+    assert hub.active_usage_reservations(scope) == ()
+    services = hub.services().resolve(scope)
+
+    sessions = services.sessions.store
+    sessions.create_conversation(
+        "conversation",
+        provider="fake",
+        model="fake",
+    )
+    first_summary = sessions.save_conversation_summary(
+        "conversation",
+        content="first",
+        source_message_count=1,
+    )
+    updated_summary = sessions.save_conversation_summary(
+        "conversation",
+        content="updated",
+        source_message_count=2,
+    )
+    assert updated_summary.id == first_summary.id
+    sessions.save_message(
+        "conversation",
+        role="user",
+        content=" ",
+    )
+    sessions.save_message(
+        "conversation",
+        role="user",
+        content="hello",
+        message_key="message-1",
+    )
+    sessions.save_message(
+        "conversation",
+        role="user",
+        content="duplicate",
+        message_key="message-1",
+    )
+    assert sessions.max_observation_index("conversation", "turn-1") == 0
+    terminal_turn = TurnState(user_message="hello")
+    terminal_turn.complete("done")
+    assert sessions.save_terminal_turn_bundle(
+        "conversation",
+        turn_id=terminal_turn.turn_id,
+        content="done",
+        message_key="assistant-1",
+        turn=terminal_turn.to_dict(),
+    )
+    assert sessions.load_terminal_turn_message(
+        "conversation",
+        terminal_turn.turn_id,
+    ) == {"content": "done", "kind": "final"}
+    with pytest.raises(PermissionError, match="cross-scope"):
+        sessions.get_conversation("other")
+
+    memory = services.memory
+    assert memory.summarize_memories() == "No memories found."
+    approved_id = memory.create_memory_proposal(
+        "approved memory",
+        tags=["profile"],
+        evidence="host review",
+        conversation_id="conversation",
+        turn_id="turn-1",
+    )
+    rejected_id = memory.create_memory_proposal("rejected memory")
+    assert len(memory.list_memory_proposals(status=None)) == 2
+    approved = memory.approve_memory_proposal(approved_id)
+    assert memory.approve_memory_proposal(approved_id) is approved
+    rejected = memory.reject_memory_proposal(rejected_id)
+    assert memory.reject_memory_proposal(rejected_id) is rejected
+    assert approved.accepted_memory_id is not None
+    assert memory.archive_memory(approved.accepted_memory_id)
+    assert memory.get_memory(approved.accepted_memory_id) is None
+    assert (
+        memory.get_memory(
+            approved.accepted_memory_id,
+            include_archived=True,
+        )
+        is not None
+    )
+    assert memory.search_memory(
+        "approved",
+        include_archived=True,
+    )
+
+    usage = services.usage
+    model = usage.reserve_model_request(turn_id="turn-1", request_index=0)
+    usage.commit_model_request(
+        turn_id="turn-1",
+        request_index=0,
+        purpose="model",
+    )
+    tool = usage.reserve_tool_call(turn_id="turn-1", tool_call_index=1)
+    usage.commit_tool_call(
+        turn_id="turn-1",
+        tool_call_index=1,
+        tool_name="lookup",
+    )
+    media = usage.reserve_media_transform(
+        turn_id="turn-1",
+        operation_index=2,
+    )
+    usage.commit_media_transform(media, processor="resize")
+    released_media = usage.reserve_media_transform(
+        turn_id="turn-1",
+        operation_index=3,
+    )
+    assert usage.release_media_transform(released_media) is released_media
+    assert usage.release_model_request(
+        turn_id="turn-1",
+        request_index=0,
+    ) is None
+    assert usage.release_tool_call(
+        turn_id="turn-1",
+        tool_call_index=1,
+    ) is None
+    assert model.resource_kind is ResourceKind.MODEL
+    assert tool.resource_kind is ResourceKind.TOOL
+    for group_by in UsageGroupBy:
+        assert usage.group(group_by)
+
+    skills = services.skills.registry
+    first_skill = Skill(
+        name="first",
+        description="first",
+        path=Path("first"),
+        loaded_content="first content",
+        digest="sha256:first",
+    )
+    second_skill = Skill(
+        name="second",
+        description="second",
+        path=Path("second"),
+        digest="sha256:second",
+    )
+    skills.register(first_skill)
+    with pytest.raises(ValueError, match="already registered"):
+        skills.register(first_skill)
+    skills.register(second_skill)
+    selections = skills.load_selected_skills(
+        "request",
+        pinned_names=("missing", "first", "second"),
+        limit=1,
+    )
+    assert [selection.skill for selection in selections] == [first_skill]
+    assert {
+        decision.reason for decision in skills.last_routing_result.decisions
+    } == {"not_found", "pinned", "skill_count_limit"}
+    assert skills.load_content("first") == "first content"
+    skills.restrict_to(["first"])
+    assert skills.list_visible_skills() == [first_skill]
+
+    services.audit.record("checked", {}, scope=scope)
+    assert hub.audit_events(scope)
+    trace = services.traces
+    trace.write_artifact("evidence", "body")
+    trace.close()
+    with pytest.raises(RuntimeError, match="trace service is closed"):
+        trace.log("late")
+
+    backend = services.execution
+    session = backend.open_session(SimpleNamespace())
+    with pytest.raises(PermissionError, match="does not expose execution tools"):
+        session.missing()
+    with pytest.raises(PermissionError, match="does not expose execution tools"):
+        await session.missing_async()
+    await session.aclose()
+    await backend.aclose()
+    assert session.closed
+    assert backend.closed
+    assert services.plugins.audit().profile_id == "default"
+    assert services.content.sweep_expired() == 0
 
 
 def test_hosted_resume_rejects_persisted_scope_mismatch(
@@ -987,6 +1216,131 @@ async def test_async_hosted_tool_refs_await_native_services(
         ("sessions.search", "read_window", id(loop)),
     }
     await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_management_fails_closed_without_services(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+
+    assert await agent.list_learning_proposals() == ()
+    assert await agent.list_governed_skills() == ()
+    assert await agent.list_skill_revisions("missing") == ()
+    for operation in (
+        lambda: agent.get_learning_proposal("missing"),
+        lambda: agent.approve_learning_proposal("missing"),
+        lambda: agent.reject_learning_proposal("missing"),
+        lambda: agent.rollback_skill("missing"),
+        agent.confirm_skill_success,
+        agent.review_learning,
+    ):
+        with pytest.raises(Exception, match="not configured"):
+            await operation()
+
+    core = agent.runtime
+    memory_policy = core.async_memory_policy
+    core.async_memory_policy = None
+    assert await agent.list_memory_proposals() == ()
+    with pytest.raises(Exception, match="Memory is not configured"):
+        await agent.approve_memory_proposal("missing")
+    with pytest.raises(Exception, match="Memory is not configured"):
+        await agent.reject_memory_proposal("missing")
+    core.async_memory_policy = memory_policy
+
+    class LifecycleStore:
+        async def record_usage(self, **_kwargs):
+            raise AssertionError("invalid versions must not be recorded")
+
+    core.skill_lifecycle_store = LifecycleStore()
+    with pytest.raises(KeyError, match="does not exist"):
+        await core.confirm_skill_success_async(turn_id="missing")
+    incomplete = TurnState(user_message="incomplete")
+    core.state.turns.append(incomplete)
+    with pytest.raises(ValueError, match="completed host run"):
+        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+    incomplete.complete("done")
+    incomplete.extension_metadata["loaded_skill_versions"] = "invalid"
+    assert (
+        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+        == ()
+    )
+    incomplete.extension_metadata["loaded_skill_versions"] = [
+        None,
+        {"name": 1},
+    ]
+    assert (
+        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+        == ()
+    )
+
+    class Reviewer:
+        async def review(self, _context):
+            return LearningReviewOutcome(
+                skipped=True,
+                rationale="nothing to learn",
+            )
+
+    core.learning_reviewer = Reviewer()
+    core.async_skill_registry = None
+    with pytest.raises(KeyError, match="does not exist"):
+        await core.review_learning_async(turn_id="missing")
+    unfinished = TurnState(user_message="unfinished")
+    core.state.turns.append(unfinished)
+    with pytest.raises(ValueError, match="finished turn"):
+        await core.review_learning_async(turn_id=unfinished.turn_id)
+    unfinished.complete("done")
+    outcome = await core.review_learning_async(turn_id=unfinished.turn_id)
+    assert outcome.skipped
+    with pytest.raises(Exception, match="proposals are not configured"):
+        await agent.review_learning(turn_id=unfinished.turn_id)
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_close_preserves_first_failure_and_finishes_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    closed: list[str] = []
+
+    async def fail_flush() -> None:
+        closed.append("flush")
+        raise RuntimeError("flush failed")
+
+    class Owned:
+        async def aclose_owned(self) -> None:
+            closed.append("owned")
+            raise RuntimeError("owned close failed")
+
+    monkeypatch.setattr(agent.runtime, "_flush_async_services", fail_flush)
+    agent._async_owned_services = Owned()
+
+    with pytest.raises(RuntimeError, match="flush failed") as error:
+        await agent.close()
+
+    assert closed == ["flush", "owned"]
+    assert any(
+        "owned close failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+    assert agent._async_owned_services is None
 
 
 @pytest.mark.asyncio
