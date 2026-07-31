@@ -67,21 +67,17 @@ class _LoopBoundService:
         if not callable(value):
             return value
 
-        def invoke(*args, **kwargs):
+        async def invoke(*args, **kwargs):
             loop = asyncio.get_running_loop()
             self._calls.append(
                 (self._name, name, id(loop))
             )
             result = value(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
 
-            async def resolve():
-                if inspect.isawaitable(result):
-                    return await result
-                return result
-
-            return resolve()
-
-        return inspect.markcoroutinefunction(invoke)
+        return invoke
 
 
 async def _resolve_async_binding(binding, scope: ExecutionScope):
