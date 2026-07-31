@@ -350,11 +350,12 @@ class SQLiteRunStore:
         child_run_id: str,
     ) -> ChildRunRecord:
         with self._connect() as conn:
-            child = _child_from_row(conn, _child_row(conn, child_run_id))
+            child_row = _child_row(conn, child_run_id)
             parent = _run_from_conn(
                 conn,
-                _run_row(conn, child.parent_run_id),
+                _run_row(conn, str(child_row["parent_run_id"])),
             )
+            child = _child_from_row(conn, child_row)
         _assert_parent_or_child_scope(scope, parent.scope, child.run.scope)
         return child
 
