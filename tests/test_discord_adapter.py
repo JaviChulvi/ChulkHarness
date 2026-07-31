@@ -213,7 +213,7 @@ async def test_discord_direct_message_consumes_pairing_without_agent_execution(
 
 
 def test_discord_adapter_does_not_import_core_or_provider_modules() -> None:
-    package = Path(__file__).resolve().parents[1] / "discord"
+    package = Path(__file__).resolve().parents[1] / "src" / "chulk" / "discord"
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(package.glob("*.py"))

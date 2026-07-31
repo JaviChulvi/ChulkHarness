@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_example(
@@ -25,7 +25,12 @@ def _run_example(
     ):
         env.pop(name, None)
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(ROOT) if not existing else os.pathsep.join((str(ROOT), existing))
+    source_root = ROOT / "src"
+    env["PYTHONPATH"] = (
+        str(source_root)
+        if not existing
+        else os.pathsep.join((str(source_root), existing))
+    )
     if runtime_dir is not None:
         env["CHULK_EXAMPLE_RUNTIME_DIR"] = str(runtime_dir)
     return subprocess.run(

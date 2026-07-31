@@ -502,7 +502,7 @@ def test_runtime_factory_forwards_only_selected_child_scope(tmp_path) -> None:
         policy=DelegationPolicy(max_depth=2),
     )
     task = service.delegate(
-        DelegationRequest(_spec(context={"files": ["chulk/runtime.py"]})),
+        DelegationRequest(_spec(context={"files": ["src/chulk/runtime.py"]})),
         authority=_authority(),
     )
     claim = service.store.claim(

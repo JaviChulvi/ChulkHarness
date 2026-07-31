@@ -21,7 +21,7 @@ from chulk.plugins import (
     PluginRegistrationError,
     PluginVerificationError,
 )
-from chulk.tests.test_plugin_manifests import plugin_manifest, write_plugin
+from .test_plugin_manifests import plugin_manifest, write_plugin
 
 
 def registry(tmp_path):

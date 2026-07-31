@@ -175,7 +175,7 @@ def _resolve_config_path(value: str | Path, *, base: Path) -> Path:
 
 def load_config(environ: Mapping[str, str] | None = None) -> Config:
     """Load local development configuration."""
-    default_root = Path(__file__).resolve().parent.parent
+    default_root = Path.cwd()
     process_env = dict(os.environ if environ is None else environ)
     initial_root = Path(process_env.get("CHULK_PROJECT_ROOT", default_root)).resolve()
     dotenv_env = _parse_dotenv(initial_root / ".env")

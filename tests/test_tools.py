@@ -849,9 +849,12 @@ def test_host_can_explicitly_opt_in_to_sensitive_file_reads(tmp_path):
 
 
 def test_search_files_ignores_runtime_trace_artifacts(tmp_path):
-    (tmp_path / "chulk" / "core").mkdir(parents=True)
+    (tmp_path / "src" / "chulk" / "core").mkdir(parents=True)
     (tmp_path / "traces").mkdir()
-    (tmp_path / "chulk" / "core" / "agent.py").write_text("agentic loop lives here\n", encoding="utf-8")
+    (tmp_path / "src" / "chulk" / "core" / "agent.py").write_text(
+        "agentic loop lives here\n",
+        encoding="utf-8",
+    )
     (tmp_path / "traces" / "session.jsonl").write_text("agentic loop noisy trace\n", encoding="utf-8")
     registry = ToolRegistry()
     registry.register(search_files_tool(tmp_path))
@@ -859,7 +862,7 @@ def test_search_files_ignores_runtime_trace_artifacts(tmp_path):
     result = registry.run("search_files", {"query": "agentic loop", "path": ".", "max_results": 10})
 
     assert result.success
-    assert "chulk/core/agent.py" in result.observation
+    assert "src/chulk/core/agent.py" in result.observation
     assert "traces/session.jsonl" not in result.observation
 
 

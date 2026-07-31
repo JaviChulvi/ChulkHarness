@@ -124,7 +124,7 @@ and SQLite adapters. Run/approval access validates immutable
 
 ```bash
 CHULK_POSTGRES_TEST_URL="postgresql+psycopg://postgres:postgres@localhost/chulk" \
-  python -m pytest chulk/tests/test_postgres_reference.py -q
+  python -m pytest tests/test_postgres_reference.py -q
 ```
 
 The gate covers migration, sync/async parity, scope isolation, duplicates,

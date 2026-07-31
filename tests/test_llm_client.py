@@ -1903,6 +1903,6 @@ def test_resolve_model_capabilities_rejects_unknown_models():
         resolve_model_capabilities("openai", "unknown-model")
     except ValueError as exc:
         assert "No token capability metadata" in str(exc)
-        assert "chulk/llm/model_catalog.py" in str(exc)
+        assert "src/chulk/llm/model_catalog.py" in str(exc)
     else:
         raise AssertionError("Expected unknown model capability lookup to fail")

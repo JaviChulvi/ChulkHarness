@@ -79,9 +79,9 @@ adds cited web search without exposing arbitrary network access.
 conda env create -f environment.yml
 conda activate chulk
 python -m pytest
-python -m ruff check chulk examples scripts
+python -m ruff check src/chulk examples scripts
 python -m mypy typing_tests
-python -m compileall chulk examples scripts
+python -m compileall src/chulk examples scripts
 python scripts/check_docs.py
 ```
 

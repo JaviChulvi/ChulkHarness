@@ -283,7 +283,7 @@ def resolve_model_capabilities(provider: str, model: str) -> LLMModelCapabilitie
     )
     raise ValueError(
         f"No token capability metadata configured for {provider}/{model}. "
-        f"Add this model to chulk/llm/model_catalog.py. Supported models: {supported}"
+        f"Add this model to src/chulk/llm/model_catalog.py. Supported models: {supported}"
     )
 
 

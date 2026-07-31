@@ -524,7 +524,7 @@ def test_main_plan_prefix_creates_one_shot_pending_plan(monkeypatch, tmp_path, c
                                     {
                                         "id": "1",
                                         "title": "Add subagent dispatcher",
-                                        "description": "Update chulk/core/agent.py with a parent-to-child delegation path.",
+                                        "description": "Update src/chulk/core/agent.py with a parent-to-child delegation path.",
                                         "status": "pending",
                                     }
                                 ],

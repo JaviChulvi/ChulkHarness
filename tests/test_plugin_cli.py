@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from chulk.main import main
-from chulk.tests.test_plugin_manifests import write_plugin
+from .test_plugin_manifests import write_plugin
 
 
 def test_cli_inspects_without_importing_plugin_code(

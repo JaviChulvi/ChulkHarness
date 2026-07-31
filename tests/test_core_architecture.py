@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 
-CORE = Path(__file__).parents[1] / "core"
+CORE = Path(__file__).resolve().parents[1] / "src" / "chulk" / "core"
 
 
 def _imports(path: Path) -> set[str]:

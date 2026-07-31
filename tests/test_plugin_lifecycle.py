@@ -28,7 +28,7 @@ from chulk.plugins import (
     PluginVerificationError,
     ReviewedPluginCatalog,
 )
-from chulk.tests.test_plugin_manifests import (
+from .test_plugin_manifests import (
     plugin_manifest,
     write_plugin,
 )

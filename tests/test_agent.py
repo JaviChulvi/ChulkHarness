@@ -1545,15 +1545,18 @@ def test_agent_planned_turn_creates_pending_plan_without_running_tools(tmp_path)
 
 
 def test_agent_planned_turn_allows_read_only_reconnaissance_before_plan(tmp_path):
-    (tmp_path / "chulk").mkdir()
-    (tmp_path / "chulk" / "core.py").write_text("class Agent:\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "chulk").mkdir(parents=True)
+    (tmp_path / "src" / "chulk" / "core.py").write_text(
+        "class Agent:\n    pass\n",
+        encoding="utf-8",
+    )
     plan_payload = {
         "summary": "Add subagent support based on the inspected runtime.",
         "steps": [
             {
                 "id": "1",
                 "title": "Extend agent runtime",
-                "description": "Use the inspected chulk/core.py shape to add subagent orchestration.",
+                "description": "Use the inspected src/chulk/core.py shape to add subagent orchestration.",
                 "status": "pending",
             }
         ],
@@ -1565,7 +1568,7 @@ def test_agent_planned_turn_allows_read_only_reconnaissance_before_plan(tmp_path
                     "type": "tool_call",
                     "content": None,
                     "tool_name": "read_file",
-                    "arguments_json": json.dumps({"path": "chulk/core.py"}),
+                    "arguments_json": json.dumps({"path": "src/chulk/core.py"}),
                 }
             ),
             json.dumps(
@@ -1691,9 +1694,15 @@ def test_agent_planned_turn_blocks_read_named_tool_declared_as_write():
 
 
 def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
-    (tmp_path / "chulk").mkdir()
-    (tmp_path / "chulk" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
-    (tmp_path / "chulk" / "config.py").write_text("class Config:\n    pass\n", encoding="utf-8")
+    (tmp_path / "src" / "chulk").mkdir(parents=True)
+    (tmp_path / "src" / "chulk" / "main.py").write_text(
+        "def main():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "chulk" / "config.py").write_text(
+        "class Config:\n    pass\n",
+        encoding="utf-8",
+    )
     weak_plan_payload = {
         "summary": "Explore the current codebase before designing subagents.",
         "steps": [
@@ -1717,13 +1726,13 @@ def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
             {
                 "id": "1",
                 "title": "Add subagent state models",
-                "description": "Extend chulk/core/state.py with records for child task requests and results.",
+                "description": "Extend src/chulk/core/state.py with records for child task requests and results.",
                 "status": "pending",
             },
             {
                 "id": "2",
                 "title": "Implement subagent orchestration",
-                "description": "Update chulk/core/agent.py to spawn isolated child agents and collect results.",
+                "description": "Update src/chulk/core/agent.py to spawn isolated child agents and collect results.",
                 "status": "pending",
             },
         ],
@@ -1735,7 +1744,7 @@ def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
                     "type": "tool_call",
                     "content": None,
                     "tool_name": "list_files",
-                    "arguments_json": json.dumps({"path": "chulk", "pattern": "*.py"}),
+                    "arguments_json": json.dumps({"path": "src/chulk", "pattern": "*.py"}),
                 }
             ),
             json.dumps(
@@ -1752,7 +1761,7 @@ def test_agent_planned_turn_revises_reconnaissance_only_plan(tmp_path):
                     "type": "tool_call",
                     "content": None,
                     "tool_name": "read_file",
-                    "arguments_json": json.dumps({"path": "chulk/main.py"}),
+                    "arguments_json": json.dumps({"path": "src/chulk/main.py"}),
                 }
             ),
             json.dumps(
@@ -1798,13 +1807,13 @@ def test_agent_planned_turn_revises_direct_answer_into_plan():
             {
                 "id": "1",
                 "title": "Add subagent action type",
-                "description": "Extend chulk/core/actions.py with a delegation action for child-agent work.",
+                "description": "Extend src/chulk/core/actions.py with a delegation action for child-agent work.",
                 "status": "pending",
             },
             {
                 "id": "2",
                 "title": "Implement delegation runtime",
-                "description": "Update chulk/core/agent.py to create child agents and return their observations.",
+                "description": "Update src/chulk/core/agent.py to create child agents and return their observations.",
                 "status": "pending",
             },
         ],
@@ -1845,7 +1854,7 @@ def test_agent_planned_turn_requests_plan_when_reconnaissance_budget_is_exhauste
             {
                 "id": "1",
                 "title": "Update agent runtime",
-                "description": "Modify chulk/core/agent.py using the files already inspected.",
+                "description": "Modify src/chulk/core/agent.py using the files already inspected.",
                 "status": "pending",
             }
         ],

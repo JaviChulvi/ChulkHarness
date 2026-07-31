@@ -56,6 +56,15 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.mcp_servers == ()
 
 
+def test_load_config_defaults_project_root_to_current_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config({})
+
+    assert config.project_root == tmp_path
+    assert config.runtime_dir == tmp_path / ".chulk"
+
+
 def test_load_config_reads_dotenv(tmp_path):
     (tmp_path / ".env").write_text(
         "\n".join(

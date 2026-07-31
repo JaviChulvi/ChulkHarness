@@ -283,7 +283,7 @@ def test_lowercase_factories_return_public_facades(tmp_path):
 
 
 def test_public_package_contract_uses_one_version_and_distinct_names():
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
     assert __version__ == source_version == distribution_version("chulkharness")
@@ -1623,7 +1623,7 @@ def test_wheel_install_exposes_sdk_defaults_and_bundled_skills(tmp_path):
             "-w",
             str(wheelhouse),
         ],
-        cwd=Path(__file__).resolve().parents[2],
+        cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
         text=True,

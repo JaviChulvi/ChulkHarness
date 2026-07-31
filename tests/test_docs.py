@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_documentation_checker_passes() -> None:

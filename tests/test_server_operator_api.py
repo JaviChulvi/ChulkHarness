@@ -16,7 +16,7 @@ from chulk.goals import GoalService, GoalStep, GoalStore
 from chulk.profiles import SQLiteProfileStore
 from chulk.server import ControlApiClient, ControlApiError
 from chulk.scheduling import SQLiteScheduleStore
-from chulk.tests.test_server_app import _app, _auth
+from .test_server_app import _app, _auth
 from chulk.usage import BudgetScope, RunBudget
 
 

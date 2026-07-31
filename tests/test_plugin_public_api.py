@@ -20,7 +20,7 @@ from chulk import (
     plugins,
 )
 from chulk.llm import LLMClient
-from chulk.tests.test_plugin_manifests import write_plugin
+from .test_plugin_manifests import write_plugin
 
 
 class FakeLLMClient(LLMClient):
