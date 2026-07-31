@@ -1,6 +1,5 @@
 """Stable public programmable API for Chulk."""
 
-from chulk._sdk.config import AgentConfig, AgentPreset, MCP
 from chulk.authoring import (
     AGENT_DEFINITION_SCHEMA_VERSION,
     AgentCompiler,
@@ -33,6 +32,7 @@ from chulk.authoring import (
     WorkflowGraph,
     WorkflowStep,
 )
+from chulk._sdk.config import AgentConfig, AgentPreset, MCP
 from chulk.capabilities import (
     Capabilities,
     FileAccess,

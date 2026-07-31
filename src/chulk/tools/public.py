@@ -14,7 +14,7 @@ from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
 from chulk.tools.artifacts import read_trace_artifact_tool
 from chulk.tools.permissions import ToolPermissionLevel
 from chulk.tools.policy import ToolIdentity, ToolPolicy
-from chulk.tools.calculator import calculator_tool
+from chulk.tools._calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.processes import process_tools
 from chulk.tools.memory import (

@@ -1,95 +1,102 @@
 """Tool implementations and registry primitives."""
 
-from chulk.tools.builtins import create_default_tool_registry
-from chulk.tools.artifacts import read_trace_artifact_tool
-from chulk.tools.calculator import calculator_tool
-from chulk.tools.files import (
-    FileReadPolicy,
-    apply_patch_tool,
-    list_files_tool,
-    read_file_tool,
-    search_files_tool,
-    write_file_tool,
-)
-from chulk.tools.memory import (
-    archive_memory_tool,
-    compact_memories_tool,
-    delete_memory_tool,
-    export_memories_tool,
-    import_memories_tool,
-    list_memories_tool,
-    restore_memory_tool,
-    save_memory_tool,
-    search_memory_tool,
-    summarize_memories_tool,
-    update_memory_tool,
-)
-from chulk.tools.registry import Tool, ToolExecutionContext, ToolFailureKind, ToolRegistry, ToolResult
-from chulk.tools.permissions import (
-    DEFAULT_PERMISSION_PROFILE,
-    PermissionDecision,
-    PermissionDecisionRecord,
-    PermissionRequest,
-    SUPPORTED_PERMISSION_PROFILES,
-    ToolPermissionLevel,
-    ToolPermissionPolicy,
-    normalize_permission_profile,
-    permission_policy_for_profile,
-)
-from chulk.tools.policy import (
-    DataClassification,
-    ToolApprovalMode,
-    ToolAuthorization,
-    ToolConcurrency,
-    ToolEffect,
-    ToolIdentity,
-    ToolIdempotencyStrategy,
-    ToolPolicy,
-    ToolPolicyHooks,
-    ToolRisk,
-)
-from chulk.tools.processes import process_tools
-from chulk.tools.public import (
-    ToolContext,
-    ToolRef,
-    apply_patch,
-    archive_memory,
-    calculator,
-    compact_memories,
-    default_software_engineer,
-    delete_memory,
-    export_memories,
-    import_memories,
-    list_files,
-    list_memories,
-    process_logs,
-    process_poll,
-    process_start,
-    process_terminate,
-    process_write,
-    read_file,
-    read_trace_artifact,
-    restore_memory,
-    run_cmd,
-    save_memory,
-    search_files,
-    search_memory,
-    session_read,
-    session_search,
-    summarize_memories,
-    tool,
-    update_memory,
-    write_file,
-)
-from chulk.tools.shell import (
-    DirectShellExecutionPolicy,
-    ShellExecutionDecision,
-    ShellExecutionPolicy,
-    ShellExecutionRequest,
-    run_shell_command,
-    shell_tool,
-)
-from chulk.tools.sessions import session_read_tool, session_search_tool
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from chulk._lazy import public_dir, resolve_export
+
+if TYPE_CHECKING:
+    from chulk.tools.builtins import create_default_tool_registry
+    from chulk.tools.artifacts import read_trace_artifact_tool
+    from chulk.tools._calculator import calculator_tool
+    from chulk.tools.files import (
+        FileReadPolicy,
+        apply_patch_tool,
+        list_files_tool,
+        read_file_tool,
+        search_files_tool,
+        write_file_tool,
+    )
+    from chulk.tools.memory import (
+        archive_memory_tool,
+        compact_memories_tool,
+        delete_memory_tool,
+        export_memories_tool,
+        import_memories_tool,
+        list_memories_tool,
+        restore_memory_tool,
+        save_memory_tool,
+        search_memory_tool,
+        summarize_memories_tool,
+        update_memory_tool,
+    )
+    from chulk.tools.registry import Tool, ToolExecutionContext, ToolFailureKind, ToolRegistry, ToolResult
+    from chulk.tools.permissions import (
+        DEFAULT_PERMISSION_PROFILE,
+        PermissionDecision,
+        PermissionDecisionRecord,
+        PermissionRequest,
+        SUPPORTED_PERMISSION_PROFILES,
+        ToolPermissionLevel,
+        ToolPermissionPolicy,
+        normalize_permission_profile,
+        permission_policy_for_profile,
+    )
+    from chulk.tools.policy import (
+        DataClassification,
+        ToolApprovalMode,
+        ToolAuthorization,
+        ToolConcurrency,
+        ToolEffect,
+        ToolIdentity,
+        ToolIdempotencyStrategy,
+        ToolPolicy,
+        ToolPolicyHooks,
+        ToolRisk,
+    )
+    from chulk.tools.processes import process_tools
+    from chulk.tools.public import (
+        ToolContext,
+        ToolRef,
+        apply_patch,
+        archive_memory,
+        calculator,
+        compact_memories,
+        default_software_engineer,
+        delete_memory,
+        export_memories,
+        import_memories,
+        list_files,
+        list_memories,
+        process_logs,
+        process_poll,
+        process_start,
+        process_terminate,
+        process_write,
+        read_file,
+        read_trace_artifact,
+        restore_memory,
+        run_cmd,
+        save_memory,
+        search_files,
+        search_memory,
+        session_read,
+        session_search,
+        summarize_memories,
+        tool,
+        update_memory,
+        write_file,
+    )
+    from chulk.tools.shell import (
+        DirectShellExecutionPolicy,
+        ShellExecutionDecision,
+        ShellExecutionPolicy,
+        ShellExecutionRequest,
+        run_shell_command,
+        shell_tool,
+    )
+    from chulk.tools.sessions import session_read_tool, session_search_tool
 
 __all__ = [
     "Tool",
@@ -176,3 +183,33 @@ __all__ = [
     "write_file",
     "write_file_tool",
 ]
+
+
+_EXPORT_MODULES = (
+    "chulk.tools.public",
+    "chulk.tools.registry",
+    "chulk.tools.permissions",
+    "chulk.tools.policy",
+    "chulk.tools.files",
+    "chulk.tools.memory",
+    "chulk.tools.shell",
+    "chulk.tools.builtins",
+    "chulk.tools.artifacts",
+    "chulk.tools._calculator",
+    "chulk.tools.processes",
+    "chulk.tools.sessions",
+)
+
+
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> object:
+        return resolve_export(
+            name,
+            public_names=__all__,
+            owner_modules=_EXPORT_MODULES,
+            namespace=globals(),
+        )
+
+    def __dir__() -> list[str]:
+        return public_dir(__all__, globals())

@@ -7,7 +7,7 @@ from pathlib import Path
 from chulk.capabilities import Capabilities, FileAccess, MemoryMode
 from chulk.memory import MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import SessionSearchService
-from chulk.tools.calculator import calculator_tool
+from chulk.tools._calculator import calculator_tool
 from chulk.tools.files import apply_patch_tool, list_files_tool, read_file_tool, search_files_tool, write_file_tool
 from chulk.tools.memory import (
     archive_memory_tool,

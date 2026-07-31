@@ -1,80 +1,86 @@
 """Skill registry primitives and public skill references."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from chulk.skills.manifest import (
-    LEGACY_SKILL_VERSION,
-    SKILL_MANIFEST_SCHEMA_VERSION,
-    SkillManifest,
-    SkillManifestError,
-    SkillPackage,
-    load_skill_package,
-    resolve_skill_resource,
-    skill_package_digest,
-)
-from chulk.skills.lifecycle_models import (
-    LearningProposalKind,
-    LearningProposalRecord,
-    LearningProposalStatus,
-    LearningReviewUsage,
-    SkillLifecycleRecord,
-    SkillLifecycleStatus,
-    SkillRevisionRecord,
-    SkillUsageKind,
-)
-from chulk.skills.lifecycle import (
-    SkillApprovalError,
-    SkillConflictError,
-    SkillLifecycleError,
-    SkillLifecycleManager,
-    SkillScope,
-    proposal_diff,
-)
-from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
-from chulk.skills.locks import (
-    SKILL_LOCK_SCHEMA_VERSION,
-    SkillLockEntry,
-    SkillLockFile,
-)
-from chulk.skills.proposals import (
-    AutomaticLearningBlocked,
-    LearningProposalDraft,
-    LearningProposalService,
-)
-from chulk.skills.reviewer import (
-    LearningReviewContext,
-    LearningReviewCoordinator,
-    LearningReviewError,
-    LearningReviewOutcome,
-    LearningReviewPolicy,
-    LearningReviewQuota,
-    LearningReviewQuotaExceeded,
-    LearningReviewResult,
-    LearningReviewTrigger,
-    RestrictedLearningReviewer,
-)
-from chulk.skills.registry import (
-    Skill,
-    SkillRegistry,
-    SkillRouteDecision,
-    SkillReranker,
-    SkillRoutingResult,
-    SkillSelection,
-    explicit_skill_names,
-)
-from chulk.skills.publication import (
-    AsyncInMemorySkillPublicationStore,
-    AsyncSkillPublicationManager,
-    AsyncSkillPublicationStore,
-    InMemorySkillPublicationStore,
-    PortableSkill,
-    SkillActivationRecord,
-    SkillPublicationManager,
-    SkillPublicationRecord,
-    SkillPublicationStore,
-    skill_reference_map,
-)
+from chulk._lazy import public_dir, resolve_export
+
+if TYPE_CHECKING:
+    from chulk.skills.manifest import (
+        LEGACY_SKILL_VERSION,
+        SKILL_MANIFEST_SCHEMA_VERSION,
+        SkillManifest,
+        SkillManifestError,
+        SkillPackage,
+        load_skill_package,
+        resolve_skill_resource,
+        skill_package_digest,
+    )
+    from chulk.skills.lifecycle_models import (
+        LearningProposalKind,
+        LearningProposalRecord,
+        LearningProposalStatus,
+        LearningReviewUsage,
+        SkillLifecycleRecord,
+        SkillLifecycleStatus,
+        SkillRevisionRecord,
+        SkillUsageKind,
+    )
+    from chulk.skills.lifecycle import (
+        SkillApprovalError,
+        SkillConflictError,
+        SkillLifecycleError,
+        SkillLifecycleManager,
+        SkillScope,
+        proposal_diff,
+    )
+    from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
+    from chulk.skills.locks import (
+        SKILL_LOCK_SCHEMA_VERSION,
+        SkillLockEntry,
+        SkillLockFile,
+    )
+    from chulk.skills.proposals import (
+        AutomaticLearningBlocked,
+        LearningProposalDraft,
+        LearningProposalService,
+    )
+    from chulk.skills.reviewer import (
+        LearningReviewContext,
+        LearningReviewCoordinator,
+        LearningReviewError,
+        LearningReviewOutcome,
+        LearningReviewPolicy,
+        LearningReviewQuota,
+        LearningReviewQuotaExceeded,
+        LearningReviewResult,
+        LearningReviewTrigger,
+        RestrictedLearningReviewer,
+    )
+    from chulk.skills.registry import (
+        Skill,
+        SkillRegistry,
+        SkillRouteDecision,
+        SkillReranker,
+        SkillRoutingResult,
+        SkillSelection,
+        explicit_skill_names,
+    )
+    from chulk.skills.publication import (
+        AsyncInMemorySkillPublicationStore,
+        AsyncSkillPublicationManager,
+        AsyncSkillPublicationStore,
+        InMemorySkillPublicationStore,
+        PortableSkill,
+        SkillActivationRecord,
+        SkillPublicationManager,
+        SkillPublicationRecord,
+        SkillPublicationStore,
+        skill_reference_map,
+    )
 
 
 def bundled_skills_dir() -> Path:
@@ -220,3 +226,30 @@ __all__ = [
     "skill_package_digest",
     "skill_reference_map",
 ]
+
+
+_EXPORT_MODULES = (
+    "chulk.skills.manifest",
+    "chulk.skills.lifecycle_models",
+    "chulk.skills.registry",
+    "chulk.skills.locks",
+    "chulk.skills.lifecycle",
+    "chulk.skills.lifecycle_store",
+    "chulk.skills.proposals",
+    "chulk.skills.reviewer",
+    "chulk.skills.publication",
+)
+
+
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> object:
+        return resolve_export(
+            name,
+            public_names=__all__,
+            owner_modules=_EXPORT_MODULES,
+            namespace=globals(),
+        )
+
+    def __dir__() -> list[str]:
+        return public_dir(__all__, globals())
