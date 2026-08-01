@@ -9,6 +9,16 @@ from chulk.tui.app import OperatorApp
 from chulk.tui.models import OperatorSnapshot, TimelineEntry
 
 
+async def _wait_for_latest_worker(app: OperatorApp, group: str) -> None:
+    workers = [
+        worker
+        for worker in app.workers
+        if worker.group == group and not worker.is_finished
+    ]
+    if workers:
+        await workers[-1].wait()
+
+
 class FakeOperatorSource:
     profile_id = "default"
     selected_conversation_id = "conv-1"
@@ -189,12 +199,13 @@ async def test_operator_app_remains_usable_narrow_monochrome_and_reconnects() ->
         assert app.query_one("#slash-help", Static).has_class("visible")
         prompt.text = "/new"
         app.action_submit_prompt()
-        await pilot.pause()
+        await _wait_for_latest_worker(app, "mutation")
+        await _wait_for_latest_worker(app, "snapshot")
         assert ("create",) in source.calls
 
         source.profile_id = "recovered"
         app.action_reload()
-        await pilot.pause()
+        await _wait_for_latest_worker(app, "snapshot")
         assert "profile recovered" in str(
             app.query_one("#status-line", Static).render()
         )
