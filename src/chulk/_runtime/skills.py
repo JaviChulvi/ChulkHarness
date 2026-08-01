@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from chulk.capabilities import Capabilities
+from chulk.hosting.async_utils import call_async_service
 from chulk.skills import (
     SkillAllowlistRef,
     SkillDirectoryRef,
@@ -114,6 +115,114 @@ def resolve_skill_specs(
         pinned_skill_names=pinned_skill_names,
         warnings=warning_payloads,
     )
+
+
+async def resolve_skill_specs_async(
+    registry: object,
+    skill_specs: object | Iterable[object] | None,
+) -> SkillSpecResolution:
+    """Apply skill references through the native async registry contract."""
+    specs = _coerce_skill_specs(skill_specs)
+    if specs is None:
+        return SkillSpecResolution(pinned_skill_names=[], warnings=[])
+    if not specs:
+        await call_async_service(registry, "clear")
+        return SkillSpecResolution(pinned_skill_names=[], warnings=[])
+
+    allowlist_requests: list[str] = []
+    pin_requests: list[str] = []
+    warning_payloads: list[dict[str, str]] = []
+    has_allowlist = False
+    for spec in specs:
+        if isinstance(spec, SkillAllowlistRef):
+            has_allowlist = True
+            allowlist_requests.extend(spec.names)
+            continue
+        if isinstance(spec, SkillPinRef):
+            pin_requests.extend(spec.names)
+            continue
+        if isinstance(spec, SkillDirectoryRef):
+            await call_async_service(
+                registry,
+                "register_directory",
+                spec.skills_dir,
+            )
+            continue
+        if isinstance(spec, SkillRef):
+            if spec.skill_path is not None:
+                skill = await call_async_service(
+                    registry,
+                    "register_path",
+                    spec.skill_path,
+                )
+                pin_requests.append(skill.name)
+                continue
+            if spec.name is not None:
+                pin_requests.append(spec.name)
+                continue
+            raise ValueError("SkillRef must include name or skill_path")
+        register_async = getattr(spec, "register_async", None)
+        if callable(register_async):
+            pinned_name = await register_async(registry)
+            if pinned_name:
+                pin_requests.append(str(pinned_name))
+            continue
+        if isinstance(spec, str):
+            pin_requests.append(spec)
+            continue
+        raise TypeError(
+            "native async hosted skills require SkillRef values or an "
+            "async register_async(registry) implementation"
+        )
+
+    allowlisted_names = await _resolve_existing_skill_names_async(
+        registry,
+        allowlist_requests,
+        kind="allowlist",
+        warning_payloads=warning_payloads,
+    )
+    pinned_skill_names = await _resolve_existing_skill_names_async(
+        registry,
+        pin_requests,
+        kind="pin",
+        warning_payloads=warning_payloads,
+    )
+    if has_allowlist:
+        await call_async_service(
+            registry,
+            "restrict_to",
+            [*allowlisted_names, *pinned_skill_names],
+        )
+    return SkillSpecResolution(
+        pinned_skill_names=pinned_skill_names,
+        warnings=warning_payloads,
+    )
+
+
+async def _resolve_existing_skill_names_async(
+    registry: object,
+    names: Iterable[str],
+    *,
+    kind: str,
+    warning_payloads: list[dict[str, str]],
+) -> list[str]:
+    resolved_names: list[str] = []
+    for requested_name in names:
+        skill = await call_async_service(
+            registry,
+            "get_skill",
+            requested_name,
+        )
+        if skill is None:
+            _append_missing_skill_warning(
+                kind,
+                requested_name,
+                warning_payloads,
+            )
+            continue
+        if skill.name not in resolved_names:
+            resolved_names.append(skill.name)
+    return resolved_names
 
 
 def _coerce_skill_specs(

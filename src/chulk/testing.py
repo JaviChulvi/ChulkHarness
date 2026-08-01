@@ -21,6 +21,7 @@ from chulk.approvals import (
     DurableApprovalService,
 )
 from chulk.events import AgentEvent, RunLifecyclePayload
+from chulk.execution import ExecutionSessionRequest
 from chulk.gateway import (
     AuthenticationState,
     ChannelIdentity,
@@ -212,12 +213,130 @@ async def assert_async_hosted_services_contract(
     first_scope: ExecutionScope,
     second_scope: ExecutionScope,
 ) -> HostedContractReport:
-    """Exercise native async run, approval, and event service boundaries."""
+    """Exercise the complete native-async hosted service boundary."""
     _contract_scopes(first_scope, second_scope)
     first = await services.resolve_async(first_scope)
     second = await services.resolve_async(second_scope)
     checks: list[str] = []
-    await first.runs.submit(
+
+    conversation_id = first_scope.conversation_id or "contract-conversation"
+    await _native_call(
+        first.sessions.store.create_conversation,
+        conversation_id,
+        provider="contract",
+        model="contract",
+    )
+    await _must_reject_async(
+        lambda: _native_call(
+            second.sessions.store.get_conversation,
+            conversation_id,
+        ),
+        "async sessions allowed a cross-scope read",
+    )
+    checks.append("async_session_isolation")
+
+    memory_id = await _native_call(
+        first.memory.save_memory,
+        "contract memory",
+        tags=["contract"],
+    )
+    stored_memory = await _native_call(first.memory.get_memory, memory_id)
+    _require(
+        stored_memory is not None and stored_memory.id == memory_id,
+        "async memory did not preserve its write",
+    )
+    other_memory = await _native_call(second.memory.get_memory, memory_id)
+    _require(
+        other_memory is None,
+        "async memory allowed a cross-scope read",
+    )
+    checks.append("async_memory_isolation")
+
+    await _native_call(first.skills.registry.load_metadata)
+    await _native_call(
+        first.skills.registry.configure_environment,
+        available_tools=set(),
+        capabilities=set(),
+    )
+    visible_skills = await _native_call(
+        first.skills.registry.list_visible_skills
+    )
+    _require(
+        isinstance(visible_skills, list),
+        "async skill registry did not return a skill list",
+    )
+    checks.append("async_skill_lifecycle")
+
+    artifact = await _native_call(
+        first.artifacts.write,
+        "contract",
+        "private",
+    )
+    artifact_id = str(getattr(artifact, "artifact_id", ""))
+    _require(bool(artifact_id), "async artifact write returned no artifact id")
+    artifact_read = await _native_call(first.artifacts.read, artifact_id)
+    _require(
+        getattr(artifact_read, "content", None) == "private",
+        "async artifact read did not preserve content",
+    )
+    await _must_reject_async(
+        lambda: _native_call(second.artifacts.read, artifact_id),
+        "async artifacts allowed a cross-scope read",
+    )
+    checks.append("async_artifact_isolation")
+
+    await _native_call(first.traces.activate)
+    await _native_call(
+        first.traces.log,
+        "contract.trace",
+        {"artifact_id": artifact_id},
+        turn_id="contract-turn",
+    )
+    await _native_call(
+        first.audit.record,
+        "contract.audit",
+        {"artifact_id": artifact_id},
+        scope=first_scope,
+    )
+    checks.append("async_trace_audit_delivery")
+
+    reservation = await _native_call(
+        first.usage.reserve_model_request,
+        turn_id="contract-turn",
+        request_index=1,
+        messages=[],
+        purpose="contract",
+    )
+    released = await _native_call(
+        first.usage.release_model_request,
+        turn_id="contract-turn",
+        request_index=1,
+    )
+    _require(
+        released is not None and released.id == reservation.id,
+        "async usage reservation was not released",
+    )
+    checks.append("async_usage_reservation")
+
+    execution_session = await _native_call(
+        first.execution.open_session_async,
+        ExecutionSessionRequest(
+            conversation_id=conversation_id,
+            turn_id="contract-turn",
+        ),
+    )
+    await _native_call(execution_session.aclose)
+    checks.append("async_execution_lifecycle")
+
+    plugin_report = await _native_call(first.plugins.verify_startup)
+    _require(
+        plugin_report is not None,
+        "async plugin startup verification returned no report",
+    )
+    checks.append("async_plugin_startup")
+
+    await _native_call(
+        first.runs.submit,
         first_scope,
         _contract_submission(),
         actor="contract",
@@ -228,20 +347,20 @@ async def assert_async_hosted_services_contract(
     )
     checks.append("async_run_isolation")
 
-    emit = first.events.emit(_contract_event(first_scope))
-    _require(inspect.isawaitable(emit), "async event sink did not return an awaitable")
-    await emit
+    await _native_call(first.events.emit, _contract_event(first_scope))
     await _must_reject_async(
         lambda: second.events.emit(_contract_event(first_scope)),
         "async event sink accepted another scope",
     )
     checks.append("async_event_isolation")
 
-    first_approvals = await first.approvals.list(
+    first_approvals = await _native_call(
+        first.approvals.list,
         first_scope,
         run_id=first_scope.run_id,
     )
-    second_approvals = await second.approvals.list(
+    second_approvals = await _native_call(
+        second.approvals.list,
         second_scope,
         run_id=second_scope.run_id,
     )
@@ -251,6 +370,15 @@ async def assert_async_hosted_services_contract(
     )
     checks.append("async_approval_isolation")
     return HostedContractReport(tuple(checks))
+
+
+async def _native_call(method: Any, *args: Any, **kwargs: Any) -> Any:
+    result = method(*args, **kwargs)
+    _require(
+        inspect.isawaitable(result),
+        "native async hosted service method did not return an awaitable",
+    )
+    return await result
 
 
 def assert_durable_execution_contract(

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from chulk._lazy import public_dir, resolve_export
 
 if TYPE_CHECKING:
+    from chulk.memory.async_policy import AsyncMemoryPolicy
     from chulk.memory.extraction import extract_memory_candidates, route_memory_candidates
     from chulk.memory.models import (
         DEFAULT_MEMORY_NAMESPACE,
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ConversationMemory",
+    "AsyncMemoryPolicy",
     "DEFAULT_MEMORY_NAMESPACE",
     "Memory",
     "MemoryExtractionCandidate",
@@ -42,6 +44,7 @@ __all__ = [
 
 
 _EXPORT_MODULES = (
+    "chulk.memory.async_policy",
     "chulk.memory.models",
     "chulk.memory.extraction",
     "chulk.memory.policy",

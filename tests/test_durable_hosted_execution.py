@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -333,7 +334,7 @@ def test_policy_ask_pauses_worker_and_consumed_approval_resumes_effect(
 @pytest.mark.asyncio
 async def test_async_hosted_execution_uses_async_run_services(tmp_path) -> None:
     hub = InMemoryServiceHub()
-    agent = AsyncHostedRuntime(
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=tmp_path),
         llm=_LLM([_tool_call(), _final()]),
         tools=[_tool(lambda arguments: "ok")],
@@ -364,6 +365,84 @@ async def test_async_hosted_execution_uses_async_run_services(tmp_path) -> None:
         agent.execution_scope.run_id,
     )
     assert effects[0].status.value == "completed"
+    assert hub.public_events(agent.execution_scope)[-1].name == "run.completed"
+    await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_async_durable_cancellation_quarantines_effect_and_blocks_replay(
+    tmp_path,
+) -> None:
+    started = asyncio.Event()
+    calls = 0
+
+    async def uncertain_write(_arguments):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await asyncio.Future()
+
+    hub = InMemoryServiceHub()
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=_LLM([_tool_call(), _final()]),
+        tools=[_tool(uncertain_write)],
+        skills=[],
+        services=hub.async_services(
+            policy_hooks=ToolPolicyHooks(
+                authorize=lambda *args: True,
+                derive_effect_key=lambda *args: "ticket:42:update",
+            )
+        ),
+        execution_scope=_scope(),
+    )
+    executor = AsyncDurableHostedExecutor(
+        agent,
+        agent.runtime.run_store,
+    )
+    task = asyncio.create_task(
+        executor.execute(
+            "update ticket 42",
+            _submission(),
+            worker_id="worker-cancelled",
+            step_id="agent",
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    run = await agent.runtime.run_store.get(
+        agent.execution_scope,
+        agent.execution_scope.run_id,
+    )
+    effects = await agent.runtime.run_store.effects(
+        agent.execution_scope,
+        agent.execution_scope.run_id,
+    )
+    attempts = await agent.runtime.run_store.attempts(
+        agent.execution_scope,
+        agent.execution_scope.run_id,
+        step_id="agent",
+    )
+    assert run.status is DurableRunStatus.UNKNOWN
+    assert len(effects) == 1
+    assert effects[0].status.value == "unknown"
+    assert attempts[-1].status.value == "unknown"
+    assert hub.active_usage_reservations(agent.execution_scope) == ()
+
+    duplicate = await executor.execute(
+        "update ticket 42",
+        _submission(),
+        worker_id="worker-retry",
+        step_id="agent",
+    )
+    assert duplicate.duplicate
+    assert not duplicate.claimed
+    assert duplicate.run.status is DurableRunStatus.UNKNOWN
+    assert calls == 1
     await agent.close()
 
 
@@ -371,7 +450,13 @@ async def test_async_hosted_execution_uses_async_run_services(tmp_path) -> None:
 async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
     hub = InMemoryServiceHub()
     calls: list[str] = []
-    agent = AsyncHostedRuntime(
+    credential_resolutions: list[str] = []
+
+    async def resolve_credentials(*_args):
+        credential_resolutions.append("resolved")
+        return {"token": "runtime-only"}
+
+    agent = await AsyncHostedRuntime.create(
         config=AgentConfig(
             project_root=tmp_path,
             permission_profile="workspace-write",
@@ -388,6 +473,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
             policy_hooks=ToolPolicyHooks(
                 authorize=lambda *args: True,
                 derive_effect_key=lambda *args: "ticket:42:update",
+                resolve_credentials=resolve_credentials,
             )
         ),
         execution_scope=_scope(),
@@ -402,6 +488,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
     approval = paused.approval.approval
     assert paused.run.status is DurableRunStatus.WAITING_FOR_APPROVAL
     assert calls == []
+    assert credential_resolutions == []
 
     service = AsyncDurableApprovalService(
         agent.runtime.approval_store,
@@ -430,7 +517,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
     )
     assert resumed.resumed
 
-    restarted = AsyncHostedRuntime(
+    restarted = await AsyncHostedRuntime.create(
         config=AgentConfig(
             project_root=tmp_path,
             permission_profile="workspace-write",
@@ -448,6 +535,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
             policy_hooks=ToolPolicyHooks(
                 authorize=lambda *args: True,
                 derive_effect_key=lambda *args: "ticket:42:update",
+                resolve_credentials=resolve_credentials,
             )
         ),
         execution_scope=agent.execution_scope,
@@ -464,5 +552,6 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
 
     assert completed.run.status is DurableRunStatus.COMPLETED
     assert calls == ["tool"]
+    assert credential_resolutions == ["resolved"]
     await restarted.close()
     await agent.close()

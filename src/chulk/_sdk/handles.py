@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any, Callable
 
@@ -256,8 +255,11 @@ class AgentHandle:
         """Close owned runtime resources exactly once from an async host."""
         if self._closed:
             return
-        self._closed = True
-        await self.runtime.aclose()
+        try:
+            await self.runtime.aclose()
+        finally:
+            if self.runtime.closed:
+                self._closed = True
 
     def __enter__(self) -> "AgentHandle":
         self._ensure_open()
@@ -483,8 +485,7 @@ class AsyncAgentHandle:
         return self.handle._run_result(content)
 
     async def reject(self) -> str:
-        self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.reject)
+        return (await self.reject_result()).content
 
     async def reject_result(
         self,
@@ -493,7 +494,21 @@ class AsyncAgentHandle:
         on_event: EventCallback | None = None,
     ) -> RunResult:
         self.handle._ensure_open()
-        return await asyncio.to_thread(self.handle.reject_result, on_delta=on_delta, on_event=on_event)
+        has_plan_to_cancel = (
+            self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
+        )
+        previous_on_delta = self.handle._active_on_delta
+        previous_on_event = self.handle._active_on_event
+        self.handle._active_on_delta = on_delta
+        self.handle._active_on_event = on_event
+        try:
+            content = await self.runtime.reject_plan_async()
+        finally:
+            self.handle._active_on_delta = previous_on_delta
+            self.handle._active_on_event = previous_on_event
+        if not has_plan_to_cancel:
+            return self.handle._no_pending_plan_result(content)
+        return self.handle._run_result(content)
 
     async def close(self) -> None:
         await self.handle.aclose()

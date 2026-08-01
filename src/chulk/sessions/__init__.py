@@ -10,6 +10,7 @@ from chulk.sessions.models import (
     SessionWindow,
 )
 from chulk.sessions.recorder import SessionRecorder
+from chulk.sessions.async_recorder import AsyncSessionRecorder
 from chulk.sessions.search import (
     MAX_SESSION_QUERY_CHARS,
     MAX_SESSION_QUERY_TERMS,
@@ -40,4 +41,5 @@ __all__ = [
     "SQLiteSessionStore",
     "SessionNotFoundError",
     "SessionRecorder",
+    "AsyncSessionRecorder",
 ]

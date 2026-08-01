@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
+from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.model_transport import ModelTransport
@@ -31,6 +32,7 @@ from chulk.llm.usage import (
 )
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import ExecutionScope
+from chulk.hosting.async_utils import call_async_service
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.media import (
@@ -41,6 +43,7 @@ from chulk.media import (
     UserInput,
 )
 from chulk.memory import (
+    AsyncMemoryPolicy,
     ConversationMemory,
     MemoryPolicy,
     MemoryRecord,
@@ -48,6 +51,7 @@ from chulk.memory import (
     route_memory_candidates,
     select_memories_for_prompt,
 )
+from chulk.memory.extraction import extract_memory_candidates
 from chulk.skills import (
     LearningProposalService,
     LearningReviewContext,
@@ -136,6 +140,7 @@ class Agent:
         execution_scope: ExecutionScope | None = None,
         tool_policy_hooks: ToolPolicyHooks | None = None,
         close_trace_logger: bool = True,
+        restore_plan_context: bool = True,
     ) -> None:
         if max_json_repair_attempts < 0:
             raise ValueError("max_json_repair_attempts cannot be negative")
@@ -211,10 +216,19 @@ class Agent:
         self.content_store = content_store
         self.media_processors = media_processors or MediaProcessorRegistry()
         self.tool_context_lifecycle = tool_context_lifecycle
+        self.async_memory_store: object | None = None
+        self.async_memory_policy: AsyncMemoryPolicy | None = None
+        self.async_skill_registry: object | None = None
+        self.async_usage_accounting: object | None = None
+        self.async_artifact_store: object | None = None
+        self.async_content_store: object | None = None
+        self.async_media_processors: object | None = None
+        self.async_flushables: tuple[object, ...] = ()
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
-        self._restore_plan_turn_context()
+        if restore_plan_context:
+            self._restore_plan_turn_context()
         self.state.conversation_summary = self.memory.conversation_summary
         self._tool_executor = ToolExecutor(
             registry=self.tool_registry,
@@ -226,6 +240,9 @@ class Agent:
             goal_execution=self.goal_execution,
             execution_scope=self.execution_scope,
             policy_hooks=tool_policy_hooks,
+            get_context_async=self._tool_context_for_turn_async,
+            async_usage_accounting=self.async_usage_accounting,
+            flush_async=self._flush_async_services,
         )
         self._plan_execution = PlanExecution(
             state=self.state,
@@ -248,6 +265,7 @@ class Agent:
             max_observation_chars=self.max_observation_chars,
             max_tool_stdout_chars=self.max_tool_stdout_chars,
             max_tool_stderr_chars=self.max_tool_stderr_chars,
+            async_artifact_writer=self._write_tool_output_artifact_async,
         )
         self._model_transport = ModelTransport(
             llm_client=self.llm_client,
@@ -272,11 +290,16 @@ class Agent:
             max_reflection_attempts=self.max_reflection_attempts,
             trace_max_prompt_chars=self.trace_max_prompt_chars,
             max_output_tokens=self.max_model_output_tokens,
+            record_accounting_async=self._record_model_accounting_async,
+            reserve_accounting_async=self._reserve_model_accounting_async,
+            release_accounting_async=self._release_model_accounting_async,
+            flush_async=self._flush_async_services,
         )
         self._action_runtime = ActionLoopRuntime(
             model=self._model_transport,
             tools=self._tool_executor,
             effects=self._turn_effects,
+            async_flush=self._flush_async_services,
         )
 
     @property
@@ -320,21 +343,23 @@ class Agent:
         """Finalize owned closeable resources exactly once from an async host."""
         if self._closed:
             return
-        self._closed = True
         failures: list[Exception] = []
-        for context in tuple(self._tool_contexts.values()):
+        for context_id, context in tuple(self._tool_contexts.items()):
             if context is None or self.tool_context_lifecycle is None:
+                self._tool_contexts.pop(context_id, None)
                 continue
             try:
                 await self.tool_context_lifecycle.aclose(context)
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
-        self._tool_contexts.clear()
-        for resource in reversed(self._owned_resources):
+            self._tool_contexts.pop(context_id, None)
+        while self._owned_resources:
+            resource = self._owned_resources[-1]
             try:
                 await aclose_resources((resource,))
             except Exception as exc:  # pragma: no cover - defensive aggregation
                 failures.append(exc)
+            self._owned_resources.pop()
         if self.trace_logger is not None and self._close_trace_logger:
             try:
                 self.trace_logger.close()
@@ -343,6 +368,7 @@ class Agent:
         self.event_callback = None
         self.event_sink = None
         self.audit_callback = None
+        self._closed = True
         if failures:
             raise RuntimeError(
                 f"Failed to close {len(failures)} owned agent resource(s)"
@@ -451,10 +477,11 @@ class Agent:
         if blocked is not None:
             return blocked
         turn_id = str(uuid4())
-        projection, prepared, media_sections, media_events = await asyncio.to_thread(
-            self._prepare_user_input,
+        projection, prepared, media_sections, media_events = (
+            await self._prepare_user_input_async(
             user_input,
             turn_id=turn_id,
+        )
         )
         return await self._run_user_turn_async(
             projection,
@@ -558,7 +585,7 @@ class Agent:
         turn: TurnState | None = None
         previous_turn_count = len(self.state.turns)
         try:
-            turn_or_response = self._start_user_turn(
+            turn_or_response = await self._start_user_turn_async(
                 clean_message,
                 context_sections=context_sections,
                 prompt_profile=prompt_profile,
@@ -574,21 +601,146 @@ class Agent:
                 return turn_or_response
             turn = turn_or_response
             result = await self._run_action_loop_async(turn, require_plan=require_plan)
-        except DurableApprovalPaused:
+        except DurableApprovalPaused as exc:
             turn = turn or self._turn_started_after(previous_turn_count)
             if turn is not None:
                 turn.status = "waiting_for_approval"
-                await self._release_tool_context_async(turn)
+                await self._flush_async_services_after_error(exc)
+                await await_cleanup_after_error(
+                    self._release_tool_context_async(turn),
+                    exc,
+                )
             raise
         except BaseException as exc:
             turn = turn or self._turn_started_after(previous_turn_count)
             if turn is not None:
                 self._terminalize_exception(turn, exc)
-                await self._release_tool_context_async(turn)
+                await self._flush_async_services_after_error(exc)
+                await await_cleanup_after_error(
+                    self._release_tool_context_async(turn),
+                    exc,
+                )
             raise
         if turn.status != "waiting_for_approval":
             await self._release_tool_context_async(turn)
+        await self._flush_async_services()
         return result
+
+    async def _start_user_turn_async(
+        self,
+        clean_message: str,
+        *,
+        context_sections: list[TurnContextSection | dict | str] | None,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+        tool_context: ToolExecutionContext | dict | None,
+        input_parts: list[dict] | None = None,
+        model_input: UserInput | None = None,
+        media_events: list[dict] | None = None,
+        turn_id: str | None = None,
+    ) -> TurnState | str:
+        """Create a turn while awaiting hosted memory, skills, and execution."""
+
+        blocked = self._new_turn_block_message()
+        if blocked is not None:
+            return blocked
+
+        turn_context_sections = _coerce_turn_context_sections(context_sections)
+        execution_context = (
+            _coerce_tool_execution_context(tool_context)
+            or self.default_tool_context
+        )
+        turn = TurnState(
+            user_message=clean_message,
+            turn_id=turn_id or str(uuid4()),
+            available_tool_names=[
+                tool.name for tool in self.tool_registry.list_tools()
+            ],
+            context_sections=turn_context_sections,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            input_parts=deepcopy(input_parts or []),
+            extension_metadata={
+                **deepcopy(extension_metadata or {}),
+                **deepcopy(self.runtime_metadata),
+            },
+            tool_context_metadata=(
+                execution_context.metadata if execution_context else {}
+            ),
+        )
+        turn.model_input = model_input
+        if execution_context is None:
+            execution_context = ToolExecutionContext()
+        execution_context = ToolExecutionContext(
+            metadata={
+                **execution_context.metadata,
+                "conversation_id": self.state.conversation_id,
+                "turn_id": turn.turn_id,
+            },
+            deps=execution_context.deps,
+            execution_session=execution_context.execution_session,
+        )
+        if (
+            self.tool_context_lifecycle is not None
+            and execution_context.execution_session is None
+        ):
+            execution_context = await self.tool_context_lifecycle.open_async(
+                execution_context
+            )
+        self._tool_contexts[turn.turn_id] = execution_context
+        self.state.current_turn_id = turn.turn_id
+        self.state.available_tool_names = turn.available_tool_names
+        self.state.turns.append(turn)
+        self._trace(TraceEvent.TURN_STARTED, {"turn": turn.to_dict()})
+        if input_parts:
+            self._trace(
+                TraceEvent.MEDIA_INPUT_PREPARED,
+                {
+                    "turn_id": turn.turn_id,
+                    "parts": deepcopy(input_parts),
+                },
+            )
+        for media_event in media_events or []:
+            self._trace(
+                TraceEvent.MEDIA_TRANSFORMED,
+                {"turn_id": turn.turn_id, **deepcopy(media_event)},
+            )
+        model_selection = turn.extension_metadata.get("model_selection")
+        if isinstance(model_selection, dict):
+            self._trace(
+                TraceEvent.MODEL_PROFILE_SELECTED,
+                {"turn_id": turn.turn_id, **model_selection},
+            )
+        if turn_context_sections or prompt_profile or locale:
+            self._trace(
+                TraceEvent.TURN_CONTEXT_SELECTED,
+                {
+                    "turn_id": turn.turn_id,
+                    "context_section_ids": [
+                        section.id for section in turn_context_sections
+                    ],
+                    "context_sections": [
+                        section.to_dict() for section in turn_context_sections
+                    ],
+                    "prompt_profile": prompt_profile,
+                    "locale": locale,
+                },
+            )
+
+        await self._extract_long_term_memories_async(clean_message)
+        await self._select_long_term_memories_async(clean_message)
+        await self._select_skills_async(clean_message)
+        turn.extracted_memory_ids = list(self.state.extracted_memory_ids)
+        turn.loaded_memory_ids = list(self.state.loaded_memory_ids)
+        turn.loaded_skill_names = list(self.state.loaded_skill_names)
+        self.memory.add_user_message(clean_message)
+        self._trace(
+            TraceEvent.USER_MESSAGE,
+            {"turn_id": turn.turn_id, "content": clean_message},
+        )
+        await self._flush_async_services()
+        return turn
 
     def _start_user_turn(
         self,
@@ -822,6 +974,162 @@ class Agent:
             prepared_parts.append(TextInputPart(projection, external_content=True))
         return projection, UserInput(tuple(prepared_parts)), sections, events
 
+    async def _prepare_user_input_async(
+        self,
+        user_input: UserInput,
+        *,
+        turn_id: str,
+    ) -> tuple[
+        str,
+        UserInput,
+        list[TurnContextSection],
+        list[dict],
+    ]:
+        content_store = self.async_content_store
+        processors = self.async_media_processors
+        if content_store is None or processors is None:
+            return await asyncio.to_thread(
+                self._prepare_user_input,
+                user_input,
+                turn_id=turn_id,
+            )
+        projection = user_input.textual_projection(
+            max_chars=self.max_observation_chars
+        )
+        prepared_parts: list[TextInputPart] = []
+        sections: list[TurnContextSection] = []
+        events: list[dict] = []
+        for operation_index, part in enumerate(user_input.parts, start=1):
+            if isinstance(part, TextInputPart):
+                prepared_parts.append(part)
+                continue
+            if not isinstance(part, MediaInputPart):
+                raise TypeError("unsupported user input part")
+            item = await call_async_service(
+                content_store,
+                "get",
+                part.media.content_ref,
+                profile_id=self.profile_id,
+            )
+            if item.sha256 != part.media.sha256:
+                raise ValueError(
+                    "typed media metadata does not match stored content"
+                )
+            processor, transform = await call_async_service(
+                processors,
+                "choose",
+                item,
+            )
+            capability = processor.capability
+            usage_reservation = None
+            if self.async_usage_accounting is not None:
+                usage_reservation = await call_async_service(
+                    self.async_usage_accounting,
+                    "reserve_media_transform",
+                    turn_id=turn_id,
+                    operation_index=operation_index,
+                    content_ref=item.content_ref.id,
+                    processor=capability.name,
+                    provider=capability.provider,
+                    pricing_per_unit=capability.pricing_per_unit,
+                    network_access=capability.network_access,
+                )
+            try:
+                result = await call_async_service(
+                    processors,
+                    "transform",
+                    content_store,
+                    item,
+                    instruction=part.caption or projection,
+                    selection=(processor, transform),
+                )
+                if result.text is None:
+                    raise RuntimeError(
+                        "Native media transforms require a model client media "
+                        "adapter."
+                    )
+                bounded_text = result.text[: self.max_observation_chars]
+                sections.append(
+                    TurnContextSection(
+                        id=(
+                            "media-"
+                            + item.content_ref.id.removeprefix("content:")[:16]
+                        ),
+                        title=(
+                            f"Media transform: "
+                            f"{item.file_name or item.kind.value}"
+                        ),
+                        source="media_processor",
+                        content=bounded_text,
+                        metadata={
+                            "trusted": item.trust.value != "untrusted",
+                            "external_content": True,
+                            "content_ref": item.content_ref.id,
+                            "mime_type": item.mime_type,
+                            "processor": result.processor,
+                            "transform": result.transform.value,
+                            "truncated": len(result.text) > len(bounded_text),
+                        },
+                        persist_content=False,
+                    )
+                )
+                events.append(
+                    {
+                        "content_ref": item.content_ref.id,
+                        "media_kind": item.kind.value,
+                        "mime_type": item.mime_type,
+                        "processor": result.processor,
+                        "transform": result.transform.value,
+                        "output_characters": len(bounded_text),
+                        "units": result.units,
+                    }
+                )
+                if (
+                    self.async_usage_accounting is not None
+                    and usage_reservation is not None
+                ):
+                    await call_async_service(
+                        self.async_usage_accounting,
+                        "commit_media_transform",
+                        usage_reservation,
+                        content_ref=item.content_ref.id,
+                        processor=result.processor,
+                        provider=str(
+                            result.metadata.get("provider") or "local"
+                        ),
+                        byte_length=item.byte_length,
+                        units=result.units,
+                        unit_name=str(
+                            result.metadata.get("unit_name") or "request"
+                        ),
+                        network_access=bool(
+                            result.metadata.get("network_access")
+                        ),
+                        retains_data=bool(
+                            result.metadata.get("retains_data")
+                        ),
+                    )
+                    usage_reservation = None
+            except BaseException as exc:
+                if (
+                    self.async_usage_accounting is not None
+                    and usage_reservation is not None
+                ):
+                    await await_cleanup_after_error(
+                        call_async_service(
+                            self.async_usage_accounting,
+                            "release_media_transform",
+                            usage_reservation,
+                        ),
+                        exc,
+                    )
+                raise
+        if not prepared_parts:
+            prepared_parts.append(
+                TextInputPart(projection, external_content=True)
+            )
+        return projection, UserInput(tuple(prepared_parts)), sections, events
+
     def has_pending_plan(self) -> bool:
         """Return True when a turn is paused on a plan awaiting approval."""
         turn = self._pending_plan_turn()
@@ -858,16 +1166,26 @@ class Agent:
         try:
             turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
-                return turn_or_response
-            turn = turn_or_response
-            return await self._run_action_loop_async(turn, require_plan=False)
+                result = turn_or_response
+            else:
+                turn = turn_or_response
+                await self._flush_async_services()
+                result = await self._run_action_loop_async(
+                    turn,
+                    require_plan=False,
+                )
         except BaseException as exc:
             if turn is not None:
                 self._terminalize_exception(turn, exc)
+                await self._flush_async_services_after_error(exc)
+                await await_cleanup_after_error(
+                    self._release_tool_context_async(turn),
+                    exc,
+                )
             raise
-        finally:
-            if turn is not None:
-                await self._release_tool_context_async(turn)
+        if turn is not None:
+            await self._release_tool_context_async(turn)
+        return result
 
     def _prepare_plan_execution(self) -> TurnState | str:
         """Approve a pending plan or continue an already-approved durable plan."""
@@ -883,22 +1201,18 @@ class Agent:
         if turn.active_plan is None:
             return "No plan is waiting for approval."
 
-        try:
-            turn.approve_plan()
-            self.state.pending_plan_turn_id = None
-            self.state.active_plan = turn.active_plan
-            self.state.messages = self.memory.recent()
-            self._trace(
-                TraceEvent.PLAN_APPROVED,
-                {
-                    "turn_id": turn.turn_id,
-                    "plan": turn.active_plan.to_dict(),
-                    "turn": turn.to_dict(),
-                },
-            )
-        except BaseException:
-            self._release_tool_context(turn)
-            raise
+        turn.approve_plan()
+        self.state.pending_plan_turn_id = None
+        self.state.active_plan = turn.active_plan
+        self.state.messages = self.memory.recent()
+        self._trace(
+            TraceEvent.PLAN_APPROVED,
+            {
+                "turn_id": turn.turn_id,
+                "plan": turn.active_plan.to_dict(),
+                "turn": turn.to_dict(),
+            },
+        )
         return turn
 
     def reject_plan(self) -> str:
@@ -946,6 +1260,58 @@ class Agent:
         finally:
             self._release_tool_context(turn)
 
+    async def reject_plan_async(self) -> str:
+        """Reject or cancel a plan without entering a synchronous host path."""
+
+        self._ensure_open()
+        self._refresh_action_runtime()
+        turn = self._pending_plan_turn()
+        resumed = False
+        if turn is None:
+            turn = self._resumable_plan_turn()
+            resumed = turn is not None
+        if turn is None or turn.active_plan is None:
+            return "No plan is waiting for approval."
+        try:
+            if resumed:
+                message = (
+                    "Approved plan cancelled. No further steps will run; any "
+                    "work already completed was not rolled back."
+                )
+                turn.cancel(message)
+                event_type = TraceEvent.TURN_FAILED
+            else:
+                message = "Plan rejected. No tools were run."
+                turn.reject_plan(message)
+                event_type = TraceEvent.PLAN_REJECTED
+            self._plan_execution.clear(turn)
+            self.state.final_answer = message
+            self.memory.add_assistant_message(message)
+            self.state.messages = self.memory.recent()
+            self._trace(
+                event_type,
+                {
+                    "turn_id": turn.turn_id,
+                    "plan": turn.active_plan.to_dict(),
+                    "message": message,
+                    "status": turn.status,
+                    "turn": turn.to_dict(),
+                },
+            )
+            self._trace(
+                TraceEvent.TURN_FINISHED,
+                self._turn_effects.state_snapshot(turn),
+            )
+            await self._flush_async_services()
+        except BaseException as exc:
+            await await_cleanup_after_error(
+                self._release_tool_context_async(turn),
+                exc,
+            )
+            raise
+        await self._release_tool_context_async(turn)
+        return message
+
     def describe_plan_status(self) -> str:
         """Return a compact pending-plan status for the CLI."""
         if self.state.active_plan is None:
@@ -992,13 +1358,16 @@ class Agent:
         model.max_json_repair_attempts = self.max_json_repair_attempts
         model.max_reflection_attempts = self.max_reflection_attempts
         model.trace_max_prompt_chars = self.trace_max_prompt_chars
+        model.flush_async = self._flush_async_services
 
         tools = self._tool_executor
         tools.registry = self.tool_registry
         tools.permission_policy = self.permission_policy
         tools.permission_callback = self.permission_callback
         tools.usage_accounting = self.usage_accounting
+        tools.async_usage_accounting = self.async_usage_accounting
         tools.goal_execution = self.goal_execution
+        tools.flush_async = self._flush_async_services
 
         self._plan_execution.state = self.state
         self._plan_execution.memory = self.memory
@@ -1012,6 +1381,8 @@ class Agent:
         effects.max_observation_chars = self.max_observation_chars
         effects.max_tool_stdout_chars = self.max_tool_stdout_chars
         effects.max_tool_stderr_chars = self.max_tool_stderr_chars
+        effects.async_artifact_writer = self._write_tool_output_artifact_async
+        self._action_runtime.async_flush = self._flush_async_services
 
     def _restore_plan_turn_context(self) -> None:
         """Restore context that shaped a pending or resumable approved plan."""
@@ -1052,6 +1423,58 @@ class Agent:
         elif (
             self.memory_policy is not None and not self.memory_policy.retrieval_enabled
         ):
+            self.state.loaded_memory_ids = []
+            turn.loaded_memory_ids = []
+
+    async def restore_plan_turn_context_async(self) -> None:
+        """Restore persisted plan context through native async services."""
+
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is None:
+            return
+        registry = self.async_skill_registry
+        if registry is not None:
+            for name in turn.loaded_skill_names:
+                skill = await call_async_service(
+                    registry,
+                    "get_skill",
+                    name,
+                    visible_only=True,
+                )
+                if skill is None:
+                    continue
+                loaded_content = await call_async_service(
+                    registry,
+                    "load_content",
+                    skill.name,
+                )
+                if getattr(skill, "loaded_content", None) is None:
+                    skill.loaded_content = loaded_content
+                self._selected_skills.append(
+                    SkillSelection(
+                        skill=skill,
+                        score=10_000,
+                        matched_keywords=["restored_pending_plan"],
+                    )
+                )
+
+        store = self.async_memory_store
+        policy = self.async_memory_policy
+        if store is not None and policy is not None and policy.retrieval_enabled:
+            for memory_id in turn.loaded_memory_ids:
+                memory = await call_async_service(
+                    store,
+                    "get_memory",
+                    memory_id,
+                    include_archived=True,
+                )
+                if memory is None:
+                    continue
+                if set(memory.tags) & PROFILE_MEMORY_TAGS:
+                    self._profile_memories.append(memory)
+                else:
+                    self._relevant_memories.append(memory)
+        elif policy is not None and not policy.retrieval_enabled:
             self.state.loaded_memory_ids = []
             turn.loaded_memory_ids = []
 
@@ -1124,6 +1547,50 @@ class Agent:
                 },
             )
 
+    async def _extract_long_term_memories_async(
+        self,
+        user_message: str,
+    ) -> None:
+        self.state.extracted_memory_ids = []
+        policy = self.async_memory_policy
+        if policy is None:
+            await asyncio.to_thread(
+                self._extract_long_term_memories,
+                user_message,
+            )
+            return
+        result = await policy.handle_candidates(
+            extract_memory_candidates(user_message),
+            conversation_id=self.state.conversation_id,
+            turn_id=self.state.current_turn_id,
+            evidence=user_message,
+        )
+        self.state.extracted_memory_ids = list(result.accepted_memory_ids)
+        namespace = getattr(self.async_memory_store, "namespace", None)
+        if result.accepted_memory_ids or result.proposal_ids:
+            self._trace(
+                TraceEvent.MEMORY_EXTRACTION_COMPLETED,
+                {
+                    "turn_id": self.state.current_turn_id,
+                    "memory_ids": list(result.accepted_memory_ids),
+                    "proposal_ids": list(result.proposal_ids),
+                    "memory_mode": policy.mode.value,
+                    "memory_namespace": namespace,
+                },
+            )
+        for proposal_id in result.proposal_ids:
+            self._trace(
+                TraceEvent.LEARNING_PROPOSAL_CHANGED,
+                {
+                    "turn_id": self.state.current_turn_id,
+                    "proposal_id": proposal_id,
+                    "kind": "memory_create",
+                    "status": "pending",
+                    "action": "created",
+                    "target_name": None,
+                },
+            )
+
     def _select_long_term_memories(self, user_message: str) -> None:
         """Select durable memories that should shape this turn."""
         self._profile_memories = []
@@ -1145,10 +1612,15 @@ class Agent:
                 "memory_namespace": self.memory_store.namespace,
             },
         )
-        profile, relevant = select_memories_for_prompt(self.memory_store, user_message)
+        profile, relevant = select_memories_for_prompt(
+            self.memory_store,
+            user_message,
+        )
         self._profile_memories = profile
         self._relevant_memories = relevant
-        self.state.loaded_memory_ids = [memory.id for memory in [*profile, *relevant]]
+        self.state.loaded_memory_ids = [
+            memory.id for memory in [*profile, *relevant]
+        ]
         self._trace(
             TraceEvent.MEMORY_SEARCH_COMPLETED,
             {
@@ -1157,6 +1629,63 @@ class Agent:
                 "relevant_memory_ids": [memory.id for memory in relevant],
                 "loaded_memory_ids": self.state.loaded_memory_ids,
                 "memory_namespace": self.memory_store.namespace,
+            },
+        )
+
+    async def _select_long_term_memories_async(
+        self,
+        user_message: str,
+    ) -> None:
+        self._profile_memories = []
+        self._relevant_memories = []
+        self.state.loaded_memory_ids = []
+        store = self.async_memory_store
+        policy = self.async_memory_policy
+        if store is None or policy is None:
+            await asyncio.to_thread(
+                self._select_long_term_memories,
+                user_message,
+            )
+            return
+        if not policy.retrieval_enabled:
+            return
+        namespace = getattr(store, "namespace", None)
+        self._trace(
+            TraceEvent.MEMORY_SEARCH_STARTED,
+            {
+                "turn_id": self.state.current_turn_id,
+                "query": user_message,
+                "memory_namespace": namespace,
+            },
+        )
+        profile = await call_async_service(
+            store,
+            "profile_memories",
+            limit=5,
+        )
+        relevant = await call_async_service(
+            store,
+            "search_memory",
+            user_message,
+            limit=5,
+        )
+        profile_ids = {memory.id for memory in profile}
+        relevant = [
+            memory for memory in relevant if memory.id not in profile_ids
+        ]
+        self._profile_memories = list(profile)
+        self._relevant_memories = list(relevant)
+        self.state.loaded_memory_ids = [
+            memory.id for memory in [*profile, *relevant]
+        ]
+        self._trace(
+            TraceEvent.MEMORY_SEARCH_COMPLETED,
+            {
+                "turn_id": self.state.current_turn_id,
+                "profile_memory_ids": [memory.id for memory in profile],
+                "relevant_memory_ids": [memory.id for memory in relevant],
+                "loaded_memory_ids": self.state.loaded_memory_ids,
+                "memory_namespace": namespace,
             },
         )
 
@@ -1222,6 +1751,75 @@ class Agent:
         )
         self._record_selected_skill_usage()
 
+    async def _select_skills_async(self, user_message: str) -> None:
+        self._selected_skills = []
+        self.state.loaded_skill_names = []
+        registry = self.async_skill_registry
+        if registry is None:
+            await asyncio.to_thread(self._select_skills, user_message)
+            return
+        self._trace(
+            TraceEvent.SKILL_SELECTION_STARTED,
+            {"turn_id": self.state.current_turn_id, "query": user_message},
+        )
+        selections = await call_async_service(
+            registry,
+            "load_selected_skills",
+            user_message,
+            pinned_names=self.pinned_skill_names,
+            limit=self.max_skills_per_turn,
+        )
+        self._selected_skills = list(selections)
+        self.state.loaded_skill_names = [
+            selection.skill.name for selection in self._selected_skills
+        ]
+        routing_result = getattr(registry, "last_routing_result")
+        self._trace(
+            TraceEvent.SKILL_SELECTION_COMPLETED,
+            {
+                "turn_id": self.state.current_turn_id,
+                "explicit_skill_names": list(
+                    routing_result.explicit_skill_names
+                ),
+                "loaded_skill_names": self.state.loaded_skill_names,
+                "skills": [
+                    {
+                        "name": selection.skill.name,
+                        "path": str(selection.skill.path),
+                        "score": selection.score,
+                        "matched_keywords": selection.matched_keywords,
+                        "reason": selection.reason,
+                        "stage": selection.stage,
+                        "version": (
+                            selection.skill.manifest.version
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
+                        "source": (
+                            selection.skill.manifest.source
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
+                        "trust": (
+                            selection.skill.manifest.trust
+                            if selection.skill.manifest is not None
+                            else None
+                        ),
+                        "digest": selection.skill.digest,
+                        "loaded_resources": list(
+                            selection.skill.loaded_resources
+                        ),
+                    }
+                    for selection in self._selected_skills
+                ],
+                "decisions": [
+                    decision.to_dict()
+                    for decision in routing_result.decisions
+                ],
+            },
+        )
+        await self._record_selected_skill_usage_async()
+
     def _record_selected_skill_usage(self) -> None:
         if self.skill_lifecycle_store is None:
             return
@@ -1232,23 +1830,8 @@ class Agent:
         for selection in self._selected_skills:
             manifest = selection.skill.manifest
             digest = selection.skill.digest
-            root = selection.skill.root
-            if (
-                manifest is None
-                or digest is None
-                or root is None
-                or self.skill_lifecycle is None
-            ):
-                continue
-            resolved_root = root.resolve()
-            if resolved_root.parent == self.skill_lifecycle.project_skills_dir:
-                scope = "project"
-            elif (
-                resolved_root.parent
-                == self.skill_lifecycle.profile_skills_dir
-            ):
-                scope = "profile"
-            else:
+            scope = self._selected_skill_scope(selection)
+            if manifest is None or digest is None or scope is None:
                 continue
             try:
                 matched = self.skill_lifecycle_store.get_skill(
@@ -1286,6 +1869,99 @@ class Agent:
             )
         if versions:
             turn.extension_metadata["loaded_skill_versions"] = versions
+
+    async def _record_selected_skill_usage_async(self) -> None:
+        if self.skill_lifecycle_store is None:
+            return
+        turn = self.state.turns[-1] if self.state.turns else None
+        if turn is None:
+            return
+        versions: list[dict[str, str]] = []
+        for selection in self._selected_skills:
+            manifest = selection.skill.manifest
+            digest = selection.skill.digest
+            scope = self._selected_skill_scope(selection)
+            if manifest is None or digest is None or scope is None:
+                continue
+            try:
+                matched = await call_async_service(
+                    self.skill_lifecycle_store,
+                    "get_skill",
+                    selection.skill.name,
+                    scope=scope,
+                )
+                if matched.digest != digest:
+                    continue
+                await call_async_service(
+                    self.skill_lifecycle_store,
+                    "record_usage",
+                    name=matched.name,
+                    version=matched.version,
+                    digest=matched.digest,
+                    kind=SkillUsageKind.USE,
+                    source_event_id=turn.turn_id,
+                    scope=matched.scope,
+                )
+            except (KeyError, OSError, ValueError) as exc:
+                self._trace(
+                    "skill_usage_record_failed",
+                    {
+                        "turn_id": turn.turn_id,
+                        "skill_name": selection.skill.name,
+                        "scope": scope,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+            versions.append(
+                {
+                    "name": matched.name,
+                    "scope": matched.scope,
+                    "version": matched.version,
+                    "digest": matched.digest,
+                }
+            )
+        if versions:
+            turn.extension_metadata["loaded_skill_versions"] = versions
+
+    def _selected_skill_scope(
+        self,
+        selection: SkillSelection,
+    ) -> str | None:
+        metadata_scope = selection.skill.metadata.get("scope")
+        if isinstance(metadata_scope, str) and metadata_scope in {
+            "project",
+            "profile",
+        }:
+            return metadata_scope
+        root = selection.skill.root
+        lifecycle = self.skill_lifecycle
+        if root is None or lifecycle is None:
+            return None
+        project_skills_dir = getattr(
+            lifecycle,
+            "project_skills_dir",
+            None,
+        )
+        profile_skills_dir = getattr(
+            lifecycle,
+            "profile_skills_dir",
+            None,
+        )
+        if project_skills_dir is None and profile_skills_dir is None:
+            return None
+        resolved_parent = root.resolve().parent
+        if (
+            project_skills_dir is not None
+            and resolved_parent == project_skills_dir
+        ):
+            return "project"
+        if (
+            profile_skills_dir is not None
+            and resolved_parent == profile_skills_dir
+        ):
+            return "profile"
+        return None
 
     def confirm_skill_success(
         self,
@@ -1328,6 +2004,57 @@ class Agent:
                     digest=item["digest"],
                     kind=SkillUsageKind.SUCCESS,
                     source_event_id=f"{selected_turn.turn_id}:host-success",
+                    host_confirmed=True,
+                )
+            )
+        return tuple(records)
+
+    async def confirm_skill_success_async(
+        self,
+        *,
+        turn_id: str | None = None,
+    ) -> tuple[SkillLifecycleRecord, ...]:
+        """Await host-confirmed success recording for exact skill versions."""
+
+        if self.skill_lifecycle_store is None:
+            raise RuntimeError("skill lifecycle is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.status != "completed":
+            raise ValueError("skill success requires a completed host run")
+        raw_versions = selected_turn.extension_metadata.get(
+            "loaded_skill_versions",
+            [],
+        )
+        if not isinstance(raw_versions, list):
+            return ()
+        records: list[SkillLifecycleRecord] = []
+        for item in raw_versions:
+            if not isinstance(item, dict):
+                continue
+            required = ("name", "scope", "version", "digest")
+            if not all(isinstance(item.get(key), str) for key in required):
+                continue
+            records.append(
+                await call_async_service(
+                    self.skill_lifecycle_store,
+                    "record_usage",
+                    name=item["name"],
+                    scope=item["scope"],
+                    version=item["version"],
+                    digest=item["digest"],
+                    kind=SkillUsageKind.SUCCESS,
+                    source_event_id=(
+                        f"{selected_turn.turn_id}:host-success"
+                    ),
                     host_confirmed=True,
                 )
             )
@@ -1379,6 +2106,64 @@ class Agent:
                 host_confirmed_success=host_confirmed_success,
                 current_skill_manifests=manifests,
             )
+        )
+
+    async def review_learning_async(
+        self,
+        *,
+        trigger: LearningReviewTrigger | str = LearningReviewTrigger.MANUAL,
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReviewOutcome:
+        """Await a restricted learning review through hosted services."""
+
+        if self.learning_reviewer is None:
+            raise RuntimeError("learning reviewer is not configured")
+        selected_turn = next(
+            (
+                turn
+                for turn in reversed(self.state.turns)
+                if turn_id is None or turn.turn_id == turn_id
+            ),
+            None,
+        )
+        if selected_turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if selected_turn.final_answer is None:
+            raise ValueError("learning review requires a finished turn")
+        visible_skills = (
+            await call_async_service(
+                self.async_skill_registry,
+                "list_visible_skills",
+            )
+            if self.async_skill_registry is not None
+            else ()
+        )
+        manifests = tuple(
+            skill.manifest.to_dict()
+            for skill in visible_skills
+            if skill.manifest is not None
+        )
+        return cast(
+            LearningReviewOutcome,
+            await call_async_service(
+                self.learning_reviewer,
+                "review",
+                LearningReviewContext(
+                    trigger=LearningReviewTrigger(trigger),
+                    user_message=selected_turn.user_message,
+                    assistant_response=selected_turn.final_answer,
+                    turn_id=selected_turn.turn_id,
+                    source_trace=(
+                        str(self.trace_logger.path)
+                        if self.trace_logger is not None
+                        else None
+                    ),
+                    tool_call_count=selected_turn.tool_call_count,
+                    host_confirmed_success=host_confirmed_success,
+                    current_skill_manifests=manifests,
+                ),
+            ),
         )
 
     def _turn_started_after(self, previous_turn_count: int) -> TurnState | None:
@@ -1486,6 +2271,70 @@ class Agent:
         self.state.last_usage_report = turn.model_usage_totals
         return usage_payload, cost_payload
 
+    async def _record_model_accounting_async(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        usage: LLMUsage | None,
+        cost: LLMCost | None,
+        fallback_attempts: object = None,
+        purpose: str = "agent_action",
+    ) -> tuple[dict | None, dict | None]:
+        service = self.async_usage_accounting
+        if service is None:
+            return await asyncio.to_thread(
+                self._record_model_accounting,
+                turn,
+                request_index=request_index,
+                usage=usage,
+                cost=cost,
+                fallback_attempts=fallback_attempts,
+                purpose=purpose,
+            )
+        usage_payload = usage.to_dict() if usage is not None else None
+        cost_payload = cost.to_dict() if cost is not None else None
+        attempt_payloads = _fallback_attempt_payloads(fallback_attempts)
+        entries = await call_async_service(
+            service,
+            "commit_model_request",
+            turn_id=turn.turn_id,
+            request_index=request_index,
+            purpose=purpose,
+            usage=usage,
+            cost=cost,
+            fallback_attempts=fallback_attempts,
+        )
+        self._trace(
+            TraceEvent.BUDGET_COMMITTED,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "resource_kind": "model",
+                "entry_ids": [entry.id for entry in entries],
+                "source_event_ids": [
+                    entry.source_event_id for entry in entries
+                ],
+            },
+        )
+        if usage_payload is None and cost_payload is None and not attempt_payloads:
+            return None, None
+        report = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "purpose": purpose,
+            "usage": usage_payload,
+            "cost": cost_payload,
+        }
+        if attempt_payloads:
+            report["fallback_attempts"] = attempt_payloads
+        turn.model_usage_reports.append(report)
+        turn.model_usage_totals = _aggregate_model_usage_reports(
+            turn.model_usage_reports
+        )
+        self.state.last_usage_report = turn.model_usage_totals
+        return usage_payload, cost_payload
+
     def _reserve_model_accounting(
         self,
         turn: TurnState,
@@ -1539,6 +2388,69 @@ class Agent:
         self._trace(TraceEvent.BUDGET_RESERVED, payload)
         return payload
 
+    async def _reserve_model_accounting_async(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        messages: list[dict[str, str]],
+        purpose: str,
+        repair_attempts: int = 0,
+    ) -> dict | None:
+        service = self.async_usage_accounting
+        if service is None:
+            return await asyncio.to_thread(
+                self._reserve_model_accounting,
+                turn,
+                request_index=request_index,
+                messages=messages,
+                purpose=purpose,
+                repair_attempts=repair_attempts,
+            )
+        try:
+            reservation = await call_async_service(
+                service,
+                "reserve_model_request",
+                turn_id=turn.turn_id,
+                request_index=request_index,
+                messages=messages,
+                purpose=purpose,
+                repair_attempts=repair_attempts,
+            )
+        except BudgetExceededError as exc:
+            payload = {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "resource_kind": "model",
+                "scope": exc.scope.value,
+                "dimension": exc.dimension,
+                "limit": exc.limit,
+                "committed": exc.committed,
+                "reserved": exc.reserved,
+                "requested": exc.requested,
+                "message": str(exc),
+            }
+            turn.extension_metadata["budget_exhausted"] = payload
+            self._trace(TraceEvent.BUDGET_EXHAUSTED, payload)
+            raise
+        payload = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "resource_kind": "model",
+            "reservation_id": reservation.id,
+            "scope": reservation.budget.scope.value,
+            "reserved_model_calls": reservation.reserved_model_calls,
+            "reserved_tokens": reservation.reserved_tokens,
+            "reserved_cost": reservation.reserved_cost.to_dict(),
+            "expires_at": (
+                reservation.expires_at.isoformat()
+                if reservation.expires_at is not None
+                else None
+            ),
+        }
+        self._trace(TraceEvent.BUDGET_RESERVED, payload)
+        return payload
+
     def _release_model_accounting(
         self,
         turn: TurnState,
@@ -1549,6 +2461,39 @@ class Agent:
         if self.usage_accounting is None:
             return None
         reservation = self.usage_accounting.release_model_request(
+            turn_id=turn.turn_id,
+            request_index=request_index,
+        )
+        if reservation is None:
+            return None
+        payload = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "resource_kind": "model",
+            "reservation_id": reservation.id,
+            "reason": reason,
+        }
+        self._trace(TraceEvent.BUDGET_RELEASED, payload)
+        return payload
+
+    async def _release_model_accounting_async(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        reason: str,
+    ) -> dict | None:
+        service = self.async_usage_accounting
+        if service is None:
+            return await asyncio.to_thread(
+                self._release_model_accounting,
+                turn,
+                request_index=request_index,
+                reason=reason,
+            )
+        reservation = await call_async_service(
+            service,
+            "release_model_request",
             turn_id=turn.turn_id,
             request_index=request_index,
         )
@@ -1670,6 +2615,47 @@ class Agent:
         self._tool_contexts[turn.turn_id] = context
         return context
 
+    async def _tool_context_for_turn_async(
+        self,
+        turn: TurnState,
+    ) -> ToolExecutionContext | None:
+        if turn.turn_id in self._tool_contexts:
+            return self._tool_contexts[turn.turn_id]
+        default_context = self.default_tool_context
+        if (
+            not turn.tool_context_metadata
+            and default_context is None
+            and self.tool_context_lifecycle is None
+        ):
+            return None
+        context = ToolExecutionContext(
+            metadata={
+                **(
+                    default_context.metadata
+                    if default_context is not None
+                    else {}
+                ),
+                **turn.tool_context_metadata,
+                "conversation_id": self.state.conversation_id,
+                "turn_id": turn.turn_id,
+            },
+            deps=(
+                default_context.deps if default_context is not None else None
+            ),
+            execution_session=(
+                default_context.execution_session
+                if default_context is not None
+                else None
+            ),
+        )
+        if (
+            self.tool_context_lifecycle is not None
+            and context.execution_session is None
+        ):
+            context = await self.tool_context_lifecycle.open_async(context)
+        self._tool_contexts[turn.turn_id] = context
+        return context
+
     def _release_tool_context(self, turn: TurnState) -> None:
         """Release request-scoped host dependencies after terminal work."""
         context = self._tool_contexts.pop(turn.turn_id, None)
@@ -1686,6 +2672,56 @@ class Agent:
         if self.trace_logger is None:
             return None
         return self.trace_logger.write_artifact(name, content)
+
+    async def _write_tool_output_artifact_async(
+        self,
+        name: str,
+        content: str,
+    ) -> dict | None:
+        store = self.async_artifact_store
+        if store is None:
+            return await asyncio.to_thread(
+                self._write_tool_output_artifact,
+                name,
+                content,
+            )
+        record = await call_async_service(store, "write", name, content)
+        if record is None:
+            return None
+        if isinstance(record, dict):
+            return record
+        reference = getattr(record, "reference", None)
+        if callable(reference):
+            return cast(dict, reference())
+        to_dict = getattr(record, "to_dict", None)
+        if callable(to_dict):
+            return cast(dict, to_dict())
+        raise TypeError("async artifact store returned an unsupported record")
+
+    async def _flush_async_services(self) -> None:
+        failure: BaseException | None = None
+        for service in self.async_flushables:
+            try:
+                await call_async_service(service, "flush")
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "async journal flush also failed with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        if failure is not None:
+            raise failure
+
+    async def _flush_async_services_after_error(
+        self,
+        original: BaseException,
+    ) -> None:
+        await await_cleanup_after_error(
+            self._flush_async_services(),
+            original,
+        )
 
 
 def _fallback_attempt_payloads(fallback_attempts: object) -> list[dict]:

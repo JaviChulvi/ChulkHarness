@@ -101,8 +101,14 @@ cancellation and I/O timeouts.
 
 Native async hosted factories are resolved with
 `await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are
-closed with their `aclose()` method on the active event loop. The direct
-constructor remains the compatibility path for synchronous service bindings.
+closed with their `aclose()` method on the active event loop. Native async
+service methods and policy hooks are awaited directly; explicit synchronous
+bindings are isolated in worker threads. Ordered persistence and sink journals
+flush before model, tool, approval, and terminal boundaries. Cancellation and
+timeouts release active usage reservations and flush terminal evidence; close
+the runtime with `async with` or `await runtime.close()` to finalize all
+runtime-owned resources. The direct constructor remains the compatibility path
+for entirely synchronous service bindings.
 
 Application-owned service and gateway implementations can run the published
 offline gates in `chulk.testing`:
@@ -116,10 +122,10 @@ offline gates in `chulk.testing`:
 - `assert_gateway_store_contract` and
   `assert_async_gateway_store_contract`.
 
-They check scope isolation, duplicate triggers and logical effects, approval
-restart behavior, unknown-effect reconciliation, deterministic event order,
-bounded parent/child fan-out and progress, durable outbox ownership, and
-ambiguous delivery reconciliation.
+They check the complete hosted service surface, scope isolation, duplicate
+triggers and logical effects, approval restart behavior, unknown-effect
+reconciliation, deterministic event order, bounded parent/child fan-out and
+progress, durable outbox ownership, and ambiguous delivery reconciliation.
 
 See [events](events.md) for generator cleanup and ordering,
 [configuration](configuration.md) for runtime ownership, and the

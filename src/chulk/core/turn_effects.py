@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -11,6 +11,7 @@ from chulk.core.observations import (
     MAX_TOOL_ACTION_CONTEXT_CHARS,
     format_tool_action_context,
     format_tool_observation,
+    format_tool_observation_async,
 )
 from chulk.core.plan_execution import PlanExecution
 from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
@@ -79,6 +80,9 @@ class TurnEffects:
     max_observation_chars: int
     max_tool_stdout_chars: int
     max_tool_stderr_chars: int
+    async_artifact_writer: (
+        Callable[[str, str], Awaitable[dict | None]] | None
+    ) = None
 
     def snapshot(self, turn: TurnState, *, require_plan: bool) -> ActionLoopSnapshot:
         """Capture the immutable control state consumed by the reducer."""
@@ -181,6 +185,47 @@ class TurnEffects:
             outcome=transition.outcome,
             response=response,
             pending=next_pending,
+        )
+
+    async def apply_async(
+        self,
+        turn: TurnState,
+        transition: ActionTransition,
+        *,
+        pending: PendingOperation | None = None,
+        tool_result: ToolResult | None = None,
+    ) -> TransitionApplication:
+        """Apply one transition and await any required artifact writes."""
+
+        effect = transition.effect
+        if not isinstance(effect, FinishToolEffect):
+            return self.apply(
+                turn,
+                transition,
+                pending=pending,
+                tool_result=tool_result,
+            )
+        if not isinstance(pending, PendingToolExecution) or tool_result is None:
+            raise RuntimeError(
+                "FinishToolEffect requires its pending tool and result"
+            )
+        blocked_message = await self._finish_tool_async(
+            turn,
+            effect,
+            pending=pending,
+            result=tool_result,
+        )
+        response = None
+        if blocked_message is not None:
+            response = (
+                self.fail_turn(blocked_message, turn)
+                if effect.disposition == "fatal_safety"
+                else self.block_turn(blocked_message, turn)
+            )
+        return _validate_application(
+            outcome=transition.outcome,
+            response=response,
+            pending=None,
         )
 
     def complete_answer(self, content: str, turn: TurnState) -> str:
@@ -373,6 +418,85 @@ class TurnEffects:
             },
         )
         observation, metadata = self._format_observation(action.tool_name, result)
+        return self._record_tool_observation(
+            turn,
+            effect,
+            pending=pending,
+            result=result,
+            observation=observation,
+            metadata=metadata,
+        )
+
+    async def _finish_tool_async(
+        self,
+        turn: TurnState,
+        effect: FinishToolEffect,
+        *,
+        pending: PendingToolExecution,
+        result: ToolResult,
+    ) -> str | None:
+        action = pending.effect.action
+        record = pending.record
+        record.finish(result)
+        state_record: dict[str, object] = {
+            "tool_name": action.tool_name,
+            "arguments": action.arguments,
+            "phase": pending.effect.phase,
+            "success": result.success,
+        }
+        if record.plan_step_id is not None:
+            state_record["plan_step_id"] = record.plan_step_id
+        self.state.tool_calls.append(state_record)
+        self.trace(
+            TraceEvent.TOOL_CALL,
+            {
+                "turn_id": turn.turn_id,
+                "tool_name": action.tool_name,
+                "arguments": action.arguments,
+                "phase": pending.effect.phase,
+                "plan_step_id": record.plan_step_id,
+                "success": result.success,
+                "error": result.error,
+            },
+        )
+        self.trace(
+            (
+                TraceEvent.TOOL_CALL_COMPLETED
+                if result.success
+                else TraceEvent.TOOL_CALL_FAILED
+            ),
+            {
+                **record.to_dict(),
+                "turn_id": turn.turn_id,
+                "max_tool_calls_per_turn": self.max_tool_calls_per_turn,
+                "exit_code": result.exit_code,
+            },
+        )
+        observation, metadata = await self._format_observation_async(
+            action.tool_name,
+            result,
+        )
+        return self._record_tool_observation(
+            turn,
+            effect,
+            pending=pending,
+            result=result,
+            observation=observation,
+            metadata=metadata,
+        )
+
+    def _record_tool_observation(
+        self,
+        turn: TurnState,
+        effect: FinishToolEffect,
+        *,
+        pending: PendingToolExecution,
+        result: ToolResult,
+        observation: str,
+        metadata: dict,
+    ) -> str | None:
+        action = pending.effect.action
+        record = pending.record
         tool_action_context, action_context_metadata = self._format_tool_action_context(
             pending,
         )
@@ -452,6 +576,34 @@ class TurnEffects:
             max_stdout_chars=self.max_tool_stdout_chars,
             max_stderr_chars=self.max_tool_stderr_chars,
             artifact_writer=self.artifact_writer,
+        )
+        observation, redaction = self.redact_text(
+            TraceEvent.TOOL_OBSERVATION,
+            observation,
+            {
+                "requested_tool_name": requested_tool_name,
+                "resolved_tool_name": result.tool_name,
+            },
+        )
+        if redaction.get("redacted") or redaction.get("redaction_error"):
+            metadata["redaction"] = redaction
+        return observation, metadata
+
+    async def _format_observation_async(
+        self,
+        requested_tool_name: str,
+        result: ToolResult,
+    ) -> tuple[str, dict]:
+        writer = self.async_artifact_writer
+        if writer is None:
+            return self._format_observation(requested_tool_name, result)
+        observation, metadata = await format_tool_observation_async(
+            requested_tool_name=requested_tool_name,
+            result=result,
+            max_observation_chars=self.max_observation_chars,
+            max_stdout_chars=self.max_tool_stdout_chars,
+            max_stderr_chars=self.max_tool_stderr_chars,
+            artifact_writer=writer,
         )
         observation, redaction = self.redact_text(
             TraceEvent.TOOL_OBSERVATION,

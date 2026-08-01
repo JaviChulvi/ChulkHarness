@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from typing import Any
 
+from chulk.hosting.async_utils import call_async_service
 from chulk.sessions import (
     MAX_SESSION_QUERY_CHARS,
     MAX_SESSION_SEARCH_LIMIT,
@@ -110,6 +112,50 @@ def session_read_tool(service: SessionSearchService) -> Tool:
     )
 
 
+def async_session_search_tool(service: object) -> Tool:
+    """Return the exact-search tool bound to a native async service."""
+
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        page = await call_async_service(
+            service,
+            "search",
+            str(arguments["query"]),
+            limit=arguments.get("limit", 10),
+            cursor=arguments.get("cursor"),
+        )
+        return _search_result(page)
+
+    return replace(
+        session_search_tool(service),  # type: ignore[arg-type]
+        callable=invoke,
+        run_in_executor=False,
+    )
+
+
+def async_session_read_tool(service: object) -> Tool:
+    """Return the bounded-window tool bound to a native async service."""
+
+    async def invoke(arguments: dict[str, Any]) -> ToolResult:
+        window = await call_async_service(
+            service,
+            "read_window",
+            str(arguments["conversation_id"]),
+            ordinal=arguments["ordinal"],
+            before=arguments.get("before", 3),
+            after=arguments.get("after", 3),
+            limit=arguments.get("limit", 20),
+            cursor=arguments.get("cursor"),
+            include_sensitive=False,
+        )
+        return _read_result(window)
+
+    return replace(
+        session_read_tool(service),  # type: ignore[arg-type]
+        callable=invoke,
+        run_in_executor=False,
+    )
+
+
 def _search(
     arguments: dict[str, Any],
     service: SessionSearchService,
@@ -119,6 +165,10 @@ def _search(
         limit=arguments.get("limit", 10),
         cursor=arguments.get("cursor"),
     )
+    return _search_result(page)
+
+
+def _search_result(page: Any) -> ToolResult:
     payload = page.to_dict()
     return ToolResult(
         tool_name="session_search",
@@ -148,6 +198,10 @@ def _read(
         cursor=arguments.get("cursor"),
         include_sensitive=False,
     )
+    return _read_result(window)
+
+
+def _read_result(window: Any) -> ToolResult:
     payload = window.to_dict()
     return ToolResult(
         tool_name="session_read",
@@ -164,4 +218,9 @@ def _read(
     )
 
 
-__all__ = ["session_read_tool", "session_search_tool"]
+__all__ = [
+    "async_session_read_tool",
+    "async_session_search_tool",
+    "session_read_tool",
+    "session_search_tool",
+]

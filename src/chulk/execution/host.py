@@ -369,6 +369,22 @@ class ExecutionContextLifecycle:
         )
         return replace(context, execution_session=self.backend.open_session(request))
 
+    async def open_async(
+        self,
+        context: ToolExecutionContext[Any],
+    ) -> ToolExecutionContext[Any]:
+        """Open a turn session through the backend's native async boundary."""
+
+        request = ExecutionSessionRequest(
+            conversation_id=_metadata_text(context.metadata, "conversation_id"),
+            turn_id=_metadata_text(context.metadata, "turn_id"),
+            metadata=context.metadata,
+        )
+        return replace(
+            context,
+            execution_session=await self.backend.open_session_async(request),
+        )
+
     def close(self, context: ToolExecutionContext[Any]) -> None:
         session = context.execution_session
         close = getattr(session, "close", None)
@@ -381,7 +397,9 @@ class ExecutionContextLifecycle:
         if callable(aclose):
             await aclose()
             return
-        self.close(context)
+        close = getattr(session, "close", None)
+        if callable(close):
+            await asyncio.to_thread(close)
 
 
 def _metadata_text(metadata: dict[str, Any], key: str) -> str | None:

@@ -6,7 +6,10 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from chulk._runtime.assembly import assemble_agent
+from chulk._runtime.assembly import (
+    assemble_agent,
+    assemble_async_hosted_agent,
+)
 from chulk._runtime.sessions import block_unresolved_tool_intent
 from chulk._runtime.skills import SkillSpecResolution as SkillSpecResolution
 from chulk._runtime.tools import RuntimeToolContext as RuntimeToolContext
@@ -17,7 +20,8 @@ from chulk.core import Agent, TurnState
 from chulk.core.events import AgentEvent
 from chulk.execution import ExecutionBackend
 from chulk.goals.runtime import GoalExecutionContext
-from chulk.hosting import ExecutionScope, RuntimeServices
+from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
+from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.llm import LLMClient, provider_capabilities
 from chulk.llm.capabilities import (
     client_requires_mcp_bridge,
@@ -135,6 +139,65 @@ def create_agent(
         mcp_bridge_required=_mcp_bridge_required,
         mcp_provider_path=_mcp_provider_path,
         unresolved_tool_handler=_block_unresolved_tool_intent,
+    )
+
+
+async def create_async_hosted_agent(
+    config: Config,
+    *,
+    services: AsyncRuntimeServices,
+    execution_scope: ExecutionScope,
+    conversation_id: str | None = None,
+    conversation_metadata: dict[str, object] | None = None,
+    runtime_metadata: dict | None = None,
+    llm_client: LLMClient | None = None,
+    tool_specs: Iterable[object] | None = None,
+    skill_specs: object | Iterable[object] | None = None,
+    system_prompt: str | None = None,
+    permission_callback: Callable[
+        [PermissionRequest, PermissionDecisionRecord],
+        PermissionDecision | bool,
+    ]
+    | None = None,
+    mcp_servers: Iterable[MCPServerConfig] | None = None,
+    redaction_callback: Callable[[str, str, dict], str] | None = None,
+    redaction_fail_closed: bool = False,
+    capabilities: Capabilities | None = None,
+    deps: object | None = None,
+    shell_execution_policy: ShellExecutionPolicy | None = None,
+    require_shell_containment: bool = False,
+    run_budget: RunBudget | None = None,
+    usage_dimensions: UsageDimensions | None = None,
+    goal_execution: GoalExecutionContext | None = None,
+    profile_id: str | None = None,
+) -> tuple[Agent, ResolvedRuntimeServices]:
+    """Create a hosted agent through native async service contracts."""
+    return await assemble_async_hosted_agent(
+        config,
+        services=services,
+        execution_scope=execution_scope,
+        conversation_id=conversation_id,
+        conversation_metadata=conversation_metadata,
+        runtime_metadata=runtime_metadata,
+        llm_client=llm_client,
+        tool_specs=tool_specs,
+        skill_specs=skill_specs,
+        system_prompt=system_prompt,
+        permission_callback=permission_callback,
+        mcp_servers=mcp_servers,
+        redaction_callback=redaction_callback,
+        redaction_fail_closed=redaction_fail_closed,
+        capabilities=capabilities,
+        deps=deps,
+        shell_execution_policy=shell_execution_policy,
+        require_shell_containment=require_shell_containment,
+        run_budget=run_budget,
+        usage_dimensions=usage_dimensions,
+        goal_execution=goal_execution,
+        profile_id=profile_id,
+        agent_factory=Agent,
+        bridge_tool_factory=create_mcp_bridge_tools,
+        mcp_bridge_required=_mcp_bridge_required,
     )
 
 

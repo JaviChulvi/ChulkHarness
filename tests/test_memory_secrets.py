@@ -3,11 +3,35 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
-from chulk.memory import MemoryExtractionCandidate, MemoryPolicy, SQLiteMemoryStore
+from chulk.memory import (
+    AsyncMemoryPolicy,
+    MemoryExtractionCandidate,
+    MemoryPolicy,
+    SQLiteMemoryStore,
+)
 from chulk.memory.security import MemorySecretError
+from chulk.tools.memory import (
+    async_import_memories_tool,
+    async_save_memory_tool,
+    async_update_memory_tool,
+)
+from chulk.tools.registry import ToolRegistry
+
+
+class _PoisonAsyncMemoryStore:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        async def invoke(*_args, **_kwargs):
+            self.calls.append(name)
+            raise AssertionError(f"unsafe hosted memory call: {name}")
+
+        return invoke
 
 
 @pytest.mark.parametrize(
@@ -154,3 +178,167 @@ def test_inferred_secret_candidates_are_skipped_without_aborting_the_turn(tmp_pa
     assert result.proposal_ids == ()
     assert store.list_memories() == []
     assert store.list_memory_proposals() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_factory", "arguments"),
+    [
+        (
+            async_save_memory_tool,
+            {
+                "content": (
+                    "OPENAI_API_KEY="
+                    "sk-proj-FakeHostedSaveCredential123456789"
+                )
+            },
+        ),
+        (
+            async_update_memory_tool,
+            {
+                "memory_id": "memory-1",
+                "metadata": {
+                    "provider": {
+                        "accessToken": (
+                            "FakeHostedUpdateCredential123456789"
+                        )
+                    }
+                },
+            },
+        ),
+    ],
+)
+async def test_async_memory_tools_reject_secrets_before_hosted_write(
+    tool_factory,
+    arguments,
+):
+    store = _PoisonAsyncMemoryStore()
+    registry = ToolRegistry()
+    registry.register(tool_factory(store))
+
+    result = await registry.run_async(registry.list_tools()[0].name, arguments)
+
+    assert not result.success
+    assert result.error is not None
+    assert "FakeHosted" not in result.error
+    assert store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_memory_import_preflights_before_hosted_write(tmp_path):
+    secret = "sk-proj-FakeHostedImportCredential123456789"
+    markdown = tmp_path / "MEMORY.md"
+    markdown.write_text(
+        "- [preference] User prefers concise answers.\n"
+        f"- [project] OPENAI_API_KEY={secret}\n",
+        encoding="utf-8",
+    )
+    store = _PoisonAsyncMemoryStore()
+    registry = ToolRegistry()
+    registry.register(async_import_memories_tool(store, tmp_path))
+
+    result = await registry.run_async(
+        "import_memories",
+        {"path": "MEMORY.md"},
+    )
+
+    assert not result.success
+    assert result.error is not None
+    assert secret not in result.error
+    assert store.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["automatic", "manual"])
+async def test_async_memory_policy_rejects_secrets_before_hosted_write(mode):
+    store = _PoisonAsyncMemoryStore()
+    policy = AsyncMemoryPolicy(store, mode)
+    secret = "sk-proj-FakeHostedPolicyCredential123456789"
+
+    result = await policy.handle_candidates(
+        [
+            MemoryExtractionCandidate(
+                content=f"OPENAI_API_KEY={secret}",
+                tags=["explicit", "user"],
+            )
+        ],
+        conversation_id="conversation-id",
+        turn_id="turn-id",
+        evidence=f"Remember OPENAI_API_KEY={secret}",
+    )
+
+    assert result.accepted_memory_ids == ()
+    assert result.proposal_ids == ()
+    assert store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_async_memory_policy_rechecks_proposal_before_hosted_approval():
+    secret = "sk-proj-FakeHostedApprovalCredential123456789"
+
+    class ProposalStore:
+        def __init__(self) -> None:
+            self.approve_called = False
+
+        async def list_memory_proposals(self, **_kwargs):
+            return [
+                SimpleNamespace(
+                    id="proposal-1",
+                    content=f"OPENAI_API_KEY={secret}",
+                    tags=[],
+                    metadata={},
+                    source="manual_review",
+                    evidence="legacy proposal",
+                    conversation_id="conversation-id",
+                    turn_id="turn-id",
+                )
+            ]
+
+        async def approve_memory_proposal(self, _proposal_id):
+            self.approve_called = True
+            raise AssertionError("unsafe hosted proposal approval")
+
+    store = ProposalStore()
+    policy = AsyncMemoryPolicy(store, "manual")
+
+    with pytest.raises(MemorySecretError) as exc_info:
+        await policy.approve("proposal-1")
+
+    assert secret not in str(exc_info.value)
+    assert not store.approve_called
+
+
+@pytest.mark.asyncio
+async def test_async_memory_policy_rechecks_mapping_proposal_before_approval():
+    secret = "sk-proj-FakeHostedMappingCredential123456789"
+
+    class ProposalStore:
+        def __init__(self) -> None:
+            self.approve_called = False
+
+        async def list_memory_proposals(self, **_kwargs):
+            return [
+                {
+                    "id": "proposal-1",
+                    "content": f"OPENAI_API_KEY={secret}",
+                    "tags": [],
+                    "metadata": {},
+                    "source": "manual_review",
+                    "evidence": "legacy proposal",
+                    "conversation_id": "conversation-id",
+                    "turn_id": "turn-id",
+                }
+            ]
+
+        async def approve_memory_proposal(self, _proposal_id):
+            self.approve_called = True
+            raise AssertionError("unsafe hosted proposal approval")
+
+    store = ProposalStore()
+    policy = AsyncMemoryPolicy(store, "manual")
+
+    with pytest.raises(MemorySecretError) as exc_info:
+        await policy.approve("proposal-1")
+
+    assert secret not in str(exc_info.value)
+    assert not store.approve_called

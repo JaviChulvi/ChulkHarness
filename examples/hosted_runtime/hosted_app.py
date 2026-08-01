@@ -108,14 +108,15 @@ def run_sync(root: Path, hub: InMemoryServiceHub) -> str:
 
 
 async def run_async(root: Path, hub: InMemoryServiceHub) -> str:
-    async with AsyncHostedRuntime(
+    runtime = await AsyncHostedRuntime.create(
         config=AgentConfig(project_root=root),
         llm=script(),
         tools=[catalog_status],
         skills=[],
         services=hub.async_services(),
         execution_scope=execution_scope("async-run"),
-    ) as runtime:
+    )
+    async with runtime:
         outcome = await AsyncDurableHostedExecutor(
             runtime,
             runtime.runtime.run_store,

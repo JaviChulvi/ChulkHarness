@@ -66,6 +66,7 @@ def create_tool_registry(
     artifact_store: TraceArtifactStore,
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
+    async_services: bool = False,
 ) -> tuple[ToolRegistry, list[str]]:
     """Build explicit or default tools and add any required MCP bridge tools."""
     if tool_specs is None:
@@ -104,7 +105,13 @@ def create_tool_registry(
     )
     registry = ToolRegistry()
     for spec in tool_specs:
-        registry.register(_resolve_tool_spec(spec, context))
+        registry.register(
+            _resolve_tool_spec(
+                spec,
+                context,
+                async_services=async_services,
+            )
+        )
     return _register_mcp_bridge_tools(
         config,
         registry,
@@ -138,9 +145,16 @@ def _register_mcp_bridge_tools(
     return registry, bridge_tool_names
 
 
-def _resolve_tool_spec(spec: object, context: RuntimeToolContext) -> Tool:
+def _resolve_tool_spec(
+    spec: object,
+    context: RuntimeToolContext,
+    *,
+    async_services: bool = False,
+) -> Tool:
     if isinstance(spec, Tool):
         return spec
+    if async_services and hasattr(spec, "to_async_tool"):
+        return spec.to_async_tool(context)  # type: ignore[no-any-return, attr-defined]
     if hasattr(spec, "to_tool"):
         return spec.to_tool(context)  # type: ignore[no-any-return, attr-defined]
     raise TypeError(f"Unsupported tool spec: {spec!r}")

@@ -99,7 +99,8 @@ record.
 provides:
 
 - `create_local(...)` for ordinary SDK services.
-- `create_hosted(...)` and `create_async_hosted(...)` for injected services.
+- `create_hosted(...)` and awaited `create_async_hosted(...)` for injected
+  services.
 - `dry_run(...)` for side-effect-free dependency resolution.
 - `capability_diff(...)` for reviewable tool, skill, and effect changes.
 

@@ -729,7 +729,7 @@ async def test_same_definition_runs_through_async_hosted_facade(
             }
         ]
     )
-    async with runtime.create_async_hosted(
+    async with await runtime.create_async_hosted(
         scope=scope(run_id="async-hosted-run"),
         services=hub.async_services(),
         config=AgentConfig(project_root=root),

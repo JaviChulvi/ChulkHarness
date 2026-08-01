@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 import time
 
 import pytest
 
 from chulk import Agent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
+from chulk.core.state import TurnState
+from chulk.core.tool_execution import ToolExecutor
 from chulk.llm import LLMClient
 from chulk.tools import ToolExecutionContext, ToolRegistry
+from chulk.tools.permissions import ToolPermissionPolicy
 from chulk.tools.policy import schema_digest as policy_schema_digest
 from chulk.tools.schema import schema_digest
 
@@ -295,3 +299,156 @@ async def test_async_cancellation_is_not_converted_or_retried():
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
+    started = asyncio.Event()
+    released = False
+    aborted: list[BaseException] = []
+
+    @Tool
+    async def cancellable() -> str:
+        """Wait until cancelled."""
+        started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    class Usage:
+        async def reserve_tool_call(self, **_kwargs):
+            return SimpleNamespace(
+                id="reservation-1",
+                budget=SimpleNamespace(
+                    scope=SimpleNamespace(value="turn"),
+                ),
+                reserved_tool_calls=1,
+            )
+
+        async def release_tool_call(self, **_kwargs):
+            nonlocal released
+            released = True
+            raise RuntimeError("tool release failed")
+
+    class Goal:
+        def begin_tool(self, **_kwargs):
+            return object()
+
+        def finish_tool(self, _checkpoint, _result):
+            raise AssertionError("cancelled tools cannot finish")
+
+        def abort_tool(self, checkpoint, error):
+            aborted.append(error)
+            return checkpoint
+
+    registry = ToolRegistry()
+    registry.register(cancellable)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda _name, _payload=None: None,
+        get_context=lambda _turn: None,
+        goal_execution=Goal(),
+        async_usage_accounting=Usage(),
+    )
+    task = asyncio.create_task(
+        executor.execute_async("cancellable", {}, TurnState("cancel"))
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert released
+    assert aborted == [error.value]
+    assert any(
+        "tool release failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_durable_effect_cleanup_preserves_cancellation():
+    started = asyncio.Event()
+    failed_with: list[BaseException] = []
+
+    @Tool
+    async def cancellable() -> str:
+        """Wait until cancelled."""
+        started.set()
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    class DurableEffects:
+        async def prepare_async(self, **_kwargs):
+            return "effect-1"
+
+        async def started_async(self, _token):
+            return None
+
+        async def failed_async(self, _token, error):
+            failed_with.append(error)
+            raise RuntimeError("effect quarantine failed")
+
+    registry = ToolRegistry()
+    registry.register(cancellable)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda _name, _payload=None: None,
+        get_context=lambda _turn: ToolExecutionContext(),
+        durable_effects=DurableEffects(),
+    )
+    task = asyncio.create_task(
+        executor.execute_async("cancellable", {}, TurnState("cancel"))
+    )
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert failed_with == [error.value]
+    assert any(
+        "effect quarantine failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_tool_flushes_authorization_before_dispatch():
+    tool_calls = 0
+    trace_events: list[str] = []
+
+    @Tool
+    async def side_effect() -> str:
+        """Perform one external side effect."""
+        nonlocal tool_calls
+        tool_calls += 1
+        return "done"
+
+    async def reject_authorization_journal() -> None:
+        assert "tool_permission_decided" in trace_events
+        raise RuntimeError("authorization journal unavailable")
+
+    registry = ToolRegistry()
+    registry.register(side_effect)
+    executor = ToolExecutor(
+        registry=registry,
+        permission_policy=ToolPermissionPolicy(),
+        permission_callback=None,
+        trace=lambda name, _payload=None: trace_events.append(name),
+        get_context=lambda _turn: None,
+        flush_async=reject_authorization_journal,
+    )
+
+    with pytest.raises(RuntimeError, match="authorization journal unavailable"):
+        await executor.execute_async(
+            "side_effect",
+            {},
+            TurnState("run side effect"),
+        )
+
+    assert tool_calls == 0

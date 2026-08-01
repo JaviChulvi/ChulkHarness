@@ -18,6 +18,10 @@ advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `ScriptedLLMClient` is stable only from `chulk.testing`.
 The `assert_*_contract` functions in `chulk.testing` are public-stable
 compatibility gates for third-party hosted services and gateway stores.
+The hosted sync and async service protocols, including `AsyncSkillService`,
+`AsyncSkillLifecycleStore`, `AsyncLearningProposalService`,
+`AsyncLearningReviewer`, and `AsyncPluginService`, their binding containers,
+and resource-ownership semantics are public-stable.
 
 The top-level package resolves stable exports lazily. Plain `import chulk`
 loads only package metadata; requesting a named export loads its owning public
