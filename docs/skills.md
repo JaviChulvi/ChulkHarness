@@ -3,7 +3,7 @@
 Skills are procedural instructions loaded into model context; they are not
 callable tools and are not durable memory.
 
-- Bundled skills ship under `chulk/skills/bundled/`.
+- Bundled skills ship under `src/chulk/skills/bundled/`.
 - Project skills live under `<runtime_dir>/skills/`, normally `.chulk/skills/`.
 - `Skills.only(...)` limits what may be selected.
 - `Skills.pin(...)` always loads a chosen skill.

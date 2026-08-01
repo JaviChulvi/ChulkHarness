@@ -45,7 +45,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile package
-        run: python -m compileall chulk
+        run: python -m compileall src/chulk
 
       - name: Lint
         run: python -m ruff check .
@@ -69,7 +69,7 @@ jobs:
           python -m pip install -e ".[dev,providers,mcp,postgres]"
 
       - name: Typecheck package, examples, and external consumer
-        run: python -m mypy chulk examples typing_tests
+        run: python -m mypy src/chulk examples typing_tests
 
       - name: Verify documentation contract
         run: python scripts/check_docs.py
@@ -116,7 +116,7 @@ jobs:
         env:
           CHULK_POSTGRES_TEST_URL: >-
             postgresql+psycopg://postgres:postgres@localhost:5432/chulk
-        run: python -m pytest chulk/tests/test_postgres_reference.py -q
+        run: python -m pytest tests/test_postgres_reference.py -q
 
       - name: Run PostgreSQL hosted example
         env:
@@ -146,7 +146,7 @@ jobs:
         run: python -m pytest
 
       - name: Compile package
-        run: python -m compileall chulk
+        run: python -m compileall src/chulk
 
       - name: Lint
         run: python -m ruff check .

@@ -96,15 +96,15 @@ chulk-telegram = "chulk.telegram.main:main"
 chulk-discord = "chulk.discord.main:main"
 
 [tool.setuptools]
-package-dir = {"" = "."}
+package-dir = {"" = "src"}
 
 [tool.setuptools.dynamic]
 version = {attr = "chulk._version.__version__"}
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["chulk*"]
-exclude = ["chulk.tests*", "chulkharness.egg-info*"]
+exclude = ["chulkharness.egg-info*"]
 
 [tool.setuptools.package-data]
 "chulk" = ["py.typed"]
@@ -120,13 +120,12 @@ exclude = ["chulk.tests*", "chulkharness.egg-info*"]
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["chulk/tests"]
-pythonpath = ["."]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.coverage.run]
 branch = true
 source = ["chulk"]
-omit = ["chulk/tests/*"]
 
 [tool.coverage.report]
 fail_under = 80
@@ -142,4 +141,4 @@ check_untyped_defs = true
 follow_imports = "silent"
 warn_unused_configs = true
 warn_redundant_casts = true
-exclude = ["build", "dist", "chulk/tests"]
+exclude = ["^build/", "^dist/", "^tests/"]

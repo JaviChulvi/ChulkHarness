@@ -8,8 +8,9 @@ from tempfile import TemporaryDirectory
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SOURCE_ROOT = REPO_ROOT / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
 
 from chulk import Agent, AgentConfig, Skills  # noqa: E402
 from chulk.config import Config  # noqa: E402

@@ -24,8 +24,8 @@ agent harness:
 
 - State, prompts, model calls, tools, memory, skills, permissions, and traces
   must remain easy to follow from the code.
-- Provider-specific behavior belongs in `chulk/llm/`.
-- Runtime assembly belongs in `chulk/runtime.py` and is shared by CLI and SDK.
+- Provider-specific behavior belongs in `src/chulk/llm/`.
+- Runtime assembly belongs in `src/chulk/runtime.py` and is shared by CLI and SDK.
 - The LLM boundary returns validated action dataclasses; orchestration does not
   parse provider text directly.
 - Tools, skills, and memory remain separate concepts.
@@ -67,7 +67,8 @@ Acceptance criteria:
   provider errors, and cancellation.
 - [x] Compare durable turn state, model/tool counts, observations, and trace
   event ordering while excluding generated ids and timestamps.
-- [x] Measure branch coverage over production code and omit `chulk/tests/`.
+- [x] Measure branch coverage over production code while keeping tests outside
+  the importable package.
 - [x] Enforce an initial 80% global coverage floor and ratchet it upward as
   coverage grows.
 - [x] Run one Python CI lane with `.[dev,providers,mcp]`; keep the full suite
@@ -256,7 +257,7 @@ These stories are ordered after the maintenance tranche above.
 - [x] Enforce an explicit MIME/extension policy covering common iPhone and Mac
   images, audio, videos, documents, contacts, and calendar exports, with clear
   PDF-export guidance for Pages, Numbers, and Keynote packages.
-- [x] Keep provider-specific multimodal processing in `chulk/llm/providers/`.
+- [x] Keep provider-specific multimodal processing in `src/chulk/llm/providers/`.
 - [x] Preserve captions as user instructions and feed extracted text through
   the normal agent, memory, session, and trace path.
 - [x] Keep media bytes out of project files, durable memory, and trace payloads.
@@ -345,9 +346,9 @@ complete and the repository passes:
 
 ```bash
 python -m pytest
-python -m compileall chulk
+python -m compileall src/chulk
 python -m ruff check .
-python -m mypy chulk examples typing_tests
+python -m mypy src/chulk examples typing_tests
 python scripts/check_docs.py
 ```
 

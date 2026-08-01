@@ -1,0 +1,372 @@
+"""Configuration helpers for ChulkHarness."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+
+from chulk.llm.capabilities import (
+    LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
+    LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS,
+)
+from chulk.llm.factory import supported_llm_providers
+from chulk.llm.providers.compatible import DEFAULT_OPENROUTER_BASE_URL
+from chulk.mcp import MCPServerConfig, load_mcp_servers
+from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
+
+
+DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_PROVIDER = "openai"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LOCAL_MODEL = "google/gemma-4-12b-qat"
+DEFAULT_LOCAL_BASE_URL = "http://localhost:1234/v1"
+DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS
+DEFAULT_MAX_SKILLS_PER_TURN = 3
+DEFAULT_MAX_SKILL_CONTENT_CHARS = 4000
+DEFAULT_TRACE_MAX_PROMPT_CHARS = 50000
+DEFAULT_MAX_OBSERVATION_CHARS = 12000
+DEFAULT_MAX_TOOL_STDOUT_CHARS = 8000
+DEFAULT_MAX_TOOL_STDERR_CHARS = 4000
+DEFAULT_MAX_REFLECTION_ATTEMPTS = 0
+SUPPORTED_LLM_PROVIDERS = supported_llm_providers()
+
+
+class ConfigValueError(ValueError):
+    """Internal validation error retaining the invalid environment field."""
+
+    def __init__(self, field: str, message: str) -> None:
+        self.field = field
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class LLMFallbackProviderConfig:
+    """One configured fallback provider after the primary LLM."""
+
+    provider: str
+    model: str
+
+
+@dataclass(frozen=True)
+class Config:
+    """Runtime configuration loaded from environment variables."""
+
+    project_root: Path
+    runtime_dir: Path
+    skills_dir: Path
+    skills_dirs: tuple[Path, ...]
+    store_path: Path
+    traces_dir: Path
+    mcp_config_path: Path
+    llm_provider: str
+    model: str
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
+    openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    local_api_key: str | None = None
+    local_base_url: str = DEFAULT_LOCAL_BASE_URL
+    local_context_window_tokens: int = field(
+        default=DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS,
+        kw_only=True,
+    )
+    openai_compatible_api_key: str | None = None
+    openai_compatible_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = DEFAULT_OPENROUTER_BASE_URL
+    anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
+    bedrock_api_key: str | None = None
+    bedrock_base_url: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
+    llm_fallback_providers: tuple[LLMFallbackProviderConfig, ...] = ()
+    history_limit: int = 20
+    max_tool_calls_per_turn: int = 5
+    max_skills_per_turn: int = DEFAULT_MAX_SKILLS_PER_TURN
+    max_skill_content_chars: int = DEFAULT_MAX_SKILL_CONTENT_CHARS
+    shell_timeout_seconds: int = 10
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 2
+    trace_max_prompt_chars: int = DEFAULT_TRACE_MAX_PROMPT_CHARS
+    max_observation_chars: int = DEFAULT_MAX_OBSERVATION_CHARS
+    max_tool_stdout_chars: int = DEFAULT_MAX_TOOL_STDOUT_CHARS
+    max_tool_stderr_chars: int = DEFAULT_MAX_TOOL_STDERR_CHARS
+    max_reflection_attempts: int = DEFAULT_MAX_REFLECTION_ATTEMPTS
+    permission_profile: str = DEFAULT_PERMISSION_PROFILE
+    profile_id: str = "default"
+
+
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    """Parse a simple .env file without adding a runtime dependency."""
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigValueError(key, f"{key} must be an integer") from exc
+    if parsed < 1:
+        raise ConfigValueError(key, f"{key} must be greater than zero")
+    return parsed
+
+
+def _local_context_window_tokens(env: Mapping[str, str]) -> int:
+    key = "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS"
+    value = _env_int(env, key, DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS)
+    if value <= LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS:
+        raise ConfigValueError(
+            key,
+            f"{key} must be greater than the local response reserve "
+            f"({LOCAL_DEFAULT_RESPONSE_RESERVE_TOKENS})",
+        )
+    return value
+
+
+def _env_nonnegative_int(env: Mapping[str, str], key: str, default: int) -> int:
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigValueError(key, f"{key} must be an integer") from exc
+    if parsed < 0:
+        raise ConfigValueError(key, f"{key} must be zero or greater")
+    return parsed
+
+
+def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ConfigValueError(key, f"{key} must be a number") from exc
+    if parsed <= 0:
+        raise ConfigValueError(key, f"{key} must be greater than zero")
+    return parsed
+
+
+def _resolve_config_path(value: str | Path, *, base: Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def load_config(environ: Mapping[str, str] | None = None) -> Config:
+    """Load local development configuration."""
+    default_root = Path.cwd()
+    process_env = dict(os.environ if environ is None else environ)
+    initial_root = Path(process_env.get("CHULK_PROJECT_ROOT", default_root)).resolve()
+    dotenv_env = _parse_dotenv(initial_root / ".env")
+    env = {**dotenv_env, **process_env}
+    project_root = Path(env.get("CHULK_PROJECT_ROOT", initial_root)).resolve()
+    llm_provider = (env.get("CHULK_LLM_PROVIDER") or DEFAULT_PROVIDER).lower()
+    if llm_provider not in SUPPORTED_LLM_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
+        raise ConfigValueError("CHULK_LLM_PROVIDER", f"CHULK_LLM_PROVIDER must be one of: {supported}")
+
+    model = _configured_model(env, llm_provider)
+    bedrock_base_url = _bedrock_base_url(env)
+    llm_fallback_providers = _parse_fallback_providers(
+        env,
+        primary_provider=llm_provider,
+        primary_model=model,
+    )
+    bedrock_is_configured = llm_provider == "bedrock" or any(
+        fallback.provider == "bedrock" for fallback in llm_fallback_providers
+    )
+    if bedrock_is_configured and bedrock_base_url is None:
+        raise ConfigValueError(
+            "CHULK_BEDROCK_BASE_URL",
+            "CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL is required when Bedrock "
+            "is configured as a primary or fallback provider",
+        )
+    runtime_dir = _resolve_config_path(env.get("CHULK_RUNTIME_DIR") or ".chulk", base=project_root)
+    mcp_config_path = runtime_dir / "mcp.json"
+    mcp_servers = load_mcp_servers(mcp_config_path, env)
+    skills_dir = runtime_dir / "skills"
+
+    return Config(
+        project_root=project_root,
+        runtime_dir=runtime_dir,
+        skills_dir=skills_dir,
+        skills_dirs=_default_skills_dirs(skills_dir),
+        store_path=project_root / "chulk" / "store.sqlite",
+        traces_dir=project_root / "traces",
+        mcp_config_path=mcp_config_path,
+        mcp_servers=mcp_servers,
+        llm_provider=llm_provider,
+        model=model,
+        openai_api_key=env.get("OPENAI_API_KEY") or None,
+        deepseek_api_key=env.get("CHULK_DEEPSEEK_API_KEY") or env.get("DEEPSEEK_API_KEY") or None,
+        deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
+        local_api_key=env.get("CHULK_LOCAL_API_KEY") or None,
+        local_base_url=env.get("CHULK_LOCAL_BASE_URL") or DEFAULT_LOCAL_BASE_URL,
+        local_context_window_tokens=_local_context_window_tokens(env),
+        openai_compatible_api_key=env.get("CHULK_OPENAI_COMPATIBLE_API_KEY") or None,
+        openai_compatible_base_url=env.get("CHULK_OPENAI_COMPATIBLE_BASE_URL") or None,
+        openrouter_api_key=env.get("CHULK_OPENROUTER_API_KEY") or env.get("OPENROUTER_API_KEY") or None,
+        openrouter_base_url=env.get("CHULK_OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL,
+        anthropic_api_key=env.get("CHULK_ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY") or None,
+        anthropic_base_url=env.get("CHULK_ANTHROPIC_BASE_URL") or None,
+        bedrock_api_key=(
+            env.get("CHULK_BEDROCK_API_KEY")
+            or env.get("BEDROCK_API_KEY")
+            or env.get("AWS_BEARER_TOKEN_BEDROCK")
+            or None
+        ),
+        bedrock_base_url=bedrock_base_url,
+        gemini_api_key=_first_nonblank_env(
+            env,
+            "CHULK_GEMINI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ),
+        gemini_base_url=_first_nonblank_env(env, "CHULK_GEMINI_BASE_URL"),
+        llm_fallback_providers=llm_fallback_providers,
+        history_limit=_env_int(env, "CHULK_HISTORY_LIMIT", 20),
+        max_tool_calls_per_turn=_env_int(env, "CHULK_MAX_TOOL_CALLS_PER_TURN", 5),
+        max_skills_per_turn=_env_int(env, "CHULK_MAX_SKILLS_PER_TURN", DEFAULT_MAX_SKILLS_PER_TURN),
+        max_skill_content_chars=_env_int(env, "CHULK_MAX_SKILL_CONTENT_CHARS", DEFAULT_MAX_SKILL_CONTENT_CHARS),
+        shell_timeout_seconds=_env_int(env, "CHULK_SHELL_TIMEOUT_SECONDS", 10),
+        llm_timeout_seconds=_env_float(env, "CHULK_LLM_TIMEOUT_SECONDS", 60.0),
+        llm_max_retries=_env_int(env, "CHULK_LLM_MAX_RETRIES", 2),
+        trace_max_prompt_chars=_env_int(env, "CHULK_TRACE_MAX_PROMPT_CHARS", DEFAULT_TRACE_MAX_PROMPT_CHARS),
+        max_observation_chars=_env_int(env, "CHULK_MAX_OBSERVATION_CHARS", DEFAULT_MAX_OBSERVATION_CHARS),
+        max_tool_stdout_chars=_env_int(env, "CHULK_MAX_TOOL_STDOUT_CHARS", DEFAULT_MAX_TOOL_STDOUT_CHARS),
+        max_tool_stderr_chars=_env_int(env, "CHULK_MAX_TOOL_STDERR_CHARS", DEFAULT_MAX_TOOL_STDERR_CHARS),
+        max_reflection_attempts=_env_nonnegative_int(
+            env,
+            "CHULK_MAX_REFLECTION_ATTEMPTS",
+            DEFAULT_MAX_REFLECTION_ATTEMPTS,
+        ),
+        permission_profile=normalize_permission_profile(env.get("CHULK_PERMISSION_PROFILE")),
+    )
+
+
+def resolve_cli_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | str | None = None,
+) -> dict[str, str]:
+    """Return CLI environment values with one explicit project root."""
+    env = dict(os.environ if environ is None else environ)
+    if not env.get("CHULK_PROJECT_ROOT"):
+        project_root = Path.cwd() if cwd is None else Path(cwd)
+        env["CHULK_PROJECT_ROOT"] = str(project_root.expanduser().resolve())
+    return env
+
+
+def load_cli_config(
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | str | None = None,
+) -> Config:
+    """Load CLI configuration relative to the current project directory."""
+    return load_config(resolve_cli_environment(environ, cwd=cwd))
+
+
+def bundled_skills_dir() -> Path:
+    """Return the installed path for Chulk's bundled skill playbooks."""
+    return Path(__file__).resolve().parent / "skills" / "bundled"
+
+
+def _default_skills_dirs(project_skills_dir: Path) -> tuple[Path, ...]:
+    return (bundled_skills_dir(), project_skills_dir)
+
+
+def _configured_model(env: Mapping[str, str], provider: str) -> str:
+    configured = (env.get("CHULK_MODEL") or "").strip()
+    if configured:
+        return configured
+    default = _default_model_for_provider(provider)
+    if default is None:
+        raise ConfigValueError(
+            "CHULK_MODEL",
+            f"CHULK_MODEL is required when CHULK_LLM_PROVIDER={provider}",
+        )
+    return default
+
+
+def _default_model_for_provider(provider: str) -> str | None:
+    return {
+        "openai": DEFAULT_MODEL,
+        "deepseek": DEFAULT_DEEPSEEK_MODEL,
+        "local": DEFAULT_LOCAL_MODEL,
+    }.get(provider)
+
+
+def _bedrock_base_url(env: Mapping[str, str]) -> str | None:
+    value = env.get("CHULK_BEDROCK_BASE_URL") or env.get("CHULK_BASE_URL")
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
+def _first_nonblank_env(env: Mapping[str, str], *keys: str) -> str | None:
+    for key in keys:
+        value = env.get(key)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _parse_fallback_providers(
+    env: Mapping[str, str],
+    *,
+    primary_provider: str,
+    primary_model: str,
+) -> tuple[LLMFallbackProviderConfig, ...]:
+    raw_value = env.get("CHULK_LLM_FALLBACK_PROVIDERS")
+    if raw_value is None or raw_value.strip() == "":
+        return ()
+
+    providers: list[LLMFallbackProviderConfig] = []
+    seen = {(primary_provider.lower(), primary_model.lower())}
+    for raw_item in raw_value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        provider, separator, raw_model = item.partition(":")
+        provider = provider.strip().lower()
+        if not provider:
+            raise ValueError("CHULK_LLM_FALLBACK_PROVIDERS contains an empty provider name")
+        if provider not in SUPPORTED_LLM_PROVIDERS:
+            supported = ", ".join(sorted(SUPPORTED_LLM_PROVIDERS))
+            raise ValueError(f"CHULK_LLM_FALLBACK_PROVIDERS must use providers from: {supported}")
+        model = raw_model.strip() if separator else _default_model_for_provider(provider)
+        if model is None:
+            raise ValueError(
+                f"CHULK_LLM_FALLBACK_PROVIDERS entries for {provider} must include an explicit model"
+            )
+        if not model:
+            raise ValueError("CHULK_LLM_FALLBACK_PROVIDERS entries with ':' must include a model")
+
+        key = (provider, model.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        providers.append(LLMFallbackProviderConfig(provider=provider, model=model))
+
+    return tuple(providers)
