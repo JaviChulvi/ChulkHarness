@@ -2041,6 +2041,63 @@ async def test_async_hosted_close_can_retry_after_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_async_hosted_cancelled_flush_does_not_close_pending_journal(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    entered = asyncio.Event()
+
+    class Journal:
+        def __init__(self) -> None:
+            self.flush_calls = 0
+            self.flushed = False
+            self.closed = False
+
+        async def flush(self) -> None:
+            if self.closed:
+                raise AssertionError("cannot flush a closed journal")
+            self.flush_calls += 1
+            if self.flush_calls == 1:
+                entered.set()
+                await asyncio.Future()
+            self.flushed = True
+
+        async def aclose(self) -> None:
+            if not self.flushed:
+                raise AssertionError("journal closed before pending flush")
+            self.closed = True
+
+    journal = Journal()
+    agent.runtime.async_flushables = (journal,)
+    agent.runtime._owned_resources.append(journal)
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert not journal.closed
+    assert not journal.flushed
+    assert not agent.closed
+    assert agent.runtime._owned_resources == [journal]
+
+    await agent.close()
+
+    assert journal.flush_calls == 2
+    assert journal.flushed
+    assert journal.closed
+    assert agent.closed
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_close_retries_only_interrupted_owned_resources(
     tmp_path: Path,
 ) -> None:
@@ -2370,14 +2427,7 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(
     class LifecycleStore:
         async def list_skills(self, **_kwargs):
             calls.append(("skills.list", id(asyncio.get_running_loop())))
-            return [
-                SimpleNamespace(
-                    name=skill["name"],
-                    scope=skill["scope"],
-                    version=skill["version"],
-                    digest=skill["digest"],
-                )
-            ]
+            return [skill]
 
         async def list_revisions(self, _name, **_kwargs):
             calls.append(("skills.revisions", id(asyncio.get_running_loop())))

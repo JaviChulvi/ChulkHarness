@@ -616,14 +616,15 @@ class AsyncHostedRuntime(AsyncAgent):
             event_id = f"sdk-view:{uuid4()}"
             viewed = []
             for record in records:
+                skill = governed_skill_snapshot(record)
                 viewed.append(
                     await call_async_service(
                         store,
                         "record_usage",
-                        name=record.name,
-                        scope=record.scope,
-                        version=record.version,
-                        digest=record.digest,
+                        name=skill.name,
+                        scope=skill.scope,
+                        version=skill.version,
+                        digest=skill.digest,
                         kind=SkillUsageKind.VIEW,
                         source_event_id=event_id,
                     )
@@ -1078,6 +1079,14 @@ class AsyncHostedRuntime(AsyncAgent):
             for close_operation in operations:
                 try:
                     await close_operation()
+                except asyncio.CancelledError as exc:
+                    if failure is not None:
+                        exc.add_note(
+                            "async close previously failed with "
+                            f"{type(failure).__name__}: {failure}"
+                        )
+                    failure = exc
+                    break
                 except BaseException as exc:
                     if failure is None:
                         failure = exc
