@@ -71,7 +71,7 @@ async def close_async_resource(resource: object) -> None:
         return
     close = getattr(resource, "close", None)
     if callable(close):
-        await asyncio.to_thread(close)
+        await call_async_service(resource, "close")
 
 
 __all__ = ["call_async_service", "close_async_resource"]

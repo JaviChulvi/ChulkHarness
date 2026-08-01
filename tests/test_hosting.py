@@ -1701,6 +1701,116 @@ async def test_reference_session_resume_excludes_prompt_only_messages(
 
 
 @pytest.mark.asyncio
+async def test_reference_session_resume_restores_tool_history(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    scope = _scope()
+    tool = Tool(
+        name="reference_lookup",
+        description="Return reference session evidence.",
+        args_schema={"type": "object", "properties": {}},
+        callable=lambda _arguments: ToolResult(
+            "reference_lookup",
+            True,
+            "reference observation marker",
+        ),
+    )
+    first = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_tool_call("reference_lookup"), _final()]),
+        tools=[tool],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+    )
+    conversation_id = first.conversation_id
+
+    assert await first.run("record the reference lookup") == "hosted ok"
+    await first.close()
+
+    llm = FakeLLM([_final("resumed")])
+    resumed = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[tool],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+        conversation_id=conversation_id,
+    )
+
+    assert await resumed.run("continue with the prior evidence") == "resumed"
+
+    request = json.dumps(llm.requests)
+    assert "<executed_tool_action>" in request
+    assert "reference observation marker" in request
+    await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_reference_session_resume_blocks_unobserved_tool_intent(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    scope = _scope()
+    first = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+    )
+    conversation_id = first.conversation_id
+    assert await first.run("initialize the reference conversation") == "hosted ok"
+    turn = TurnState(
+        user_message="mutate an external system once",
+        turn_id="turn-unobserved-reference",
+    )
+    store = first._resolved_async_services().sessions.store
+    await store.save_message(
+        conversation_id,
+        turn_id=turn.turn_id,
+        role="user",
+        content=turn.user_message,
+        message_key=f"{turn.turn_id}:user",
+    )
+    await store.save_turn_snapshot(conversation_id, turn.to_dict())
+    await store.save_tool_call(
+        conversation_id,
+        {
+            "turn_id": turn.turn_id,
+            "tool_name": "external_mutation",
+            "arguments": {"value": "once"},
+            "iteration": 1,
+            "phase": "execution",
+            "started_at": "2026-08-01T00:00:00+00:00",
+            "ended_at": "2026-08-01T00:00:01+00:00",
+            "success": True,
+        },
+    )
+    await first.close()
+
+    resumed = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=hub.async_services(),
+        execution_scope=scope,
+        conversation_id=conversation_id,
+    )
+
+    restored = resumed.state.turns[-1]
+    assert restored.status == "blocked"
+    assert "will not replay it automatically" in (
+        restored.final_answer or ""
+    )
+    await resumed.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata",
     [
@@ -2154,6 +2264,59 @@ async def test_async_hosted_close_retries_only_interrupted_owned_resources(
     assert single_close.calls == 1
     assert interrupted.calls == 2
     assert agent._async_owned_services is None
+    assert agent.closed
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_cancelled_sync_close_is_not_retried(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Resource:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        def close(self) -> None:
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError("sync resource closed more than once")
+            entered.set()
+            if not release.wait(timeout=2):
+                raise TimeoutError("sync close was not released")
+            self.closed = True
+
+    resource = Resource()
+    services = InMemoryServiceHub().async_services()
+    fields = {
+        name: getattr(services, name)
+        for name in services.__dataclass_fields__
+    }
+    fields["content"] = ServiceBinding.runtime(resource)
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=AsyncRuntimeServices(**fields),
+        execution_scope=_scope(),
+    )
+    close_task = asyncio.create_task(agent.close())
+    assert await asyncio.to_thread(entered.wait, 1)
+
+    close_task.cancel()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert resource.calls == 1
+    assert resource.closed
+    await agent.close()
+    assert resource.calls == 1
     assert agent.closed
 
 

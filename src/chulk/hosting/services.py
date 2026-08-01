@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Any, Awaitable, Generic, Protocol, TypeVar, runtime_checkable
 
 from chulk.events import AgentEvent
+from chulk.hosting.async_utils import close_async_resource
 from chulk.hosting.scope import ExecutionScope
 
 
@@ -751,9 +752,13 @@ class ResolvedRuntimeServices:
         failure: BaseException | None = None
         for resource in tuple(self._pending_owned_resources):
             completed = False
+            has_native_async_close = callable(
+                getattr(resource, "aclose", None)
+            )
             try:
                 await _aclose_resources((resource,))
             except asyncio.CancelledError as exc:
+                completed = not has_native_async_close
                 if failure is None:
                     failure = exc
                 else:
@@ -786,13 +791,7 @@ async def _aclose_resources(resources: Any) -> None:
     failure: BaseException | None = None
     for resource in resources:
         try:
-            aclose = getattr(resource, "aclose", None)
-            if callable(aclose):
-                await aclose()
-                continue
-            close = getattr(resource, "close", None)
-            if callable(close):
-                await asyncio.to_thread(close)
+            await close_async_resource(resource)
         except BaseException as exc:
             if failure is None:
                 failure = exc

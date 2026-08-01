@@ -760,6 +760,14 @@ class InMemorySessionStore:
         self._messages: dict[str, list[MessageRecord]] = {}
         self._turns: dict[str, dict[str, dict[str, Any]]] = {}
         self._summaries: dict[str, ConversationSummaryRecord] = {}
+        self._tool_calls: dict[
+            str,
+            dict[tuple[str, str, int], dict[str, Any]],
+        ] = {}
+        self._observations: dict[
+            str,
+            dict[tuple[str, int], dict[str, Any]],
+        ] = {}
 
     def create_conversation(
         self,
@@ -929,6 +937,30 @@ class InMemorySessionStore:
         payload: dict[str, Any],
     ) -> None:
         self._assert_conversation(conversation_id)
+        turn_id = str(payload.get("turn_id") or "").strip()
+        raw_iteration = payload.get("iteration")
+        tool_name = str(
+            payload.get("tool_name")
+            or payload.get("resolved_tool_name")
+            or ""
+        ).strip()
+        if (
+            not turn_id
+            or not isinstance(raw_iteration, int)
+            or isinstance(raw_iteration, bool)
+            or raw_iteration < 1
+            or not tool_name
+        ):
+            return
+        phase = str(payload.get("phase") or "execution")
+        self._tool_calls.setdefault(conversation_id, {})[
+            (turn_id, phase, raw_iteration)
+        ] = dict(payload)
+        turn = payload.get("turn")
+        if isinstance(turn, dict) and str(turn.get("turn_id") or "") == turn_id:
+            self.save_turn_snapshot(conversation_id, turn)
+        else:
+            self._touch(conversation_id)
 
     def save_tool_observation_bundle(
         self,
@@ -943,8 +975,55 @@ class InMemorySessionStore:
         turn: dict[str, Any] | None,
     ) -> None:
         self._assert_conversation(conversation_id)
-        if turn is not None:
+        if (
+            not isinstance(observation_index, int)
+            or isinstance(observation_index, bool)
+            or observation_index < 1
+        ):
+            raise ValueError("observation_index must be a positive integer")
+        clean_content = content.strip()
+        if not clean_content:
+            return
+        observation_key = (turn_id, observation_index)
+        observations = self._observations.setdefault(conversation_id, {})
+        inserted = observation_key not in observations
+        observations.setdefault(
+            observation_key,
+            {
+                "tool_name": tool_name,
+                "content": clean_content,
+                "output_metadata": dict(output_metadata),
+            },
+        )
+        if isinstance(action_context, str) and action_context.strip():
+            self.save_message(
+                conversation_id,
+                turn_id=turn_id,
+                role="assistant",
+                content=action_context,
+                message_key=f"{turn_id}:tool_action:{observation_index}",
+                metadata={
+                    "tool_name": tool_name,
+                    "internal": True,
+                    "event": "tool_observation",
+                    "observation_index": observation_index,
+                },
+            )
+        self.save_message(
+            conversation_id,
+            turn_id=turn_id,
+            role="observation",
+            content=clean_content,
+            message_key=f"{turn_id}:observation:{observation_index}",
+            metadata={
+                "tool_name": tool_name,
+                "observation_index": observation_index,
+            },
+        )
+        if inserted and turn is not None:
             self.save_turn_snapshot(conversation_id, turn)
+        else:
+            self._touch(conversation_id)
 
     def max_observation_index(
         self,
@@ -952,7 +1031,17 @@ class InMemorySessionStore:
         turn_id: str,
     ) -> int:
         self._assert_conversation(conversation_id)
-        return 0
+        return max(
+            (
+                index
+                for stored_turn_id, index in self._observations.get(
+                    conversation_id,
+                    {},
+                )
+                if stored_turn_id == turn_id
+            ),
+            default=0,
+        )
 
     def save_terminal_turn_bundle(
         self,
@@ -1014,7 +1103,78 @@ class InMemorySessionStore:
         conversation_id: str,
         turn_id: str,
     ) -> list[dict[str, Any]]:
-        return []
+        self._assert_conversation(conversation_id)
+        calls: list[dict[str, Any]] = []
+        for (stored_turn_id, phase, iteration), payload in sorted(
+            self._tool_calls.get(conversation_id, {}).items(),
+            key=lambda item: item[0][2],
+        ):
+            if stored_turn_id != turn_id:
+                continue
+            calls.append(
+                {
+                    "tool_name": str(
+                        payload.get("tool_name")
+                        or payload.get("resolved_tool_name")
+                        or "tool"
+                    ),
+                    "arguments": dict(payload.get("arguments") or {}),
+                    "iteration": iteration,
+                    "phase": phase,
+                    "started_at": str(
+                        payload.get("started_at") or ""
+                    ),
+                    "ended_at": payload.get("ended_at"),
+                    "success": payload.get("success"),
+                }
+            )
+
+        observed_identities: set[tuple[str, int]] = set()
+        legacy_observation_tools: list[str] = []
+        for (stored_turn_id, _index), observation in self._observations.get(
+            conversation_id,
+            {},
+        ).items():
+            if stored_turn_id != turn_id:
+                continue
+            metadata = observation["output_metadata"]
+            if metadata.get("synthetic") is True:
+                continue
+            identity = metadata.get("tool_call_identity")
+            if isinstance(identity, dict):
+                identity_phase = identity.get("phase")
+                identity_iteration = identity.get("iteration")
+                if (
+                    isinstance(identity_phase, str)
+                    and identity_phase
+                    and isinstance(identity_iteration, int)
+                    and not isinstance(identity_iteration, bool)
+                    and identity_iteration > 0
+                ):
+                    observed_identities.add(
+                        (identity_phase, identity_iteration)
+                    )
+                    continue
+            legacy_observation_tools.append(str(observation["tool_name"]))
+
+        unmatched = [
+            call
+            for call in calls
+            if (str(call["phase"]), int(call["iteration"]))
+            not in observed_identities
+        ]
+        for observed_tool_name in legacy_observation_tools:
+            matching_index = next(
+                (
+                    index
+                    for index, call in enumerate(unmatched)
+                    if call["tool_name"] == observed_tool_name
+                ),
+                None,
+            )
+            if matching_index is not None:
+                unmatched.pop(matching_index)
+        return unmatched
 
     def _assert_conversation(self, conversation_id: str) -> None:
         expected = self.scope.conversation_id
