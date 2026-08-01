@@ -24,10 +24,40 @@ async def call_async_service(
     method = getattr(service, method_name)
     if inspect.iscoroutinefunction(method):
         return await method(*args, **kwargs)
-    result = await asyncio.to_thread(method, *args, **kwargs)
+    invocation = asyncio.create_task(
+        asyncio.to_thread(method, *args, **kwargs)
+    )
+    try:
+        result = await asyncio.shield(invocation)
+    except asyncio.CancelledError as cancellation:
+        await _finish_cancelled_sync_call(invocation, cancellation)
+        raise
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _finish_cancelled_sync_call(
+    invocation: asyncio.Task[Any],
+    cancellation: asyncio.CancelledError,
+) -> None:
+    """Wait for an in-flight sync call without replacing cancellation."""
+
+    try:
+        await asyncio.shield(invocation)
+    except asyncio.CancelledError:
+        try:
+            await invocation
+        except BaseException as error:
+            cancellation.add_note(
+                "cancelled sync service call also failed with "
+                f"{type(error).__name__}: {error}"
+            )
+    except BaseException as error:
+        cancellation.add_note(
+            "cancelled sync service call also failed with "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 async def close_async_resource(resource: object) -> None:

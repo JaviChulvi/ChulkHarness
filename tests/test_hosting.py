@@ -34,6 +34,7 @@ from chulk import (
 )
 from chulk.core.state import TurnState
 from chulk._sdk.config import coerce_config
+from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.reference import InMemoryServiceHub
 from chulk.hosting.services import (
     ServiceBinding,
@@ -393,6 +394,64 @@ async def test_cancelled_sync_service_resolution_reclaims_late_resource() -> Non
         await task
 
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_service_call_waits_for_worker_completion() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+
+    class Service:
+        def commit(self) -> None:
+            started.set()
+            if not release.wait(timeout=1):
+                raise TimeoutError("test did not release sync service call")
+            completed.set()
+
+    task = asyncio.create_task(call_async_service(Service(), "commit"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert completed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_service_call_preserves_worker_failure() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class Service:
+        def commit(self) -> None:
+            started.set()
+            if not release.wait(timeout=1):
+                raise TimeoutError("test did not release sync service call")
+            raise RuntimeError("commit failed")
+
+    task = asyncio.create_task(call_async_service(Service(), "commit"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as error:
+        await task
+
+    assert any(
+        "commit failed" in note
+        for note in getattr(error.value, "__notes__", ())
+    )
 
 
 @pytest.mark.asyncio
