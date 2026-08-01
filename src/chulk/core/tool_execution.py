@@ -153,6 +153,7 @@ class ToolExecutor:
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
         tool = self._registered_tool(tool_name)
+        tool_call_index = turn.tool_call_count
         retry_policy = getattr(tool, "retry_policy", None)
         max_attempts, non_idempotent_guard = _attempt_policy(tool, retry_policy)
         attempts: list[dict] = []
@@ -162,16 +163,22 @@ class ToolExecutor:
             self._reserve_tool_attempt(
                 turn,
                 tool_name=tool_name,
+                tool_call_index=tool_call_index,
                 attempt=attempt_number,
             )
             try:
                 goal_checkpoint = self._begin_goal_tool(
                     turn,
                     tool_name=tool_name,
+                    tool_call_index=tool_call_index,
                     attempt=attempt_number,
                 )
             except BaseException:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                self._release_tool_attempt(
+                    turn,
+                    tool_call_index=tool_call_index,
+                    attempt=attempt_number,
+                )
                 raise
             try:
                 result = self._authorization_result(tool, arguments)
@@ -249,7 +256,11 @@ class ToolExecutor:
                         self.durable_effects.completed(durable_token, result)
                 result = self._redacted_result(tool, arguments, result)
             except BaseException as exc:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                self._release_tool_attempt(
+                    turn,
+                    tool_call_index=tool_call_index,
+                    attempt=attempt_number,
+                )
                 self._abort_goal_tool(goal_checkpoint, exc)
                 raise
             try:
@@ -257,11 +268,16 @@ class ToolExecutor:
                 self._commit_tool_attempt(
                     turn,
                     tool_name=tool_name,
+                    tool_call_index=tool_call_index,
                     attempt=attempt_number,
                     result=result,
                 )
             except BaseException:
-                self._release_tool_attempt(turn, attempt=attempt_number)
+                self._release_tool_attempt(
+                    turn,
+                    tool_call_index=tool_call_index,
+                    attempt=attempt_number,
+                )
                 raise
             retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
             record = _attempt_payload(
@@ -288,9 +304,16 @@ class ToolExecutor:
         tool_name: str,
         arguments: dict,
         turn: TurnState,
+        *,
+        tool_call_index: int | None = None,
     ) -> ToolResult:
         """Execute a tool through the async transport and retry policy."""
         tool = self._registered_tool(tool_name)
+        call_index = (
+            turn.tool_call_count
+            if tool_call_index is None
+            else tool_call_index
+        )
         retry_policy = getattr(tool, "retry_policy", None)
         max_attempts, non_idempotent_guard = _attempt_policy(tool, retry_policy)
         attempts: list[dict] = []
@@ -300,18 +323,21 @@ class ToolExecutor:
             await self._reserve_tool_attempt_async(
                 turn,
                 tool_name=tool_name,
+                tool_call_index=call_index,
                 attempt=attempt_number,
             )
             try:
                 goal_checkpoint = self._begin_goal_tool(
                     turn,
                     tool_name=tool_name,
+                    tool_call_index=call_index,
                     attempt=attempt_number,
                 )
             except BaseException as exc:
                 await await_cleanup_after_error(
                     self._release_tool_attempt_async(
                         turn,
+                        tool_call_index=call_index,
                         attempt=attempt_number,
                     ),
                     exc,
@@ -411,6 +437,7 @@ class ToolExecutor:
                 await await_cleanup_after_error(
                     self._release_tool_attempt_async(
                         turn,
+                        tool_call_index=call_index,
                         attempt=attempt_number,
                     ),
                     exc,
@@ -422,6 +449,7 @@ class ToolExecutor:
                 await self._commit_tool_attempt_async(
                     turn,
                     tool_name=tool_name,
+                    tool_call_index=call_index,
                     attempt=attempt_number,
                     result=result,
                 )
@@ -429,6 +457,7 @@ class ToolExecutor:
                 await await_cleanup_after_error(
                     self._release_tool_attempt_async(
                         turn,
+                        tool_call_index=call_index,
                         attempt=attempt_number,
                     ),
                     exc,
@@ -467,6 +496,14 @@ class ToolExecutor:
         """
         if not calls:
             return ()
+        indexed_calls = tuple(
+            (
+                turn.tool_call_count + offset,
+                name,
+                arguments,
+            )
+            for offset, (name, arguments) in enumerate(calls)
+        )
         parallel = all(
             _parallel_safe(self._registered_tool(name))
             for name, _arguments in calls
@@ -474,15 +511,25 @@ class ToolExecutor:
         if not parallel:
             return tuple(
                 [
-                    await self.execute_async(name, arguments, turn)
-                    for name, arguments in calls
+                    await self.execute_async(
+                        name,
+                        arguments,
+                        turn,
+                        tool_call_index=tool_call_index,
+                    )
+                    for tool_call_index, name, arguments in indexed_calls
                 ]
             )
         return tuple(
             await asyncio.gather(
                 *(
-                    self.execute_async(name, arguments, turn)
-                    for name, arguments in calls
+                    self.execute_async(
+                        name,
+                        arguments,
+                        turn,
+                        tool_call_index=tool_call_index,
+                    )
+                    for tool_call_index, name, arguments in indexed_calls
                 )
             )
         )
@@ -963,13 +1010,14 @@ class ToolExecutor:
         turn: TurnState,
         *,
         tool_name: str,
+        tool_call_index: int,
         attempt: int,
     ) -> GoalActionCheckpoint | None:
         if self.goal_execution is None:
             return None
         return self.goal_execution.begin_tool(
             turn_id=turn.turn_id,
-            tool_call_index=turn.tool_call_count,
+            tool_call_index=tool_call_index,
             attempt=attempt,
             tool_name=tool_name,
         )
@@ -995,6 +1043,7 @@ class ToolExecutor:
         turn: TurnState,
         *,
         tool_name: str,
+        tool_call_index: int,
         attempt: int,
     ) -> None:
         if self.usage_accounting is None:
@@ -1002,7 +1051,7 @@ class ToolExecutor:
         try:
             reservation = self.usage_accounting.reserve_tool_call(
                 turn_id=turn.turn_id,
-                tool_call_index=turn.tool_call_count,
+                tool_call_index=tool_call_index,
                 attempt=attempt,
                 tool_name=tool_name,
             )
@@ -1010,7 +1059,7 @@ class ToolExecutor:
             payload = {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "scope": exc.scope.value,
@@ -1029,7 +1078,7 @@ class ToolExecutor:
             {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "scope": reservation.budget.scope.value,
@@ -1043,6 +1092,7 @@ class ToolExecutor:
         turn: TurnState,
         *,
         tool_name: str,
+        tool_call_index: int,
         attempt: int,
         result: ToolResult,
     ) -> None:
@@ -1050,7 +1100,7 @@ class ToolExecutor:
             return
         entries = self.usage_accounting.commit_tool_call(
             turn_id=turn.turn_id,
-            tool_call_index=turn.tool_call_count,
+            tool_call_index=tool_call_index,
             attempt=attempt,
             tool_name=tool_name,
             success=result.success,
@@ -1061,19 +1111,25 @@ class ToolExecutor:
             {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "entry_ids": [item.id for item in entries],
             },
         )
 
-    def _release_tool_attempt(self, turn: TurnState, *, attempt: int) -> None:
+    def _release_tool_attempt(
+        self,
+        turn: TurnState,
+        *,
+        tool_call_index: int,
+        attempt: int,
+    ) -> None:
         if self.usage_accounting is None:
             return
         reservation = self.usage_accounting.release_tool_call(
             turn_id=turn.turn_id,
-            tool_call_index=turn.tool_call_count,
+            tool_call_index=tool_call_index,
             attempt=attempt,
         )
         if reservation is not None:
@@ -1081,7 +1137,7 @@ class ToolExecutor:
                 TraceEvent.BUDGET_RELEASED,
                 {
                     "turn_id": turn.turn_id,
-                    "tool_call_index": turn.tool_call_count,
+                    "tool_call_index": tool_call_index,
                     "attempt": attempt,
                     "resource_kind": "tool",
                     "reservation_id": reservation.id,
@@ -1094,6 +1150,7 @@ class ToolExecutor:
         turn: TurnState,
         *,
         tool_name: str,
+        tool_call_index: int,
         attempt: int,
     ) -> None:
         service = self.async_usage_accounting
@@ -1102,6 +1159,7 @@ class ToolExecutor:
                 self._reserve_tool_attempt,
                 turn,
                 tool_name=tool_name,
+                tool_call_index=tool_call_index,
                 attempt=attempt,
             )
             return
@@ -1110,7 +1168,7 @@ class ToolExecutor:
                 service,
                 "reserve_tool_call",
                 turn_id=turn.turn_id,
-                tool_call_index=turn.tool_call_count,
+                tool_call_index=tool_call_index,
                 attempt=attempt,
                 tool_name=tool_name,
             )
@@ -1118,7 +1176,7 @@ class ToolExecutor:
             payload = {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "scope": exc.scope.value,
@@ -1137,7 +1195,7 @@ class ToolExecutor:
             {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "scope": reservation.budget.scope.value,
@@ -1151,6 +1209,7 @@ class ToolExecutor:
         turn: TurnState,
         *,
         tool_name: str,
+        tool_call_index: int,
         attempt: int,
         result: ToolResult,
     ) -> None:
@@ -1160,6 +1219,7 @@ class ToolExecutor:
                 self._commit_tool_attempt,
                 turn,
                 tool_name=tool_name,
+                tool_call_index=tool_call_index,
                 attempt=attempt,
                 result=result,
             )
@@ -1168,7 +1228,7 @@ class ToolExecutor:
             service,
             "commit_tool_call",
             turn_id=turn.turn_id,
-            tool_call_index=turn.tool_call_count,
+            tool_call_index=tool_call_index,
             attempt=attempt,
             tool_name=tool_name,
             success=result.success,
@@ -1179,7 +1239,7 @@ class ToolExecutor:
             {
                 "turn_id": turn.turn_id,
                 "tool_name": tool_name,
-                "tool_call_index": turn.tool_call_count,
+                "tool_call_index": tool_call_index,
                 "attempt": attempt,
                 "resource_kind": "tool",
                 "entry_ids": [item.id for item in entries],
@@ -1190,6 +1250,7 @@ class ToolExecutor:
         self,
         turn: TurnState,
         *,
+        tool_call_index: int,
         attempt: int,
     ) -> None:
         service = self.async_usage_accounting
@@ -1197,6 +1258,7 @@ class ToolExecutor:
             await asyncio.to_thread(
                 self._release_tool_attempt,
                 turn,
+                tool_call_index=tool_call_index,
                 attempt=attempt,
             )
             return
@@ -1204,7 +1266,7 @@ class ToolExecutor:
             service,
             "release_tool_call",
             turn_id=turn.turn_id,
-            tool_call_index=turn.tool_call_count,
+            tool_call_index=tool_call_index,
             attempt=attempt,
         )
         if reservation is not None:
@@ -1212,7 +1274,7 @@ class ToolExecutor:
                 TraceEvent.BUDGET_RELEASED,
                 {
                     "turn_id": turn.turn_id,
-                    "tool_call_index": turn.tool_call_count,
+                    "tool_call_index": tool_call_index,
                     "attempt": attempt,
                     "resource_kind": "tool",
                     "reservation_id": reservation.id,
