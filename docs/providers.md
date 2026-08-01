@@ -146,7 +146,7 @@ use `CHULK_BEDROCK_BASE_URL`.
 ## Model metadata catalog
 
 Bundled pricing and token limits live in the immutable Python catalog at
-`chulk/llm/model_catalog.py`. Each canonical model is represented by one
+`src/chulk/llm/model_catalog.py`. Each canonical model is represented by one
 `ModelSpec`; pricing, limits, aliases, lifecycle state, and provenance therefore
 resolve to the same record instead of being maintained in parallel tables.
 Exact model and explicit alias lookups use a prebuilt dictionary. Resolution

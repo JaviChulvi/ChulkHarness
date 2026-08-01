@@ -21,17 +21,17 @@ These are the primary decision rules for every change:
 Do not use this guide as a snapshot of every model, provider, environment variable, command, default, or roadmap status. Verify current behavior at its owner:
 
 - Product direction, delivery order, dependencies, and implementation status: `TODO.md`.
-- Supported public behavior and stability policy: `chulk/__init__.py`, `chulk/api.py`, `chulk/testing.py`, and `docs/release-policy.md`.
-- Runtime construction shared by CLI and SDK: `chulk/runtime.py`.
-- SDK facade, configuration, results, events, and error mapping: `chulk/_sdk/`, `chulk/results.py`, `chulk/events.py`, and `chulk/errors.py`.
-- Agent orchestration and state transitions: `chulk/core/`.
-- Provider registration, capabilities, lifecycle, and transports: `chulk/llm/factory.py`, `chulk/llm/capabilities.py`, and `chulk/llm/providers/`.
-- Runtime configuration and defaults: `chulk/config.py`, `chulk/_sdk/config.py`, `.env.example`, and `docs/configuration.md`.
-- Shared SQLite policy and forward-only schema migrations: `chulk/storage/sqlite.py` and `chulk/storage/migrations.py`.
-- Subsystem persistence behavior: the relevant store under `chulk/memory/`, `chulk/sessions/`, `chulk/scheduling/`, or another owning package.
-- Tools, schemas, permissions, and bounded output: `chulk/tools/`, `chulk/capabilities.py`, and the corresponding documentation.
-- CLI commands and terminal behavior: `chulk/main.py` and `chulk/cli/`.
-- Control-plane server and operator interface: `chulk/server/`, `chulk/tui/`, and `chulk/cli/tui.py`.
+- Supported public behavior and stability policy: `src/chulk/__init__.py`, `src/chulk/api.py`, `src/chulk/testing.py`, and `docs/release-policy.md`.
+- Runtime construction shared by CLI and SDK: `src/chulk/runtime.py`.
+- SDK facade, configuration, results, events, and error mapping: `src/chulk/_sdk/`, `src/chulk/results.py`, `src/chulk/events.py`, and `src/chulk/errors.py`.
+- Agent orchestration and state transitions: `src/chulk/core/`.
+- Provider registration, capabilities, lifecycle, and transports: `src/chulk/llm/factory.py`, `src/chulk/llm/capabilities.py`, and `src/chulk/llm/providers/`.
+- Runtime configuration and defaults: `src/chulk/config.py`, `src/chulk/_sdk/config.py`, `.env.example`, and `docs/configuration.md`.
+- Shared SQLite policy and forward-only schema migrations: `src/chulk/storage/sqlite.py` and `src/chulk/storage/migrations.py`.
+- Subsystem persistence behavior: the relevant store under `src/chulk/memory/`, `src/chulk/sessions/`, `src/chulk/scheduling/`, or another owning package.
+- Tools, schemas, permissions, and bounded output: `src/chulk/tools/`, `src/chulk/capabilities.py`, and the corresponding documentation.
+- CLI commands and terminal behavior: `src/chulk/main.py` and `src/chulk/cli/`.
+- Control-plane server and operator interface: `src/chulk/server/`, `src/chulk/tui/`, and `src/chulk/cli/tui.py`.
 - Dependencies, supported Python versions, and development tooling: `pyproject.toml` and `environment.yml`.
 - Required automation and validation: `.github/workflows/ci.yml` and `scripts/`.
 - User-facing behavior and examples: `README.md`, `docs/`, and `examples/`.
@@ -43,7 +43,7 @@ When documentation, tests, and implementation disagree, do not guess. Trace the 
 ChulkHarness is a lightweight Python agent harness. State, prompts, model calls, tools, memory, skills, events, and traces should remain easy to follow from the code.
 
 ```text
-chulk/
+src/chulk/
   api.py, __init__.py     # Supported public imports
   runtime.py              # Shared runtime assembly
   _sdk/                   # SDK facade and typed SDK contracts
@@ -60,7 +60,7 @@ chulk/
   server/, tui/           # Control-plane server and operator interface
   cli/                    # Terminal formatting, progress, and commands
   tracing/                # Trace, artifact, and log primitives
-  tests/                  # Pytest suite
+tests/                    # Pytest suite outside the importable package
 .chulk/                   # Declarative project config plus ignored runtime state
 docs/                     # Maintained SDK and operator documentation
 examples/                 # Credential-free public usage examples
@@ -73,9 +73,9 @@ Verify the current tree before relying on this high-level map.
 
 ### Runtime And Orchestration
 
-- Keep runtime assembly in `chulk/runtime.py`; the CLI, SDK, adapters, and tests should consume the same builder.
+- Keep runtime assembly in `src/chulk/runtime.py`; the CLI, SDK, adapters, and tests should consume the same builder.
 - Ask the LLM layer for validated actions with `complete_action(...)`; orchestration must not parse provider text directly.
-- Keep prompt text in `chulk/core/prompts.py` and composition in `chulk/core/prompt_builder.py`.
+- Keep prompt text in `src/chulk/core/prompts.py` and composition in `src/chulk/core/prompt_builder.py`.
 - Keep session-wide data in `AgentState` and per-message execution details in `TurnState`.
 - Route action changes through the existing action-loop, transition, and turn-effect owners instead of adding a parallel loop.
 - Record tool calls and observations with `ToolCallRecord` and `ObservationRecord` before persisting traces.
@@ -84,24 +84,24 @@ Verify the current tree before relying on this high-level map.
 
 ### Providers
 
-- Keep provider-specific behavior inside `chulk/llm/`.
-- Add providers through `chulk/llm/factory.py` and `chulk/llm/providers/`.
+- Keep provider-specific behavior inside `src/chulk/llm/`.
+- Add providers through `src/chulk/llm/factory.py` and `src/chulk/llm/providers/`.
 - Declare capabilities explicitly and preserve the shared provider lifecycle.
 - Normalize provider-specific structured-output transports into shared action dataclasses before orchestration.
 - Test request shaping, capability handling, fallback, retries, and errors with fake provider clients. Unit tests must not require credentials or network access.
 
 ### Public API
 
-- Maintain supported import ergonomics through `chulk/__init__.py`, `chulk/api.py`, `chulk/tools/public.py`, `chulk/llm/public.py`, `chulk/skills/__init__.py`, and `chulk/presets/`.
+- Maintain supported import ergonomics through `src/chulk/__init__.py`, `src/chulk/api.py`, `src/chulk/tools/public.py`, `src/chulk/llm/public.py`, `src/chulk/skills/__init__.py`, and `src/chulk/presets/`.
 - Do not expose internal implementation types accidentally. Follow the stability categories in `docs/release-policy.md`.
 - When a public contract changes, update its exports, typed results/events/errors, `typing_tests/`, focused public-API tests, examples, and relevant documentation together.
 - Keep synchronous and asynchronous behavior aligned where both are supported.
 
 ### Persistence And Memory
 
-- Use `chulk/storage/sqlite.py` for shared connection, transaction, privacy, backup, and migration policy.
-- Add database-wide schema changes as ordered forward-only migrations in `chulk/storage/migrations.py`. Do not rely on a freshly created database as proof that an upgrade works.
-- Keep subsystem queries and mapping logic in the owning store. Memory-specific SQLite operations belong in `chulk/memory/sqlite_store.py`; session and scheduling operations belong in their respective stores.
+- Use `src/chulk/storage/sqlite.py` for shared connection, transaction, privacy, backup, and migration policy.
+- Add database-wide schema changes as ordered forward-only migrations in `src/chulk/storage/migrations.py`. Do not rely on a freshly created database as proof that an upgrade works.
+- Keep subsystem queries and mapping logic in the owning store. Memory-specific SQLite operations belong in `src/chulk/memory/sqlite_store.py`; session and scheduling operations belong in their respective stores.
 - Test migrations from supported older schemas, rollback behavior, reopen behavior, and future-version rejection when schema contracts change.
 - Keep tools, skills, and memory distinct:
   - Tool: a validated callable action.
@@ -173,8 +173,8 @@ CI is authoritative; inspect `.github/workflows/ci.yml` if commands drift. The f
 ```bash
 python -m pytest --cov=chulk --cov-report=term-missing
 python -m ruff check .
-python -m mypy chulk typing_tests
-python -m compileall chulk
+python -m mypy src/chulk typing_tests
+python -m compileall src/chulk
 python scripts/check_docs.py
 ```
 

@@ -19,6 +19,11 @@ advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 The `assert_*_contract` functions in `chulk.testing` are public-stable
 compatibility gates for third-party hosted services and gateway stores.
 
+The top-level package resolves stable exports lazily. Plain `import chulk`
+loads only package metadata; requesting a named export loads its owning public
+surface, while `from chulk import *` intentionally resolves the complete
+compatibility API declared by `chulk.__all__`.
+
 `chulk.hosting.reference` is a documented example and contract-test fixture,
 not a durable production service implementation.
 
