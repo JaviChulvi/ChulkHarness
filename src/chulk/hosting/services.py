@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Awaitable, Generic, Protocol, TypeVar, runtime_checkable
 
@@ -724,6 +724,18 @@ class ResolvedRuntimeServices:
     approvals: Any
     events: Any
     owned_resources: tuple[object, ...]
+    _pending_owned_resources: list[object] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_pending_owned_resources",
+            list(reversed(self.owned_resources)),
+        )
 
     def host_bindings(self) -> RuntimeServices:
         """Create a non-owning bundle for the synchronous compatibility core."""
@@ -736,7 +748,38 @@ class ResolvedRuntimeServices:
 
     async def aclose_owned(self) -> None:
         """Close only runtime-owned resources through native async methods."""
-        await _aclose_resources(reversed(self.owned_resources))
+        failure: BaseException | None = None
+        for resource in tuple(self._pending_owned_resources):
+            completed = False
+            try:
+                await _aclose_resources((resource,))
+            except asyncio.CancelledError as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "another async resource close was cancelled"
+                    )
+            except BaseException as exc:
+                completed = True
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "another async resource close failed with "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            else:
+                completed = True
+            if completed:
+                for index, pending in enumerate(
+                    self._pending_owned_resources
+                ):
+                    if pending is resource:
+                        del self._pending_owned_resources[index]
+                        break
+        if failure is not None:
+            raise failure
 
 
 async def _aclose_resources(resources: Any) -> None:

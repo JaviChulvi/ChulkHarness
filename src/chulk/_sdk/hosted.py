@@ -239,14 +239,27 @@ class AsyncHostedRuntime(AsyncAgent):
             raise RuntimeError("Agent is closed")
         return resolved
 
+    def _uses_sync_compatibility(self) -> bool:
+        return self._async_owned_services is None and not self.closed
+
     @property
     def usage_ledger(self) -> Any:
         """Return the native async usage service bound to this runtime."""
+        if self._uses_sync_compatibility():
+            service = self.runtime.usage_accounting
+            if service is None:
+                raise RuntimeError("Usage accounting is not configured")
+            return service
         return self._resolved_async_services().usage
 
     @property
     def session_search(self) -> Any:
         """Return the native async session-search service for this runtime."""
+        if self._uses_sync_compatibility():
+            service = self.runtime.session_search_service
+            if service is None:
+                raise RuntimeError("Session search is not configured")
+            return service
         return self._resolved_async_services().sessions.search
 
     async def _call_hosted_service(
@@ -259,6 +272,28 @@ class AsyncHostedRuntime(AsyncAgent):
         serialized: bool = False,
         **kwargs: Any,
     ) -> Any:
+        if self._uses_sync_compatibility():
+            if service_name == "usage":
+                async def call_sync_service() -> Any:
+                    return await call_async_service(
+                        self.usage_ledger,
+                        method_name,
+                        *args,
+                        **kwargs,
+                    )
+
+                return await self._invoke_async(
+                    operation,
+                    call_sync_service,
+                    serialized=serialized,
+                )
+            return await self._call_sync_facade(
+                operation,
+                *args,
+                serialized=serialized,
+                **kwargs,
+            )
+
         async def call() -> Any:
             service = getattr(
                 self._resolved_async_services(),
@@ -277,7 +312,53 @@ class AsyncHostedRuntime(AsyncAgent):
             serialized=serialized,
         )
 
+    async def _call_sync_facade(
+        self,
+        operation: str,
+        /,
+        *args: Any,
+        serialized: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        async def call() -> Any:
+            return await call_async_service(
+                self._agent,
+                operation,
+                *args,
+                **kwargs,
+            )
+
+        return await self._invoke_async(
+            operation,
+            call,
+            serialized=serialized,
+        )
+
+    async def _call_sync_session_search(
+        self,
+        operation: str,
+        method_name: str,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        async def call() -> Any:
+            return await call_async_service(
+                self.session_search,
+                method_name,
+                *args,
+                **kwargs,
+            )
+
+        return await self._invoke_async(operation, call)
+
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
+        if self._uses_sync_compatibility():
+            return cast(
+                tuple[MemoryProposal, ...],
+                await self._call_sync_facade("list_memory_proposals"),
+            )
+
         async def operation() -> tuple[MemoryProposal, ...]:
             policy = self.runtime.async_memory_policy
             if policy is None:
@@ -293,6 +374,15 @@ class AsyncHostedRuntime(AsyncAgent):
         self,
         proposal_id: str,
     ) -> MemoryProposal:
+        if self._uses_sync_compatibility():
+            return cast(
+                MemoryProposal,
+                await self._call_sync_facade(
+                    "approve_memory_proposal",
+                    proposal_id,
+                ),
+            )
+
         async def operation() -> MemoryProposal:
             policy = self.runtime.async_memory_policy
             if policy is None:
@@ -305,6 +395,15 @@ class AsyncHostedRuntime(AsyncAgent):
         self,
         proposal_id: str,
     ) -> MemoryProposal:
+        if self._uses_sync_compatibility():
+            return cast(
+                MemoryProposal,
+                await self._call_sync_facade(
+                    "reject_memory_proposal",
+                    proposal_id,
+                ),
+            )
+
         async def operation() -> MemoryProposal:
             policy = self.runtime.async_memory_policy
             if policy is None:
@@ -319,6 +418,16 @@ class AsyncHostedRuntime(AsyncAgent):
         status: str | None = "pending",
         limit: int = 100,
     ) -> tuple[LearningProposal, ...]:
+        if self._uses_sync_compatibility():
+            return cast(
+                tuple[LearningProposal, ...],
+                await self._call_sync_facade(
+                    "list_learning_proposals",
+                    status=status,
+                    limit=limit,
+                ),
+            )
+
         async def operation() -> tuple[LearningProposal, ...]:
             service = self._resolved_async_services().skills.learning_proposals
             if service is None:
@@ -345,6 +454,15 @@ class AsyncHostedRuntime(AsyncAgent):
         self,
         proposal_id: str,
     ) -> LearningProposal:
+        if self._uses_sync_compatibility():
+            return cast(
+                LearningProposal,
+                await self._call_sync_facade(
+                    "get_learning_proposal",
+                    proposal_id,
+                ),
+            )
+
         async def operation() -> LearningProposal:
             service = self._resolved_async_services().skills.learning_proposals
             if service is None:
@@ -360,6 +478,16 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         approved_by: str = "sdk-host",
     ) -> LearningProposal:
+        if self._uses_sync_compatibility():
+            return cast(
+                LearningProposal,
+                await self._call_sync_facade(
+                    "approve_learning_proposal",
+                    proposal_id,
+                    approved_by=approved_by,
+                ),
+            )
+
         async def operation() -> LearningProposal:
             service = self._resolved_async_services().skills.learning_proposals
             if service is None:
@@ -384,6 +512,18 @@ class AsyncHostedRuntime(AsyncAgent):
         turn_id: str | None = None,
         host_confirmed_success: bool = False,
     ) -> LearningReview:
+        if self._uses_sync_compatibility():
+            return cast(
+                LearningReview,
+                await self._call_sync_facade(
+                    "review_learning",
+                    trigger=trigger,
+                    turn_id=turn_id,
+                    host_confirmed_success=host_confirmed_success,
+                    serialized=True,
+                ),
+            )
+
         async def operation() -> LearningReview:
             outcome = await self.runtime.review_learning_async(
                 trigger=trigger,
@@ -423,6 +563,16 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         rejected_by: str = "sdk-host",
     ) -> LearningProposal:
+        if self._uses_sync_compatibility():
+            return cast(
+                LearningProposal,
+                await self._call_sync_facade(
+                    "reject_learning_proposal",
+                    proposal_id,
+                    rejected_by=rejected_by,
+                ),
+            )
+
         async def operation() -> LearningProposal:
             service = self._resolved_async_services().skills.learning_proposals
             if service is None:
@@ -445,6 +595,15 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         scope: str | None = None,
     ) -> tuple[GovernedSkill, ...]:
+        if self._uses_sync_compatibility():
+            return cast(
+                tuple[GovernedSkill, ...],
+                await self._call_sync_facade(
+                    "list_governed_skills",
+                    scope=scope,
+                ),
+            )
+
         async def operation() -> tuple[GovernedSkill, ...]:
             store = self._resolved_async_services().skills.lifecycle_store
             if store is None:
@@ -482,6 +641,17 @@ class AsyncHostedRuntime(AsyncAgent):
         scope: str = "project",
         approved_by: str = "sdk-host",
     ) -> GovernedSkill:
+        if self._uses_sync_compatibility():
+            return cast(
+                GovernedSkill,
+                await self._call_sync_facade(
+                    "rollback_skill",
+                    revision_id,
+                    scope=scope,
+                    approved_by=approved_by,
+                ),
+            )
+
         async def operation() -> GovernedSkill:
             lifecycle = self._resolved_async_services().skills.lifecycle
             if lifecycle is None:
@@ -506,6 +676,17 @@ class AsyncHostedRuntime(AsyncAgent):
         scope: str = "project",
         limit: int = 100,
     ) -> tuple[GovernedSkillRevision, ...]:
+        if self._uses_sync_compatibility():
+            return cast(
+                tuple[GovernedSkillRevision, ...],
+                await self._call_sync_facade(
+                    "list_skill_revisions",
+                    name,
+                    scope=scope,
+                    limit=limit,
+                ),
+            )
+
         async def operation() -> tuple[GovernedSkillRevision, ...]:
             store = self._resolved_async_services().skills.lifecycle_store
             if store is None:
@@ -529,6 +710,15 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         turn_id: str | None = None,
     ) -> tuple[GovernedSkill, ...]:
+        if self._uses_sync_compatibility():
+            return cast(
+                tuple[GovernedSkill, ...],
+                await self._call_sync_facade(
+                    "confirm_skill_success",
+                    turn_id=turn_id,
+                ),
+            )
+
         async def operation() -> tuple[GovernedSkill, ...]:
             records = await self.runtime.confirm_skill_success_async(
                 turn_id=turn_id
@@ -763,6 +953,18 @@ class AsyncHostedRuntime(AsyncAgent):
         limit: int = 10,
         cursor: str | None = None,
     ) -> SessionSearchPage:
+        if self._uses_sync_compatibility():
+            return cast(
+                SessionSearchPage,
+                await self._call_sync_session_search(
+                    "search_sessions",
+                    "search",
+                    query,
+                    limit=limit,
+                    cursor=cursor,
+                ),
+            )
+
         async def operation() -> SessionSearchPage:
             search = self._resolved_async_services().sessions.search
             return cast(
@@ -789,6 +991,22 @@ class AsyncHostedRuntime(AsyncAgent):
         cursor: str | None = None,
         include_sensitive: bool = False,
     ) -> SessionWindow:
+        if self._uses_sync_compatibility():
+            return cast(
+                SessionWindow,
+                await self._call_sync_session_search(
+                    "read_session_window",
+                    "read_window",
+                    conversation_id,
+                    ordinal=ordinal,
+                    before=before,
+                    after=after,
+                    limit=limit,
+                    cursor=cursor,
+                    include_sensitive=include_sensitive,
+                ),
+            )
+
         async def operation() -> SessionWindow:
             search = self._resolved_async_services().sessions.search
             return cast(
@@ -816,6 +1034,24 @@ class AsyncHostedRuntime(AsyncAgent):
         offset: int = 0,
         max_bytes: int = DEFAULT_ARTIFACT_READ_BYTES,
     ) -> dict[str, Any]:
+        if self._uses_sync_compatibility():
+            async def sync_operation() -> dict[str, Any]:
+                trace = self.runtime.trace_logger
+                store = getattr(trace, "artifact_store", None)
+                if store is None:
+                    raise RuntimeError("Trace artifacts are unavailable")
+                record = await call_async_service(
+                    store,
+                    "read",
+                    artifact_id,
+                    mode=mode,
+                    offset=offset,
+                    max_bytes=max_bytes,
+                )
+                return _artifact_read_payload(record)
+
+            return await self._invoke_async("read_artifact", sync_operation)
+
         async def operation() -> dict[str, Any]:
             record = await call_async_service(
                 self._resolved_async_services().artifacts,
@@ -825,12 +1061,7 @@ class AsyncHostedRuntime(AsyncAgent):
                 offset=offset,
                 max_bytes=max_bytes,
             )
-            if isinstance(record, dict):
-                return dict(record)
-            to_dict = getattr(record, "to_dict", None)
-            if callable(to_dict):
-                return cast(dict[str, Any], to_dict())
-            raise TypeError("async artifact store returned an unsupported read")
+            return _artifact_read_payload(record)
 
         return await self._invoke_async("read_artifact", operation)
 
@@ -861,3 +1092,12 @@ class AsyncHostedRuntime(AsyncAgent):
                 raise failure
 
         await self._invoke_async("close", operation, serialized=True)
+
+
+def _artifact_read_payload(record: object) -> dict[str, Any]:
+    if isinstance(record, dict):
+        return dict(record)
+    to_dict = getattr(record, "to_dict", None)
+    if callable(to_dict):
+        return cast(dict[str, Any], to_dict())
+    raise TypeError("async artifact store returned an unsupported read")

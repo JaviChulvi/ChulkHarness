@@ -1187,6 +1187,56 @@ async def test_async_hosted_factory_and_owned_cleanup_are_native(
 
 
 @pytest.mark.asyncio
+async def test_direct_async_hosted_sync_compatibility_keeps_management_calls(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    sync_services = hub.services()
+    services = AsyncRuntimeServices(
+        **{
+            name: getattr(sync_services, name)
+            for name in sync_services.__dataclass_fields__
+        }
+    )
+    agent = AsyncHostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("compatibility complete")]),
+        tools=[],
+        skills=[],
+        services=services,
+        execution_scope=_scope(),
+    )
+
+    assert await agent.run("sync compatibility management") == (
+        "compatibility complete"
+    )
+    trace = agent.runtime.trace_logger
+    assert trace is not None
+    artifact = trace.write_artifact("compatibility", "artifact body")
+
+    assert agent.usage_ledger is agent.runtime.usage_accounting
+    assert agent.session_search is agent.runtime.session_search_service
+    assert await agent.list_memory_proposals() == ()
+    assert await agent.list_learning_proposals() == ()
+    assert await agent.list_governed_skills() == ()
+    assert await agent.list_plugins() == ()
+    assert (await agent.query_usage()).entries
+    assert await agent.group_usage(UsageGroupBy.RESOURCE_KIND)
+    search = await agent.search_sessions("sync compatibility")
+    assert search.hits
+    window = await agent.read_session_window(
+        agent.conversation_id,
+        ordinal=search.hits[0].ordinal,
+    )
+    assert window.messages
+    assert (
+        await agent.read_artifact(artifact["artifact_id"])
+    )["content"] == "artifact body"
+
+    await agent.close()
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_runtime_awaits_native_trace_and_audit_sinks(
     tmp_path: Path,
 ) -> None:
@@ -1986,6 +2036,66 @@ async def test_async_hosted_close_can_retry_after_cancellation(
     assert lifecycle.calls == 2
     assert lifecycle.closed == [context]
     assert agent.runtime._tool_contexts == {}
+    assert agent._async_owned_services is None
+    assert agent.closed
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_close_retries_only_interrupted_owned_resources(
+    tmp_path: Path,
+) -> None:
+    agent = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    entered = asyncio.Event()
+
+    class SingleCloseResource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError("resource closed more than once")
+
+    class InterruptedResource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def aclose(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                await asyncio.Future()
+
+    single_close = SingleCloseResource()
+    interrupted = InterruptedResource()
+    owned = agent._async_owned_services
+    assert owned is not None
+    agent._async_owned_services = replace(
+        owned,
+        owned_resources=(single_close, interrupted),
+    )
+    close_task = asyncio.create_task(agent.close())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert single_close.calls == 1
+    assert interrupted.calls == 1
+    assert agent._async_owned_services is not None
+
+    await agent.close()
+
+    assert single_close.calls == 1
+    assert interrupted.calls == 2
     assert agent._async_owned_services is None
     assert agent.closed
 
