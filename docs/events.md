@@ -68,6 +68,13 @@ reuse the public `Usage` and `Cost` snapshots, while plan events carry `Plan`.
 Constructor and per-run `on_event` callbacks receive the same public envelope.
 `on_delta` remains supported and is driven by `model.delta` events.
 
+In incremental mode, every `model.delta` is already redacted and accepted by
+the configured host output policy. Its sequence is deterministic and its
+causation link points at the preceding public event. The corresponding terminal
+result reconstructs exactly the concatenated permitted deltas and records the
+delivery outcome in `RunResult.final_answer_delivery`. Structured action bytes,
+tool-call arguments, and repair responses never enter this event.
+
 Durable transitions are first committed to `RunStore` as append-only
 `RunEvent` records. `RunEventPublisher` projects them to schema-v3 envelopes
 using the durable event ID and sequence, chaining each event to its predecessor.
@@ -87,8 +94,10 @@ async for event in agent.run_events_async("Explain the change"):
     render(event)
 ```
 
-Cancelling an async iteration stops event delivery and releases callback
-ownership after the in-flight operation unwinds. Closing a synchronous iterator
+Cancelling an incremental async iteration cancels the native provider iterator,
+releases active accounting reservations, records partial-delivery evidence, and
+terminalizes the turn as cancelled. Validated compatibility runs retain their
+historical in-flight unwind behavior. Closing a synchronous iterator
 also waits for the operation to finish; Python threads are not force-killed.
 
 Consumers should always close partially consumed synchronous generators and

@@ -40,6 +40,12 @@ from chulk.tools.permissions import (
     PermissionRequest,
 )
 from chulk.usage import RunBudget, UsageDimensions
+from chulk.streaming import (
+    AsyncIncrementalOutputPolicy,
+    FinalAnswerStreamingMode,
+    IncrementalOutputPolicy,
+    OutputPolicyFailureMode,
+)
 
 
 class LLMClientFactory(Protocol):
@@ -76,6 +82,10 @@ def create_agent(
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
+    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
+    output_policy: IncrementalOutputPolicy | None = None,
+    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
+    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
@@ -113,6 +123,10 @@ def create_agent(
         event_sink=event_sink,
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,
+        final_answer_streaming=final_answer_streaming,
+        output_policy=output_policy,
+        async_output_policy=async_output_policy,
+        output_policy_failure_mode=output_policy_failure_mode,
         capabilities=capabilities,
         deps=deps,
         shell_execution_policy=shell_execution_policy,
@@ -162,6 +176,10 @@ async def create_async_hosted_agent(
     mcp_servers: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
+    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
+    output_policy: IncrementalOutputPolicy | None = None,
+    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
+    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
     capabilities: Capabilities | None = None,
     deps: object | None = None,
     shell_execution_policy: ShellExecutionPolicy | None = None,
@@ -187,6 +205,10 @@ async def create_async_hosted_agent(
         mcp_servers=mcp_servers,
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,
+        final_answer_streaming=final_answer_streaming,
+        output_policy=output_policy,
+        async_output_policy=async_output_policy,
+        output_policy_failure_mode=output_policy_failure_mode,
         capabilities=capabilities,
         deps=deps,
         shell_execution_policy=shell_execution_policy,

@@ -9,6 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeVar
+from chulk.streaming import FinalAnswerDeliveryStatus
 
 
 class RunStatus(StrEnum):
@@ -253,6 +254,22 @@ PlanSnapshot = Plan
 
 
 @dataclass(frozen=True)
+class FinalAnswerDelivery:
+    """Terminal evidence for public final-answer delivery."""
+
+    status: FinalAnswerDeliveryStatus
+    public_delta_count: int = 0
+    provider_completed: bool = True
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", FinalAnswerDeliveryStatus(self.status))
+
+    def to_dict(self) -> dict[str, Any]:
+        return plain_data(self)
+
+
+@dataclass(frozen=True)
 class RunResult:
     content: str
     status: RunStatus
@@ -269,6 +286,7 @@ class RunResult:
     errors: tuple[str, ...] = ()
     plan: Plan | None = None
     extension_metadata: Mapping[str, Any] = field(default_factory=dict)
+    final_answer_delivery: FinalAnswerDelivery | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", enum_value(RunStatus, self.status, RunStatus.UNKNOWN))

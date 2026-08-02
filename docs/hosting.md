@@ -318,6 +318,18 @@ state from the durable run ledger even after detailed traces expire.
 fail-closed delivery; set `fail_closed=False` only when dropping a public event
 is an explicit host policy.
 
+## Incremental final-answer policy
+
+Hosted runtimes opt into native final-answer streaming with
+`final_answer_streaming="incremental"`. Sync hosts bind an `output_policy`;
+async hosts bind an `async_output_policy`, which is awaited for every chunk and
+completion flush without adapting provider iteration through a worker thread.
+Policy output is the only text allowed into public events, traces, session
+state, and terminal reconstruction. Blocking and fail-closed errors expose no
+rejected text. Safe stops produce a completed run with a
+`safely_truncated` delivery status; provider errors after a public delta produce
+an explicit partial failure and cannot switch providers.
+
 ## Versioned tools and host hooks
 
 Every registered tool receives a `ToolIdentity` and `ToolPolicy`. Simple tools

@@ -316,3 +316,12 @@ provider charges.
 
 See [configuration](configuration.md), [quickstart](quickstart.md), and
 [SDK errors](sdk-errors.md).
+## Final-answer streaming protocol
+
+Provider clients expose `stream_final_answer` and `astream_final_answer` as the
+plain-text protocol used after structured orchestration has selected a legal
+final answer. It is intentionally separate from action assembly: action JSON,
+native tool payloads, and repair attempts remain private. OpenAI Responses and
+OpenAI-compatible Chat Completions use native async iterators. Other providers
+may implement the same protocol; the base client supplies a one-shot async
+compatibility stream, so native incremental support is not mandatory.

@@ -40,6 +40,16 @@ from chulk.memory import ConversationMemory, MemoryRecord
 from chulk.media import ModelRequest, UserInput
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import Tool, ToolRegistry
+from chulk.streaming import (
+    AsyncIncrementalOutputPolicy,
+    AsyncPassThroughOutputPolicy,
+    FinalAnswerChunk,
+    FinalAnswerDeliveryStatus,
+    FinalAnswerPolicyDecision,
+    IncrementalOutputPolicy,
+    OutputPolicyFailureMode,
+    PassThroughOutputPolicy,
+)
 
 
 MAX_SUMMARY_SOURCE_CHARS = 12000
@@ -65,6 +75,17 @@ class ProtocolFailure:
     """A terminal structured-action protocol failure already recorded in state."""
 
     message: str
+
+
+@dataclass(frozen=True)
+class FinalAnswerStreamResult:
+    """Permitted public content and terminal delivery evidence."""
+
+    content: str
+    status: FinalAnswerDeliveryStatus
+    public_delta_count: int
+    provider_completed: bool
+    error: str | None = None
 
 
 @dataclass
@@ -97,6 +118,486 @@ class ModelTransport:
     reserve_accounting_async: AsyncReservationCallback | None = None
     release_accounting_async: AsyncReleaseCallback | None = None
     flush_async: Callable[[], Awaitable[None]] | None = None
+    redact_text: Callable[[str, str, dict], tuple[str, dict]] | None = None
+    output_policy: IncrementalOutputPolicy | None = None
+    async_output_policy: AsyncIncrementalOutputPolicy | None = None
+    output_policy_failure_mode: OutputPolicyFailureMode = OutputPolicyFailureMode.CLOSED
+
+    def stream_final_answer(
+        self, draft: str, turn: TurnState
+    ) -> FinalAnswerStreamResult:
+        """Emit a policy-filtered plain-text answer as provider chunks arrive."""
+        messages, request_index = self._start_final_answer_stream(turn, draft)
+        policy = self.output_policy or PassThroughOutputPolicy()
+        parts: list[str] = []
+        public_sequence = 0
+        provider_sequence = 0
+        usage = None
+        cost = None
+        completed = False
+        self.trace(
+            TraceEvent.MODEL_STREAM_STARTED,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "source": "incremental_final_answer",
+            },
+        )
+        try:
+            for chunk in self.llm_client.stream_final_answer(
+                messages, max_output_tokens=self.max_output_tokens
+            ):
+                if chunk.usage is not None:
+                    usage = chunk.usage
+                if chunk.cost is not None:
+                    cost = chunk.cost
+                if chunk.type == "completed":
+                    completed = True
+                    break
+                if chunk.type != "text_delta" or not chunk.text:
+                    continue
+                decision = self._apply_output_policy(
+                    policy, chunk.text, provider_sequence, turn
+                )
+                provider_sequence += 1
+                if decision.blocked:
+                    return self._finish_final_answer_stream(
+                        turn,
+                        request_index=request_index,
+                        content="".join(parts),
+                        status=FinalAnswerDeliveryStatus.BLOCKED,
+                        public_delta_count=public_sequence,
+                        provider_completed=False,
+                        usage=usage,
+                        cost=cost,
+                        error=decision.reason or "output policy blocked the answer",
+                    )
+                public_sequence = self._publish_policy_text(
+                    decision.text, turn, request_index, public_sequence, parts
+                )
+                if decision.stop:
+                    return self._finish_final_answer_stream(
+                        turn,
+                        request_index=request_index,
+                        content="".join(parts),
+                        status=FinalAnswerDeliveryStatus.TRUNCATED,
+                        public_delta_count=public_sequence,
+                        provider_completed=False,
+                        usage=usage,
+                        cost=cost,
+                        error=decision.reason,
+                    )
+            decision = self._complete_output_policy(policy, provider_sequence, turn)
+            if decision.blocked:
+                return self._finish_final_answer_stream(
+                    turn,
+                    request_index=request_index,
+                    content="".join(parts),
+                    status=FinalAnswerDeliveryStatus.BLOCKED,
+                    public_delta_count=public_sequence,
+                    provider_completed=completed,
+                    usage=usage,
+                    cost=cost,
+                    error=decision.reason or "output policy blocked the answer",
+                )
+            public_sequence = self._publish_policy_text(
+                decision.text, turn, request_index, public_sequence, parts
+            )
+            status = (
+                FinalAnswerDeliveryStatus.TRUNCATED
+                if decision.stop
+                else FinalAnswerDeliveryStatus.COMPLETE
+            )
+            return self._finish_final_answer_stream(
+                turn,
+                request_index=request_index,
+                content="".join(parts),
+                status=status,
+                public_delta_count=public_sequence,
+                provider_completed=completed,
+                usage=usage,
+                cost=cost,
+                error=decision.reason,
+            )
+        except BaseException as exc:
+            if parts:
+                return self._finish_final_answer_stream(
+                    turn,
+                    request_index=request_index,
+                    content="".join(parts),
+                    status=FinalAnswerDeliveryStatus.FAILED,
+                    public_delta_count=public_sequence,
+                    provider_completed=False,
+                    usage=usage,
+                    cost=cost,
+                    error=str(exc),
+                )
+            self.release_accounting(
+                turn, request_index=request_index, reason="final_answer_stream_failed"
+            )
+            self.trace(
+                TraceEvent.MODEL_STREAM_FAILED,
+                {
+                    "turn_id": turn.turn_id,
+                    "request_index": request_index,
+                    "source": "incremental_final_answer",
+                    "error": str(exc),
+                    "partial": bool(parts),
+                },
+            )
+            raise
+
+    async def stream_final_answer_async(
+        self, draft: str, turn: TurnState
+    ) -> FinalAnswerStreamResult:
+        """Native async final-answer stream with no sync iterator adaptation."""
+        messages, request_index = await self._start_final_answer_stream_async(turn, draft)
+        policy = self.async_output_policy or AsyncPassThroughOutputPolicy()
+        parts: list[str] = []
+        public_sequence = 0
+        provider_sequence = 0
+        usage = None
+        cost = None
+        completed = False
+        self.trace(
+            TraceEvent.MODEL_STREAM_STARTED,
+            {"turn_id": turn.turn_id, "request_index": request_index, "source": "incremental_final_answer"},
+        )
+        await self._flush_async()
+        try:
+            async for chunk in self.llm_client.astream_final_answer(
+                messages, max_output_tokens=self.max_output_tokens
+            ):
+                if chunk.usage is not None:
+                    usage = chunk.usage
+                if chunk.cost is not None:
+                    cost = chunk.cost
+                if chunk.type == "completed":
+                    completed = True
+                    break
+                if chunk.type != "text_delta" or not chunk.text:
+                    continue
+                decision = await self._apply_output_policy_async(
+                    policy, chunk.text, provider_sequence, turn
+                )
+                provider_sequence += 1
+                if decision.blocked:
+                    return await self._finish_final_answer_stream_async(
+                        turn, request_index, "".join(parts), FinalAnswerDeliveryStatus.BLOCKED,
+                        public_sequence, False, usage, cost,
+                        decision.reason or "output policy blocked the answer",
+                    )
+                public_sequence = self._publish_policy_text(
+                    decision.text, turn, request_index, public_sequence, parts
+                )
+                await self._flush_async()
+                if decision.stop:
+                    return await self._finish_final_answer_stream_async(
+                        turn, request_index, "".join(parts), FinalAnswerDeliveryStatus.TRUNCATED,
+                        public_sequence, False, usage, cost, decision.reason,
+                    )
+            decision = await self._complete_output_policy_async(
+                policy, provider_sequence, turn
+            )
+            if decision.blocked:
+                return await self._finish_final_answer_stream_async(
+                    turn, request_index, "".join(parts), FinalAnswerDeliveryStatus.BLOCKED,
+                    public_sequence, completed, usage, cost,
+                    decision.reason or "output policy blocked the answer",
+                )
+            public_sequence = self._publish_policy_text(
+                decision.text, turn, request_index, public_sequence, parts
+            )
+            await self._flush_async()
+            status = FinalAnswerDeliveryStatus.TRUNCATED if decision.stop else FinalAnswerDeliveryStatus.COMPLETE
+            return await self._finish_final_answer_stream_async(
+                turn, request_index, "".join(parts), status, public_sequence,
+                completed, usage, cost, decision.reason,
+            )
+        except BaseException as exc:
+            if parts and not isinstance(exc, asyncio.CancelledError):
+                return await self._finish_final_answer_stream_async(
+                    turn, request_index, "".join(parts),
+                    FinalAnswerDeliveryStatus.FAILED, public_sequence,
+                    False, usage, cost, str(exc),
+                )
+            await await_cleanup_after_error(
+                self._release_accounting_async(
+                    turn, request_index=request_index, reason="final_answer_stream_failed"
+                ),
+                exc,
+            )
+            self.trace(
+                TraceEvent.MODEL_STREAM_FAILED,
+                {"turn_id": turn.turn_id, "request_index": request_index, "source": "incremental_final_answer", "error": str(exc), "partial": bool(parts)},
+            )
+            await self._flush_async()
+            if parts:
+                turn.extension_metadata["final_answer_delivery"] = {
+                    "status": FinalAnswerDeliveryStatus.FAILED.value,
+                    "public_delta_count": public_sequence,
+                    "provider_completed": False,
+                    "error": "cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc),
+                    "partial_content": "".join(parts),
+                }
+            raise
+
+    def _final_answer_messages(self, turn: TurnState, draft: str) -> list[dict[str, str]]:
+        prompt = self.build_prompt(turn, require_plan=False)
+        messages = [dict(message) for message in prompt.messages]
+        for message in messages:
+            if message.get("role") == "system":
+                message["content"] = re.sub(
+                    r"<response_protocol>.*?</response_protocol>",
+                    "",
+                    message.get("content", ""),
+                    flags=re.DOTALL,
+                ).strip()
+        instruction = (
+            "Return only the final user-facing answer as plain text. Do not emit JSON, "
+            "tool calls, action payloads, repair content, or internal reasoning. The "
+            f"validated answer intent was: {draft}"
+        )
+        messages.append({"role": "user", "content": instruction})
+        return messages
+
+    def _start_final_answer_stream(
+        self, turn: TurnState, draft: str
+    ) -> tuple[list[dict[str, str]], int]:
+        messages = self._final_answer_messages(turn, draft)
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        self.reserve_accounting(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose="incremental_final_answer",
+        )
+        payload = format_model_request_trace(
+            messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report={"purpose": "incremental_final_answer"},
+        )
+        payload["purpose"] = "incremental_final_answer"
+        payload["action_transport"] = "plain_text_stream"
+        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        return messages, request_index
+
+    async def _start_final_answer_stream_async(
+        self, turn: TurnState, draft: str
+    ) -> tuple[list[dict[str, str]], int]:
+        messages = self._final_answer_messages(turn, draft)
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        await self._reserve_accounting_async(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose="incremental_final_answer",
+        )
+        payload = format_model_request_trace(
+            messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report={"purpose": "incremental_final_answer"},
+        )
+        payload["purpose"] = "incremental_final_answer"
+        payload["action_transport"] = "plain_text_stream"
+        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        await self._flush_async()
+        return messages, request_index
+
+    def _redact_stream_text(self, text: str, sequence: int, turn: TurnState) -> str:
+        if self.redact_text is None:
+            return text
+        permitted, metadata = self.redact_text(
+            TraceEvent.MODEL_STREAM_DELTA,
+            text,
+            {"turn_id": turn.turn_id, "field": "text", "sequence": sequence},
+        )
+        if metadata.get("redacted") or metadata.get("redaction_error"):
+            turn.extension_metadata.setdefault("final_answer_stream_redactions", []).append(
+                {"sequence": sequence, **metadata}
+            )
+        return permitted
+
+    def _apply_output_policy(
+        self,
+        policy: IncrementalOutputPolicy,
+        text: str,
+        sequence: int,
+        turn: TurnState,
+    ) -> FinalAnswerPolicyDecision:
+        chunk = FinalAnswerChunk(
+            text=self._redact_stream_text(text, sequence, turn),
+            sequence=sequence,
+            turn_id=turn.turn_id,
+        )
+        try:
+            return policy.process(chunk)
+        except Exception as exc:
+            if self.output_policy_failure_mode == OutputPolicyFailureMode.OPEN:
+                return FinalAnswerPolicyDecision(text=chunk.text, reason=str(exc))
+            return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
+
+    async def _apply_output_policy_async(
+        self,
+        policy: AsyncIncrementalOutputPolicy,
+        text: str,
+        sequence: int,
+        turn: TurnState,
+    ) -> FinalAnswerPolicyDecision:
+        chunk = FinalAnswerChunk(
+            text=self._redact_stream_text(text, sequence, turn),
+            sequence=sequence,
+            turn_id=turn.turn_id,
+        )
+        try:
+            return await policy.process(chunk)
+        except Exception as exc:
+            if self.output_policy_failure_mode == OutputPolicyFailureMode.OPEN:
+                return FinalAnswerPolicyDecision(text=chunk.text, reason=str(exc))
+            return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
+
+    def _complete_output_policy(
+        self, policy: IncrementalOutputPolicy, sequence: int, turn: TurnState
+    ) -> FinalAnswerPolicyDecision:
+        try:
+            return policy.complete(turn_id=turn.turn_id, next_sequence=sequence)
+        except Exception as exc:
+            if self.output_policy_failure_mode == OutputPolicyFailureMode.OPEN:
+                return FinalAnswerPolicyDecision(reason=str(exc))
+            return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
+
+    async def _complete_output_policy_async(
+        self, policy: AsyncIncrementalOutputPolicy, sequence: int, turn: TurnState
+    ) -> FinalAnswerPolicyDecision:
+        try:
+            return await policy.complete(turn_id=turn.turn_id, next_sequence=sequence)
+        except Exception as exc:
+            if self.output_policy_failure_mode == OutputPolicyFailureMode.OPEN:
+                return FinalAnswerPolicyDecision(reason=str(exc))
+            return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
+
+    def _publish_policy_text(
+        self,
+        text: str,
+        turn: TurnState,
+        request_index: int,
+        sequence: int,
+        parts: list[str],
+    ) -> int:
+        if not text:
+            return sequence
+        parts.append(text)
+        self.trace(
+            TraceEvent.MODEL_STREAM_DELTA,
+            {
+                "turn_id": turn.turn_id,
+                "request_index": request_index,
+                "source": "incremental_final_answer",
+                "sequence": sequence,
+                "text": text,
+            },
+        )
+        return sequence + 1
+
+    def _finish_final_answer_stream(
+        self,
+        turn: TurnState,
+        *,
+        request_index: int,
+        content: str,
+        status: FinalAnswerDeliveryStatus,
+        public_delta_count: int,
+        provider_completed: bool,
+        usage: object,
+        cost: object,
+        error: str | None,
+    ) -> FinalAnswerStreamResult:
+        usage_snapshot, cost_snapshot = self.record_accounting(
+            turn,
+            request_index=request_index,
+            usage=usage,
+            cost=cost,
+            fallback_attempts=getattr(self.llm_client, "last_attempts", None),
+            purpose="incremental_final_answer",
+        )
+        payload = {
+            "turn_id": turn.turn_id,
+            "request_index": request_index,
+            "source": "incremental_final_answer",
+            "status": status.value,
+            "public_delta_count": public_delta_count,
+            "provider_completed": provider_completed,
+            "usage": usage_snapshot,
+            "cost": cost_snapshot,
+            "error": error,
+        }
+        self.trace(
+            TraceEvent.MODEL_STREAM_COMPLETED
+            if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED}
+            else TraceEvent.MODEL_STREAM_FAILED,
+            payload,
+        )
+        self.trace(
+            TraceEvent.MODEL_RESPONSE,
+            {**payload, "content": content},
+        )
+        return FinalAnswerStreamResult(
+            content=content,
+            status=status,
+            public_delta_count=public_delta_count,
+            provider_completed=provider_completed,
+            error=error,
+        )
+
+    async def _finish_final_answer_stream_async(
+        self,
+        turn: TurnState,
+        request_index: int,
+        content: str,
+        status: FinalAnswerDeliveryStatus,
+        public_delta_count: int,
+        provider_completed: bool,
+        usage: object,
+        cost: object,
+        error: str | None,
+    ) -> FinalAnswerStreamResult:
+        usage_snapshot, cost_snapshot = await self._record_accounting_async(
+            turn,
+            request_index=request_index,
+            usage=usage,
+            cost=cost,
+            fallback_attempts=getattr(self.llm_client, "last_attempts", None),
+            purpose="incremental_final_answer",
+        )
+        payload = {
+            "turn_id": turn.turn_id, "request_index": request_index,
+            "source": "incremental_final_answer", "status": status.value,
+            "public_delta_count": public_delta_count,
+            "provider_completed": provider_completed, "usage": usage_snapshot,
+            "cost": cost_snapshot, "error": error,
+        }
+        self.trace(
+            TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED,
+            payload,
+        )
+        self.trace(TraceEvent.MODEL_RESPONSE, {**payload, "content": content})
+        await self._flush_async()
+        return FinalAnswerStreamResult(
+            content=content, status=status, public_delta_count=public_delta_count,
+            provider_completed=provider_completed, error=error
+        )
 
     def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
         """Build the model input and context report."""
