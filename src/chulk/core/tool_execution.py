@@ -1581,6 +1581,10 @@ def _redaction_payload(
         "observation": result.observation,
         "value": result.value,
         "metadata": dict(result.metadata),
+        "resources": [resource.to_dict() for resource in result.resources],
+        "application_events": [
+            event.to_dict() for event in result.application_events
+        ],
     }
 
 
@@ -1624,6 +1628,8 @@ def _withheld_secret_result(result: ToolResult) -> ToolResult:
         error=None if result.success else result.error,
         metadata=metadata,
         value=None,
+        resources=(),
+        application_events=(),
     )
 
 

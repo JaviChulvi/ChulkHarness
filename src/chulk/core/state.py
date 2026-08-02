@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from chulk.tools.registry import ToolResult
 from chulk.core.context import TurnContextSection
+from chulk.resources import ApplicationEventIntent, HostResource
 
 
 PLAN_STEP_STATUSES = {"pending", "in_progress", "completed", "blocked"}
@@ -346,6 +347,8 @@ class TurnState:
     tool_call_count: int = 0
     available_tool_names: list[str] = field(default_factory=list)
     context_sections: list[TurnContextSection] = field(default_factory=list)
+    resources: list[HostResource] = field(default_factory=list)
+    application_events: list[ApplicationEventIntent] = field(default_factory=list)
     prompt_profile: str | None = None
     locale: str | None = None
     input_parts: list[dict] = field(default_factory=list)
@@ -433,6 +436,10 @@ class TurnState:
             "available_tool_names": self.available_tool_names,
             "context_sections": [section.to_dict() for section in self.context_sections],
             "context_section_ids": [section.id for section in self.context_sections],
+            "resources": [resource.to_dict() for resource in self.resources],
+            "application_events": [
+                event.to_dict() for event in self.application_events
+            ],
             "prompt_profile": self.prompt_profile,
             "locale": self.locale,
             "input_parts": self.input_parts,

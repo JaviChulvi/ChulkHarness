@@ -318,6 +318,27 @@ state from the durable run ledger even after detailed traces expire.
 fail-closed delivery; set `fail_closed=False` only when dropping a public event
 is an explicit host policy.
 
+## Host resources and application events
+
+Use `HostResource` for retrieved evidence, citations, generated documents, or
+other application-visible outputs. A resource contains an opaque ID, generic
+kind, title, source, optional public HTTP/URN URI, bounded excerpt, provenance
+and relevance metadata, and a host-controlled persistence policy. It never
+contains the private context body.
+
+Attach a resource to `TurnContextSection(resource=...)` while keeping the model
+content in `content`. Set `persist_content=False` when snapshots must retain
+only the resource projection. Context resources produce `resource.available`
+before model output and appear in terminal `RunResult.resources`.
+
+Tools can return additional resources and schema-versioned
+`ApplicationEventIntent` values in `ToolResult`. Each tool must register the
+allowed `ApplicationEventSchema` contracts. Unknown schemas, invalid JSON,
+oversized payloads, duplicate idempotency keys, and schema mismatches fail
+before publication. Sync and async tools use the same ordering and validation
+path; hosts consume both resource and application events through the existing
+`EventSink` rather than a parallel bus.
+
 ## Versioned tools and host hooks
 
 Every registered tool receives a `ToolIdentity` and `ToolPolicy`. Simple tools

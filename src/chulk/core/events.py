@@ -25,6 +25,8 @@ class TraceEvent:
     MEDIA_INPUT_PREPARED = "media_input_prepared"
     MEDIA_TRANSFORMED = "media_transformed"
     TURN_CONTEXT_SELECTED = "turn_context_selected"
+    HOST_RESOURCE_AVAILABLE = "host_resource_available"
+    APPLICATION_EVENT = "application_event"
     MEMORY_EXTRACTION_COMPLETED = "memory_extraction_completed"
     MEMORY_SEARCH_STARTED = "memory_search_started"
     MEMORY_SEARCH_COMPLETED = "memory_search_completed"

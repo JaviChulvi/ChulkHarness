@@ -195,6 +195,8 @@ Acceptance criteria:
   hooks, secret-output withholding, and compatibility defaults.
 - [x] Add credential-free sync/async in-memory embedding examples and contract
   tests that create no local runtime files.
+- [x] Add typed host resources and schema-validated application events to the
+  ordered public run stream and terminal results.
 - [x] Await native async persistence, trace, audit, and usage services directly
   throughout the async orchestration path.
 - [x] Execute independent `parallel_safe` read-only tool batches concurrently
