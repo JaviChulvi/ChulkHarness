@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+import hashlib
 from typing import Any, Callable
+from uuid import uuid4
 
 from chulk._sdk.results import cost_snapshot, plan_snapshot, run_result_from_runtime, usage_snapshot
 from chulk.core import Agent as CoreAgent, TraceEvent
 from chulk.events import (
     AgentEvent,
+    ApplicationEventPayload,
     BudgetPayload,
     EventName,
     LearningProposalChangedPayload,
@@ -19,12 +22,14 @@ from chulk.events import (
     PermissionPayload,
     PlanPayload,
     ResourcesLoadedPayload,
+    ResourceAvailablePayload,
     RunCompletedPayload,
     RunFailedPayload,
     RunStartedPayload,
     ToolCallPayload,
 )
 from chulk.hosting.scope import ExecutionScope
+from chulk.resources import ApplicationEventIntent, HostResource
 
 
 EventCallback = Callable[[AgentEvent], None]
@@ -97,6 +102,54 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
             ModelRequestPayload(payload.get("request_index"), payload.get("purpose")),
             extensions,
             profile_id=runtime.profile_id,
+        )
+    if event_type == TraceEvent.HOST_RESOURCE_AVAILABLE:
+        resource_value = payload.get("resource")
+        if not isinstance(resource_value, Mapping):
+            return None
+        resource = HostResource.from_dict(resource_value)
+        event_key = f"resource:{turn_id}:{resource.id}"
+        return _event(
+            EventName.RESOURCE_AVAILABLE,
+            conversation_id,
+            turn_id,
+            ResourceAvailablePayload(
+                resource=resource,
+                origin=str(payload.get("origin") or "unknown"),
+                tool_name=(
+                    payload.get("tool_name")
+                    if isinstance(payload.get("tool_name"), str)
+                    else None
+                ),
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+            event_id=_deterministic_event_id(conversation_id, event_key),
+            idempotency_key=event_key,
+        )
+    if event_type == TraceEvent.APPLICATION_EVENT:
+        intent_value = payload.get("intent")
+        if not isinstance(intent_value, Mapping):
+            return None
+        intent = ApplicationEventIntent.from_dict(intent_value)
+        return _event(
+            EventName.APPLICATION_EVENT,
+            conversation_id,
+            turn_id,
+            ApplicationEventPayload(
+                namespace=intent.namespace,
+                name=intent.name,
+                schema_version=intent.schema_version,
+                payload=intent.payload,
+                tool_name=str(payload.get("tool_name") or "unknown"),
+            ),
+            extensions,
+            profile_id=runtime.profile_id,
+            event_id=_deterministic_event_id(
+                conversation_id,
+                intent.idempotency_key,
+            ),
+            idempotency_key=intent.idempotency_key,
         )
     if event_type == TraceEvent.MODEL_STREAM_DELTA:
         text = payload.get("text")
@@ -454,6 +507,8 @@ def _event(
     profile_id: str | None = None,
     execution_scope: ExecutionScope | None = None,
     causation_id: str | None = None,
+    event_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AgentEvent:
     scope_value = extensions.get("execution_scope")
     resolved_scope = execution_scope or (
@@ -462,6 +517,7 @@ def _event(
         else None
     )
     return AgentEvent(
+        event_id=event_id or uuid4().hex,
         name=name.value,
         conversation_id=conversation_id,
         turn_id=turn_id,
@@ -472,6 +528,7 @@ def _event(
             resolved_scope.run_id if resolved_scope is not None else None
         ),
         causation_id=causation_id,
+        idempotency_key=idempotency_key,
         source_event_id=(
             resolved_scope.trigger_id
             if resolved_scope is not None
@@ -479,6 +536,13 @@ def _event(
         ),
         extensions=extensions,
     )
+
+
+def _deterministic_event_id(conversation_id: str, key: str) -> str:
+    digest = hashlib.sha256(
+        f"{conversation_id}\0{key}".encode("utf-8")
+    ).hexdigest()
+    return f"evt_{digest}"
 
 
 def _turn_id(runtime: CoreAgent, payload: dict[str, Any]) -> str | None:

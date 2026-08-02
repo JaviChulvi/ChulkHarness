@@ -417,6 +417,7 @@ class TurnEffects:
                 "exit_code": result.exit_code,
             },
         )
+        self._publish_tool_outputs(turn, action.tool_name, result)
         observation, metadata = self._format_observation(action.tool_name, result)
         return self._record_tool_observation(
             turn,
@@ -472,6 +473,7 @@ class TurnEffects:
                 "exit_code": result.exit_code,
             },
         )
+        self._publish_tool_outputs(turn, action.tool_name, result)
         observation, metadata = await self._format_observation_async(
             action.tool_name,
             result,
@@ -484,6 +486,58 @@ class TurnEffects:
             observation=observation,
             metadata=metadata,
         )
+
+    def _publish_tool_outputs(
+        self,
+        turn: TurnState,
+        tool_name: str,
+        result: ToolResult,
+    ) -> None:
+        if not result.success:
+            return
+        resources_by_id = {resource.id: resource for resource in turn.resources}
+        for resource in result.resources:
+            existing = resources_by_id.get(resource.id)
+            if existing is not None:
+                if existing != resource:
+                    raise ValueError(
+                        f"conflicting host resource id: {resource.id}"
+                    )
+                continue
+            turn.resources.append(resource)
+            resources_by_id[resource.id] = resource
+            self.trace(
+                TraceEvent.HOST_RESOURCE_AVAILABLE,
+                {
+                    "turn_id": turn.turn_id,
+                    "origin": "tool",
+                    "tool_name": tool_name,
+                    "resource": resource.to_dict(),
+                },
+            )
+
+        events_by_key = {
+            event.idempotency_key: event for event in turn.application_events
+        }
+        for event in result.application_events:
+            existing_event = events_by_key.get(event.idempotency_key)
+            if existing_event is not None:
+                if existing_event != event:
+                    raise ValueError(
+                        "conflicting application event idempotency_key: "
+                        f"{event.idempotency_key}"
+                    )
+                continue
+            turn.application_events.append(event)
+            events_by_key[event.idempotency_key] = event
+            self.trace(
+                TraceEvent.APPLICATION_EVENT,
+                {
+                    "turn_id": turn.turn_id,
+                    "tool_name": tool_name,
+                    "intent": event.to_dict(),
+                },
+            )
 
     def _record_tool_observation(
         self,

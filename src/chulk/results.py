@@ -10,6 +10,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeVar
 
+from chulk.resources import HostResource
+
 
 class RunStatus(StrEnum):
     IN_PROGRESS = "in_progress"
@@ -269,12 +271,14 @@ class RunResult:
     errors: tuple[str, ...] = ()
     plan: Plan | None = None
     extension_metadata: Mapping[str, Any] = field(default_factory=dict)
+    resources: tuple[HostResource, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", enum_value(RunStatus, self.status, RunStatus.UNKNOWN))
         object.__setattr__(self, "trace_path", Path(self.trace_path) if self.trace_path is not None else None)
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
         object.__setattr__(self, "observations", tuple(self.observations))
+        object.__setattr__(self, "resources", tuple(self.resources))
         object.__setattr__(self, "loaded_skill_names", tuple(self.loaded_skill_names))
         object.__setattr__(self, "loaded_memory_ids", tuple(self.loaded_memory_ids))
         object.__setattr__(self, "errors", tuple(self.errors))

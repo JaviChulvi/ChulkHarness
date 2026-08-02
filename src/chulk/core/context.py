@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from math import ceil
 from typing import Any, Literal
 
+from chulk.resources import HostResource
+
 
 ESTIMATED_CHARS_PER_TOKEN = 4
 MESSAGE_OVERHEAD_TOKENS = 4
@@ -68,6 +70,7 @@ class TurnContextSection:
     source: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     persist_content: bool = True
+    resource: HostResource | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +80,7 @@ class TurnContextSection:
             "content": self.content if self.persist_content else "[content omitted]",
             "metadata": self.metadata,
             "persist_content": self.persist_content,
+            "resource": self.resource.to_dict() if self.resource is not None else None,
         }
 
 

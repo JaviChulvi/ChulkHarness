@@ -279,6 +279,7 @@ def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResu
         ),
         tool_calls=tuple(tool_call_snapshot(record) for record in turn.tool_calls) if turn is not None else (),
         observations=(tuple(observation_snapshot(record) for record in turn.observations) if turn is not None else ()),
+        resources=tuple(turn.resources) if turn is not None else (),
         loaded_skill_names=tuple(turn.loaded_skill_names) if turn is not None else tuple(state.loaded_skill_names),
         loaded_memory_ids=tuple(turn.loaded_memory_ids) if turn is not None else tuple(state.loaded_memory_ids),
         errors=tuple(turn.errors) if turn is not None else tuple(state.errors),

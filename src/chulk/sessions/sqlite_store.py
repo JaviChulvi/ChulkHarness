@@ -980,6 +980,8 @@ def _row_to_summary(row: sqlite3.Row) -> ConversationSummaryRecord:
 
 
 def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
+    from chulk.resources import ApplicationEventIntent, HostResource
+
     turn = TurnState(
         user_message=str(payload.get("user_message") or ""),
         turn_id=str(payload.get("turn_id") or uuid4()),
@@ -990,6 +992,14 @@ def _turn_from_dict(payload: dict[str, Any]) -> TurnState:
         tool_call_count=int(payload.get("tool_call_count") or 0),
         available_tool_names=_safe_string_list(payload.get("available_tool_names")),
         context_sections=[_context_section_from_dict(item) for item in _safe_dict_list(payload.get("context_sections"))],
+        resources=[
+            HostResource.from_dict(item)
+            for item in _safe_dict_list(payload.get("resources"))
+        ],
+        application_events=[
+            ApplicationEventIntent.from_dict(item)
+            for item in _safe_dict_list(payload.get("application_events"))
+        ],
         prompt_profile=payload.get("prompt_profile"),
         locale=payload.get("locale"),
         input_parts=_safe_dict_list(payload.get("input_parts")),
@@ -1057,6 +1067,9 @@ def _plan_from_dict(payload: Any) -> Plan | None:
 
 
 def _context_section_from_dict(payload: dict[str, Any]) -> TurnContextSection:
+    from chulk.resources import HostResource
+
+    resource_value = payload.get("resource")
     return TurnContextSection(
         id=str(payload.get("id") or ""),
         title=payload.get("title"),
@@ -1064,6 +1077,11 @@ def _context_section_from_dict(payload: dict[str, Any]) -> TurnContextSection:
         content=str(payload.get("content") or ""),
         metadata=_safe_json_object(payload.get("metadata")),
         persist_content=bool(payload.get("persist_content", True)),
+        resource=(
+            HostResource.from_dict(resource_value)
+            if isinstance(resource_value, dict)
+            else None
+        ),
     )
 
 

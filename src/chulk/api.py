@@ -33,6 +33,7 @@ from chulk.authoring import (
     WorkflowStep,
 )
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
+from chulk.core import TurnContextSection
 from chulk.capabilities import (
     Capabilities,
     FileAccess,
@@ -199,6 +200,7 @@ from chulk.events import (
     EVENT_SCHEMA_VERSION,
     SUPPORTED_EVENT_SCHEMA_VERSIONS,
     AgentEvent,
+    ApplicationEventPayload,
     ApprovalLifecyclePayload,
     AutomationChangedPayload,
     BudgetPayload,
@@ -214,6 +216,7 @@ from chulk.events import (
     PermissionPayload,
     PlanPayload,
     ResourcesLoadedPayload,
+    ResourceAvailablePayload,
     ReconciliationPayload,
     RunCompletedPayload,
     RunFailedPayload,
@@ -222,6 +225,12 @@ from chulk.events import (
     SerializedEventPayload,
     StepLifecyclePayload,
     ToolCallPayload,
+)
+from chulk.resources import (
+    ApplicationEventIntent,
+    ApplicationEventSchema,
+    HostResource,
+    ResourcePersistence,
 )
 from chulk.approvals import (
     ApprovalConflictError,
@@ -824,6 +833,9 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AgentEvent",
+    "ApplicationEventIntent",
+    "ApplicationEventPayload",
+    "ApplicationEventSchema",
     "AgentHandle",
     "AgentPreset",
     "AgentProfile",
@@ -1094,6 +1106,9 @@ __all__ = [
     "RuntimeChildAgentFactory",
     "ProviderError",
     "ResourcesLoadedPayload",
+    "ResourceAvailablePayload",
+    "ResourcePersistence",
+    "HostResource",
     "RunCompletedPayload",
     "RunFailedPayload",
     "RunStartedPayload",
@@ -1127,6 +1142,7 @@ __all__ = [
     "ToolCall",
     "ToolAttempt",
     "ToolCallPayload",
+    "TurnContextSection",
     "ToolContext",
     "TraceError",
     "TransferPolicy",
