@@ -217,7 +217,14 @@ def _catalog_entry(tool: Tool) -> dict[str, Any]:
         "identity": tool.resolved_identity().to_dict(),
         "policy": tool.resolved_policy().to_dict(),
         "application_events": [
-            schema.to_dict() for schema in tool.application_event_schemas
+            {
+                "namespace": schema.namespace,
+                "name": schema.name,
+                "version": schema.version,
+                "payload_schema": deepcopy(dict(schema.payload_schema)),
+                "max_payload_bytes": schema.max_payload_bytes,
+            }
+            for schema in tool.application_event_schemas
         ],
     }
 

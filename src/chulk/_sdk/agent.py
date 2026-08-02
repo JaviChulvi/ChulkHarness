@@ -37,6 +37,10 @@ from chulk.hosting import (
     ExecutionScope,
     RuntimeServices,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ToolCatalogResolver,
+)
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
 from chulk.plugins import (
@@ -134,6 +138,9 @@ class Agent:
         media_processors: MediaProcessorRegistry | None = None,
         services: RuntimeServices | None = None,
         execution_scope: ExecutionScope | None = None,
+        tool_catalog_resolver: ToolCatalogResolver | None = None,
+        async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+        tool_catalog_timeout_seconds: float | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -173,6 +180,9 @@ class Agent:
                 media_processors=media_processors,
                 services=services,
                 execution_scope=execution_scope,
+                tool_catalog_resolver=tool_catalog_resolver,
+                async_tool_catalog_resolver=async_tool_catalog_resolver,
+                tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
