@@ -21,6 +21,11 @@ The documented categories are `ConfigurationError`, `ProviderError`,
 `MemoryError`. All derive from `ChulkError` and expose `message`, `category`,
 immutable `details`, and a redacted `to_dict()` representation.
 
+`HostedServiceDisabledError` is a `ConfigurationError` raised when application
+code attempts to use a service that a hosted capability profile explicitly
+disabled. Its `details.invalid_field` identifies the service without exposing
+host data.
+
 Details are present only when known. They can include provider, model, tool,
 invalid field, validation issues, retryability, conversation and turn ids, and
 the trace path. Translated errors retain the internal exception in `__cause__`

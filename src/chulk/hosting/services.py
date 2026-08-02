@@ -6,8 +6,9 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Awaitable, Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Awaitable, Generic, Protocol, TypeVar, cast, runtime_checkable
 
+from chulk.errors import ErrorDetails, HostedServiceDisabledError
 from chulk.events import AgentEvent
 from chulk.hosting.async_utils import close_async_resource
 from chulk.hosting.scope import ExecutionScope
@@ -21,6 +22,200 @@ class ResourceOwnership(StrEnum):
 
     HOST = "host"
     RUNTIME = "runtime"
+
+
+class HostedCapability(StrEnum):
+    """Optional hosted behaviors that require application-owned services."""
+
+    MEMORY = "memory"
+    SKILLS = "skills"
+    ARTIFACTS = "artifacts"
+    PLUGINS = "plugins"
+    CONTENT = "content"
+    MEDIA = "media"
+    DURABLE_RUNS = "durable_runs"
+    APPROVALS = "approvals"
+
+
+_SERVICE_NAMES = (
+    "memory",
+    "sessions",
+    "skills",
+    "traces",
+    "artifacts",
+    "usage",
+    "audit",
+    "execution",
+    "plugins",
+    "content",
+    "media",
+    "tool_policy",
+    "runs",
+    "approvals",
+    "events",
+)
+_CORE_SERVICE_NAMES = frozenset(
+    {"sessions", "traces", "usage", "audit", "execution", "tool_policy", "events"}
+)
+_CAPABILITY_SERVICES = {
+    HostedCapability.MEMORY: frozenset({"memory"}),
+    HostedCapability.SKILLS: frozenset({"skills"}),
+    HostedCapability.ARTIFACTS: frozenset({"artifacts"}),
+    HostedCapability.PLUGINS: frozenset({"plugins"}),
+    HostedCapability.CONTENT: frozenset({"content"}),
+    HostedCapability.MEDIA: frozenset({"media"}),
+    HostedCapability.DURABLE_RUNS: frozenset({"runs"}),
+    HostedCapability.APPROVALS: frozenset({"approvals"}),
+}
+_CAPABILITY_DEPENDENCIES = {
+    HostedCapability.MEDIA: frozenset({HostedCapability.CONTENT}),
+    HostedCapability.APPROVALS: frozenset({HostedCapability.DURABLE_RUNS}),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class HostedCapabilityProfile:
+    """Declared optional capabilities for one hosted runtime boundary."""
+
+    enabled: frozenset[HostedCapability] = field(
+        default_factory=lambda: frozenset(HostedCapability)
+    )
+
+    def __post_init__(self) -> None:
+        normalized = frozenset(HostedCapability(item) for item in self.enabled)
+        for capability, dependencies in _CAPABILITY_DEPENDENCIES.items():
+            missing = dependencies - normalized
+            if capability in normalized and missing:
+                names = ", ".join(sorted(item.value for item in missing))
+                raise ValueError(
+                    f"hosted capability {capability.value} requires {names}"
+                )
+        object.__setattr__(self, "enabled", normalized)
+
+    @classmethod
+    def full(cls) -> "HostedCapabilityProfile":
+        """Enable every hosted capability for complete-bundle compatibility."""
+        return cls()
+
+    @classmethod
+    def tool_only(cls) -> "HostedCapabilityProfile":
+        """Enable model execution and application tools without optional services."""
+        return cls(enabled=frozenset())
+
+    def with_capabilities(
+        self,
+        *capabilities: HostedCapability | str,
+    ) -> "HostedCapabilityProfile":
+        """Return a profile with the selected capabilities enabled."""
+        return HostedCapabilityProfile(
+            self.enabled | {HostedCapability(item) for item in capabilities}
+        )
+
+    def without_capabilities(
+        self,
+        *capabilities: HostedCapability | str,
+    ) -> "HostedCapabilityProfile":
+        """Return a profile with the selected capabilities disabled."""
+        removed = {HostedCapability(item) for item in capabilities}
+        return HostedCapabilityProfile(self.enabled - removed)
+
+
+@dataclass(frozen=True, slots=True)
+class HostedServiceManifest:
+    """Resolved, inspectable capability-to-service composition."""
+
+    capabilities: tuple[str, ...]
+    enabled_services: tuple[str, ...]
+    disabled_services: tuple[str, ...]
+
+    @classmethod
+    def from_profile(
+        cls,
+        profile: HostedCapabilityProfile,
+    ) -> "HostedServiceManifest":
+        enabled_services = set(_CORE_SERVICE_NAMES)
+        for capability in profile.enabled:
+            enabled_services.update(_CAPABILITY_SERVICES[capability])
+        return cls(
+            capabilities=tuple(sorted(item.value for item in profile.enabled)),
+            enabled_services=tuple(
+                name for name in _SERVICE_NAMES if name in enabled_services
+            ),
+            disabled_services=tuple(
+                name for name in _SERVICE_NAMES if name not in enabled_services
+            ),
+        )
+
+    @classmethod
+    def complete(cls) -> "HostedServiceManifest":
+        return cls.from_profile(HostedCapabilityProfile.full())
+
+    def is_enabled(self, service_name: str) -> bool:
+        return service_name in self.enabled_services
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "capabilities": list(self.capabilities),
+            "enabled_services": list(self.enabled_services),
+            "disabled_services": list(self.disabled_services),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledHostedService:
+    """Fail-closed marker bound for an explicitly disabled hosted service."""
+
+    service_name: str
+
+    def _raise(self) -> None:
+        raise HostedServiceDisabledError(
+            f"hosted service {self.service_name} is explicitly disabled",
+            details=ErrorDetails(
+                invalid_field=self.service_name,
+                extensions={"service": self.service_name},
+            ),
+        )
+
+    def __getattr__(self, _name: str) -> Any:
+        self._raise()
+
+
+def _bindings_for_profile(
+    profile: HostedCapabilityProfile,
+    bindings: dict[
+        str,
+        ServiceBinding[Any] | AsyncServiceBinding[Any] | None,
+    ],
+) -> tuple[
+    HostedServiceManifest,
+    dict[str, ServiceBinding[Any] | AsyncServiceBinding[Any]],
+]:
+    manifest = HostedServiceManifest.from_profile(profile)
+    result: dict[str, ServiceBinding[Any] | AsyncServiceBinding[Any]] = {}
+    missing: list[str] = []
+    conflicts: list[str] = []
+    for name in _SERVICE_NAMES:
+        binding = bindings.get(name)
+        if manifest.is_enabled(name):
+            if binding is None:
+                missing.append(name)
+            else:
+                result[name] = binding
+        else:
+            if binding is not None:
+                conflicts.append(name)
+            result[name] = ServiceBinding.host(DisabledHostedService(name))
+    if missing:
+        raise ValueError(
+            "enabled hosted services require bindings: "
+            + ", ".join(missing)
+        )
+    if conflicts:
+        raise ValueError(
+            "disabled hosted services cannot have bindings: "
+            + ", ".join(conflicts)
+        )
+    return manifest, result
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +294,25 @@ class AsyncServiceBinding(Generic[T]):
         if resource is None:
             raise ValueError("async hosted service factory returned no resource")
         return resource
+
+
+def _manifest_from_bindings(services: Any) -> HostedServiceManifest:
+    enabled_capabilities: set[HostedCapability] = set()
+    for capability, service_names in _CAPABILITY_SERVICES.items():
+        enabled = True
+        for service_name in service_names:
+            binding = getattr(services, service_name)
+            if (
+                isinstance(binding, ServiceBinding)
+                and isinstance(binding.value, DisabledHostedService)
+            ):
+                enabled = False
+                break
+        if enabled:
+            enabled_capabilities.add(capability)
+    return HostedServiceManifest.from_profile(
+        HostedCapabilityProfile(frozenset(enabled_capabilities))
+    )
 
 
 @runtime_checkable
@@ -583,12 +797,51 @@ class RuntimeServices:
     approvals: ServiceBinding[Any]
     events: ServiceBinding[Any]
 
+    @property
+    def manifest(self) -> HostedServiceManifest:
+        """Return the capability manifest derived from explicit bindings."""
+        return _manifest_from_bindings(self)
+
+    @classmethod
+    def for_profile(
+        cls,
+        profile: HostedCapabilityProfile,
+        *,
+        memory: ServiceBinding[Any] | None = None,
+        sessions: ServiceBinding[Any] | None = None,
+        skills: ServiceBinding[Any] | None = None,
+        traces: ServiceBinding[Any] | None = None,
+        artifacts: ServiceBinding[Any] | None = None,
+        usage: ServiceBinding[Any] | None = None,
+        audit: ServiceBinding[Any] | None = None,
+        execution: ServiceBinding[Any] | None = None,
+        plugins: ServiceBinding[Any] | None = None,
+        content: ServiceBinding[Any] | None = None,
+        media: ServiceBinding[Any] | None = None,
+        tool_policy: ServiceBinding[Any] | None = None,
+        runs: ServiceBinding[Any] | None = None,
+        approvals: ServiceBinding[Any] | None = None,
+        events: ServiceBinding[Any] | None = None,
+    ) -> "RuntimeServices":
+        """Build a bundle that requires only services enabled by ``profile``."""
+        _manifest, bindings = _bindings_for_profile(
+            profile,
+            {
+                "memory": memory, "sessions": sessions, "skills": skills,
+                "traces": traces, "artifacts": artifacts, "usage": usage,
+                "audit": audit, "execution": execution, "plugins": plugins,
+                "content": content, "media": media, "tool_policy": tool_policy,
+                "runs": runs, "approvals": approvals, "events": events,
+            },
+        )
+        return cls(**cast(dict[str, ServiceBinding[Any]], bindings))
+
     def resolve(self, scope: ExecutionScope) -> "ResolvedRuntimeServices":
         values: dict[str, Any] = {}
         owned: list[object] = []
         owned_ids: set[int] = set()
         try:
-            for name in self.__dataclass_fields__:
+            for name in _SERVICE_NAMES:
                 binding = getattr(self, name)
                 if not isinstance(binding, ServiceBinding):
                     raise TypeError(
@@ -614,7 +867,11 @@ class RuntimeServices:
                 if callable(close):
                     close()
             raise
-        return ResolvedRuntimeServices(**values, owned_resources=tuple(owned))
+        return ResolvedRuntimeServices(
+            **values,
+            manifest=self.manifest,
+            owned_resources=tuple(owned),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -641,10 +898,30 @@ class AsyncRuntimeServices:
     approvals: ServiceBinding[Any] | AsyncServiceBinding[Any]
     events: ServiceBinding[Any] | AsyncServiceBinding[Any]
 
+    @property
+    def manifest(self) -> HostedServiceManifest:
+        """Return the capability manifest derived from explicit bindings."""
+        return _manifest_from_bindings(self)
+
+    @classmethod
+    def for_profile(
+        cls,
+        profile: HostedCapabilityProfile,
+        **bindings: ServiceBinding[Any] | AsyncServiceBinding[Any] | None,
+    ) -> "AsyncRuntimeServices":
+        """Build a native-async bundle from a capability profile."""
+        unknown = set(bindings) - set(_SERVICE_NAMES)
+        if unknown:
+            raise TypeError(
+                "unknown hosted services: " + ", ".join(sorted(unknown))
+            )
+        _manifest, resolved = _bindings_for_profile(profile, bindings)
+        return cls(**resolved)
+
     def as_sync_services(self) -> RuntimeServices:
         """Return the compatibility bundle when every binding is synchronous."""
         bindings: dict[str, ServiceBinding[Any]] = {}
-        for name in self.__dataclass_fields__:
+        for name in _SERVICE_NAMES:
             binding = getattr(self, name)
             if not isinstance(binding, ServiceBinding):
                 raise ValueError(
@@ -665,7 +942,7 @@ class AsyncRuntimeServices:
         owned: list[object] = []
         owned_ids: set[int] = set()
         try:
-            for name in self.__dataclass_fields__:
+            for name in _SERVICE_NAMES:
                 binding = getattr(self, name)
                 try:
                     if isinstance(binding, AsyncServiceBinding):
@@ -703,6 +980,7 @@ class AsyncRuntimeServices:
             raise
         return ResolvedRuntimeServices(
             **values,
+            manifest=self.manifest,
             owned_resources=tuple(owned),
         )
 
@@ -724,6 +1002,7 @@ class ResolvedRuntimeServices:
     runs: Any
     approvals: Any
     events: Any
+    manifest: HostedServiceManifest
     owned_resources: tuple[object, ...]
     _pending_owned_resources: list[object] = field(
         init=False,
@@ -743,9 +1022,13 @@ class ResolvedRuntimeServices:
         return RuntimeServices(
             **{
                 name: ServiceBinding.host(getattr(self, name))
-                for name in RuntimeServices.__dataclass_fields__
-            }
+                for name in _SERVICE_NAMES
+            },
         )
+
+    def is_enabled(self, service_name: str) -> bool:
+        """Return whether a service is enabled in the resolved bundle."""
+        return self.manifest.is_enabled(service_name)
 
     async def aclose_owned(self) -> None:
         """Close only runtime-owned resources through native async methods."""
