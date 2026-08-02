@@ -8,7 +8,7 @@ import warnings
 from typing import cast
 
 from chulk._version import __version__
-from chulk.capabilities import Capabilities
+from chulk.capabilities import Capabilities, MemoryMode
 from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
@@ -193,25 +193,32 @@ def assemble_agent(
         and usage_dimensions.goal_id not in {None, goal_snapshot.id}
     ):
         raise ValueError("usage dimensions do not match the claimed goal")
+    plugins_enabled = (
+        resolved_services is None
+        or resolved_services.is_enabled("plugins")
+    )
     selected_plugin_registry = (
         resolved_services.plugins
-        if resolved_services is not None
+        if resolved_services is not None and plugins_enabled
         else plugin_registry
         or LocalPluginRegistry(
             config.runtime_dir,
             profile_id=effective_profile_id,
         )
-    )
-    plugin_profile_id = getattr(
-        selected_plugin_registry,
-        "profile_id",
-        effective_profile_id,
-    )
-    if plugin_profile_id != effective_profile_id:
-        raise ValueError(
-            "plugin registry profile does not match the runtime profile"
+    ) if plugins_enabled else None
+    if selected_plugin_registry is not None:
+        plugin_profile_id = getattr(
+            selected_plugin_registry,
+            "profile_id",
+            effective_profile_id,
         )
-    plugin_audit_report = selected_plugin_registry.verify_startup()
+        if plugin_profile_id != effective_profile_id:
+            raise ValueError(
+                "plugin registry profile does not match the runtime profile"
+            )
+        plugin_audit_report = selected_plugin_registry.verify_startup()
+    else:
+        plugin_audit_report = None
     effective_conversation_metadata = dict(conversation_metadata or {})
     metadata_profile_id = effective_conversation_metadata.get("profile_id")
     if metadata_profile_id is not None and metadata_profile_id != effective_profile_id:
@@ -226,32 +233,70 @@ def assemble_agent(
         effective_conversation_metadata["execution_scope_key"] = (
             execution_scope.key
         )
+    memory_enabled = (
+        resolved_services is None
+        or resolved_services.is_enabled("memory")
+    )
     memory_store = (
         resolved_services.memory
-        if resolved_services is not None
+        if resolved_services is not None and memory_enabled
         else SQLiteMemoryStore(
             config.store_path,
             namespace=memory_namespace,
         )
-    )
+    ) if memory_enabled else None
     selected_capabilities = capabilities or Capabilities.full()
-    memory_policy = MemoryPolicy(memory_store, selected_capabilities.memory)
+    if not memory_enabled and selected_capabilities.memory != MemoryMode.OFF:
+        raise ValueError(
+            "memory capability requires the hosted memory service"
+        )
+    memory_policy = (
+        MemoryPolicy(memory_store, selected_capabilities.memory)
+        if memory_store is not None
+        else None
+    )
     if resolved_services is not None:
         if not isinstance(resolved_services.sessions, SessionRuntimeServices):
             raise TypeError(
                 "hosted sessions service must be SessionRuntimeServices"
             )
-        if not isinstance(resolved_services.skills, SkillRuntimeServices):
+        skills_enabled = resolved_services.is_enabled("skills")
+        if skills_enabled and not isinstance(
+            resolved_services.skills,
+            SkillRuntimeServices,
+        ):
             raise TypeError("hosted skills service must be SkillRuntimeServices")
+        if not skills_enabled and skill_specs:
+            raise ValueError(
+                "skill specifications require the hosted skills service"
+            )
         session_store = resolved_services.sessions.store
         session_search_service = resolved_services.sessions.search
-        selected_content_store = resolved_services.content
-        selected_media_processors = resolved_services.media
-        skill_registry = resolved_services.skills.registry
-        skill_lifecycle_store = resolved_services.skills.lifecycle_store
-        skill_lifecycle = resolved_services.skills.lifecycle
-        learning_proposals = resolved_services.skills.learning_proposals
-        learning_reviewer = resolved_services.skills.learning_reviewer
+        selected_content_store = (
+            resolved_services.content
+            if resolved_services.is_enabled("content")
+            else None
+        )
+        selected_media_processors = (
+            resolved_services.media
+            if resolved_services.is_enabled("media")
+            else None
+        )
+        skill_registry = (
+            resolved_services.skills.registry if skills_enabled else None
+        )
+        skill_lifecycle_store = (
+            resolved_services.skills.lifecycle_store if skills_enabled else None
+        )
+        skill_lifecycle = (
+            resolved_services.skills.lifecycle if skills_enabled else None
+        )
+        learning_proposals = (
+            resolved_services.skills.learning_proposals if skills_enabled else None
+        )
+        learning_reviewer = (
+            resolved_services.skills.learning_reviewer if skills_enabled else None
+        )
         state = hosted_state or create_agent_state(
             session_store,
             conversation_id,
@@ -309,7 +354,7 @@ def assemble_agent(
         skill_lifecycle.register_existing(scope="project")
         skill_lifecycle.register_existing(scope="profile")
         learning_proposals = LearningProposalService(
-            memory_store=memory_store,
+            memory_store=cast(SQLiteMemoryStore, memory_store),
             lifecycle_store=skill_lifecycle_store,
             lifecycle_manager=skill_lifecycle,
             automatic_approval_enabled=automatic_learning_approval,
@@ -356,9 +401,12 @@ def assemble_agent(
             ),
             audit_callback=audit_session_read,
         )
-    skill_registry.load_metadata()
-    skill_resolution = resolve_skill_specs(skill_registry, skill_specs)
-    if allowed_skill_names is not None:
+    if skill_registry is not None:
+        skill_registry.load_metadata()
+        skill_resolution = resolve_skill_specs(skill_registry, skill_specs)
+    else:
+        skill_resolution = SkillSpecResolution(pinned_skill_names=[], warnings=[])
+    if allowed_skill_names is not None and skill_registry is not None:
         allowed = tuple(allowed_skill_names)
         skill_registry.restrict_to(
             [
@@ -416,8 +464,11 @@ def assemble_agent(
     if resolved_services is None:
         learning_reviewer = LearningReviewCoordinator(
             reviewer=RestrictedLearningReviewer(client),
-            proposal_service=learning_proposals,
-            lifecycle_store=skill_lifecycle_store,
+            proposal_service=cast(LearningProposalService, learning_proposals),
+            lifecycle_store=cast(
+                SQLiteSkillLifecycleStore,
+                skill_lifecycle_store,
+            ),
             policy=learning_review_policy,
             quota=learning_review_quota,
             automatic_approval=automatic_learning_approval,
@@ -522,8 +573,13 @@ def assemble_agent(
         require_shell_containment=require_shell_containment,
         artifact_store=(
             resolved_services.artifacts
-            if resolved_services is not None
+            if (
+                resolved_services is not None
+                and resolved_services.is_enabled("artifacts")
+            )
             else trace_logger.artifact_store
+            if resolved_services is None
+            else None
         ),
         bridge_tool_factory=bridge_tool_factory,
         mcp_bridge_required=mcp_bridge_required,
@@ -532,10 +588,11 @@ def assemble_agent(
     skill_capabilities = skill_capability_names(selected_capabilities)
     if available_tool_names:
         skill_capabilities.add("tools")
-    skill_registry.configure_environment(
-        available_tools=available_tool_names,
-        capabilities=skill_capabilities,
-    )
+    if skill_registry is not None:
+        skill_registry.configure_environment(
+            available_tools=available_tool_names,
+            capabilities=skill_capabilities,
+        )
     if active_mcp_servers:
         trace_logger.log(
             "mcp_config_loaded",
@@ -618,7 +675,13 @@ def assemble_agent(
             skill_lifecycle=skill_lifecycle,
             learning_proposals=learning_proposals,
             learning_reviewer=learning_reviewer,
-            plugin_registry=selected_plugin_registry,
+            plugin_registry=(
+                selected_plugin_registry
+                if selected_plugin_registry is not None
+                else resolved_services.plugins
+                if resolved_services is not None
+                else None
+            ),
             plugin_audit_report=plugin_audit_report,
             goal_execution=goal_execution,
             content_store=selected_content_store,
@@ -650,6 +713,11 @@ def assemble_agent(
     )
     agent.public_event_sink = (
         resolved_services.events
+        if resolved_services is not None
+        else None
+    )
+    agent.hosted_service_manifest = (
+        resolved_services.manifest
         if resolved_services is not None
         else None
     )
@@ -719,10 +787,6 @@ async def assemble_async_hosted_agent(
             raise TypeError(
                 "hosted sessions service must be SessionRuntimeServices"
             )
-        if not isinstance(resolved.skills, SkillRuntimeServices):
-            raise TypeError(
-                "hosted skills service must be SkillRuntimeServices"
-            )
         effective_profile_id = profile_id or config.profile_id
         goal_snapshot = (
             goal_execution.assert_boundary()
@@ -753,20 +817,24 @@ async def assemble_async_hosted_agent(
                 "usage dimensions do not match the claimed goal"
             )
 
-        plugin_registry = resolved.plugins
-        plugin_profile_id = getattr(
-            plugin_registry,
-            "profile_id",
-            effective_profile_id,
-        )
-        if plugin_profile_id != effective_profile_id:
-            raise ValueError(
-                "plugin registry profile does not match the runtime profile"
+        plugins_enabled = resolved.is_enabled("plugins")
+        plugin_registry = resolved.plugins if plugins_enabled else None
+        if plugin_registry is not None:
+            plugin_profile_id = getattr(
+                plugin_registry,
+                "profile_id",
+                effective_profile_id,
             )
-        plugin_audit_report = await call_async_service(
-            plugin_registry,
-            "verify_startup",
-        )
+            if plugin_profile_id != effective_profile_id:
+                raise ValueError(
+                    "plugin registry profile does not match the runtime profile"
+                )
+            plugin_audit_report = await call_async_service(
+                plugin_registry,
+                "verify_startup",
+            )
+        else:
+            plugin_audit_report = None
 
         effective_metadata = dict(conversation_metadata or {})
         metadata_profile_id = effective_metadata.get("profile_id")
@@ -784,12 +852,35 @@ async def assemble_async_hosted_agent(
 
         session_store = resolved.sessions.store
         session_search_service = resolved.sessions.search
-        skill_registry = resolved.skills.registry
-        memory_store = resolved.memory
+        skills_enabled = resolved.is_enabled("skills")
+        if skills_enabled and not isinstance(
+            resolved.skills,
+            SkillRuntimeServices,
+        ):
+            raise TypeError(
+                "hosted skills service must be SkillRuntimeServices"
+            )
+        if not skills_enabled and skill_specs:
+            raise ValueError(
+                "skill specifications require the hosted skills service"
+            )
+        skill_registry = (
+            resolved.skills.registry if skills_enabled else None
+        )
+        memory_enabled = resolved.is_enabled("memory")
+        memory_store = resolved.memory if memory_enabled else None
         selected_capabilities = capabilities or Capabilities.full()
-        memory_policy = AsyncMemoryPolicy(
-            memory_store,
-            selected_capabilities.memory,
+        if not memory_enabled and selected_capabilities.memory != MemoryMode.OFF:
+            raise ValueError(
+                "memory capability requires the hosted memory service"
+            )
+        memory_policy = (
+            AsyncMemoryPolicy(
+                memory_store,
+                selected_capabilities.memory,
+            )
+            if memory_store is not None
+            else None
         )
         state = hosted_state or await create_agent_state_async(
             session_store,
@@ -801,11 +892,17 @@ async def assemble_async_hosted_agent(
         audit_sink = BufferedAsyncAuditSink(resolved.audit)
         event_sink = BufferedAsyncEventSink(resolved.events)
 
-        await call_async_service(skill_registry, "load_metadata")
-        skill_resolution = await resolve_skill_specs_async(
-            skill_registry,
-            skill_specs,
-        )
+        if skill_registry is not None:
+            await call_async_service(skill_registry, "load_metadata")
+            skill_resolution = await resolve_skill_specs_async(
+                skill_registry,
+                skill_specs,
+            )
+        else:
+            skill_resolution = SkillSpecResolution(
+                pinned_skill_names=[],
+                warnings=[],
+            )
         for warning_payload in skill_resolution.warnings:
             warnings.warn(
                 warning_payload["message"],
@@ -892,12 +989,12 @@ async def assemble_async_hosted_agent(
         execution_lifecycle = ExecutionContextLifecycle(resolved.execution)
         tool_registry, mcp_bridge_tool_names = create_tool_registry(
             config,
-            cast(SQLiteMemoryStore, memory_store),
+            cast(SQLiteMemoryStore | None, memory_store),
             tool_specs,
             active_mcp_servers,
             llm_client=client,
             capabilities=selected_capabilities,
-            memory_policy=cast(MemoryPolicy, memory_policy),
+            memory_policy=cast(MemoryPolicy | None, memory_policy),
             session_search_service=cast(
                 SessionSearchService,
                 session_search_service,
@@ -905,7 +1002,11 @@ async def assemble_async_hosted_agent(
             deps=deps,
             shell_execution_policy=shell_execution_policy,
             require_shell_containment=require_shell_containment,
-            artifact_store=cast(TraceArtifactStore, resolved.artifacts),
+            artifact_store=(
+                cast(TraceArtifactStore, resolved.artifacts)
+                if resolved.is_enabled("artifacts")
+                else None
+            ),
             bridge_tool_factory=bridge_tool_factory,
             mcp_bridge_required=mcp_bridge_required,
             async_services=True,
@@ -916,12 +1017,13 @@ async def assemble_async_hosted_agent(
         skill_capabilities = skill_capability_names(selected_capabilities)
         if available_tool_names:
             skill_capabilities.add("tools")
-        await call_async_service(
-            skill_registry,
-            "configure_environment",
-            available_tools=available_tool_names,
-            capabilities=skill_capabilities,
-        )
+        if skill_registry is not None:
+            await call_async_service(
+                skill_registry,
+                "configure_environment",
+                available_tools=available_tool_names,
+                capabilities=skill_capabilities,
+            )
 
         owned_resources: list[object] = [client] if client_is_owned else []
 
@@ -938,7 +1040,7 @@ async def assemble_async_hosted_agent(
             memory=conversation_memory,
             memory_store=None,
             memory_policy=None,
-            skill_registry=cast(SkillRegistry, skill_registry),
+            skill_registry=cast(SkillRegistry | None, skill_registry),
             trace_logger=cast(JSONLTraceLogger, trace_logger),
             tool_registry=tool_registry,
             max_tool_calls_per_turn=config.max_tool_calls_per_turn,
@@ -976,29 +1078,54 @@ async def assemble_async_hosted_agent(
             tool_context_lifecycle=execution_lifecycle,
             profile_id=effective_profile_id,
             usage_accounting=None,
-            skill_lifecycle_store=resolved.skills.lifecycle_store,
-            skill_lifecycle=resolved.skills.lifecycle,
-            learning_proposals=resolved.skills.learning_proposals,
-            learning_reviewer=resolved.skills.learning_reviewer,
-            plugin_registry=cast(LocalPluginRegistry, plugin_registry),
+            skill_lifecycle_store=(
+                resolved.skills.lifecycle_store if skills_enabled else None
+            ),
+            skill_lifecycle=(
+                resolved.skills.lifecycle if skills_enabled else None
+            ),
+            learning_proposals=(
+                resolved.skills.learning_proposals if skills_enabled else None
+            ),
+            learning_reviewer=(
+                resolved.skills.learning_reviewer if skills_enabled else None
+            ),
+            plugin_registry=cast(
+                LocalPluginRegistry,
+                plugin_registry if plugin_registry is not None else resolved.plugins,
+            ),
             plugin_audit_report=plugin_audit_report,
             goal_execution=goal_execution,
-            content_store=cast(ContentStore, resolved.content),
-            media_processors=cast(MediaProcessorRegistry, resolved.media),
+            content_store=(
+                cast(ContentStore, resolved.content)
+                if resolved.is_enabled("content")
+                else None
+            ),
+            media_processors=(
+                cast(MediaProcessorRegistry, resolved.media)
+                if resolved.is_enabled("media")
+                else None
+            ),
             execution_scope=execution_scope,
             tool_policy_hooks=cast(ToolPolicyHooks, resolved.tool_policy),
             close_trace_logger=False,
             restore_plan_context=False,
         )
-        agent.memory_store = cast(SQLiteMemoryStore, memory_store)
-        agent.memory_policy = cast(MemoryPolicy, memory_policy)
+        agent.memory_store = cast(SQLiteMemoryStore | None, memory_store)
+        agent.memory_policy = cast(MemoryPolicy | None, memory_policy)
         agent.async_memory_store = memory_store
         agent.async_memory_policy = memory_policy
         agent.async_skill_registry = skill_registry
         agent.async_usage_accounting = resolved.usage
-        agent.async_artifact_store = resolved.artifacts
-        agent.async_content_store = resolved.content
-        agent.async_media_processors = resolved.media
+        agent.async_artifact_store = (
+            resolved.artifacts if resolved.is_enabled("artifacts") else None
+        )
+        agent.async_content_store = (
+            resolved.content if resolved.is_enabled("content") else None
+        )
+        agent.async_media_processors = (
+            resolved.media if resolved.is_enabled("media") else None
+        )
         agent.async_flushables = (
             trace_logger,
             session_recorder,
@@ -1011,6 +1138,7 @@ async def assemble_async_hosted_agent(
         agent.run_store = resolved.runs
         agent.approval_store = resolved.approvals
         agent.public_event_sink = event_sink
+        agent.hosted_service_manifest = resolved.manifest
         agent._refresh_action_runtime()
         await agent.restore_plan_turn_context_async()
         await agent._flush_async_services()

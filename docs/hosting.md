@@ -46,7 +46,7 @@ cross-process code should compare persisted scopes with
 Local `Agent` and CLI construction remains unchanged. Local mode continues to
 use its documented SQLite and filesystem defaults.
 
-## Complete service boundary
+## Capability-scoped service boundary
 
 `RuntimeServices` and `AsyncRuntimeServices` require bindings for every runtime
 resource:
@@ -80,6 +80,50 @@ scope and default to runtime ownership; pass
 and review services. An explicit bundle is complete: invalid bindings and
 factories that return no resource fail during construction, before model or tool
 work.
+
+Hosts that do not use every optional subsystem can construct the boundary with
+`RuntimeServices.for_profile(...)` or
+`AsyncRuntimeServices.for_profile(...)`. Core evidence and safety services
+remain mandatory. The profile makes memory, skills, artifacts, plugins,
+content, media, durable runs, and approvals explicit:
+
+```python
+from chulk import Capabilities, HostedCapabilityProfile, RuntimeServices
+
+profile = HostedCapabilityProfile.tool_only()
+services = RuntimeServices.for_profile(
+    profile,
+    sessions=session_binding,
+    traces=trace_binding,
+    usage=usage_binding,
+    audit=audit_binding,
+    execution=execution_binding,
+    tool_policy=tool_policy_binding,
+    events=event_binding,
+)
+runtime = HostedRuntime(
+    config=config,
+    llm=client,
+    tools=[application_tool],
+    skills=[],
+    capabilities=Capabilities.none(),
+    services=services,
+    execution_scope=scope,
+)
+```
+
+`runtime.service_manifest` lists enabled capabilities plus enabled and disabled
+services. Disabled bindings do not create a local fallback or in-memory
+substitute. Direct use raises `HostedServiceDisabledError`. Enabling media
+requires content; enabling approvals requires durable runs. Missing enabled
+bindings and contradictory disabled bindings fail during construction.
+
+The complete dataclass constructor remains supported and resolves to the full
+profile. To migrate incrementally, replace `RuntimeServices(...)` with
+`RuntimeServices.for_profile(HostedCapabilityProfile.full(), ...)`, then
+remove bindings only after disabling their capabilities. A memory-free profile
+must also use `Capabilities` with `memory="off"`, and a skills-free profile
+must pass an empty `skills` collection.
 
 Async hosts may use `AsyncServiceBinding.host(...)`,
 `AsyncServiceBinding.runtime(...)`, or `AsyncServiceBinding.scoped(...)`.

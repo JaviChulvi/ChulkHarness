@@ -187,6 +187,8 @@ Acceptance criteria:
 - [x] Add complete sync and async hosted service containers with explicit
   resource ownership and scope-bound factories; keep omitted services as the
   backward-compatible local mode.
+- [x] Add capability-scoped hosted bundles with explicit disabled services,
+  dependency validation, inspectable manifests, and sync/async parity.
 - [x] Add immutable execution scopes with canonical keys, non-escalating child
   scopes, cross-tenant isolation, persisted resume verification, tool-context
   propagation, and public event attribution.
