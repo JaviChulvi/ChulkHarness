@@ -23,6 +23,9 @@ The hosted sync and async service protocols, including `AsyncSkillService`,
 `AsyncSkillLifecycleStore`, `AsyncLearningProposalService`,
 `AsyncLearningReviewer`, and `AsyncPluginService`, their binding containers,
 and resource-ownership semantics are public-stable.
+`HostedCapability`, `HostedCapabilityProfile`, `HostedServiceManifest`, and
+`HostedServiceDisabledError` are also public-stable hosted composition
+contracts.
 
 The top-level package resolves stable exports lazily. Plain `import chulk`
 loads only package metadata; requesting a named export loads its owning public

@@ -19,9 +19,13 @@ from chulk import (
     AsyncRuntimeServices,
     AsyncServiceBinding,
     ConfigurationError,
+    Capabilities,
     ExecutionScope,
     ExecutionScopeError,
     HostedRuntime,
+    HostedCapability,
+    HostedCapabilityProfile,
+    HostedServiceDisabledError,
     ToolEffect,
     ToolIdentity,
     ToolPolicy,
@@ -258,6 +262,120 @@ def test_hosted_runtime_is_filesystem_free_and_events_are_scoped(
     trace = agent.runtime.trace_logger
     agent.close()
     assert trace.closed is False
+
+
+def test_tool_only_hosted_profile_resolves_explicit_disabled_services(
+    tmp_path: Path,
+) -> None:
+    hub = InMemoryServiceHub()
+    complete = hub.services()
+    profile = HostedCapabilityProfile.tool_only()
+    manifest = complete.for_profile(
+        profile,
+        **{
+            name: getattr(complete, name)
+            for name in (
+                "sessions",
+                "traces",
+                "usage",
+                "audit",
+                "execution",
+                "tool_policy",
+                "events",
+            )
+        },
+    )
+
+    runtime = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("tool-only ok")]),
+        tools=[],
+        skills=[],
+        capabilities=Capabilities.none(),
+        services=manifest,
+        execution_scope=_scope(),
+    )
+
+    assert runtime.run("hello") == "tool-only ok"
+    assert runtime.service_manifest.disabled_services == (
+        "memory",
+        "skills",
+        "artifacts",
+        "plugins",
+        "content",
+        "media",
+        "runs",
+        "approvals",
+    )
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(HostedServiceDisabledError) as error:
+        runtime.runtime.plugin_registry.audit()
+    assert error.value.details.invalid_field == "plugins"
+    runtime.close()
+
+
+def test_hosted_profile_validates_dependencies_and_bindings() -> None:
+    with pytest.raises(ValueError, match="media requires content"):
+        HostedCapabilityProfile(
+            enabled=frozenset({HostedCapability.MEDIA})
+        )
+
+    complete = InMemoryServiceHub().services()
+    with pytest.raises(ValueError, match="sessions"):
+        complete.for_profile(HostedCapabilityProfile.tool_only())
+    with pytest.raises(ValueError, match="disabled.*memory"):
+        complete.for_profile(
+            HostedCapabilityProfile.tool_only(),
+            memory=complete.memory,
+            **{
+                name: getattr(complete, name)
+                for name in (
+                    "sessions",
+                    "traces",
+                    "usage",
+                    "audit",
+                    "execution",
+                    "tool_policy",
+                    "events",
+                )
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_tool_only_profile_has_sync_parity(tmp_path: Path) -> None:
+    complete = InMemoryServiceHub().async_services()
+    services = AsyncRuntimeServices.for_profile(
+        HostedCapabilityProfile.tool_only(),
+        **{
+            name: getattr(complete, name)
+            for name in (
+                "sessions",
+                "traces",
+                "usage",
+                "audit",
+                "execution",
+                "tool_policy",
+                "events",
+            )
+        },
+    )
+    runtime = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final("async tool-only ok")]),
+        tools=[],
+        skills=[],
+        capabilities=Capabilities.none(),
+        services=services,
+        execution_scope=_scope(),
+    )
+
+    result = await runtime.run_result("hello")
+
+    assert result.content == "async tool-only ok"
+    assert runtime.service_manifest.to_dict() == services.manifest.to_dict()
+    assert list(tmp_path.iterdir()) == []
+    await runtime.close()
 
 
 def test_hosted_construction_fails_before_resolving_services_without_scope(

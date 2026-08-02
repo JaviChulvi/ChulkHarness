@@ -88,6 +88,12 @@ class ConfigurationError(ChulkError):
     category = "configuration"
 
 
+class HostedServiceDisabledError(ConfigurationError):
+    """A hosted capability attempted to use an explicitly disabled service."""
+
+    category = "hosted_service_disabled"
+
+
 class ProviderError(ChulkError):
     """A model provider request or response failure."""
 
@@ -128,6 +134,7 @@ __all__ = [
     "ChulkError",
     "ConfigurationError",
     "ErrorDetails",
+    "HostedServiceDisabledError",
     "MemoryError",
     "PermissionDeniedError",
     "ProviderError",
