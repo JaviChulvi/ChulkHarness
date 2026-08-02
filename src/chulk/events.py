@@ -14,6 +14,7 @@ from uuid import uuid4
 from chulk.hosting.scope import ExecutionScope
 from chulk.redaction import redact_data
 from chulk.results import Cost, Plan, RunResult, Usage, freeze_mapping, plain_data
+from chulk.resources import HostResource
 
 
 EVENT_SCHEMA_VERSION = 3
@@ -71,6 +72,8 @@ class EventName(str, Enum):
     PERMISSION_RESOLVED = "permission.resolved"
     MEMORY_LOADED = "memory.loaded"
     SKILL_LOADED = "skill.loaded"
+    RESOURCE_AVAILABLE = "resource.available"
+    APPLICATION_EVENT = "application.event"
     LEARNING_PROPOSAL_CHANGED = "learning.proposal.changed"
     PLAN_CREATED = "plan.created"
     PLAN_APPROVED = "plan.approved"
@@ -152,6 +155,30 @@ class PermissionPayload(ExtensiblePayload):
 @dataclass(frozen=True)
 class ResourcesLoadedPayload(ExtensiblePayload):
     items: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResourceAvailablePayload(ExtensiblePayload):
+    resource: HostResource
+    origin: str
+    tool_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ApplicationEventPayload(ExtensiblePayload):
+    namespace: str
+    name: str
+    schema_version: int
+    payload: Mapping[str, Any]
+    tool_name: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(
+            self,
+            "payload",
+            freeze_mapping(redact_data(dict(self.payload))),
+        )
 
 
 @dataclass(frozen=True)
@@ -298,6 +325,8 @@ EventPayload: TypeAlias = (
     | ToolCallPayload
     | PermissionPayload
     | ResourcesLoadedPayload
+    | ResourceAvailablePayload
+    | ApplicationEventPayload
     | LearningProposalChangedPayload
     | PlanPayload
     | GoalChangedPayload
@@ -468,6 +497,7 @@ def _string(value: object) -> str | None:
 
 
 __all__ = [
+    "ApplicationEventPayload",
     "AutomationChangedPayload",
     "EVENT_SCHEMA_VERSION",
     "SUPPORTED_EVENT_SCHEMA_VERSIONS",
@@ -487,6 +517,7 @@ __all__ = [
     "PermissionPayload",
     "PlanPayload",
     "ResourcesLoadedPayload",
+    "ResourceAvailablePayload",
     "ReconciliationPayload",
     "RunCompletedPayload",
     "RunFailedPayload",

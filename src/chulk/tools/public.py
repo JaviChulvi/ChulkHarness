@@ -11,6 +11,7 @@ from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin, get_type_hints, overload
 
 from chulk.capabilities import ToolOutputPolicy, ToolRetryPolicy
+from chulk.resources import ApplicationEventSchema
 from chulk.tools.artifacts import (
     async_read_trace_artifact_tool,
     read_trace_artifact_tool,
@@ -88,6 +89,7 @@ def tool(
     idempotent: bool = False,
     identity: ToolIdentity | None = None,
     policy: ToolPolicy | None = None,
+    application_event_schemas: tuple[ApplicationEventSchema, ...] = (),
 ) -> Tool: ...
 
 
@@ -106,6 +108,7 @@ def tool(
     idempotent: bool = False,
     identity: ToolIdentity | None = None,
     policy: ToolPolicy | None = None,
+    application_event_schemas: tuple[ApplicationEventSchema, ...] = (),
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -123,6 +126,7 @@ def tool(
     idempotent: bool = False,
     identity: ToolIdentity | None = None,
     policy: ToolPolicy | None = None,
+    application_event_schemas: tuple[ApplicationEventSchema, ...] = (),
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Convert a Python callable into a Chulk tool."""
 
@@ -159,6 +163,7 @@ def tool(
             idempotent=idempotent,
             identity=identity,
             policy=policy,
+            application_event_schemas=application_event_schemas,
         )
 
     if fn is None:
