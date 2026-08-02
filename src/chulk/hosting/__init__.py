@@ -45,6 +45,13 @@ from chulk.hosting.sinks import (
     InMemoryEventSink,
     SinkDeliveryError,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ResolvedToolCatalog,
+    ToolCatalogRequest,
+    ToolCatalogResolutionError,
+    ToolCatalogResolver,
+)
 
 __all__ = [
     "ArtifactStore",
@@ -65,6 +72,7 @@ __all__ = [
     "AsyncSkillService",
     "AsyncTraceSink",
     "AsyncTraceService",
+    "AsyncToolCatalogResolver",
     "AsyncUsageService",
     "AuditSink",
     "AuditService",
@@ -80,6 +88,7 @@ __all__ = [
     "MemoryService",
     "ResourceOwnership",
     "RuntimeServices",
+    "ResolvedToolCatalog",
     "ServiceBinding",
     "SessionRuntimeServices",
     "SessionService",
@@ -88,5 +97,8 @@ __all__ = [
     "SinkDeliveryError",
     "TraceSink",
     "TraceService",
+    "ToolCatalogRequest",
+    "ToolCatalogResolutionError",
+    "ToolCatalogResolver",
     "UsageService",
 ]

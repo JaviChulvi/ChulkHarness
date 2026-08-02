@@ -14,6 +14,7 @@ from chulk import (
     AgentDefinition,
     AgentDefinitionRuntime,
     AsyncHostedRuntime,
+    AsyncToolCatalogResolver,
     AsyncLearningProposalService,
     AsyncLearningReviewer,
     AsyncPluginService,
@@ -42,6 +43,7 @@ from chulk import (
     DurableHostedExecutor,
     DurableRunStatus,
     HostedRuntime,
+    ResolvedToolCatalog,
     HostResource,
     MemoryError,
     MemoryMode,
@@ -71,6 +73,9 @@ from chulk import (
     ToolExecutionError,
     ToolEffect,
     ToolIdentity,
+    ToolCatalogRequest,
+    ToolCatalogResolutionError,
+    ToolCatalogResolver,
     ToolPolicy,
     ToolRetryPolicy,
     TurnContextSection,
@@ -280,6 +285,11 @@ assert host_context.resource is host_resource
 assert application_schema.key == application_intent.schema_key
 assert HostedRuntime is not None
 assert AsyncHostedRuntime is not None
+assert AsyncToolCatalogResolver is not None
+assert ResolvedToolCatalog is not None
+assert ToolCatalogRequest is not None
+assert ToolCatalogResolutionError is not None
+assert ToolCatalogResolver is not None
 assert AsyncRuntimeServices is not None
 assert AsyncServiceBinding is not None
 assert AsyncLearningProposalService is not None

@@ -193,6 +193,12 @@ class AsyncHostedRuntime(AsyncAgent):
                 run_budget=kwargs.get("run_budget"),
                 usage_dimensions=kwargs.get("usage_dimensions"),
                 goal_execution=kwargs.get("goal_execution"),
+                async_tool_catalog_resolver=kwargs.get(
+                    "async_tool_catalog_resolver"
+                ),
+                tool_catalog_timeout_seconds=kwargs.get(
+                    "tool_catalog_timeout_seconds"
+                ),
             )
         except Exception as exc:
             mapped = map_public_error(
