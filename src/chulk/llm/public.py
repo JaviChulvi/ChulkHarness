@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import json
 import time
@@ -500,7 +500,41 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None = None,
     ) -> Iterator[LLMStreamChunk]:
-        yield from self._stream_providers(messages, max_output_tokens=max_output_tokens)
+        yield from self._stream_providers(
+            messages, max_output_tokens=max_output_tokens, final_answer=False
+        )
+
+    def stream_final_answer(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        yield from self._stream_providers(
+            messages, max_output_tokens=max_output_tokens, final_answer=True
+        )
+
+    async def astream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        async for chunk in self._astream_providers(
+            messages, max_output_tokens=max_output_tokens, final_answer=False
+        ):
+            yield chunk
+
+    async def astream_final_answer(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        async for chunk in self._astream_providers(
+            messages, max_output_tokens=max_output_tokens, final_answer=True
+        ):
+            yield chunk
 
     def _complete_action_once(
         self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None
@@ -712,6 +746,7 @@ class FallbackChain(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None,
+        final_answer: bool,
     ) -> Iterator[LLMStreamChunk]:
         self.last_attempts = []
         self.last_success_provider = None
@@ -740,8 +775,13 @@ class FallbackChain(LLMClient):
             usage: LLMUsage | None = None
             cost: LLMCost | None = None
             try:
-                for chunk in _stream_complete(
-                    provider, messages, max_output_tokens=max_output_tokens
+                stream = (
+                    provider.stream_final_answer
+                    if final_answer
+                    else provider.stream_complete
+                )
+                for chunk in call_with_supported_kwargs(
+                    stream, messages, max_output_tokens=max_output_tokens
                 ):
                     if chunk.usage is not None:
                         usage = chunk.usage
@@ -802,6 +842,89 @@ class FallbackChain(LLMClient):
         raise LLMError(
             f"All fallback providers failed: {detail}",
             code="fallback_exhausted",
+            retryable=any(attempt.retryable is True for attempt in self.last_attempts),
+        )
+
+    async def _astream_providers(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None,
+        final_answer: bool,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        self.last_attempts = []
+        self.last_success_provider = None
+        errors: list[str] = []
+        for provider in self.providers:
+            if not isinstance(provider, LLMClient):
+                raise TypeError("FallbackChain must be bound before use")
+            started_at = time.monotonic()
+            provider_name, model = _provider_identity(provider)
+            if not self._provider_is_available(provider):
+                attempt = ProviderAttempt(
+                    provider_name, model, False, 0.0,
+                    error="provider skipped by circuit breaker",
+                    error_code="circuit_open", retryable=False,
+                    fallback_eligible=True,
+                    model_profile_id=getattr(provider, "model_profile_id", None),
+                )
+                self._record_attempt(attempt, notify=False)
+                errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
+                continue
+            emitted_chunk = False
+            usage: LLMUsage | None = None
+            cost: LLMCost | None = None
+            try:
+                stream = (
+                    provider.astream_final_answer
+                    if final_answer
+                    else provider.astream_complete
+                )
+                async for chunk in stream(messages, max_output_tokens=max_output_tokens):
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                    if chunk.cost is not None:
+                        cost = chunk.cost
+                    emitted_chunk = True
+                    yield chunk
+            except Exception as exc:
+                latency = time.monotonic() - started_at
+                error = str(exc)
+                error_code, retryable, fallback_eligible = _provider_error_metadata(exc)
+                self._record_attempt(
+                    ProviderAttempt(
+                        provider_name, model, False, latency, error=error,
+                        error_code=error_code, retryable=retryable,
+                        fallback_eligible=fallback_eligible,
+                        usage=getattr(exc, "usage", None), cost=getattr(exc, "cost", None),
+                        model_profile_id=getattr(provider, "model_profile_id", None),
+                    )
+                )
+                if emitted_chunk:
+                    source_error = exc if isinstance(exc, LLMError) else None
+                    raise LLMError(
+                        f"{provider_name}/{model or 'unknown'} stream failed after yielding a chunk: {error}",
+                        provider=provider_name, model=model,
+                        code=source_error.code if source_error is not None else "unknown",
+                        retryable=source_error.retryable if source_error is not None else False,
+                        fallback_eligible=False,
+                    ) from exc
+                if not self._should_fallback(exc):
+                    raise
+                errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
+                continue
+            self._record_attempt(
+                ProviderAttempt(
+                    provider_name, model, True, time.monotonic() - started_at,
+                    usage=usage, cost=cost,
+                    model_profile_id=getattr(provider, "model_profile_id", None),
+                )
+            )
+            self.last_success_provider = provider
+            return
+        detail = "; ".join(errors) if errors else "no providers were available"
+        raise LLMError(
+            f"All fallback providers failed: {detail}", code="fallback_exhausted",
             retryable=any(attempt.retryable is True for attempt in self.last_attempts),
         )
 
