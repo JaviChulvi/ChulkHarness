@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -246,6 +246,64 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
                 "transport": "chat_completions",
                 "finish_reason": finish_reason,
             },
+            usage=response.usage,
+            cost=response.cost,
+        )
+
+    async def astream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Yield chunks through the provider's native async client."""
+        if self._async_client is None:
+            async for chunk in super().astream_complete(
+                messages, max_output_tokens=max_output_tokens
+            ):
+                yield chunk
+            return
+        request = self._request(messages, max_output_tokens=max_output_tokens, stream=True)
+        try:
+            stream = await self._async_client.chat.completions.create(**request)
+            text_parts: list[str] = []
+            usage_payload: object = None
+            finish_reason: object = None
+            async for chunk in stream:
+                chunk_usage = _value(chunk, "usage")
+                if chunk_usage is not None:
+                    usage_payload = chunk_usage
+                choice = _first_choice(chunk)
+                if choice is None:
+                    continue
+                finish_reason = _value(choice, "finish_reason") or finish_reason
+                delta = _value(_value(choice, "delta"), "content")
+                if isinstance(delta, str) and delta:
+                    text_parts.append(delta)
+                    yield LLMStreamChunk(
+                        type="text_delta", text=delta,
+                        metadata={"transport": "chat_completions"},
+                    )
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc,
+                message=f"{self.profile.display_name} streaming request failed",
+                provider=self.provider,
+                model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+        if not text_parts:
+            raise LLMError(
+                f"{self.profile.display_name} streaming response did not include message content",
+                provider=self.provider, model=self.model, code="invalid_response",
+                retryable=True, fallback_eligible=True,
+            )
+        response = self._response_from_provider(messages, "".join(text_parts), usage_payload)
+        yield LLMStreamChunk(
+            type="completed",
+            metadata={"transport": "chat_completions", "finish_reason": finish_reason},
             usage=response.usage,
             cost=response.cost,
         )

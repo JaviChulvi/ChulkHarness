@@ -78,6 +78,12 @@ from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
 from chulk.resources import HostResource, deduplicate_resources
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
+from chulk.streaming import (
+    AsyncIncrementalOutputPolicy,
+    FinalAnswerStreamingMode,
+    IncrementalOutputPolicy,
+    OutputPolicyFailureMode,
+)
 
 if TYPE_CHECKING:
     from chulk.plugins.models import PluginAuditReport
@@ -120,6 +126,10 @@ class Agent:
         audit_callback: Callable[[str, dict], None] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
         redaction_fail_closed: bool = False,
+        final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
+        output_policy: IncrementalOutputPolicy | None = None,
+        async_output_policy: AsyncIncrementalOutputPolicy | None = None,
+        output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
         pinned_skill_names: list[str] | None = None,
         mcp_servers: list[MCPServerConfig] | tuple[MCPServerConfig, ...] | None = None,
         mcp_bridge_tool_names: list[str] | None = None,
@@ -196,6 +206,10 @@ class Agent:
         self.audit_callback = audit_callback
         self.redaction_callback = redaction_callback
         self.redaction_fail_closed = redaction_fail_closed
+        self.final_answer_streaming = FinalAnswerStreamingMode(final_answer_streaming)
+        self.output_policy_failure_mode = OutputPolicyFailureMode(
+            output_policy_failure_mode
+        )
         self.pinned_skill_names = pinned_skill_names or []
         self.mcp_servers = tuple(mcp_servers or ())
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
@@ -295,6 +309,15 @@ class Agent:
             reserve_accounting_async=self._reserve_model_accounting_async,
             release_accounting_async=self._release_model_accounting_async,
             flush_async=self._flush_async_services,
+            redact_text=self._redact_text,
+            output_policy=output_policy,
+            async_output_policy=async_output_policy,
+            output_policy_failure_mode=self.output_policy_failure_mode,
+        )
+        self._turn_effects.final_answer_streaming = self.final_answer_streaming
+        self._turn_effects.stream_final_answer = self._model_transport.stream_final_answer
+        self._turn_effects.stream_final_answer_async = (
+            self._model_transport.stream_final_answer_async
         )
         self._action_runtime = ActionLoopRuntime(
             model=self._model_transport,

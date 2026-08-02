@@ -233,6 +233,17 @@ Acceptance criteria:
 - [x] Complete the restart, duplicate-trigger, uncertain-effect, approval, and
   gateway contract suite without credentials or infrastructure dependencies.
 
+### US-H5: Stream Safe Final Answers Incrementally
+
+- [x] Separate plain-text final-answer streaming from structured action and tool
+  assembly while retaining validated-final-answer replay as the default.
+- [x] Apply redaction and sync/async host output policies before any observable
+  delta, with explicit fail-open and fail-closed behavior.
+- [x] Preserve provider fallback only before output begins and record complete,
+  safely truncated, blocked, and partial-failure terminal delivery states.
+- [x] Cancel native async provider iteration and release accounting when an
+  incremental event consumer closes early.
+
 ## Next: Reliability And SDK Depth
 
 These stories are ordered after the maintenance tranche above.

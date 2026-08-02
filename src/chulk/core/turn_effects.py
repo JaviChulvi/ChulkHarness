@@ -33,10 +33,12 @@ from chulk.core.transitions import (
     StartPlanStepEffect,
     TransitionOutcome,
 )
+from chulk.core.model_transport import FinalAnswerStreamResult
 from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory
 from chulk.tools.output import preview_text
 from chulk.tools.registry import ToolResult
+from chulk.streaming import FinalAnswerDeliveryStatus, FinalAnswerStreamingMode
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,11 @@ class TurnEffects:
     max_tool_stderr_chars: int
     async_artifact_writer: (
         Callable[[str, str], Awaitable[dict | None]] | None
+    ) = None
+    final_answer_streaming: FinalAnswerStreamingMode = FinalAnswerStreamingMode.VALIDATED
+    stream_final_answer: Callable[[str, TurnState], FinalAnswerStreamResult] | None = None
+    stream_final_answer_async: (
+        Callable[[str, TurnState], Awaitable[FinalAnswerStreamResult]] | None
     ) = None
 
     def snapshot(self, turn: TurnState, *, require_plan: bool) -> ActionLoopSnapshot:
@@ -198,6 +205,19 @@ class TurnEffects:
         """Apply one transition and await any required artifact writes."""
 
         effect = transition.effect
+        if (
+            isinstance(effect, CompleteAnswerEffect)
+            and self.final_answer_streaming == FinalAnswerStreamingMode.INCREMENTAL
+        ):
+            if self.stream_final_answer_async is None:
+                raise RuntimeError("native async final-answer streaming is not configured")
+            result = await self.stream_final_answer_async(effect.content, turn)
+            streamed_response = self._complete_streamed_answer(result, turn)
+            return _validate_application(
+                outcome=transition.outcome,
+                response=streamed_response,
+                pending=None,
+            )
         if not isinstance(effect, FinishToolEffect):
             return self.apply(
                 turn,
@@ -215,7 +235,7 @@ class TurnEffects:
             pending=pending,
             result=tool_result,
         )
-        response = None
+        response: str | None = None
         if blocked_message is not None:
             response = (
                 self.fail_turn(blocked_message, turn)
@@ -229,6 +249,13 @@ class TurnEffects:
         )
 
     def complete_answer(self, content: str, turn: TurnState) -> str:
+        if self.final_answer_streaming == FinalAnswerStreamingMode.INCREMENTAL:
+            if self.stream_final_answer is None:
+                raise RuntimeError("incremental final-answer streaming is not configured")
+            return self._complete_streamed_answer(
+                self.stream_final_answer(content, turn),
+                turn,
+            )
         content, redaction = self.redact_text(
             TraceEvent.FINAL_ANSWER,
             content,
@@ -250,6 +277,62 @@ class TurnEffects:
                 "turn": turn.to_dict(),
             },
         )
+        self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
+        return content
+
+    def _complete_streamed_answer(
+        self, result: FinalAnswerStreamResult, turn: TurnState
+    ) -> str:
+        content = result.content
+        delivery = {
+            "status": result.status.value,
+            "public_delta_count": result.public_delta_count,
+            "provider_completed": result.provider_completed,
+            "error": result.error,
+        }
+        turn.extension_metadata["final_answer_delivery"] = delivery
+        if content:
+            self.memory.add_assistant_message(content)
+        self.state.final_answer = content
+        self.state.messages = self.memory.recent()
+        if result.status in {
+            FinalAnswerDeliveryStatus.COMPLETE,
+            FinalAnswerDeliveryStatus.TRUNCATED,
+        }:
+            turn.complete(content)
+        elif result.status == FinalAnswerDeliveryStatus.BLOCKED:
+            message = result.error or "Final answer was blocked by the output policy."
+            turn.block(message)
+            turn.final_answer = content
+            self.state.errors.append(message)
+        else:
+            message = result.error or "Final answer stream failed after partial delivery."
+            turn.fail(message)
+            turn.final_answer = content
+            self.state.errors.append(message)
+        self.plan.clear(turn)
+        self.trace(
+            TraceEvent.FINAL_ANSWER,
+            {
+                "turn_id": turn.turn_id,
+                "content": content,
+                "delivery": delivery,
+                "turn": turn.to_dict(),
+            },
+        )
+        if result.status in {
+            FinalAnswerDeliveryStatus.BLOCKED,
+            FinalAnswerDeliveryStatus.FAILED,
+        }:
+            self.trace(
+                TraceEvent.TURN_FAILED,
+                {
+                    "turn_id": turn.turn_id,
+                    "message": result.error,
+                    "status": turn.status,
+                    "turn": turn.to_dict(),
+                },
+            )
         self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return content
 

@@ -12,6 +12,7 @@ from chulk.results import (
     ContextReport,
     ContextSection,
     Cost,
+    FinalAnswerDelivery,
     GovernedSkill,
     GovernedSkillRevision,
     LearningProposal,
@@ -31,6 +32,7 @@ from chulk.results import (
     ToolCall,
     Usage,
 )
+from chulk.streaming import FinalAnswerDeliveryStatus
 
 
 def usage_snapshot(value: object) -> Usage | None:
@@ -285,6 +287,23 @@ def run_result_from_runtime(runtime: Any, content: str | None = None) -> RunResu
         errors=tuple(turn.errors) if turn is not None else tuple(state.errors),
         plan=plan_snapshot(turn.active_plan if turn is not None else state.active_plan),
         extension_metadata=turn.extension_metadata if turn is not None else {},
+        final_answer_delivery=_final_answer_delivery_snapshot(turn),
+    )
+
+
+def _final_answer_delivery_snapshot(turn: object | None) -> FinalAnswerDelivery | None:
+    if turn is None:
+        return None
+    extension_metadata = getattr(turn, "extension_metadata", {})
+    payload = _mapping(extension_metadata).get("final_answer_delivery")
+    value = _mapping(payload)
+    if not value:
+        return None
+    return FinalAnswerDelivery(
+        status=FinalAnswerDeliveryStatus(str(value.get("status") or "complete")),
+        public_delta_count=_int(value.get("public_delta_count")),
+        provider_completed=bool(value.get("provider_completed")),
+        error=_optional_str(value.get("error")),
     )
 
 

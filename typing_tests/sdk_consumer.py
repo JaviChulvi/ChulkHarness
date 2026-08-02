@@ -46,6 +46,10 @@ from chulk import (
     MemoryError,
     MemoryMode,
     MemoryProposal,
+    FinalAnswerChunk,
+    FinalAnswerDelivery,
+    FinalAnswerPolicyDecision,
+    FinalAnswerStreamingMode,
     Observation,
     PermissionDeniedError,
     ProviderError,
@@ -131,11 +135,26 @@ config: AgentConfig = AgentConfig.local(
     permission_profile="read-only",
 )
 
+
+class OutputPolicy:
+    def process(self, chunk: FinalAnswerChunk) -> FinalAnswerPolicyDecision:
+        return FinalAnswerPolicyDecision(text=chunk.text)
+
+    def complete(
+        self, *, turn_id: str, next_sequence: int
+    ) -> FinalAnswerPolicyDecision:
+        return FinalAnswerPolicyDecision()
+
+    def reset(self, *, turn_id: str) -> None:
+        return None
+
 agent = Agent(
     config=config,
     capabilities=Capabilities(files="read", memory=MemoryMode.READ_ONLY),
     tools=[Tools.calculator],
     skills=[Skills.files],
+    final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+    output_policy=OutputPolicy(),
 )
 
 result: str = agent.run("Calculate 2 + 2")
@@ -167,7 +186,8 @@ def consume_result(result: RunResult) -> int:
     observations: tuple[Observation, ...] = result.observations
     resources: tuple[HostResource, ...] = result.resources
     plan: Plan | None = result.plan
-    _ = (cost, context, calls, observations, resources, plan)
+    delivery: FinalAnswerDelivery | None = result.final_answer_delivery
+    _ = (cost, context, calls, observations, resources, plan, delivery)
     return usage.total_tokens if usage is not None else 0
 
 

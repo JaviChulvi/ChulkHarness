@@ -70,6 +70,12 @@ from chulk.sessions import (
     SessionWindow,
 )
 from chulk.tools import ShellExecutionPolicy, ToolExecutionContext
+from chulk.streaming import (
+    AsyncIncrementalOutputPolicy,
+    FinalAnswerStreamingMode,
+    IncrementalOutputPolicy,
+    OutputPolicyFailureMode,
+)
 from chulk.tracing.artifacts import (
     ArtifactReadMode,
     DEFAULT_ARTIFACT_READ_BYTES,
@@ -106,6 +112,10 @@ class Agent:
         mcp: Iterable[MCPServerConfig] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
         redaction_fail_closed: bool = False,
+        final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
+        output_policy: IncrementalOutputPolicy | None = None,
+        async_output_policy: AsyncIncrementalOutputPolicy | None = None,
+        output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
         capabilities: Capabilities | None = None,
         memory_mode: MemoryMode | str | None = None,
         memory_namespace: str | None = None,
@@ -142,6 +152,10 @@ class Agent:
                 mcp=mcp,
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,
+                final_answer_streaming=final_answer_streaming,
+                output_policy=output_policy,
+                async_output_policy=async_output_policy,
+                output_policy_failure_mode=output_policy_failure_mode,
                 capabilities=selected_capabilities,
                 memory_namespace=memory_namespace,
                 deps=deps,

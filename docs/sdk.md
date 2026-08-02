@@ -62,6 +62,45 @@ containers:
   and generated outputs without requiring observation or trace parsing.
 - `ContextReport`, `ContextBudget`, and `ContextSection` describe prompt input.
 - `Plan`, `PlanStep`, and `PlanStepEvidence` describe approval and execution.
+- `FinalAnswerDelivery` distinguishes a complete answer from safe truncation,
+  policy blocking, or failure after partial delivery.
+
+## Incremental final answers
+
+Validated-final-answer replay remains the default. Hosted applications can opt
+into true incremental delivery explicitly:
+
+```python
+from chulk import Agent, FinalAnswerStreamingMode
+
+agent = Agent(
+    config=config,
+    llm=client,
+    final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+)
+```
+
+Incremental mode first completes the normal structured action request. Once a
+validated final-answer intent is legal, Chulk starts a separate plain-text
+provider request through `stream_final_answer` or `astream_final_answer`. Action
+JSON, tool arguments, repair prompts, and invalid partial actions are never
+projected as `model.delta`.
+
+Pass `output_policy` for sync hosts or `async_output_policy` for async hosts.
+Each policy receives `FinalAnswerChunk` and returns
+`FinalAnswerPolicyDecision`, so it can transform, buffer, block, or safely stop
+delivery. The decision runs after mandatory redaction and before callbacks,
+event sinks, traces, session persistence, or result reconstruction. Policy
+exceptions fail closed by default; `OutputPolicyFailureMode.OPEN` must be an
+explicit host choice. Buffering policies implement `reset()` so Chulk can
+discard uncommitted text safely before a pre-delta provider fallback.
+
+Concatenating public deltas produces `RunResult.content`. The typed
+`final_answer_delivery` field records `complete`, `safely_truncated`, `blocked`,
+or `failed_after_partial`, the public delta count, provider completion, and a
+bounded error. A fallback provider may take over only before streaming emits a
+chunk; after output begins, failure terminalizes the partial answer and never
+mixes providers.
 
 Sequences are tuples and mappings are recursively read-only. Each result is a
 detached snapshot: later runtime state changes cannot alter a result already
@@ -100,6 +139,9 @@ thread-backed path. Cancellation propagates as `asyncio.CancelledError`; hosts
 should cancel and await tasks, then close the agent. A synchronous Python worker
 thread cannot be force-killed, so custom clients and tools need cooperative
 cancellation and I/O timeouts.
+Incremental final answers use the provider's async iterator directly. OpenAI
+Responses and OpenAI-compatible Chat Completions clients implement native async
+streaming; providers without it retain a one-shot async compatibility stream.
 
 Native async hosted factories are resolved with
 `await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are

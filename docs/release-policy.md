@@ -16,6 +16,8 @@ advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
 `chulk.resources`, `chulk.tools`, `chulk.testing`, and the optional
 `chulk.postgres` module.
+The final-answer streaming modes, chunk/policy decisions, sync/async output
+policy protocols, failure mode, and terminal delivery record are public-stable.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
 The `assert_*_contract` functions in `chulk.testing` are public-stable
 compatibility gates for third-party hosted services and gateway stores.

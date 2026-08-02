@@ -545,6 +545,12 @@ class AsyncAgent:
                 yield item
         finally:
             channel.cancel()
+            if (
+                not worker.done()
+                and getattr(self.runtime, "final_answer_streaming", None)
+                == "incremental"
+            ):
+                worker.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
 

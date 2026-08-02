@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import inspect
 import json
@@ -256,6 +256,51 @@ class LLMClient:
         if text:
             yield LLMStreamChunk(type="text_delta", text=text)
         yield LLMStreamChunk(type="completed", usage=response.usage, cost=response.cost)
+
+    async def astream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Yield text through a native async transport when one is available.
+
+        The compatibility implementation deliberately uses ``acomplete_response``
+        instead of adapting a synchronous iterator in a worker thread.
+        """
+        response = await self.acomplete_response(
+            messages, max_output_tokens=max_output_tokens
+        )
+        if response.content:
+            yield LLMStreamChunk(type="text_delta", text=response.content)
+        yield LLMStreamChunk(type="completed", usage=response.usage, cost=response.cost)
+
+    def stream_final_answer(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], None] | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        """Stream plain final-answer text, never structured action transport data."""
+        yield from self.stream_complete(
+            messages, max_output_tokens=max_output_tokens
+        )
+
+    async def astream_final_answer(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Native async final-answer stream distinct from action assembly."""
+        async for chunk in self.astream_complete(
+            messages, max_output_tokens=max_output_tokens
+        ):
+            yield chunk
 
     def complete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         """Return a structured JSON response."""

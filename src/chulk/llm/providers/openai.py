@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
 from chulk.core.actions import STRICT_AGENT_ACTION_JSON_SCHEMA
@@ -264,6 +264,67 @@ class OpenAIResponsesClient(LLMClient):
                 metadata={"event_type": "response.completed"},
                 usage=usage,
                 cost=cost,
+            )
+        else:
+            yield LLMStreamChunk(type="completed", metadata={"event_type": "stream.closed"})
+
+    async def astream_complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Yield Responses API events from the native async transport."""
+        if self._async_client is None:
+            async for chunk in super().astream_complete(
+                messages, max_output_tokens=max_output_tokens
+            ):
+                yield chunk
+            return
+        request = self._text_request(messages, max_output_tokens=max_output_tokens)
+        request["stream"] = True
+        try:
+            stream = await self._async_client.responses.create(**request)
+            saw_text = False
+            completed = False
+            usage = None
+            async for event in stream:
+                event_type = _event_value(event, "type")
+                if event_type == "response.output_text.delta":
+                    delta = _event_value(event, "delta")
+                    if isinstance(delta, str) and delta:
+                        saw_text = True
+                        yield LLMStreamChunk(
+                            type="text_delta", text=delta,
+                            metadata={"event_type": event_type},
+                        )
+                    continue
+                if event_type == "response.completed":
+                    completed = True
+                    response = _event_value(event, "response")
+                    usage = normalize_openai_usage(_event_value(response, "usage"))
+                    continue
+                if event_type == "error":
+                    raise LLMError(
+                        f"OpenAI streaming request failed: {_event_error_message(event)}",
+                        provider=self.provider, model=self.model, code="server_error",
+                        retryable=True, fallback_eligible=True,
+                    )
+        except Exception as exc:
+            error = provider_error_from_exception(
+                exc, message="OpenAI streaming request failed",
+                provider=self.provider, model=self.model,
+            )
+            if error is exc:
+                raise
+            raise error from exc
+        if not saw_text:
+            raise self._invalid_response_error("OpenAI streaming response did not include output text")
+        if completed:
+            cost = estimate_cost("openai", self.model, usage) if usage is not None else None
+            yield LLMStreamChunk(
+                type="completed", metadata={"event_type": "response.completed"},
+                usage=usage, cost=cost,
             )
         else:
             yield LLMStreamChunk(type="completed", metadata={"event_type": "stream.closed"})
