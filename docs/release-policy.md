@@ -14,7 +14,8 @@ The supported top-level names are governed by `chulk.__all__`. They are
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
-`chulk.tools`, `chulk.testing`, and the optional `chulk.postgres` module.
+`chulk.resources`, `chulk.tools`, `chulk.testing`, and the optional
+`chulk.postgres` module.
 The final-answer streaming modes, chunk/policy decisions, sync/async output
 policy protocols, failure mode, and terminal delivery record are public-stable.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
@@ -24,6 +25,9 @@ The hosted sync and async service protocols, including `AsyncSkillService`,
 `AsyncSkillLifecycleStore`, `AsyncLearningProposalService`,
 `AsyncLearningReviewer`, and `AsyncPluginService`, their binding containers,
 and resource-ownership semantics are public-stable.
+`HostedCapability`, `HostedCapabilityProfile`, `HostedServiceManifest`, and
+`HostedServiceDisabledError` are also public-stable hosted composition
+contracts.
 
 The top-level package resolves stable exports lazily. Plain `import chulk`
 loads only package metadata; requesting a named export loads its owning public

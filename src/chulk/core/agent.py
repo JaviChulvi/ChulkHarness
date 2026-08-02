@@ -76,6 +76,7 @@ from chulk.tools.registry import ToolContextLifecycle, ToolExecutionContext
 from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
+from chulk.resources import HostResource, deduplicate_resources
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
 from chulk.streaming import (
     AsyncIncrementalOutputPolicy,
@@ -681,6 +682,7 @@ class Agent:
                 tool.name for tool in self.tool_registry.list_tools()
             ],
             context_sections=turn_context_sections,
+            resources=list(_context_resources(turn_context_sections)),
             prompt_profile=prompt_profile,
             locale=locale,
             input_parts=deepcopy(input_parts or []),
@@ -750,6 +752,15 @@ class Agent:
                     "locale": locale,
                 },
             )
+        for resource in turn.resources:
+            self._trace(
+                TraceEvent.HOST_RESOURCE_AVAILABLE,
+                {
+                    "turn_id": turn.turn_id,
+                    "origin": "context",
+                    "resource": resource.to_dict(),
+                },
+            )
 
         await self._extract_long_term_memories_async(clean_message)
         await self._select_long_term_memories_async(clean_message)
@@ -795,6 +806,7 @@ class Agent:
                 tool.name for tool in self.tool_registry.list_tools()
             ],
             context_sections=turn_context_sections,
+            resources=list(_context_resources(turn_context_sections)),
             prompt_profile=prompt_profile,
             locale=locale,
             input_parts=deepcopy(input_parts or []),
@@ -859,6 +871,15 @@ class Agent:
                     ],
                     "prompt_profile": prompt_profile,
                     "locale": locale,
+                },
+            )
+        for resource in turn.resources:
+            self._trace(
+                TraceEvent.HOST_RESOURCE_AVAILABLE,
+                {
+                    "turn_id": turn.turn_id,
+                    "origin": "context",
+                    "resource": resource.to_dict(),
                 },
             )
 
@@ -2831,9 +2852,25 @@ def _coerce_turn_context_sections(
                     else None,
                     content=content,
                     metadata=metadata,
+                    persist_content=bool(value.get("persist_content", True)),
+                    resource=(
+                        HostResource.from_dict(value["resource"])
+                        if isinstance(value.get("resource"), dict)
+                        else None
+                    ),
                 )
             )
     return sections
+
+
+def _context_resources(
+    sections: list[TurnContextSection],
+) -> tuple[HostResource, ...]:
+    return deduplicate_resources(
+        section.resource
+        for section in sections
+        if section.resource is not None
+    )
 
 
 def _coerce_tool_execution_context(

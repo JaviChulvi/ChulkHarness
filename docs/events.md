@@ -35,6 +35,8 @@ lowercase names are the compatibility-stable catalog:
 | `permission.resolved` | `PermissionPayload` | The permission decision was resolved. |
 | `memory.loaded` | `ResourcesLoadedPayload` | Durable memories were selected. |
 | `skill.loaded` | `ResourcesLoadedPayload` | Skill playbooks were selected. |
+| `resource.available` | `ResourceAvailablePayload` | A redacted host resource reference is available before dependent output. |
+| `application.event` | `ApplicationEventPayload` | A tool-produced, schema-validated application event is available. |
 | `plan.created` | `PlanPayload` | Plan mode created an approval-gated plan. |
 | `plan.approved` | `PlanPayload` | A pending plan was approved. |
 | `run.completed` | `RunCompletedPayload` | The terminal structured result is available. |
@@ -54,6 +56,13 @@ Hosted runtime events include the redacted execution scope and its canonical
 key in the envelope. Tool completion and permission payload extensions
 include tool/schema identity, policy versions, and digests, but never resolved
 credential values.
+
+Context resources are published before the first dependent model request. Tool
+resources and application events follow `tool.call.completed` and precede the
+terminal event. Their event IDs and idempotency keys are deterministic, while
+normal causation chaining preserves their exact position in the run stream.
+Only the bounded, redacted `HostResource` projection is public; private context
+content remains available to the model without appearing in the event.
 
 ## Iteration and callbacks
 

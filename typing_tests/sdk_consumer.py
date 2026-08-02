@@ -22,6 +22,8 @@ from chulk import (
     AsyncSkillLifecycleService,
     AsyncSkillLifecycleStore,
     AsyncSkillService,
+    ApplicationEventIntent,
+    ApplicationEventSchema,
     Capabilities,
     ChildRunRecord,
     ChulkError,
@@ -40,6 +42,7 @@ from chulk import (
     DurableHostedExecutor,
     DurableRunStatus,
     HostedRuntime,
+    HostResource,
     MemoryError,
     MemoryMode,
     MemoryProposal,
@@ -70,6 +73,7 @@ from chulk import (
     ToolIdentity,
     ToolPolicy,
     ToolRetryPolicy,
+    TurnContextSection,
     Tools,
     TraceError,
     RunCompletedPayload,
@@ -180,9 +184,10 @@ def consume_result(result: RunResult) -> int:
     context: ContextReport | None = result.context_report
     calls: tuple[ToolCall, ...] = result.tool_calls
     observations: tuple[Observation, ...] = result.observations
+    resources: tuple[HostResource, ...] = result.resources
     plan: Plan | None = result.plan
     delivery: FinalAnswerDelivery | None = result.final_answer_delivery
-    _ = (cost, context, calls, observations, plan, delivery)
+    _ = (cost, context, calls, observations, resources, plan, delivery)
     return usage.total_tokens if usage is not None else 0
 
 
@@ -246,6 +251,33 @@ hosted_identity: ToolIdentity = ToolIdentity.from_schemas(
     "catalog_lookup",
     input_schema={"type": "object", "properties": {}},
 )
+host_resource = HostResource(
+    id="resource-1",
+    kind="document",
+    title="Evidence",
+    source="host",
+)
+host_context = TurnContextSection(
+    id="context-1",
+    content="private evidence",
+    persist_content=False,
+    resource=host_resource,
+)
+application_schema = ApplicationEventSchema(
+    namespace="acme.events",
+    name="resource.ready",
+    version=1,
+    payload_schema={"type": "object"},
+)
+application_intent = ApplicationEventIntent(
+    namespace="acme.events",
+    name="resource.ready",
+    schema_version=1,
+    payload={"resource_id": host_resource.id},
+    idempotency_key="resource-1:ready",
+)
+assert host_context.resource is host_resource
+assert application_schema.key == application_intent.schema_key
 assert HostedRuntime is not None
 assert AsyncHostedRuntime is not None
 assert AsyncRuntimeServices is not None

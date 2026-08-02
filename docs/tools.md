@@ -196,6 +196,14 @@ from `ToolContext.credentials`. Secret-classified output is withheld before it
 can reach an observation, event, trace, or result. See the
 [hosted runtime guide](hosting.md) for the complete contract and hooks.
 
+A tool may return `ToolResult.resources` and `ToolResult.application_events`.
+Application events are accepted only when the tool registers a matching
+`ApplicationEventSchema` through `application_event_schemas`. Chulk validates
+the namespace, schema version, JSON payload, schema, size, redaction, and
+idempotency key before adding the event to the public ordered stream. Invalid
+publications turn the tool result into `invalid_output`; they are never sent to
+the event sink.
+
 For transports that return several independent calls, the async batch path
 permits concurrency only when every tool declares both `ToolEffect.READ` and
 `ToolConcurrency.PARALLEL_SAFE`. The presence of one write, unknown effect, or

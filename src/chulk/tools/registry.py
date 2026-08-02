@@ -12,6 +12,12 @@ from typing import Any, Generic, Protocol, TypeVar, cast
 
 from chulk.capabilities import ToolRetryPolicy
 from chulk.redaction import redact_data, redact_text
+from chulk.resources import (
+    ApplicationEventIntent,
+    ApplicationEventSchema,
+    HostResource,
+    deduplicate_resources,
+)
 from chulk.tools.permissions import ToolPermissionLevel, normalize_permission_level
 from chulk.tools.policy import (
     ToolApprovalMode,
@@ -118,6 +124,12 @@ class ToolResult:
     failure_kind: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     value: Any = None
+    resources: tuple[HostResource, ...] = ()
+    application_events: tuple[ApplicationEventIntent, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "resources", tuple(self.resources))
+        object.__setattr__(self, "application_events", tuple(self.application_events))
 
     def to_observation(self) -> str:
         """Return the safe observation text shown back to the model."""
@@ -159,6 +171,7 @@ class Tool:
     idempotent: bool = False
     identity: ToolIdentity | None = None
     policy: ToolPolicy | None = None
+    application_event_schemas: tuple[ApplicationEventSchema, ...] = ()
 
     def normalized_permission_level(self) -> ToolPermissionLevel:
         return normalize_permission_level(self.permission_level)
@@ -225,6 +238,13 @@ class ToolRegistry:
             validate_tool_output_schema(tool.name, tool.output_schema)
         if tool.timeout_seconds is not None and tool.timeout_seconds <= 0:
             raise ValueError(f"Tool {tool.name} timeout_seconds must be greater than zero")
+        event_schema_keys = [
+            schema.key for schema in tool.application_event_schemas
+        ]
+        if len(event_schema_keys) != len(set(event_schema_keys)):
+            raise ValueError(
+                f"Tool {tool.name} declares duplicate application event schemas"
+            )
         identity = tool.resolved_identity()
         policy = tool.resolved_policy()
         implementation_digest = callable_digest(tool.callable)
@@ -487,6 +507,7 @@ class ToolRegistry:
             )
 
     def _validate_output(self, tool: Tool, result: ToolResult) -> ToolResult:
+        result = self._validate_publications(tool, result)
         if not result.success or tool.output_schema is None:
             return result
         try:
@@ -512,6 +533,59 @@ class ToolRegistry:
             },
         )
 
+    def _validate_publications(self, tool: Tool, result: ToolResult) -> ToolResult:
+        if not result.success:
+            if result.resources or result.application_events:
+                return _invalid_publication_result(
+                    tool,
+                    "failed tool results cannot publish resources or application events",
+                )
+            return result
+        try:
+            resources = deduplicate_resources(result.resources)
+            schemas = {
+                schema.key: schema for schema in tool.application_event_schemas
+            }
+            seen_event_keys: set[str] = set()
+            for intent in result.application_events:
+                schema = schemas.get(intent.schema_key)
+                if schema is None:
+                    raise ValueError(
+                        "unregistered application event schema: "
+                        f"{intent.namespace}.{intent.name}@{intent.schema_version}"
+                    )
+                if intent.idempotency_key in seen_event_keys:
+                    raise ValueError(
+                        "duplicate application event idempotency_key: "
+                        f"{intent.idempotency_key}"
+                    )
+                seen_event_keys.add(intent.idempotency_key)
+                payload_bytes = len(
+                    json.dumps(
+                        dict(intent.payload),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                )
+                if payload_bytes > schema.max_payload_bytes:
+                    raise ValueError(
+                        "application event payload exceeds registered limit"
+                    )
+                validate_tool_output(
+                    f"{tool.name} application event {intent.namespace}.{intent.name}",
+                    dict(intent.payload),
+                    dict(schema.payload_schema),
+                )
+        except (ToolValidationError, TypeError, ValueError) as exc:
+            return _invalid_publication_result(tool, str(exc))
+        return replace(
+            result,
+            resources=resources,
+            application_events=tuple(result.application_events),
+        )
+
     def _log_call(self, name: str, arguments: dict[str, Any], result: ToolResult) -> None:
         self.call_log.append(
             {
@@ -532,6 +606,19 @@ def _format_invalid_arguments_observation(tool: Tool, issues: list[ToolValidatio
     lines.extend(f"- {issue.to_prompt_line()}" for issue in issues)
     lines.append("Retry with arguments_json that matches this tool schema, or answer directly if no tool is needed.")
     return "\n".join(lines)
+
+
+def _invalid_publication_result(tool: Tool, message: str) -> ToolResult:
+    return ToolResult(
+        tool_name=tool.name,
+        success=False,
+        observation=(
+            f"Tool {tool.name} returned invalid host resources or application events."
+        ),
+        error=ToolFailureKind.INVALID_OUTPUT,
+        failure_kind=ToolFailureKind.INVALID_OUTPUT,
+        metadata={"publication_validation_error": redact_text(message)},
+    )
 
 
 def _format_unknown_tool_observation(name: str, available_tools: list[str]) -> str:

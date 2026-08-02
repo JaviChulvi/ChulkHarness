@@ -25,6 +25,7 @@ from chulk.hosting import (
     AsyncRuntimeServices,
     AsyncServiceBinding,
     ExecutionScope,
+    HostedServiceManifest,
     RuntimeServices,
 )
 from chulk.hosting.async_utils import call_async_service
@@ -77,6 +78,11 @@ class HostedRuntime(Agent):
             execution_scope=execution_scope,
             **kwargs,
         )
+
+    @property
+    def service_manifest(self) -> HostedServiceManifest:
+        """Return the resolved hosted capability and service manifest."""
+        return cast(HostedServiceManifest, self.runtime.hosted_service_manifest)
 
 
 class AsyncHostedRuntime(AsyncAgent):
@@ -238,6 +244,16 @@ class AsyncHostedRuntime(AsyncAgent):
         if resolved is None:
             raise RuntimeError("Agent is closed")
         return resolved
+
+    @property
+    def service_manifest(self) -> HostedServiceManifest:
+        """Return the resolved hosted capability and service manifest."""
+        if self._uses_sync_compatibility():
+            return cast(
+                HostedServiceManifest,
+                self.runtime.hosted_service_manifest,
+            )
+        return self._resolved_async_services().manifest
 
     def _uses_sync_compatibility(self) -> bool:
         return self._async_owned_services is None and not self.closed

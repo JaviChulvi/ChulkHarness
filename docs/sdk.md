@@ -58,6 +58,8 @@ containers:
 
 - `Usage` and `Cost` preserve provider-neutral accounting.
 - `ToolCall` and `Observation` describe tool activity and returned evidence.
+- `HostResource` values in `RunResult.resources` identify retrieved evidence
+  and generated outputs without requiring observation or trace parsing.
 - `ContextReport`, `ContextBudget`, and `ContextSection` describe prompt input.
 - `Plan`, `PlanStep`, and `PlanStepEvidence` describe approval and execution.
 - `FinalAnswerDelivery` distinguishes a complete answer from safe truncation,

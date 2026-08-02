@@ -187,6 +187,8 @@ Acceptance criteria:
 - [x] Add complete sync and async hosted service containers with explicit
   resource ownership and scope-bound factories; keep omitted services as the
   backward-compatible local mode.
+- [x] Add capability-scoped hosted bundles with explicit disabled services,
+  dependency validation, inspectable manifests, and sync/async parity.
 - [x] Add immutable execution scopes with canonical keys, non-escalating child
   scopes, cross-tenant isolation, persisted resume verification, tool-context
   propagation, and public event attribution.
@@ -195,6 +197,8 @@ Acceptance criteria:
   hooks, secret-output withholding, and compatibility defaults.
 - [x] Add credential-free sync/async in-memory embedding examples and contract
   tests that create no local runtime files.
+- [x] Add typed host resources and schema-validated application events to the
+  ordered public run stream and terminal results.
 - [x] Await native async persistence, trace, audit, and usage services directly
   throughout the async orchestration path.
 - [x] Execute independent `parallel_safe` read-only tool batches concurrently
