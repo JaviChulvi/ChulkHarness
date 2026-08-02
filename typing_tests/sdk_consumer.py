@@ -141,6 +141,9 @@ class OutputPolicy:
     ) -> FinalAnswerPolicyDecision:
         return FinalAnswerPolicyDecision()
 
+    def reset(self, *, turn_id: str) -> None:
+        return None
+
 agent = Agent(
     config=config,
     capabilities=Capabilities(files="read", memory=MemoryMode.READ_ONLY),

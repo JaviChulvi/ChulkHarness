@@ -144,9 +144,14 @@ class ModelTransport:
             },
         )
         try:
-            for chunk in self.llm_client.stream_final_answer(
-                messages, max_output_tokens=self.max_output_tokens
-            ):
+            stream = call_with_supported_kwargs(
+                self.llm_client.stream_final_answer,
+                messages,
+                max_output_tokens=self.max_output_tokens,
+                public_output_committed=lambda: public_sequence > 0,
+                before_fallback=lambda: self._reset_output_policy(policy, turn),
+            )
+            for chunk in stream:
                 if chunk.usage is not None:
                     usage = chunk.usage
                 if chunk.cost is not None:
@@ -265,9 +270,14 @@ class ModelTransport:
         )
         await self._flush_async()
         try:
-            async for chunk in self.llm_client.astream_final_answer(
-                messages, max_output_tokens=self.max_output_tokens
-            ):
+            stream = call_with_supported_kwargs(
+                self.llm_client.astream_final_answer,
+                messages,
+                max_output_tokens=self.max_output_tokens,
+                public_output_committed=lambda: public_sequence > 0,
+                before_fallback=lambda: self._reset_output_policy_async(policy, turn),
+            )
+            async for chunk in stream:
                 if chunk.usage is not None:
                     usage = chunk.usage
                 if chunk.cost is not None:
@@ -478,6 +488,17 @@ class ModelTransport:
                 return FinalAnswerPolicyDecision(reason=str(exc))
             return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
 
+    @staticmethod
+    def _reset_output_policy(
+        policy: IncrementalOutputPolicy, turn: TurnState
+    ) -> None:
+        reset = getattr(policy, "reset", None)
+        if reset is None:
+            raise RuntimeError(
+                "a buffering output policy must implement reset() for safe fallback"
+            )
+        reset(turn_id=turn.turn_id)
+
     async def _complete_output_policy_async(
         self, policy: AsyncIncrementalOutputPolicy, sequence: int, turn: TurnState
     ) -> FinalAnswerPolicyDecision:
@@ -487,6 +508,17 @@ class ModelTransport:
             if self.output_policy_failure_mode == OutputPolicyFailureMode.OPEN:
                 return FinalAnswerPolicyDecision(reason=str(exc))
             return FinalAnswerPolicyDecision(blocked=True, reason=str(exc))
+
+    @staticmethod
+    async def _reset_output_policy_async(
+        policy: AsyncIncrementalOutputPolicy, turn: TurnState
+    ) -> None:
+        reset = getattr(policy, "reset", None)
+        if reset is None:
+            raise RuntimeError(
+                "a buffering async output policy must implement reset() for safe fallback"
+            )
+        await reset(turn_id=turn.turn_id)
 
     def _publish_policy_text(
         self,

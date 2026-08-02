@@ -509,9 +509,15 @@ class FallbackChain(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], None] | None = None,
     ) -> Iterator[LLMStreamChunk]:
         yield from self._stream_providers(
-            messages, max_output_tokens=max_output_tokens, final_answer=True
+            messages,
+            max_output_tokens=max_output_tokens,
+            final_answer=True,
+            public_output_committed=public_output_committed,
+            before_fallback=before_fallback,
         )
 
     async def astream_complete(
@@ -530,9 +536,15 @@ class FallbackChain(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         async for chunk in self._astream_providers(
-            messages, max_output_tokens=max_output_tokens, final_answer=True
+            messages,
+            max_output_tokens=max_output_tokens,
+            final_answer=True,
+            public_output_committed=public_output_committed,
+            before_fallback=before_fallback,
         ):
             yield chunk
 
@@ -747,6 +759,8 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None,
         final_answer: bool,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], None] | None = None,
     ) -> Iterator[LLMStreamChunk]:
         self.last_attempts = []
         self.last_success_provider = None
@@ -808,6 +822,15 @@ class FallbackChain(LLMClient):
                 )
                 self._record_attempt(attempt)
                 if emitted_chunk:
+                    if (
+                        public_output_committed is not None
+                        and not public_output_committed()
+                        and self._should_fallback(exc)
+                    ):
+                        if before_fallback is not None:
+                            before_fallback()
+                        errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
+                        continue
                     source_error = exc if isinstance(exc, LLMError) else None
                     raise LLMError(
                         f"{provider_name}/{model or 'unknown'} stream failed after yielding a chunk: {error}",
@@ -851,6 +874,8 @@ class FallbackChain(LLMClient):
         *,
         max_output_tokens: int | None,
         final_answer: bool,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         self.last_attempts = []
         self.last_success_provider = None
@@ -901,6 +926,15 @@ class FallbackChain(LLMClient):
                     )
                 )
                 if emitted_chunk:
+                    if (
+                        public_output_committed is not None
+                        and not public_output_committed()
+                        and self._should_fallback(exc)
+                    ):
+                        if before_fallback is not None:
+                            await before_fallback()
+                        errors.append(f"{provider_name}/{model or 'unknown'}: {error}")
+                        continue
                     source_error = exc if isinstance(exc, LLMError) else None
                     raise LLMError(
                         f"{provider_name}/{model or 'unknown'} stream failed after yielding a chunk: {error}",

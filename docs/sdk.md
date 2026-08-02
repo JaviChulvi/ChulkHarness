@@ -90,7 +90,8 @@ Each policy receives `FinalAnswerChunk` and returns
 delivery. The decision runs after mandatory redaction and before callbacks,
 event sinks, traces, session persistence, or result reconstruction. Policy
 exceptions fail closed by default; `OutputPolicyFailureMode.OPEN` must be an
-explicit host choice.
+explicit host choice. Buffering policies implement `reset()` so Chulk can
+discard uncommitted text safely before a pre-delta provider fallback.
 
 Concatenating public deltas produces `RunResult.content`. The typed
 `final_answer_delivery` field records `complete`, `safely_truncated`, `blocked`,

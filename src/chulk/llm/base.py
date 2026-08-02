@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import inspect
 import json
@@ -280,6 +280,8 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], None] | None = None,
     ) -> Iterator[LLMStreamChunk]:
         """Stream plain final-answer text, never structured action transport data."""
         yield from self.stream_complete(
@@ -291,6 +293,8 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        public_output_committed: Callable[[], bool] | None = None,
+        before_fallback: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Native async final-answer stream distinct from action assembly."""
         async for chunk in self.astream_complete(

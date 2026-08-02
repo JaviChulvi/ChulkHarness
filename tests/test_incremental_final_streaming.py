@@ -82,6 +82,9 @@ class UppercasePolicy:
     def complete(self, *, turn_id: str, next_sequence: int):
         return FinalAnswerPolicyDecision()
 
+    def reset(self, *, turn_id: str):
+        return None
+
 
 class BlockingPolicy:
     def process(self, chunk):
@@ -90,6 +93,9 @@ class BlockingPolicy:
     def complete(self, *, turn_id: str, next_sequence: int):
         return FinalAnswerPolicyDecision()
 
+    def reset(self, *, turn_id: str):
+        return None
+
 
 class AsyncUppercasePolicy:
     async def process(self, chunk):
@@ -97,6 +103,26 @@ class AsyncUppercasePolicy:
 
     async def complete(self, *, turn_id: str, next_sequence: int):
         return FinalAnswerPolicyDecision()
+
+    async def reset(self, *, turn_id: str):
+        return None
+
+
+class BufferingPolicy:
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.reset_count = 0
+
+    def process(self, chunk):
+        self.parts.append(chunk.text)
+        return FinalAnswerPolicyDecision()
+
+    def complete(self, *, turn_id: str, next_sequence: int):
+        return FinalAnswerPolicyDecision(text="".join(self.parts))
+
+    def reset(self, *, turn_id: str):
+        self.parts.clear()
+        self.reset_count += 1
 
 
 def _agent(tmp_path, llm: LLMClient, **kwargs) -> Agent:
@@ -157,6 +183,9 @@ def test_fail_closed_policy_exception_never_leaks_rejected_chunk(tmp_path) -> No
         def complete(self, *, turn_id: str, next_sequence: int):
             return FinalAnswerPolicyDecision()
 
+        def reset(self, *, turn_id: str):
+            return None
+
     facade = _agent(
         tmp_path,
         IncrementalLLM(("rejected",)),
@@ -174,6 +203,17 @@ def test_fallback_only_switches_before_stream_output(tmp_path) -> None:
     facade = _agent(tmp_path / "before", FallbackChain([first, second]))
     assert facade.run_result("hello").content == "fallback"
     assert second.sync_stream_called
+
+    buffered_policy = BufferingPolicy()
+    buffered_failure = IncrementalLLM(("discarded", "never"), fail_after=1)
+    buffered_fallback = IncrementalLLM(("permitted",))
+    facade = _agent(
+        tmp_path / "buffered",
+        FallbackChain([buffered_failure, buffered_fallback]),
+        output_policy=buffered_policy,
+    )
+    assert facade.run_result("hello").content == "permitted"
+    assert buffered_policy.reset_count == 1
 
     partial = IncrementalLLM(("partial", "never"), fail_after=1)
     forbidden = IncrementalLLM(("forbidden",))

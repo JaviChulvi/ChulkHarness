@@ -62,6 +62,9 @@ class IncrementalOutputPolicy(Protocol):
     def complete(self, *, turn_id: str, next_sequence: int) -> FinalAnswerPolicyDecision:
         """Flush buffered permitted text when the provider completes."""
 
+    def reset(self, *, turn_id: str) -> None:
+        """Discard buffered text before a pre-commit provider fallback."""
+
 
 class AsyncIncrementalOutputPolicy(Protocol):
     """Native async host hook for incremental output."""
@@ -74,6 +77,9 @@ class AsyncIncrementalOutputPolicy(Protocol):
     ) -> FinalAnswerPolicyDecision:
         """Flush buffered permitted text when the provider completes."""
 
+    async def reset(self, *, turn_id: str) -> None:
+        """Discard buffered text before a pre-commit provider fallback."""
+
 
 class PassThroughOutputPolicy:
     """Default policy that exposes each already-redacted chunk unchanged."""
@@ -83,6 +89,9 @@ class PassThroughOutputPolicy:
 
     def complete(self, *, turn_id: str, next_sequence: int) -> FinalAnswerPolicyDecision:
         return FinalAnswerPolicyDecision()
+
+    def reset(self, *, turn_id: str) -> None:
+        return None
 
 
 class AsyncPassThroughOutputPolicy:
@@ -95,6 +104,9 @@ class AsyncPassThroughOutputPolicy:
         self, *, turn_id: str, next_sequence: int
     ) -> FinalAnswerPolicyDecision:
         return FinalAnswerPolicyDecision()
+
+    async def reset(self, *, turn_id: str) -> None:
+        return None
 
 
 __all__ = [
