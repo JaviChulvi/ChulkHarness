@@ -32,11 +32,14 @@ from chulk import (
     ToolPolicyHooks,
     ResourceKind,
     ToolRisk,
+    ResolvedToolCatalog,
+    ToolCatalogResolutionError,
     ToolConcurrency,
     UsageGroupBy,
     DataClassification,
 )
-from chulk.core.state import TurnState
+from chulk.core.state import AgentState, TurnState
+from chulk.core.agent import Agent as CoreAgent
 from chulk._sdk.config import coerce_config
 from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.reference import InMemoryServiceHub
@@ -192,6 +195,19 @@ def _tool_call(name: str) -> str:
             "tool_name": name,
             "arguments_json": "{}",
         }
+    )
+
+
+def _catalog_tool(name: str) -> Tool:
+    return Tool(
+        name=name,
+        description=f"Run {name}.",
+        args_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        callable=lambda arguments: f"{name} ok",
     )
 
 
@@ -3271,6 +3287,143 @@ def test_tool_registry_rejects_schema_identity_mismatch() -> None:
 
     with pytest.raises(ValueError, match="input schema"):
         registry.register(tool)
+
+
+def test_hosted_tool_catalog_is_resolved_per_turn_and_exposed(
+    tmp_path: Path,
+) -> None:
+    first = _catalog_tool("first_lookup")
+    second = _catalog_tool("second_lookup")
+    requests = []
+
+    def resolver(request):
+        requests.append(request)
+        selected = request.metadata["extensions"]["selected"]
+        return [first if selected == "first" else second]
+
+    llm = FakeLLM([_final("first"), _final("second")])
+    runtime = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[first, second],
+        skills=[],
+        services=InMemoryServiceHub().services(),
+        execution_scope=_scope(),
+        tool_catalog_resolver=resolver,
+    )
+
+    first_result = runtime.run_result(
+        "one",
+        extension_metadata={"selected": "first"},
+    )
+    second_result = runtime.run_result(
+        "two",
+        extension_metadata={"selected": "second"},
+    )
+
+    first_catalog = first_result.extension_metadata["tool_catalog"]
+    second_catalog = second_result.extension_metadata["tool_catalog"]
+    assert first_catalog["digest"] != second_catalog["digest"]
+    assert [item["name"] for item in first_catalog["tools"]] == ["first_lookup"]
+    assert [item["name"] for item in second_catalog["tools"]] == ["second_lookup"]
+    assert [request.turn_id for request in requests] == [
+        first_result.turn_id,
+        second_result.turn_id,
+    ]
+    assert [tool.name for tool in runtime.tool_registry.list_tools()] == [
+        "second_lookup"
+    ]
+    first_prompt = json.dumps(llm.requests[0])
+    second_prompt = json.dumps(llm.requests[1])
+    assert "first_lookup" in first_prompt and "second_lookup" not in first_prompt
+    assert "second_lookup" in second_prompt and "first_lookup" not in second_prompt
+    runtime.close()
+
+
+def test_hosted_tool_catalog_fails_before_provider_work(tmp_path: Path) -> None:
+    llm = FakeLLM([_final()])
+    runtime = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().services(),
+        execution_scope=_scope(),
+        tool_catalog_resolver=lambda request: (_ for _ in ()).throw(
+            RuntimeError("entitlement lookup failed")
+        ),
+    )
+
+    with pytest.raises(ToolCatalogResolutionError, match="resolver failed"):
+        runtime.run("hello")
+
+    assert llm.requests == []
+    assert runtime.state.turns == []
+    runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_tool_catalog_timeout_starts_no_provider_work(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM([_final()])
+
+    async def resolver(request):
+        await asyncio.sleep(60)
+        return []
+
+    runtime = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+        async_tool_catalog_resolver=resolver,
+        tool_catalog_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(ToolCatalogResolutionError, match="timed out"):
+        await runtime.run("hello")
+
+    assert llm.requests == []
+    assert runtime.state.turns == []
+    await runtime.close()
+
+
+def test_resolved_tool_catalog_rejects_duplicate_names() -> None:
+    tool = _catalog_tool("lookup")
+
+    with pytest.raises(ValueError, match="already registered"):
+        ResolvedToolCatalog.from_tools([tool, tool])
+
+
+def test_plan_resume_rejects_changed_tool_catalog() -> None:
+    llm = FakeLLM([_final()])
+    selected = [_catalog_tool("first_lookup")]
+    registry = ToolRegistry()
+    registry.register(selected[0])
+    registry.register(_catalog_tool("second_lookup"))
+    scope = _scope(conversation_id="conversation-1")
+    runtime = CoreAgent(
+        llm,
+        state=AgentState(conversation_id="conversation-1"),
+        tool_registry=registry,
+        execution_scope=scope,
+        tool_catalog_resolver=lambda request: selected,
+    )
+    original = ResolvedToolCatalog.from_tools(selected)
+    turn = TurnState(
+        user_message="inspect",
+        extension_metadata={"tool_catalog": original.to_dict()},
+    )
+    selected[:] = [_catalog_tool("second_lookup")]
+
+    with pytest.raises(ToolCatalogResolutionError, match="changed"):
+        runtime._revalidate_tool_catalog(turn)
+
+    assert llm.requests == []
+    runtime.close()
 
 
 def test_parallel_safe_policy_is_limited_to_read_effects() -> None:

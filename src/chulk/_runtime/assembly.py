@@ -39,6 +39,10 @@ from chulk.hosting.sinks import (
     BufferedAsyncEventSink,
     BufferedAsyncTraceSink,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ToolCatalogResolver,
+)
 from chulk.llm import LLMClient
 from chulk.llm.lifecycle import close_resources
 from chulk.mcp import MCPServerConfig
@@ -167,6 +171,9 @@ def assemble_agent(
     transcript_resolver: TranscriptResolver | None = None,
     async_transcript_resolver: AsyncTranscriptResolver | None = None,
     transcript_timeout_seconds: float | None = None,
+    tool_catalog_resolver: ToolCatalogResolver | None = None,
+    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+    tool_catalog_timeout_seconds: float | None = None,
     agent_factory: Callable[..., Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
@@ -782,6 +789,9 @@ def assemble_agent(
                 if resolved_services is not None
                 else None
             ),
+            tool_catalog_resolver=tool_catalog_resolver,
+            async_tool_catalog_resolver=async_tool_catalog_resolver,
+            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
             close_trace_logger=resolved_services is None,
         )
     except Exception:
@@ -850,6 +860,8 @@ async def assemble_async_hosted_agent(
     profile_id: str | None = None,
     async_transcript_resolver: AsyncTranscriptResolver | None = None,
     transcript_timeout_seconds: float | None = None,
+    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+    tool_catalog_timeout_seconds: float | None = None,
     agent_factory: Callable[..., Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
@@ -1259,6 +1271,8 @@ async def assemble_async_hosted_agent(
             ),
             execution_scope=execution_scope,
             tool_policy_hooks=cast(ToolPolicyHooks, resolved.tool_policy),
+            async_tool_catalog_resolver=async_tool_catalog_resolver,
+            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
             close_trace_logger=False,
             restore_plan_context=False,
         )

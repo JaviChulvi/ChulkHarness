@@ -53,6 +53,9 @@ def test_runtime_facade_preserves_create_agent_signature():
         "transcript_resolver",
         "async_transcript_resolver",
         "transcript_timeout_seconds",
+        "tool_catalog_resolver",
+        "async_tool_catalog_resolver",
+        "tool_catalog_timeout_seconds",
     ]
 
 

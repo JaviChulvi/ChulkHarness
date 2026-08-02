@@ -27,6 +27,10 @@ from chulk.hosting import (
     RuntimeServices,
     TranscriptResolver,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ToolCatalogResolver,
+)
 from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.llm import LLMClient, provider_capabilities
 from chulk.llm.capabilities import (
@@ -116,6 +120,9 @@ def create_agent(
     transcript_resolver: TranscriptResolver | None = None,
     async_transcript_resolver: AsyncTranscriptResolver | None = None,
     transcript_timeout_seconds: float | None = None,
+    tool_catalog_resolver: ToolCatalogResolver | None = None,
+    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+    tool_catalog_timeout_seconds: float | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     return assemble_agent(
@@ -160,6 +167,9 @@ def create_agent(
         transcript_resolver=transcript_resolver,
         async_transcript_resolver=async_transcript_resolver,
         transcript_timeout_seconds=transcript_timeout_seconds,
+        tool_catalog_resolver=tool_catalog_resolver,
+        async_tool_catalog_resolver=async_tool_catalog_resolver,
+        tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,
@@ -202,6 +212,8 @@ async def create_async_hosted_agent(
     profile_id: str | None = None,
     async_transcript_resolver: AsyncTranscriptResolver | None = None,
     transcript_timeout_seconds: float | None = None,
+    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+    tool_catalog_timeout_seconds: float | None = None,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
     """Create a hosted agent through native async service contracts."""
     return await assemble_async_hosted_agent(
@@ -233,6 +245,8 @@ async def create_async_hosted_agent(
         profile_id=profile_id,
         async_transcript_resolver=async_transcript_resolver,
         transcript_timeout_seconds=transcript_timeout_seconds,
+        async_tool_catalog_resolver=async_tool_catalog_resolver,
+        tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,

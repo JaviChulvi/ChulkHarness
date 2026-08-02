@@ -68,6 +68,13 @@ from chulk.hosting.transcript_reference import (
     InMemoryExecutionJournal,
     InMemoryTranscriptProjectionSink,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ResolvedToolCatalog,
+    ToolCatalogRequest,
+    ToolCatalogResolutionError,
+    ToolCatalogResolver,
+)
 
 __all__ = [
     "ArtifactStore",
@@ -94,6 +101,7 @@ __all__ = [
     "AsyncTraceService",
     "AsyncTranscriptProjectionSink",
     "AsyncTranscriptResolver",
+    "AsyncToolCatalogResolver",
     "AsyncUsageService",
     "AuditSink",
     "AuditService",
@@ -115,6 +123,7 @@ __all__ = [
     "MemoryService",
     "ResourceOwnership",
     "RuntimeServices",
+    "ResolvedToolCatalog",
     "ServiceBinding",
     "SessionRuntimeServices",
     "SessionService",
@@ -130,5 +139,8 @@ __all__ = [
     "TranscriptRequest",
     "TranscriptResolutionError",
     "TranscriptResolver",
+    "ToolCatalogRequest",
+    "ToolCatalogResolutionError",
+    "ToolCatalogResolver",
     "UsageService",
 ]

@@ -14,6 +14,7 @@ from chulk import (
     AgentDefinition,
     AgentDefinitionRuntime,
     AsyncHostedRuntime,
+    AsyncToolCatalogResolver,
     AsyncLearningProposalService,
     AsyncLearningReviewer,
     AsyncPluginService,
@@ -44,6 +45,7 @@ from chulk import (
     DurableHostedExecutor,
     DurableRunStatus,
     HostedRuntime,
+    ResolvedToolCatalog,
     HostResource,
     MemoryError,
     MemoryMode,
@@ -76,6 +78,9 @@ from chulk import (
     ToolExecutionError,
     ToolEffect,
     ToolIdentity,
+    ToolCatalogRequest,
+    ToolCatalogResolutionError,
+    ToolCatalogResolver,
     ToolPolicy,
     ToolRetryPolicy,
     TurnContextSection,
@@ -304,6 +309,11 @@ def resolve_transcript(request: TranscriptRequest) -> ExternalTranscriptSnapshot
 
 def consume_projection(projection: TranscriptProjection) -> str:
     return projection.input_transcript_digest
+assert AsyncToolCatalogResolver is not None
+assert ResolvedToolCatalog is not None
+assert ToolCatalogRequest is not None
+assert ToolCatalogResolutionError is not None
+assert ToolCatalogResolver is not None
 assert AsyncRuntimeServices is not None
 assert AsyncServiceBinding is not None
 assert AsyncLearningProposalService is not None

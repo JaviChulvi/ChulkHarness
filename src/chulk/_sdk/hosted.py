@@ -199,6 +199,12 @@ class AsyncHostedRuntime(AsyncAgent):
                 transcript_timeout_seconds=kwargs.get(
                     "transcript_timeout_seconds"
                 ),
+                async_tool_catalog_resolver=kwargs.get(
+                    "async_tool_catalog_resolver"
+                ),
+                tool_catalog_timeout_seconds=kwargs.get(
+                    "tool_catalog_timeout_seconds"
+                ),
             )
         except Exception as exc:
             mapped = map_public_error(

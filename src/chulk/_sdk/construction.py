@@ -19,6 +19,10 @@ from chulk.hosting import (
     RuntimeServices,
     TranscriptResolver,
 )
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ToolCatalogResolver,
+)
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry
 from chulk.plugins import (
@@ -86,6 +90,9 @@ def _build_handle(
     transcript_resolver: TranscriptResolver | None = None,
     async_transcript_resolver: AsyncTranscriptResolver | None = None,
     transcript_timeout_seconds: float | None = None,
+    tool_catalog_resolver: ToolCatalogResolver | None = None,
+    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+    tool_catalog_timeout_seconds: float | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -128,6 +135,9 @@ def _build_handle(
         transcript_resolver=transcript_resolver,
         async_transcript_resolver=async_transcript_resolver,
         transcript_timeout_seconds=transcript_timeout_seconds,
+        tool_catalog_resolver=tool_catalog_resolver,
+        async_tool_catalog_resolver=async_tool_catalog_resolver,
+        tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
     )
     return AgentHandle(runtime, on_event=on_event)
 

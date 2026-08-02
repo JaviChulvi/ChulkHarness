@@ -7,6 +7,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 import inspect
+import json
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -42,6 +43,15 @@ from chulk.hosting.transcripts import (
     TranscriptRequest,
     TranscriptResolutionError,
     TranscriptResolver,
+)
+from chulk.hosting.tool_catalog import (
+    AsyncToolCatalogResolver,
+    ResolvedToolCatalog,
+    ToolCatalogRequest,
+    ToolCatalogResolutionError,
+    ToolCatalogResolver,
+    resolve_tool_catalog,
+    resolve_tool_catalog_async,
 )
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
@@ -163,6 +173,9 @@ class Agent:
         transcript_resolver: TranscriptResolver | None = None,
         async_transcript_resolver: AsyncTranscriptResolver | None = None,
         transcript_timeout_seconds: float | None = None,
+        tool_catalog_resolver: ToolCatalogResolver | None = None,
+        async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+        tool_catalog_timeout_seconds: float | None = None,
         close_trace_logger: bool = True,
         restore_plan_context: bool = True,
     ) -> None:
@@ -201,6 +214,17 @@ class Agent:
         )
         self.skill_registry = skill_registry
         self.tool_registry = tool_registry or ToolRegistry()
+        self._static_tool_catalog = ResolvedToolCatalog.from_tools(())
+        self.tool_catalog_resolver = tool_catalog_resolver
+        self.async_tool_catalog_resolver = async_tool_catalog_resolver
+        if (
+            tool_catalog_timeout_seconds is not None
+            and tool_catalog_timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "tool_catalog_timeout_seconds must be greater than zero"
+            )
+        self.tool_catalog_timeout_seconds = tool_catalog_timeout_seconds
         self.trace_logger = trace_logger
         self.system_prompt = system_prompt
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
@@ -578,6 +602,17 @@ class Agent:
                 snapshot,
                 extension_metadata,
             )
+        catalog = self._resolve_catalog_for_turn(
+            clean_message,
+            turn_id=effective_turn_id,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+        )
+        extension_metadata = self._activate_tool_catalog(
+            catalog,
+            extension_metadata,
+        )
         self._refresh_action_runtime()
         turn: TurnState | None = None
         previous_turn_count = len(self.state.turns)
@@ -639,6 +674,17 @@ class Agent:
                 snapshot,
                 extension_metadata,
             )
+        catalog = await self._resolve_catalog_for_turn_async(
+            clean_message,
+            turn_id=effective_turn_id,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+        )
+        extension_metadata = self._activate_tool_catalog(
+            catalog,
+            extension_metadata,
+        )
         self._refresh_action_runtime()
         turn: TurnState | None = None
         previous_turn_count = len(self.state.turns)
@@ -1221,8 +1267,10 @@ class Agent:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
         self._revalidate_external_transcript_for_resume()
-        self._refresh_action_runtime()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is not None:
+            self._revalidate_tool_catalog(turn)
+        self._refresh_action_runtime()
         try:
             turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
@@ -1241,8 +1289,10 @@ class Agent:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
         await self._revalidate_external_transcript_for_resume_async()
-        self._refresh_action_runtime()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is not None:
+            await self._revalidate_tool_catalog_async(turn)
+        self._refresh_action_runtime()
         try:
             turn_or_response = self._prepare_plan_execution()
             if isinstance(turn_or_response, str):
@@ -1574,6 +1624,154 @@ class Agent:
             raise TranscriptConflictError(
                 "external transcript changed since the turn was submitted"
             )
+
+    def _tool_catalog_request(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ToolCatalogRequest:
+        if self.execution_scope is None:
+            raise ToolCatalogResolutionError(
+                "request-scoped tool catalogs require an execution scope"
+            )
+        extensions = deepcopy(extension_metadata or {})
+        extensions.pop("tool_catalog", None)
+        metadata = {
+            "prompt_profile": prompt_profile,
+            "locale": locale,
+            "extensions": extensions,
+        }
+        try:
+            encoded = json.dumps(metadata, sort_keys=True, default=str)
+        except (TypeError, ValueError) as exc:
+            raise ToolCatalogResolutionError(
+                "tool catalog turn metadata is not serializable"
+            ) from exc
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise ToolCatalogResolutionError(
+                "tool catalog turn metadata exceeds 16384 bytes"
+            )
+        return ToolCatalogRequest.for_turn(
+            self.execution_scope,
+            conversation_id=self.state.conversation_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            metadata=metadata,
+        )
+
+    def _resolve_catalog_for_turn(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ResolvedToolCatalog:
+        if self.async_tool_catalog_resolver is not None:
+            raise ToolCatalogResolutionError(
+                "async tool catalog resolver requires an async hosted run"
+            )
+        resolver = self.tool_catalog_resolver
+        if resolver is None:
+            return self._static_tool_catalog
+        request = self._tool_catalog_request(
+            user_message,
+            turn_id=turn_id,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+        )
+        return resolve_tool_catalog(
+            resolver,
+            request,
+            timeout_seconds=self.tool_catalog_timeout_seconds,
+        )
+
+    async def _resolve_catalog_for_turn_async(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ResolvedToolCatalog:
+        resolver = self.async_tool_catalog_resolver
+        if resolver is None:
+            if self.tool_catalog_resolver is not None:
+                raise ToolCatalogResolutionError(
+                    "native async runs require async_tool_catalog_resolver"
+                )
+            return self._static_tool_catalog
+        request = self._tool_catalog_request(
+            user_message,
+            turn_id=turn_id,
+            prompt_profile=prompt_profile,
+            locale=locale,
+            extension_metadata=extension_metadata,
+        )
+        return await resolve_tool_catalog_async(
+            resolver,
+            request,
+            timeout_seconds=self.tool_catalog_timeout_seconds,
+        )
+
+    def _activate_tool_catalog(
+        self,
+        catalog: ResolvedToolCatalog,
+        extension_metadata: dict | None,
+    ) -> dict:
+        metadata = deepcopy(extension_metadata or {})
+        if (
+            self.tool_catalog_resolver is None
+            and self.async_tool_catalog_resolver is None
+        ):
+            return metadata
+        self.tool_registry = catalog.create_registry()
+        metadata["tool_catalog"] = catalog.to_dict()
+        return metadata
+
+    def _revalidate_tool_catalog(self, turn: TurnState) -> None:
+        recorded = turn.extension_metadata.get("tool_catalog")
+        if not isinstance(recorded, dict):
+            return
+        catalog = self._resolve_catalog_for_turn(
+            turn.user_message,
+            turn_id=turn.turn_id,
+            prompt_profile=turn.prompt_profile,
+            locale=turn.locale,
+            extension_metadata=turn.extension_metadata,
+        )
+        self._assert_catalog_digest(recorded, catalog)
+
+    async def _revalidate_tool_catalog_async(self, turn: TurnState) -> None:
+        recorded = turn.extension_metadata.get("tool_catalog")
+        if not isinstance(recorded, dict):
+            return
+        catalog = await self._resolve_catalog_for_turn_async(
+            turn.user_message,
+            turn_id=turn.turn_id,
+            prompt_profile=turn.prompt_profile,
+            locale=turn.locale,
+            extension_metadata=turn.extension_metadata,
+        )
+        self._assert_catalog_digest(recorded, catalog)
+
+    def _assert_catalog_digest(
+        self,
+        recorded: dict,
+        catalog: ResolvedToolCatalog,
+    ) -> None:
+        if recorded.get("digest") != catalog.digest:
+            raise ToolCatalogResolutionError(
+                "tool catalog changed since the turn was submitted"
+            )
+        self.tool_registry = catalog.create_registry()
 
     def _refresh_action_runtime(self) -> None:
         """Reflect mutable public runtime configuration in focused services."""

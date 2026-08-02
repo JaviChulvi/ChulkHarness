@@ -125,6 +125,52 @@ remove bindings only after disabling their capabilities. A memory-free profile
 must also use `Capabilities` with `memory="off"`, and a skills-free profile
 must pass an empty `skills` collection.
 
+## Request-scoped tool catalogs
+
+Long-lived hosted runtimes can resolve the exact model-visible tool catalog for
+each turn. Register a synchronous `tool_catalog_resolver` on `HostedRuntime`, or
+an `async_tool_catalog_resolver` on `AsyncHostedRuntime`. The resolver receives
+a frozen `ToolCatalogRequest` containing the bound execution scope,
+conversation and turn IDs, a digest of the user message, and at most 16 KiB of
+turn metadata. It runs before the turn is recorded, a provider request starts,
+or a tool side effect can occur.
+
+```python
+def resolve_tools(request: ToolCatalogRequest):
+    if "tickets:write" in request.scope.grants:
+        return [ticket_read, ticket_update]
+    return [ticket_read]
+
+runtime = HostedRuntime(
+    config=config,
+    llm=client,
+    tools=[ticket_read, ticket_update],
+    skills=[],
+    services=services,
+    execution_scope=scope,
+    tool_catalog_resolver=resolve_tools,
+    tool_catalog_timeout_seconds=1.0,
+)
+```
+
+Chulk validates duplicate names, schemas, identities, policies, and application
+event declarations, then computes a deterministic SHA-256 catalog digest. The
+private registry created from that snapshot remains fixed for the turn, so
+prompt-rendered descriptions and provider-native schemas see the same tools as
+execution. The digest and complete safe catalog evidence are available under
+`RunResult.extension_metadata["tool_catalog"]` and persist with the turn.
+Approval resume fails closed if resolving the same turn produces a different
+digest.
+
+Catalog visibility does not authorize execution. Tool-policy authorization,
+credential resolution, confirmation, and effect handling still run for every
+invocation. Omitting a tool prevents the model from seeing it; including it
+does not grant the actor permission to call it. Resolver errors, invalid
+catalogs, cancellation, and timeouts stop before provider or tool work. Native
+async resolution is awaited directly and is never adapted through a worker
+thread. Constructor-supplied static tools remain unchanged when no resolver is
+configured.
+
 Async hosts may use `AsyncServiceBinding.host(...)`,
 `AsyncServiceBinding.runtime(...)`, or `AsyncServiceBinding.scoped(...)`.
 Await native async factories with `await AsyncHostedRuntime.create(...)`.
