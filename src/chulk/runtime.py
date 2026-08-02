@@ -20,7 +20,13 @@ from chulk.core import Agent, TurnState
 from chulk.core.events import AgentEvent
 from chulk.execution import ExecutionBackend
 from chulk.goals.runtime import GoalExecutionContext
-from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
+from chulk.hosting import (
+    AsyncRuntimeServices,
+    AsyncTranscriptResolver,
+    ExecutionScope,
+    RuntimeServices,
+    TranscriptResolver,
+)
 from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.llm import LLMClient, provider_capabilities
 from chulk.llm.capabilities import (
@@ -107,6 +113,9 @@ def create_agent(
     media_processors: MediaProcessorRegistry | None = None,
     services: RuntimeServices | None = None,
     execution_scope: ExecutionScope | None = None,
+    transcript_resolver: TranscriptResolver | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
     return assemble_agent(
@@ -148,6 +157,9 @@ def create_agent(
         media_processors=media_processors,
         services=services,
         execution_scope=execution_scope,
+        transcript_resolver=transcript_resolver,
+        async_transcript_resolver=async_transcript_resolver,
+        transcript_timeout_seconds=transcript_timeout_seconds,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,
@@ -188,6 +200,8 @@ async def create_async_hosted_agent(
     usage_dimensions: UsageDimensions | None = None,
     goal_execution: GoalExecutionContext | None = None,
     profile_id: str | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
     """Create a hosted agent through native async service contracts."""
     return await assemble_async_hosted_agent(
@@ -217,6 +231,8 @@ async def create_async_hosted_agent(
         usage_dimensions=usage_dimensions,
         goal_execution=goal_execution,
         profile_id=profile_id,
+        async_transcript_resolver=async_transcript_resolver,
+        transcript_timeout_seconds=transcript_timeout_seconds,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,

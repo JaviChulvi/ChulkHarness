@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
+import inspect
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -33,6 +35,14 @@ from chulk.llm.usage import (
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import ExecutionScope
 from chulk.hosting.async_utils import call_async_service
+from chulk.hosting.transcripts import (
+    AsyncTranscriptResolver,
+    ExternalTranscriptSnapshot,
+    TranscriptConflictError,
+    TranscriptRequest,
+    TranscriptResolutionError,
+    TranscriptResolver,
+)
 from chulk.mcp import MCPServerConfig
 from chulk.memory.constants import PROFILE_MEMORY_TAGS
 from chulk.media import (
@@ -150,6 +160,9 @@ class Agent:
         media_processors: MediaProcessorRegistry | None = None,
         execution_scope: ExecutionScope | None = None,
         tool_policy_hooks: ToolPolicyHooks | None = None,
+        transcript_resolver: TranscriptResolver | None = None,
+        async_transcript_resolver: AsyncTranscriptResolver | None = None,
+        transcript_timeout_seconds: float | None = None,
         close_trace_logger: bool = True,
         restore_plan_context: bool = True,
     ) -> None:
@@ -219,6 +232,11 @@ class Agent:
         self.default_tool_context = default_tool_context
         self.runtime_metadata = deepcopy(runtime_metadata or {})
         self.execution_scope = execution_scope
+        self.transcript_resolver = transcript_resolver
+        self.async_transcript_resolver = async_transcript_resolver
+        if transcript_timeout_seconds is not None and transcript_timeout_seconds <= 0:
+            raise ValueError("transcript_timeout_seconds must be greater than zero")
+        self.transcript_timeout_seconds = transcript_timeout_seconds
         self._close_trace_logger = close_trace_logger
         self.usage_accounting = usage_accounting
         self.skill_lifecycle_store = skill_lifecycle_store
@@ -553,6 +571,13 @@ class Agent:
         turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
+        effective_turn_id = turn_id or str(uuid4())
+        if self.transcript_resolver is not None or self.async_transcript_resolver is not None:
+            snapshot = self._resolve_external_transcript(effective_turn_id)
+            extension_metadata = self._apply_external_transcript(
+                snapshot,
+                extension_metadata,
+            )
         self._refresh_action_runtime()
         turn: TurnState | None = None
         previous_turn_count = len(self.state.turns)
@@ -567,7 +592,7 @@ class Agent:
                 input_parts=input_parts,
                 model_input=model_input,
                 media_events=media_events,
-                turn_id=turn_id,
+                turn_id=effective_turn_id,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -605,6 +630,15 @@ class Agent:
         turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it with async tool execution."""
+        effective_turn_id = turn_id or str(uuid4())
+        if self.transcript_resolver is not None or self.async_transcript_resolver is not None:
+            snapshot = await self._resolve_external_transcript_async(
+                effective_turn_id
+            )
+            extension_metadata = self._apply_external_transcript(
+                snapshot,
+                extension_metadata,
+            )
         self._refresh_action_runtime()
         turn: TurnState | None = None
         previous_turn_count = len(self.state.turns)
@@ -619,7 +653,7 @@ class Agent:
                 input_parts=input_parts,
                 model_input=model_input,
                 media_events=media_events,
-                turn_id=turn_id,
+                turn_id=effective_turn_id,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -1186,6 +1220,7 @@ class Agent:
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
+        self._revalidate_external_transcript_for_resume()
         self._refresh_action_runtime()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
@@ -1205,6 +1240,7 @@ class Agent:
     async def approve_plan_async(self) -> str:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
+        await self._revalidate_external_transcript_for_resume_async()
         self._refresh_action_runtime()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
         try:
@@ -1384,6 +1420,160 @@ class Agent:
             turn,
             require_plan=require_plan,
         )
+
+    def _transcript_request(self, turn_id: str) -> TranscriptRequest:
+        if self.execution_scope is None:
+            raise TranscriptResolutionError(
+                "external transcripts require an execution scope"
+            )
+        return TranscriptRequest(
+            scope=self.execution_scope,
+            conversation_id=self.state.conversation_id,
+            turn_id=turn_id,
+        )
+
+    def _resolve_external_transcript(
+        self,
+        turn_id: str,
+    ) -> ExternalTranscriptSnapshot:
+        if self.async_transcript_resolver is not None:
+            raise TranscriptResolutionError(
+                "async transcript resolver requires an async hosted run"
+            )
+        resolver = self.transcript_resolver
+        if resolver is None:
+            raise TranscriptResolutionError(
+                "external transcript mode requires transcript_resolver"
+            )
+        request = self._transcript_request(turn_id)
+        executor: ThreadPoolExecutor | None = None
+        try:
+            if self.transcript_timeout_seconds is None:
+                snapshot = resolver(request)
+            else:
+                executor = ThreadPoolExecutor(max_workers=1)
+                pending = executor.submit(resolver, request)
+                try:
+                    snapshot = pending.result(
+                        timeout=self.transcript_timeout_seconds
+                    )
+                except FutureTimeoutError as exc:
+                    pending.cancel()
+                    raise TranscriptResolutionError(
+                        "transcript resolver timed out"
+                    ) from exc
+        except TranscriptResolutionError:
+            raise
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise TranscriptResolutionError("transcript resolver failed") from exc
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+        if inspect.isawaitable(snapshot):
+            if inspect.iscoroutine(snapshot):
+                snapshot.close()
+            raise TranscriptResolutionError(
+                "sync transcript resolver returned an awaitable"
+            )
+        return self._validate_external_transcript(snapshot)
+
+    async def _resolve_external_transcript_async(
+        self,
+        turn_id: str,
+    ) -> ExternalTranscriptSnapshot:
+        resolver = self.async_transcript_resolver
+        if resolver is None:
+            if self.transcript_resolver is not None:
+                raise TranscriptResolutionError(
+                    "native async runs require async_transcript_resolver"
+                )
+            raise TranscriptResolutionError(
+                "external transcript mode requires async_transcript_resolver"
+            )
+        try:
+            pending = resolver(self._transcript_request(turn_id))
+            if not inspect.isawaitable(pending):
+                raise TypeError("async transcript resolver must return an awaitable")
+            if self.transcript_timeout_seconds is None:
+                snapshot = await pending
+            else:
+                async with asyncio.timeout(self.transcript_timeout_seconds):
+                    snapshot = await pending
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            raise TranscriptResolutionError("transcript resolver timed out") from exc
+        except TranscriptResolutionError:
+            raise
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise TranscriptResolutionError("transcript resolver failed") from exc
+        return self._validate_external_transcript(snapshot)
+
+    def _validate_external_transcript(
+        self,
+        snapshot: object,
+    ) -> ExternalTranscriptSnapshot:
+        if not isinstance(snapshot, ExternalTranscriptSnapshot):
+            raise TranscriptResolutionError(
+                "transcript resolver must return ExternalTranscriptSnapshot"
+            )
+        if snapshot.conversation_id != self.state.conversation_id:
+            raise TranscriptResolutionError(
+                "external transcript conversation_id does not match the runtime"
+            )
+        return snapshot
+
+    def _apply_external_transcript(
+        self,
+        snapshot: ExternalTranscriptSnapshot,
+        extension_metadata: dict | None,
+    ) -> dict:
+        self.memory.replace(
+            snapshot.prompt_messages(),
+            conversation_summary=snapshot.summary,
+            summary_message_count=snapshot.summary_message_count,
+        )
+        self.state.messages = self.memory.recent()
+        self.state.conversation_summary = self.memory.conversation_summary
+        metadata = deepcopy(extension_metadata or {})
+        metadata["external_transcript"] = snapshot.evidence()
+        return metadata
+
+    def _revalidate_external_transcript_for_resume(self) -> None:
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is None:
+            return
+        evidence = turn.extension_metadata.get("external_transcript")
+        if not isinstance(evidence, dict):
+            return
+        snapshot = self._resolve_external_transcript(turn.turn_id)
+        self._assert_external_transcript_digest(evidence, snapshot)
+        self._apply_external_transcript(snapshot, None)
+
+    async def _revalidate_external_transcript_for_resume_async(self) -> None:
+        turn = self._pending_plan_turn() or self._resumable_plan_turn()
+        if turn is None:
+            return
+        evidence = turn.extension_metadata.get("external_transcript")
+        if not isinstance(evidence, dict):
+            return
+        snapshot = await self._resolve_external_transcript_async(turn.turn_id)
+        self._assert_external_transcript_digest(evidence, snapshot)
+        self._apply_external_transcript(snapshot, None)
+
+    def _assert_external_transcript_digest(
+        self,
+        evidence: dict,
+        snapshot: ExternalTranscriptSnapshot,
+    ) -> None:
+        if evidence.get("digest") != snapshot.digest:
+            raise TranscriptConflictError(
+                "external transcript changed since the turn was submitted"
+            )
 
     def _refresh_action_runtime(self) -> None:
         """Reflect mutable public runtime configuration in focused services."""

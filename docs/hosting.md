@@ -189,6 +189,8 @@ through the shared run owner. The host submits an immutable definition/input
 digest and named steps, then Chulk claims a lease before invoking the model:
 
 ```python
+from dataclasses import replace
+
 from chulk import (
     DurableHostedExecutor,
     RunSubmission,
@@ -446,3 +448,77 @@ See [SDK errors](sdk-errors.md) for the stable public failure categories,
 [events](events.md) for the public event contract. Third-party stores can run
 the reusable contract functions in `chulk.testing`; see
 [hosted gateway](gateway.md#contract-gate).
+
+## Externally owned conversation transcripts
+
+An application that already owns conversation history can replace the normal
+`SessionRuntimeServices` binding with
+`ExternalTranscriptSessionRuntimeServices`. In this mode the host registers a
+request-scoped `transcript_resolver`; Chulk never creates conversation or
+message rows and never falls back to its local SQLite session store.
+
+```python
+from chulk import (
+    ExecutionScope,
+    ExternalTranscriptSessionRuntimeServices,
+    ExternalTranscriptSnapshot,
+    HostedRuntime,
+    ServiceBinding,
+    TranscriptMessage,
+)
+
+services = application_services.for_profile(...)
+services = replace(
+    services,
+    sessions=ServiceBinding.host(
+        ExternalTranscriptSessionRuntimeServices(
+            journal=application_execution_journal,
+            projections=application_projection_sink,
+        )
+    ),
+)
+
+def transcript_for(request):
+    record = conversations.read(request.conversation_id)
+    return ExternalTranscriptSnapshot(
+        conversation_id=record.id,
+        revision=record.revision,
+        messages=tuple(
+            TranscriptMessage(
+                id=item.id,
+                role=item.role,
+                content=item.content,
+                ordinal=item.ordinal,
+                created_at=item.created_at,
+            )
+            for item in record.messages
+        ),
+        summary=record.summary,
+        summary_message_count=record.summary_message_count,
+    )
+
+runtime = HostedRuntime(
+    services=services,
+    execution_scope=ExecutionScope(...),
+    transcript_resolver=transcript_for,
+    transcript_timeout_seconds=2.0,
+    tools=[],
+    skills=[],
+)
+```
+
+Snapshots are immutable, bounded, deterministically digested, and bound to the
+execution scope, conversation, and turn. Duplicate message IDs, unordered
+ordinals, invalid summary metadata, mismatched conversations, resolver
+failures, and timeouts stop the run before provider work. Plan approval and
+other resume boundaries resolve the transcript again and raise
+`TranscriptConflictError` if its digest changed.
+
+The execution journal is recovery-only: it receives redacted turn state and
+effect evidence, never authoritative user or assistant content. Terminal
+outcomes are delivered separately as idempotent `TranscriptProjection` values
+for the host to apply to its transcript. `InMemoryExecutionJournal` and
+`InMemoryTranscriptProjectionSink` are deterministic reference
+implementations. Native async hosts use the corresponding async contracts and
+must provide `async_transcript_resolver`; sync/async adaptation is intentionally
+rejected.

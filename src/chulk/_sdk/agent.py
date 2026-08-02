@@ -34,8 +34,10 @@ from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
 from chulk.hosting import (
+    AsyncTranscriptResolver,
     ExecutionScope,
     RuntimeServices,
+    TranscriptResolver,
 )
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
@@ -134,6 +136,9 @@ class Agent:
         media_processors: MediaProcessorRegistry | None = None,
         services: RuntimeServices | None = None,
         execution_scope: ExecutionScope | None = None,
+        transcript_resolver: TranscriptResolver | None = None,
+        async_transcript_resolver: AsyncTranscriptResolver | None = None,
+        transcript_timeout_seconds: float | None = None,
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
@@ -173,6 +178,9 @@ class Agent:
                 media_processors=media_processors,
                 services=services,
                 execution_scope=execution_scope,
+                transcript_resolver=transcript_resolver,
+                async_transcript_resolver=async_transcript_resolver,
+                transcript_timeout_seconds=transcript_timeout_seconds,
             )
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")

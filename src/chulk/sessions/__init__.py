@@ -11,6 +11,10 @@ from chulk.sessions.models import (
 )
 from chulk.sessions.recorder import SessionRecorder
 from chulk.sessions.async_recorder import AsyncSessionRecorder
+from chulk.sessions.external_recorder import (
+    AsyncExternalTranscriptRecorder,
+    ExternalTranscriptRecorder,
+)
 from chulk.sessions.search import (
     MAX_SESSION_QUERY_CHARS,
     MAX_SESSION_QUERY_TERMS,
@@ -42,4 +46,6 @@ __all__ = [
     "SessionNotFoundError",
     "SessionRecorder",
     "AsyncSessionRecorder",
+    "AsyncExternalTranscriptRecorder",
+    "ExternalTranscriptRecorder",
 ]

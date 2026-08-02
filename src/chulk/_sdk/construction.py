@@ -14,8 +14,10 @@ from chulk.llm import LLMClient
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
 from chulk.hosting import (
+    AsyncTranscriptResolver,
     ExecutionScope,
     RuntimeServices,
+    TranscriptResolver,
 )
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry
@@ -81,6 +83,9 @@ def _build_handle(
     media_processors: MediaProcessorRegistry | None = None,
     services: RuntimeServices | None = None,
     execution_scope: ExecutionScope | None = None,
+    transcript_resolver: TranscriptResolver | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
 ) -> AgentHandle:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
@@ -120,6 +125,9 @@ def _build_handle(
         media_processors=media_processors,
         services=services,
         execution_scope=execution_scope,
+        transcript_resolver=transcript_resolver,
+        async_transcript_resolver=async_transcript_resolver,
+        transcript_timeout_seconds=transcript_timeout_seconds,
     )
     return AgentHandle(runtime, on_event=on_event)
 

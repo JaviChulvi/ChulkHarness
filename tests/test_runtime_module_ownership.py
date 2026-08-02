@@ -50,6 +50,9 @@ def test_runtime_facade_preserves_create_agent_signature():
         "media_processors",
         "services",
         "execution_scope",
+        "transcript_resolver",
+        "async_transcript_resolver",
+        "transcript_timeout_seconds",
     ]
 
 
