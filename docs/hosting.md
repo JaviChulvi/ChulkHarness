@@ -561,6 +561,14 @@ failures, and timeouts stop the run before provider work. Plan approval and
 other resume boundaries resolve the transcript again and raise
 `TranscriptConflictError` if its digest changed.
 
+External `tool` and `observation` roles are semantic conversation context, not
+lossless provider-native tool protocol messages. Chulk labels and projects them
+as user context before any provider normalization, so one canonical transcript
+is portable across Responses, Chat Completions, Anthropic, and local provider
+families. They do not require assistant tool-call pairing and their metadata is
+not translated into provider call IDs. Empty tool or observation context fails
+with `TranscriptResolutionError` before provider work.
+
 The execution journal is recovery-only: it receives redacted turn state and
 effect evidence, never authoritative user or assistant content. Terminal
 outcomes are delivered separately as idempotent `TranscriptProjection` values

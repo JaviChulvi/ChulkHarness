@@ -33,6 +33,12 @@ from chulk.hosting.transcript_reference import (
     InMemoryTranscriptProjectionSink,
 )
 from chulk.llm import LLMClient
+from chulk.llm.messages import (
+    chat_messages,
+    local_chat_messages,
+    split_instructions,
+)
+from chulk.llm.providers.anthropic import _normalize_conversation
 
 
 class RecordingLLM(LLMClient):
@@ -195,6 +201,83 @@ def test_external_transcript_snapshot_is_validated_and_immutable() -> None:
             conversation_id="conversation-1",
             summary_message_count=1,
         )
+
+
+def test_tool_roles_project_to_portable_semantic_context() -> None:
+    snapshot = ExternalTranscriptSnapshot(
+        conversation_id="conversation-1",
+        messages=(
+            TranscriptMessage("message-1", "system", "instructions", 1),
+            TranscriptMessage("message-2", "assistant", "I checked", 2),
+            TranscriptMessage("message-3", "tool", "tool result", 3),
+            TranscriptMessage(
+                "message-4",
+                "observation",
+                "host observation",
+                4,
+            ),
+        ),
+    )
+
+    projected = snapshot.prompt_messages()
+    assert projected == [
+        {"role": "system", "content": "instructions"},
+        {"role": "assistant", "content": "I checked"},
+        {
+            "role": "user",
+            "content": "[External tool context]\ntool result",
+        },
+        {
+            "role": "user",
+            "content": "[External observation context]\nhost observation",
+        },
+    ]
+
+    _, responses_messages = split_instructions(projected)
+    assert {message["role"] for message in responses_messages} <= {
+        "user",
+        "assistant",
+    }
+    assert {message["role"] for message in chat_messages(projected)} <= {
+        "system",
+        "user",
+        "assistant",
+    }
+    assert {
+        message["role"] for message in _normalize_conversation(projected)
+    } <= {"user", "assistant"}
+    assert {
+        message["role"] for message in local_chat_messages(projected)
+    } <= {"user", "assistant"}
+
+
+def test_invalid_tool_context_fails_before_provider_work(tmp_path: Path) -> None:
+    llm = RecordingLLM()
+    runtime = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        services=_sync_services(
+            InMemoryExecutionJournal(),
+            InMemoryTranscriptProjectionSink(),
+        ),
+        execution_scope=_scope(),
+        transcript_resolver=lambda _request: ExternalTranscriptSnapshot(
+            conversation_id="conversation-1",
+            messages=(
+                TranscriptMessage("message-tool", "tool", " ", 1),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        TranscriptResolutionError,
+        match="tool context cannot be empty",
+    ):
+        runtime.run("must not reach provider")
+    assert llm.requests == []
+    runtime.close()
 
 
 def test_transcript_resolution_fails_before_provider_work(tmp_path: Path) -> None:
