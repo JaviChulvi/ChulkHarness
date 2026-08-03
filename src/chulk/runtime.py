@@ -20,7 +20,13 @@ from chulk.core import Agent, TurnState
 from chulk.core.events import AgentEvent
 from chulk.execution import ExecutionBackend
 from chulk.goals.runtime import GoalExecutionContext
-from chulk.hosting import AsyncRuntimeServices, ExecutionScope, RuntimeServices
+from chulk.hosting import (
+    AsyncRuntimeServices,
+    AsyncTranscriptResolver,
+    ExecutionScope,
+    RuntimeServices,
+    TranscriptResolver,
+)
 from chulk.hosting.tool_catalog import (
     AsyncToolCatalogResolver,
     ToolCatalogResolver,
@@ -111,6 +117,9 @@ def create_agent(
     media_processors: MediaProcessorRegistry | None = None,
     services: RuntimeServices | None = None,
     execution_scope: ExecutionScope | None = None,
+    transcript_resolver: TranscriptResolver | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
     tool_catalog_resolver: ToolCatalogResolver | None = None,
     async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
     tool_catalog_timeout_seconds: float | None = None,
@@ -155,6 +164,9 @@ def create_agent(
         media_processors=media_processors,
         services=services,
         execution_scope=execution_scope,
+        transcript_resolver=transcript_resolver,
+        async_transcript_resolver=async_transcript_resolver,
+        transcript_timeout_seconds=transcript_timeout_seconds,
         tool_catalog_resolver=tool_catalog_resolver,
         async_tool_catalog_resolver=async_tool_catalog_resolver,
         tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
@@ -198,6 +210,8 @@ async def create_async_hosted_agent(
     usage_dimensions: UsageDimensions | None = None,
     goal_execution: GoalExecutionContext | None = None,
     profile_id: str | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
     async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
     tool_catalog_timeout_seconds: float | None = None,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
@@ -229,6 +243,8 @@ async def create_async_hosted_agent(
         usage_dimensions=usage_dimensions,
         goal_execution=goal_execution,
         profile_id=profile_id,
+        async_transcript_resolver=async_transcript_resolver,
+        transcript_timeout_seconds=transcript_timeout_seconds,
         async_tool_catalog_resolver=async_tool_catalog_resolver,
         tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
         agent_factory=Agent,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 import warnings
-from typing import cast
+from typing import Any, cast
 
 from chulk._version import __version__
 from chulk.capabilities import Capabilities, MemoryMode
@@ -21,11 +21,16 @@ from chulk.execution import (
 )
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import (
+    AsyncExternalTranscriptSessionRuntimeServices,
     AsyncRuntimeServices,
+    AsyncTranscriptResolver,
+    DisabledHostedService,
     ExecutionScope,
+    ExternalTranscriptSessionRuntimeServices,
     RuntimeServices,
     SessionRuntimeServices,
     SkillRuntimeServices,
+    TranscriptResolver,
 )
 from chulk.hosting.async_utils import call_async_service, close_async_resource
 from chulk.hosting.services import ResolvedRuntimeServices
@@ -50,7 +55,9 @@ from chulk.memory import (
 )
 from chulk.plugins import LocalPluginRegistry
 from chulk.sessions import (
+    AsyncExternalTranscriptRecorder,
     AsyncSessionRecorder,
+    ExternalTranscriptRecorder,
     SessionSearchService,
     SQLiteSessionStore,
     SessionRecorder,
@@ -100,6 +107,8 @@ from chulk._runtime.sessions import (
     block_unresolved_tool_intent,
     create_agent_state,
     create_agent_state_async,
+    create_external_agent_state,
+    create_external_agent_state_async,
     session_result_redactor,
     summary_source_ordinal,
 )
@@ -159,6 +168,9 @@ def assemble_agent(
     media_processors: MediaProcessorRegistry | None = None,
     services: RuntimeServices | None = None,
     execution_scope: ExecutionScope | None = None,
+    transcript_resolver: TranscriptResolver | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
     tool_catalog_resolver: ToolCatalogResolver | None = None,
     async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
     tool_catalog_timeout_seconds: float | None = None,
@@ -187,6 +199,10 @@ def assemble_agent(
     resolved_services = service_resolution.services
     conversation_id = service_resolution.conversation_id
     execution_scope = service_resolution.execution_scope
+    session_store: Any
+    session_recorder: Any
+    session_search_service: Any
+    external_sessions = False
 
     if llm_client_factory is None:
         llm_client_factory = default_llm_client_factory
@@ -273,9 +289,32 @@ def assemble_agent(
         else None
     )
     if resolved_services is not None:
-        if not isinstance(resolved_services.sessions, SessionRuntimeServices):
+        external_sessions = isinstance(
+            resolved_services.sessions,
+            ExternalTranscriptSessionRuntimeServices,
+        )
+        if not isinstance(
+            resolved_services.sessions,
+            (SessionRuntimeServices, ExternalTranscriptSessionRuntimeServices),
+        ):
             raise TypeError(
-                "hosted sessions service must be SessionRuntimeServices"
+                "hosted sessions service must be SessionRuntimeServices or "
+                "ExternalTranscriptSessionRuntimeServices"
+            )
+        if external_sessions and transcript_resolver is None:
+            raise ValueError(
+                "external transcript sessions require transcript_resolver"
+            )
+        if external_sessions and async_transcript_resolver is not None:
+            raise ValueError(
+                "synchronous hosted runs cannot use async_transcript_resolver"
+            )
+        if not external_sessions and (
+            transcript_resolver is not None
+            or async_transcript_resolver is not None
+        ):
+            raise ValueError(
+                "transcript resolvers require external transcript sessions"
             )
         skills_enabled = resolved_services.is_enabled("skills")
         if skills_enabled and not isinstance(
@@ -287,8 +326,22 @@ def assemble_agent(
             raise ValueError(
                 "skill specifications require the hosted skills service"
             )
-        session_store = resolved_services.sessions.store
-        session_search_service = resolved_services.sessions.search
+        if external_sessions:
+            external_service = cast(
+                ExternalTranscriptSessionRuntimeServices,
+                resolved_services.sessions,
+            )
+            session_store = external_service.journal
+            session_search_service = DisabledHostedService(
+                "external_transcript_search"
+            )
+        else:
+            session_service = cast(
+                SessionRuntimeServices,
+                resolved_services.sessions,
+            )
+            session_store = session_service.store
+            session_search_service = session_service.search
         selected_content_store = (
             resolved_services.content
             if resolved_services.is_enabled("content")
@@ -314,12 +367,19 @@ def assemble_agent(
         learning_reviewer = (
             resolved_services.skills.learning_reviewer if skills_enabled else None
         )
-        state = hosted_state or create_agent_state(
-            session_store,
-            conversation_id,
-            execution_scope=execution_scope,
-            unresolved_tool_handler=unresolved_tool_handler,
-        )
+        if external_sessions:
+            state = hosted_state or create_external_agent_state(
+                session_store,
+                cast(str, conversation_id),
+                execution_scope=cast(ExecutionScope, execution_scope),
+            )
+        else:
+            state = hosted_state or create_agent_state(
+                session_store,
+                conversation_id,
+                execution_scope=execution_scope,
+                unresolved_tool_handler=unresolved_tool_handler,
+            )
         trace_logger = resolved_services.traces
     else:
         session_store = SQLiteSessionStore(config.store_path)
@@ -447,7 +507,9 @@ def assemble_agent(
     if skill_resolution.warnings:
         trace_logger.activate()
     conversation_memory = ConversationMemory(max_messages=config.history_limit)
-    if conversation_id is not None:
+    if conversation_id is not None and not (
+        resolved_services is not None and external_sessions
+    ):
         latest_summary = session_store.load_latest_summary(state.conversation_id)
         recent_messages = session_store.load_recent_messages(
             state.conversation_id,
@@ -465,15 +527,26 @@ def assemble_agent(
         )
         state.messages = conversation_memory.recent()
         state.conversation_summary = conversation_memory.conversation_summary
-    session_recorder = SessionRecorder(
-        session_store,
-        state.conversation_id,
-        provider=config.llm_provider,
-        model=config.model,
-        trace_path=trace_logger.path,
-        lazy=conversation_id is None and not conversation_metadata,
-        metadata=effective_conversation_metadata,
-    )
+    if resolved_services is not None and external_sessions:
+        session_recorder = ExternalTranscriptRecorder(
+            session_store,
+            cast(
+                ExternalTranscriptSessionRuntimeServices,
+                resolved_services.sessions,
+            ).projections,
+            state.conversation_id,
+            execution_scope,
+        )
+    else:
+        session_recorder = SessionRecorder(
+            session_store,
+            state.conversation_id,
+            provider=config.llm_provider,
+            model=config.model,
+            trace_path=trace_logger.path,
+            lazy=conversation_id is None and not conversation_metadata,
+            metadata=effective_conversation_metadata,
+        )
     client_is_owned = llm_client is None
     client = llm_client if llm_client is not None else llm_client_factory(config)
     if hasattr(client, "bind_config"):
@@ -680,6 +753,9 @@ def assemble_agent(
             output_policy=output_policy,
             async_output_policy=async_output_policy,
             output_policy_failure_mode=output_policy_failure_mode,
+            transcript_resolver=transcript_resolver,
+            async_transcript_resolver=async_transcript_resolver,
+            transcript_timeout_seconds=transcript_timeout_seconds,
             pinned_skill_names=skill_resolution.pinned_skill_names,
             system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
             mcp_servers=active_mcp_servers,
@@ -782,6 +858,8 @@ async def assemble_async_hosted_agent(
     usage_dimensions: UsageDimensions | None = None,
     goal_execution: GoalExecutionContext | None = None,
     profile_id: str | None = None,
+    async_transcript_resolver: AsyncTranscriptResolver | None = None,
+    transcript_timeout_seconds: float | None = None,
     async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
     tool_catalog_timeout_seconds: float | None = None,
     agent_factory: Callable[..., Agent],
@@ -810,12 +888,32 @@ async def assemble_async_hosted_agent(
         requested_conversation_id if hosted_state is None else None
     )
     resolved = await services.resolve_async(execution_scope)
+    session_store: Any
+    session_recorder: Any
+    session_search_service: Any
+    external_sessions = False
     client: LLMClient | None = None
     client_is_owned = False
     try:
-        if not isinstance(resolved.sessions, SessionRuntimeServices):
+        external_sessions = isinstance(
+            resolved.sessions,
+            AsyncExternalTranscriptSessionRuntimeServices,
+        )
+        if not isinstance(
+            resolved.sessions,
+            (SessionRuntimeServices, AsyncExternalTranscriptSessionRuntimeServices),
+        ):
             raise TypeError(
-                "hosted sessions service must be SessionRuntimeServices"
+                "hosted sessions service must be SessionRuntimeServices or "
+                "AsyncExternalTranscriptSessionRuntimeServices"
+            )
+        if external_sessions and async_transcript_resolver is None:
+            raise ValueError(
+                "external transcript sessions require async_transcript_resolver"
+            )
+        if not external_sessions and async_transcript_resolver is not None:
+            raise ValueError(
+                "async_transcript_resolver requires external transcript sessions"
             )
         effective_profile_id = profile_id or config.profile_id
         goal_snapshot = (
@@ -880,8 +978,19 @@ async def assemble_async_hosted_agent(
         effective_metadata["execution_scope"] = execution_scope.to_dict()
         effective_metadata["execution_scope_key"] = execution_scope.key
 
-        session_store = resolved.sessions.store
-        session_search_service = resolved.sessions.search
+        if external_sessions:
+            external_service = cast(
+                AsyncExternalTranscriptSessionRuntimeServices,
+                resolved.sessions,
+            )
+            session_store = external_service.journal
+            session_search_service = DisabledHostedService(
+                "external_transcript_search"
+            )
+        else:
+            session_service = cast(SessionRuntimeServices, resolved.sessions)
+            session_store = session_service.store
+            session_search_service = session_service.search
         skills_enabled = resolved.is_enabled("skills")
         if skills_enabled and not isinstance(
             resolved.skills,
@@ -912,11 +1021,18 @@ async def assemble_async_hosted_agent(
             if memory_store is not None
             else None
         )
-        state = hosted_state or await create_agent_state_async(
-            session_store,
-            load_conversation_id,
-            execution_scope=execution_scope,
-        )
+        if external_sessions:
+            state = hosted_state or await create_external_agent_state_async(
+                session_store,
+                requested_conversation_id,
+                execution_scope=execution_scope,
+            )
+        else:
+            state = hosted_state or await create_agent_state_async(
+                session_store,
+                load_conversation_id,
+                execution_scope=execution_scope,
+            )
 
         trace_logger = BufferedAsyncTraceSink(resolved.traces)
         audit_sink = BufferedAsyncAuditSink(resolved.audit)
@@ -944,7 +1060,7 @@ async def assemble_async_hosted_agent(
         conversation_memory = ConversationMemory(
             max_messages=config.history_limit
         )
-        if load_conversation_id is not None:
+        if load_conversation_id is not None and not external_sessions:
             latest_summary = await call_async_service(
                 session_store,
                 "load_latest_summary",
@@ -972,15 +1088,26 @@ async def assemble_async_hosted_agent(
             )
             state.messages = conversation_memory.recent()
             state.conversation_summary = conversation_memory.conversation_summary
-        session_recorder = AsyncSessionRecorder(
-            session_store,
-            state.conversation_id,
-            provider=config.llm_provider,
-            model=config.model,
-            trace_path=trace_logger.path,
-            lazy=(load_conversation_id is None and not conversation_metadata),
-            metadata=effective_metadata,
-        )
+        if external_sessions:
+            session_recorder = AsyncExternalTranscriptRecorder(
+                session_store,
+                cast(
+                    AsyncExternalTranscriptSessionRuntimeServices,
+                    resolved.sessions,
+                ).projections,
+                state.conversation_id,
+                execution_scope,
+            )
+        else:
+            session_recorder = AsyncSessionRecorder(
+                session_store,
+                state.conversation_id,
+                provider=config.llm_provider,
+                model=config.model,
+                trace_path=trace_logger.path,
+                lazy=(load_conversation_id is None and not conversation_metadata),
+                metadata=effective_metadata,
+            )
         await session_recorder.initialize()
 
         client_is_owned = llm_client is None
@@ -1098,6 +1225,8 @@ async def assemble_async_hosted_agent(
             output_policy=output_policy,
             async_output_policy=async_output_policy,
             output_policy_failure_mode=output_policy_failure_mode,
+            async_transcript_resolver=async_transcript_resolver,
+            transcript_timeout_seconds=transcript_timeout_seconds,
             pinned_skill_names=skill_resolution.pinned_skill_names,
             system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
             mcp_servers=active_mcp_servers,

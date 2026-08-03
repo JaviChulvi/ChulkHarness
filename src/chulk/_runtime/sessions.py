@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from chulk.core import AgentState, TurnState
-from chulk.hosting import ExecutionScope
+from chulk.hosting import ExecutionJournal, ExecutionScope
 from chulk.hosting.async_utils import call_async_service
 from chulk.redaction import redact_text
 from chulk.sessions import ConversationSummaryRecord, SQLiteSessionStore
@@ -145,6 +145,91 @@ def create_agent_state(
     elif latest_turn.can_continue_approved_plan():
         state.active_plan = latest_turn.active_plan
     return state
+
+
+def create_external_agent_state(
+    journal: ExecutionJournal,
+    conversation_id: str,
+    *,
+    execution_scope: ExecutionScope,
+) -> AgentState:
+    """Restore recovery-only state without loading a business transcript."""
+    persisted_scope = journal.load_scope(conversation_id)
+    if persisted_scope is not None:
+        execution_scope.assert_resumable(persisted_scope)
+    state = AgentState(conversation_id=conversation_id)
+    state.turns = list(journal.load_turns(conversation_id))
+    _restore_external_latest_turn(state, journal=journal)
+    return state
+
+
+async def create_external_agent_state_async(
+    journal: object,
+    conversation_id: str,
+    *,
+    execution_scope: ExecutionScope,
+) -> AgentState:
+    """Await recovery-only state without adapting journal calls to threads."""
+    persisted_scope = await call_async_service(
+        journal,
+        "load_scope",
+        conversation_id,
+    )
+    if persisted_scope is not None:
+        execution_scope.assert_resumable(persisted_scope)
+    state = AgentState(conversation_id=conversation_id)
+    state.turns = list(
+        await call_async_service(journal, "load_turns", conversation_id)
+    )
+    _restore_external_latest_turn(state)
+    return state
+
+
+def _restore_external_latest_turn(
+    state: AgentState,
+    *,
+    journal: ExecutionJournal | None = None,
+) -> None:
+    if not state.turns:
+        return
+    latest_turn = state.turns[-1]
+    if latest_turn.status == "in_progress":
+        unresolved = [
+            record
+            for record in latest_turn.tool_calls
+            if record.success is None or record.ended_at is None
+        ]
+        if unresolved:
+            latest_turn.block(
+                "Turn execution stopped after restart because a tool effect "
+                "has no terminal recovery evidence. Reconcile external state "
+                "before retrying."
+            )
+            if journal is not None:
+                journal.save_turn_snapshot(
+                    state.conversation_id,
+                    latest_turn.to_dict(),
+                )
+    state.current_turn_id = latest_turn.turn_id
+    state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
+    state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
+    state.loaded_skill_names = list(latest_turn.loaded_skill_names)
+    state.available_tool_names = list(latest_turn.available_tool_names)
+    state.errors = [error for turn in state.turns for error in turn.errors]
+    state.final_answer = latest_turn.final_answer
+    if latest_turn.context_reports:
+        state.last_context_report = latest_turn.context_reports[-1]
+    if latest_turn.model_usage_totals:
+        state.last_usage_report = latest_turn.model_usage_totals
+    if (
+        latest_turn.status == "waiting_for_approval"
+        and latest_turn.active_plan is not None
+        and not latest_turn.plan_approved
+    ):
+        state.active_plan = latest_turn.active_plan
+        state.pending_plan_turn_id = latest_turn.turn_id
+    elif latest_turn.can_continue_approved_plan():
+        state.active_plan = latest_turn.active_plan
 
 
 async def create_agent_state_async(

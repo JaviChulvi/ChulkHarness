@@ -34,6 +34,8 @@ from chulk import (
     ContextReport,
     Cost,
     ExecutionScope,
+    ExternalTranscriptSessionRuntimeServices,
+    ExternalTranscriptSnapshot,
     GatewayRunSubmitter,
     GatewayRunTarget,
     GatewayScopeResolver,
@@ -67,6 +69,9 @@ from chulk import (
     SafetyError,
     Skills,
     Tool,
+    TranscriptMessage,
+    TranscriptProjection,
+    TranscriptRequest,
     ToolCall,
     ToolAttempt,
     ToolContext,
@@ -285,6 +290,25 @@ assert host_context.resource is host_resource
 assert application_schema.key == application_intent.schema_key
 assert HostedRuntime is not None
 assert AsyncHostedRuntime is not None
+assert ExternalTranscriptSessionRuntimeServices is not None
+
+
+def resolve_transcript(request: TranscriptRequest) -> ExternalTranscriptSnapshot:
+    return ExternalTranscriptSnapshot(
+        conversation_id=request.conversation_id,
+        messages=(
+            TranscriptMessage(
+                id="message-1",
+                role="user",
+                content="hello",
+                ordinal=1,
+            ),
+        ),
+    )
+
+
+def consume_projection(projection: TranscriptProjection) -> str:
+    return projection.input_transcript_digest
 assert AsyncToolCatalogResolver is not None
 assert ResolvedToolCatalog is not None
 assert ToolCatalogRequest is not None

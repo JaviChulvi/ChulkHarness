@@ -193,6 +193,12 @@ class AsyncHostedRuntime(AsyncAgent):
                 run_budget=kwargs.get("run_budget"),
                 usage_dimensions=kwargs.get("usage_dimensions"),
                 goal_execution=kwargs.get("goal_execution"),
+                async_transcript_resolver=kwargs.get(
+                    "async_transcript_resolver"
+                ),
+                transcript_timeout_seconds=kwargs.get(
+                    "transcript_timeout_seconds"
+                ),
                 async_tool_catalog_resolver=kwargs.get(
                     "async_tool_catalog_resolver"
                 ),

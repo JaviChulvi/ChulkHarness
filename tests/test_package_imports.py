@@ -55,7 +55,7 @@ def test_plain_package_import_loads_only_the_version_contract() -> None:
 
     loaded, export_count, agent_materialized = completed.stdout.splitlines()
     assert json.loads(loaded) == ["chulk", "chulk._version"]
-    assert export_count == "605"
+    assert export_count == "619"
     assert agent_materialized == "False"
 
 

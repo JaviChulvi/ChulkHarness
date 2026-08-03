@@ -34,8 +34,10 @@ from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
 from chulk.hosting import (
+    AsyncTranscriptResolver,
     ExecutionScope,
     RuntimeServices,
+    TranscriptResolver,
 )
 from chulk.hosting.tool_catalog import (
     AsyncToolCatalogResolver,
@@ -138,6 +140,9 @@ class Agent:
         media_processors: MediaProcessorRegistry | None = None,
         services: RuntimeServices | None = None,
         execution_scope: ExecutionScope | None = None,
+        transcript_resolver: TranscriptResolver | None = None,
+        async_transcript_resolver: AsyncTranscriptResolver | None = None,
+        transcript_timeout_seconds: float | None = None,
         tool_catalog_resolver: ToolCatalogResolver | None = None,
         async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
         tool_catalog_timeout_seconds: float | None = None,
@@ -180,6 +185,9 @@ class Agent:
                 media_processors=media_processors,
                 services=services,
                 execution_scope=execution_scope,
+                transcript_resolver=transcript_resolver,
+                async_transcript_resolver=async_transcript_resolver,
+                transcript_timeout_seconds=transcript_timeout_seconds,
                 tool_catalog_resolver=tool_catalog_resolver,
                 async_tool_catalog_resolver=async_tool_catalog_resolver,
                 tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
