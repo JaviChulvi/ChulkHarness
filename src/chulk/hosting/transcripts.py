@@ -16,6 +16,7 @@ from chulk.resources import HostResource
 
 
 _TRANSCRIPT_ROLES = frozenset({"system", "user", "assistant", "tool", "observation"})
+_SEMANTIC_CONTEXT_ROLES = frozenset({"tool", "observation"})
 MAX_TRANSCRIPT_MESSAGES = 500
 MAX_TRANSCRIPT_BYTES = 1_000_000
 
@@ -118,10 +119,20 @@ class ExternalTranscriptSnapshot:
         object.__setattr__(self, "digest", sha256(encoded).hexdigest())
 
     def prompt_messages(self) -> list[dict[str, str]]:
-        return [
-            {"role": message.role, "content": message.content}
-            for message in self.messages
-        ]
+        """Project host messages into provider-neutral conversation context."""
+        projected: list[dict[str, str]] = []
+        for message in self.messages:
+            role = message.role
+            content = message.content
+            if role in _SEMANTIC_CONTEXT_ROLES:
+                if not content.strip():
+                    raise TranscriptResolutionError(
+                        f"external transcript {role} context cannot be empty"
+                    )
+                role = "user"
+                content = f"[External {message.role} context]\n{content}"
+            projected.append({"role": role, "content": content})
+        return projected
 
     def evidence(self) -> dict[str, Any]:
         return {
