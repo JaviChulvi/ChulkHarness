@@ -46,6 +46,10 @@ from chulk.results import (
     LearningReview,
     MemoryProposal,
 )
+from chulk.streaming import (
+    FinalAnswerStreamingMode,
+    OutputPolicyFailureMode,
+)
 from chulk.runtime import create_async_hosted_agent
 from chulk.sessions import SessionSearchPage, SessionWindow
 from chulk.skills import (
@@ -181,6 +185,16 @@ class AsyncHostedRuntime(AsyncAgent):
                 redaction_callback=kwargs.get("redaction_callback"),
                 redaction_fail_closed=bool(
                     kwargs.get("redaction_fail_closed", False)
+                ),
+                final_answer_streaming=kwargs.get(
+                    "final_answer_streaming",
+                    FinalAnswerStreamingMode.VALIDATED,
+                ),
+                output_policy=kwargs.get("output_policy"),
+                async_output_policy=kwargs.get("async_output_policy"),
+                output_policy_failure_mode=kwargs.get(
+                    "output_policy_failure_mode",
+                    OutputPolicyFailureMode.CLOSED,
                 ),
                 capabilities=capabilities,
                 deps=kwargs.get("deps"),

@@ -10,12 +10,15 @@ from chulk import (
     Agent,
     AgentConfig,
     AsyncAgent,
+    AsyncHostedRuntime,
     EventName,
     FinalAnswerDeliveryStatus,
     FinalAnswerPolicyDecision,
     FinalAnswerStreamingMode,
+    ExecutionScope,
     OutputPolicyFailureMode,
 )
+from chulk.hosting.reference import InMemoryServiceHub
 from chulk.llm import FallbackChain, LLMClient, LLMError, LLMStreamChunk
 
 
@@ -241,6 +244,70 @@ async def test_async_stream_uses_native_iterator_and_async_policy(tmp_path) -> N
     assert not llm.sync_stream_called
     assert deltas == ["NATIVE ", "ASYNC"]
     assert events[-1].payload.result.content == "NATIVE ASYNC"
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_create_awaits_policy_and_honors_failure_mode(
+    tmp_path,
+) -> None:
+    class RecordingPolicy:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        async def process(self, chunk):
+            self.calls.append(("process", chunk.text))
+            return FinalAnswerPolicyDecision(text=chunk.text.upper())
+
+        async def complete(self, *, turn_id: str, next_sequence: int):
+            self.calls.append(("complete", next_sequence))
+            return FinalAnswerPolicyDecision(text="!")
+
+        async def reset(self, *, turn_id: str):
+            self.calls.append(("reset", turn_id))
+
+    scope = ExecutionScope.local()
+    policy = RecordingPolicy()
+    runtime = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "policy"),
+        llm=IncrementalLLM(("native ", "hosted")),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=scope,
+        final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+        async_output_policy=policy,
+    )
+    events = [event async for event in runtime.run_events_async("hello")]
+    assert [
+        event.payload.text
+        for event in events
+        if event.name == EventName.MODEL_DELTA.value
+    ] == ["NATIVE ", "HOSTED", "!"]
+    assert events[-1].payload.result.content == "NATIVE HOSTED!"
+    assert policy.calls == [
+        ("process", "native "),
+        ("process", "hosted"),
+        ("complete", 2),
+    ]
+    await runtime.close()
+
+    class BrokenPolicy(RecordingPolicy):
+        async def process(self, chunk):
+            raise RuntimeError("policy unavailable")
+
+    fail_open = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "fail-open"),
+        llm=IncrementalLLM(("permitted",)),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=scope,
+        final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+        async_output_policy=BrokenPolicy(),
+        output_policy_failure_mode=OutputPolicyFailureMode.OPEN,
+    )
+    assert (await fail_open.run_result("hello")).content == "permitted!"
+    await fail_open.close()
 
 
 @pytest.mark.asyncio
