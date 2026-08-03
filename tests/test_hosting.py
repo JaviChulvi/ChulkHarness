@@ -22,10 +22,12 @@ from chulk import (
     Capabilities,
     ExecutionScope,
     ExecutionScopeError,
+    FinalAnswerStreamingMode,
     HostedRuntime,
     HostedCapability,
     HostedCapabilityProfile,
     HostedServiceDisabledError,
+    OutputPolicyFailureMode,
     ToolEffect,
     ToolIdentity,
     ToolPolicy,
@@ -392,6 +394,76 @@ async def test_async_tool_only_profile_has_sync_parity(tmp_path: Path) -> None:
     assert runtime.service_manifest.to_dict() == services.manifest.to_dict()
     assert list(tmp_path.iterdir()) == []
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_create_forwards_output_streaming_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forwarded: list[dict[str, object]] = []
+    original = create_async_hosted_agent
+
+    async def capture(*args, **kwargs):
+        forwarded.append(kwargs.copy())
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "chulk._sdk.hosted.create_async_hosted_agent",
+        capture,
+    )
+    output_policy = object()
+    async_output_policy = object()
+    runtime = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "explicit"),
+        llm=FakeLLM([_final("unused")]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+        final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+        output_policy=output_policy,
+        async_output_policy=async_output_policy,
+        output_policy_failure_mode=OutputPolicyFailureMode.OPEN,
+    )
+    assert runtime.runtime.final_answer_streaming is FinalAnswerStreamingMode.INCREMENTAL
+    assert runtime.runtime._model_transport.output_policy is output_policy
+    assert runtime.runtime._model_transport.async_output_policy is async_output_policy
+    assert runtime.runtime.output_policy_failure_mode is OutputPolicyFailureMode.OPEN
+    await runtime.close()
+
+    defaults = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "defaults"),
+        llm=FakeLLM([_final("unused")]),
+        tools=[],
+        skills=[],
+        services=InMemoryServiceHub().async_services(),
+        execution_scope=_scope(),
+    )
+    assert defaults.runtime.final_answer_streaming is FinalAnswerStreamingMode.VALIDATED
+    assert defaults.runtime._model_transport.output_policy is None
+    assert defaults.runtime._model_transport.async_output_policy is None
+    assert defaults.runtime.output_policy_failure_mode is OutputPolicyFailureMode.CLOSED
+    await defaults.close()
+
+    assert {
+        name: forwarded[0][name]
+        for name in (
+            "final_answer_streaming",
+            "output_policy",
+            "async_output_policy",
+            "output_policy_failure_mode",
+        )
+    } == {
+        "final_answer_streaming": FinalAnswerStreamingMode.INCREMENTAL,
+        "output_policy": output_policy,
+        "async_output_policy": async_output_policy,
+        "output_policy_failure_mode": OutputPolicyFailureMode.OPEN,
+    }
+    assert forwarded[1]["final_answer_streaming"] is FinalAnswerStreamingMode.VALIDATED
+    assert forwarded[1]["output_policy"] is None
+    assert forwarded[1]["async_output_policy"] is None
+    assert forwarded[1]["output_policy_failure_mode"] is OutputPolicyFailureMode.CLOSED
 
 
 def test_hosted_construction_fails_before_resolving_services_without_scope(
