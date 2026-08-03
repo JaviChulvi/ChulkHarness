@@ -16,7 +16,10 @@ from chulk.resources import HostResource
 
 
 _TRANSCRIPT_ROLES = frozenset({"system", "user", "assistant", "tool", "observation"})
-_SEMANTIC_CONTEXT_ROLES = frozenset({"tool", "observation"})
+_SEMANTIC_CONTEXT_PREFIXES = {
+    "tool": "[External tool context]\n",
+    "observation": "[External observation context]\n",
+}
 MAX_TRANSCRIPT_MESSAGES = 500
 MAX_TRANSCRIPT_BYTES = 1_000_000
 
@@ -119,20 +122,20 @@ class ExternalTranscriptSnapshot:
         object.__setattr__(self, "digest", sha256(encoded).hexdigest())
 
     def prompt_messages(self) -> list[dict[str, str]]:
-        """Project host messages into provider-neutral conversation context."""
-        projected: list[dict[str, str]] = []
+        """Return semantic host messages for history selection."""
+        messages: list[dict[str, str]] = []
         for message in self.messages:
             role = message.role
             content = message.content
-            if role in _SEMANTIC_CONTEXT_ROLES:
+            prefix = _SEMANTIC_CONTEXT_PREFIXES.get(role)
+            if prefix is not None:
                 if not content.strip():
                     raise TranscriptResolutionError(
                         f"external transcript {role} context cannot be empty"
                     )
-                role = "user"
-                content = f"[External {message.role} context]\n{content}"
-            projected.append({"role": role, "content": content})
-        return projected
+                content = f"{prefix}{content}"
+            messages.append({"role": role, "content": content})
+        return messages
 
     def evidence(self) -> dict[str, Any]:
         return {
@@ -143,6 +146,21 @@ class ExternalTranscriptSnapshot:
             "message_count": len(self.messages),
             "summary_message_count": self.summary_message_count,
         }
+
+
+def project_external_transcript_messages(
+    messages: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Project selected external tool context into portable user messages."""
+    projected: list[dict[str, str]] = []
+    for message in messages:
+        role = message.get("role", "")
+        content = message.get("content", "")
+        prefix = _SEMANTIC_CONTEXT_PREFIXES.get(role)
+        if prefix is not None and content.startswith(prefix):
+            role = "user"
+        projected.append({"role": role, "content": content})
+    return projected
 
 
 @dataclass(frozen=True, slots=True)

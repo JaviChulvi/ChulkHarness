@@ -25,6 +25,8 @@ from chulk import (
     TranscriptResolutionError,
 )
 from chulk.hosting.reference import InMemoryServiceHub
+from chulk.hosting.transcripts import project_external_transcript_messages
+from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.state import ToolCallRecord, TurnState
 from chulk.hosting.transcript_reference import (
     AsyncInMemoryExecutionJournal,
@@ -33,6 +35,8 @@ from chulk.hosting.transcript_reference import (
     InMemoryTranscriptProjectionSink,
 )
 from chulk.llm import LLMClient
+from chulk.memory import ConversationMemory
+from chulk.tools import ToolRegistry
 from chulk.llm.messages import (
     chat_messages,
     local_chat_messages,
@@ -219,18 +223,25 @@ def test_tool_roles_project_to_portable_semantic_context() -> None:
         ),
     )
 
-    projected = snapshot.prompt_messages()
-    assert projected == [
+    semantic_messages = snapshot.prompt_messages()
+    assert semantic_messages == [
         {"role": "system", "content": "instructions"},
         {"role": "assistant", "content": "I checked"},
         {
-            "role": "user",
+            "role": "tool",
             "content": "[External tool context]\ntool result",
         },
         {
-            "role": "user",
+            "role": "observation",
             "content": "[External observation context]\nhost observation",
         },
+    ]
+    projected = project_external_transcript_messages(semantic_messages)
+    assert [message["role"] for message in projected] == [
+        "system",
+        "assistant",
+        "user",
+        "user",
     ]
 
     _, responses_messages = split_instructions(projected)
@@ -249,6 +260,60 @@ def test_tool_roles_project_to_portable_semantic_context() -> None:
     assert {
         message["role"] for message in local_chat_messages(projected)
     } <= {"user", "assistant"}
+
+
+def test_tool_roles_anchor_history_until_provider_projection() -> None:
+    snapshot = ExternalTranscriptSnapshot(
+        conversation_id="conversation-1",
+        messages=(
+            TranscriptMessage("question", "user", "active question", 1),
+            *(
+                TranscriptMessage(
+                    f"context-{ordinal}",
+                    "tool" if ordinal % 2 else "observation",
+                    f"result {ordinal}",
+                    ordinal,
+                )
+                for ordinal in range(2, 23)
+            ),
+        ),
+    )
+    memory = ConversationMemory(max_messages=20)
+
+    memory.replace(snapshot.prompt_messages())
+
+    assert memory.messages[0] == {
+        "role": "user",
+        "content": "active question",
+    }
+    assert memory.consume_pending_summary_messages() == []
+    prompt = build_agent_prompt(
+        system_prompt="Base prompt.",
+        memory=memory,
+        profile_memories=[],
+        relevant_memories=[],
+        selected_skills=[],
+        tool_registry=ToolRegistry(),
+        max_skill_content_chars=1000,
+        max_tool_calls_per_turn=3,
+    )
+    assert prompt.messages[1] == {
+        "role": "user",
+        "content": "active question",
+    }
+    assert all(message["role"] == "user" for message in prompt.messages[2:])
+    history = next(
+        section
+        for section in prompt.context_report.to_dict()["sections"]
+        if section["name"] == "history"
+    )
+    observations = next(
+        section
+        for section in prompt.context_report.to_dict()["sections"]
+        if section["name"] == "observations"
+    )
+    assert history["metadata"]["roles"]["tool"] == 10
+    assert observations["metadata"]["roles"]["observation"] == 11
 
 
 def test_invalid_tool_context_fails_before_provider_work(tmp_path: Path) -> None:
