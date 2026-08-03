@@ -562,12 +562,14 @@ other resume boundaries resolve the transcript again and raise
 `TranscriptConflictError` if its digest changed.
 
 External `tool` and `observation` roles are semantic conversation context, not
-lossless provider-native tool protocol messages. Chulk labels and projects them
-as user context before any provider normalization, so one canonical transcript
-is portable across Responses, Chat Completions, Anthropic, and local provider
-families. They do not require assistant tool-call pairing and their metadata is
-not translated into provider call IDs. Empty tool or observation context fails
-with `TranscriptResolutionError` before provider work.
+lossless provider-native tool protocol messages. Chulk preserves those roles
+while selecting and trimming history, then labels and projects the selected
+messages as user context before provider normalization. One canonical
+transcript is therefore portable across Responses, Chat Completions, Anthropic,
+and local provider families without changing the active-turn boundary. These
+roles do not require assistant tool-call pairing and their metadata is not
+translated into provider call IDs. Empty tool or observation context fails with
+`TranscriptResolutionError` before provider work.
 
 The execution journal is recovery-only: it receives redacted turn state and
 effect evidence, never authoritative user or assistant content. Terminal

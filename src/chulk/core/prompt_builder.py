@@ -28,6 +28,7 @@ from chulk.core.context import (
     select_messages_for_budget,
 )
 from chulk.core.state import Plan
+from chulk.hosting.transcripts import project_external_transcript_messages
 from chulk.core.planning import read_only_planning_tool_names
 from chulk.memory import ConversationMemory, MemoryRecord
 from chulk.skills import SkillSelection
@@ -387,9 +388,12 @@ def build_agent_prompt(
         request_overhead_tokens=request_overhead_estimated_tokens,
         alternate_system_message=alternate_system_message,
     )
-    messages = [system_message, *history_messages]
+    provider_history_messages = project_external_transcript_messages(
+        history_messages
+    )
+    messages = [system_message, *provider_history_messages]
     fallback_sent_messages = (
-        [alternate_system_message, *history_messages]
+        [alternate_system_message, *provider_history_messages]
         if alternate_system_message is not None
         else None
     )
