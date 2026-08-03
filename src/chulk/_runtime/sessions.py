@@ -159,7 +159,11 @@ def create_external_agent_state(
         execution_scope.assert_resumable(persisted_scope)
     state = AgentState(conversation_id=conversation_id)
     state.turns = list(journal.load_turns(conversation_id))
-    _restore_external_latest_turn(state, journal=journal)
+    if _restore_external_latest_turn(state):
+        journal.save_turn_snapshot(
+            state.conversation_id,
+            state.turns[-1].to_dict(),
+        )
     return state
 
 
@@ -181,18 +185,23 @@ async def create_external_agent_state_async(
     state.turns = list(
         await call_async_service(journal, "load_turns", conversation_id)
     )
-    _restore_external_latest_turn(state)
+    if _restore_external_latest_turn(state):
+        await call_async_service(
+            journal,
+            "save_turn_snapshot",
+            state.conversation_id,
+            state.turns[-1].to_dict(),
+        )
     return state
 
 
 def _restore_external_latest_turn(
     state: AgentState,
-    *,
-    journal: ExecutionJournal | None = None,
-) -> None:
+) -> bool:
     if not state.turns:
-        return
+        return False
     latest_turn = state.turns[-1]
+    recovered = False
     if latest_turn.status == "in_progress":
         unresolved = [
             record
@@ -205,11 +214,7 @@ def _restore_external_latest_turn(
                 "has no terminal recovery evidence. Reconcile external state "
                 "before retrying."
             )
-            if journal is not None:
-                journal.save_turn_snapshot(
-                    state.conversation_id,
-                    latest_turn.to_dict(),
-                )
+            recovered = True
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
     state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
@@ -230,6 +235,7 @@ def _restore_external_latest_turn(
         state.pending_plan_turn_id = latest_turn.turn_id
     elif latest_turn.can_continue_approved_plan():
         state.active_plan = latest_turn.active_plan
+    return recovered
 
 
 async def create_agent_state_async(

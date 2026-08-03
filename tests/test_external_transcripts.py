@@ -14,6 +14,7 @@ from chulk import (
     AsyncExternalTranscriptSessionRuntimeServices,
     AsyncHostedRuntime,
     AsyncServiceBinding,
+    ChulkError,
     ExecutionScope,
     ExternalTranscriptSessionRuntimeServices,
     ExternalTranscriptSnapshot,
@@ -24,6 +25,7 @@ from chulk import (
     TranscriptResolutionError,
 )
 from chulk.hosting.reference import InMemoryServiceHub
+from chulk.core.state import ToolCallRecord, TurnState
 from chulk.hosting.transcript_reference import (
     AsyncInMemoryExecutionJournal,
     AsyncInMemoryTranscriptProjectionSink,
@@ -359,3 +361,144 @@ async def test_native_async_external_transcript_and_timeout(tmp_path: Path) -> N
         await timed.run("timeout")
     assert slow_llm.requests == []
     await timed.close()
+
+
+@pytest.mark.asyncio
+async def test_native_async_recovery_persists_blocked_turn_once(
+    tmp_path: Path,
+) -> None:
+    class CountingJournal(AsyncInMemoryExecutionJournal):
+        def __init__(self) -> None:
+            super().__init__()
+            self.save_count = 0
+
+        async def save_turn_snapshot(self, conversation_id, turn) -> None:
+            self.save_count += 1
+            await super().save_turn_snapshot(conversation_id, turn)
+
+    journal = CountingJournal()
+    scope = _scope()
+    turn = TurnState(
+        user_message="[externally owned transcript]",
+        turn_id="turn-uncertain-effect",
+    )
+    turn.tool_call_count = 1
+    turn.tool_calls.append(
+        ToolCallRecord(
+            tool_name="external_mutation",
+            arguments={"value": "once"},
+            iteration=1,
+        )
+    )
+    await journal.bind_scope("conversation-1", scope)
+    await journal.save_turn_snapshot("conversation-1", turn.to_dict())
+    journal.save_count = 0
+
+    sync_journal = InMemoryExecutionJournal()
+    sync_journal.bind_scope("conversation-1", scope)
+    sync_journal.save_turn_snapshot("conversation-1", turn.to_dict())
+    sync_runtime = HostedRuntime(
+        config=AgentConfig(project_root=tmp_path / "sync"),
+        llm=RecordingLLM(),
+        tools=[],
+        skills=[],
+        services=_sync_services(
+            sync_journal,
+            InMemoryTranscriptProjectionSink(),
+        ),
+        execution_scope=scope,
+        transcript_resolver=lambda _request: _snapshot(),
+    )
+    sync_persisted = sync_journal.load_turns("conversation-1")[-1]
+    assert sync_persisted.status == "blocked"
+    sync_runtime.close()
+
+    async def resolve(_request):
+        return _snapshot()
+
+    first = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "first"),
+        llm=RecordingLLM(),
+        tools=[],
+        skills=[],
+        services=_async_services(
+            journal,
+            AsyncInMemoryTranscriptProjectionSink(),
+        ),
+        execution_scope=scope,
+        async_transcript_resolver=resolve,
+    )
+    assert first.state.turns[-1].status == "blocked"
+    persisted = await journal.load_turns("conversation-1")
+    assert persisted[-1].status == "blocked"
+    assert persisted[-1].final_answer == sync_persisted.final_answer
+    assert persisted[-1].user_message == "[externally owned transcript]"
+    assert _snapshot().messages[0].content not in json.dumps(
+        persisted[-1].to_dict()
+    )
+    assert journal.save_count == 1
+    await first.close()
+
+    second = await AsyncHostedRuntime.create(
+        config=AgentConfig(project_root=tmp_path / "second"),
+        llm=RecordingLLM(),
+        tools=[],
+        skills=[],
+        services=_async_services(
+            journal,
+            AsyncInMemoryTranscriptProjectionSink(),
+        ),
+        execution_scope=scope,
+        async_transcript_resolver=resolve,
+    )
+    assert second.state.turns[-1].status == "blocked"
+    assert journal.save_count == 1
+    await second.close()
+
+
+@pytest.mark.asyncio
+async def test_native_async_recovery_surfaces_checkpoint_failure(
+    tmp_path: Path,
+) -> None:
+    class FailingJournal(AsyncInMemoryExecutionJournal):
+        fail_checkpoint = False
+
+        async def save_turn_snapshot(self, conversation_id, turn) -> None:
+            if self.fail_checkpoint:
+                raise RuntimeError("recovery checkpoint unavailable")
+            await super().save_turn_snapshot(conversation_id, turn)
+
+    journal = FailingJournal()
+    scope = _scope()
+    turn = TurnState(
+        user_message="[externally owned transcript]",
+        turn_id="turn-failed-checkpoint",
+    )
+    turn.tool_calls.append(
+        ToolCallRecord(
+            tool_name="external_mutation",
+            arguments={},
+            iteration=1,
+        )
+    )
+    await journal.bind_scope("conversation-1", scope)
+    await journal.save_turn_snapshot("conversation-1", turn.to_dict())
+    journal.fail_checkpoint = True
+
+    async def resolve(_request):
+        return _snapshot()
+
+    with pytest.raises(ChulkError, match="recovery checkpoint unavailable") as exc:
+        await AsyncHostedRuntime.create(
+            config=AgentConfig(project_root=tmp_path),
+            llm=RecordingLLM(),
+            tools=[],
+            skills=[],
+            services=_async_services(
+                journal,
+                AsyncInMemoryTranscriptProjectionSink(),
+            ),
+            execution_scope=scope,
+            async_transcript_resolver=resolve,
+        )
+    assert isinstance(exc.value.__cause__, RuntimeError)

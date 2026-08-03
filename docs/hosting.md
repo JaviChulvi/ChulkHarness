@@ -567,4 +567,7 @@ for the host to apply to its transcript. `InMemoryExecutionJournal` and
 `InMemoryTranscriptProjectionSink` are deterministic reference
 implementations. Native async hosts use the corresponding async contracts and
 must provide `async_transcript_resolver`; sync/async adaptation is intentionally
-rejected.
+rejected. If recovery finds an uncertain tool effect, both sync and native
+async construction persist the blocked turn before returning; a failed
+recovery checkpoint fails construction instead of exposing an in-memory-only
+terminal state.
