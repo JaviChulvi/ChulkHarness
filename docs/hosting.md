@@ -179,7 +179,8 @@ run on the caller event loop. A native async service is never sent through its
 synchronous compatibility methods. Explicit `ServiceBinding` compatibility
 resources remain supported and are isolated in worker threads. Direct
 `AsyncHostedRuntime(...)` construction remains available only when every
-binding is synchronous.
+binding is synchronous. The native async factory has an explicit typed
+keyword-only signature and rejects unknown options before resolving services.
 
 The async boundary also owns the SDK's service-backed management operations:
 memory and learning proposals, governed skills, plugin lifecycle actions,
