@@ -182,3 +182,24 @@ jobs:
 
       - name: Verify clean wheel, resources, and examples
         run: python scripts/check_wheel_install.py dist/*.whl --examples-dir examples
+
+      - name: Read verified wheel version
+        id: wheel-version
+        run: |
+          version="$(python -c 'import sys; from pathlib import Path; from packaging.utils import parse_wheel_filename; print(parse_wheel_filename(Path(sys.argv[1]).name)[1])' dist/*.whl)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate wheel checksum
+        run: |
+          cd dist
+          sha256sum -- *.whl > SHA256SUMS
+
+      - name: Upload verified wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: chulkharness-wheel-${{ steps.wheel-version.outputs.version }}-${{ github.sha }}
+          path: |
+            dist/*.whl
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

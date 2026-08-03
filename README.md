@@ -14,8 +14,9 @@ who want an inspectable runtime and a small embedding API.
 - Vulnerability reporting: [security policy](SECURITY.md)
 
 ChulkHarness supports Python 3.11, 3.12, and 3.13. It is not published to
-PyPI yet, so install it from a source checkout. Python imports and the command
-are `chulk`.
+PyPI yet, so install it from a source checkout or use a
+[verified wheel from a successful CI run](docs/quickstart.md#install-a-verified-ci-wheel).
+Python imports and the command are `chulk`.
 
 ```bash
 python -m pip install -e .
