@@ -8,6 +8,41 @@ clone the repository and install it from its root. The Python package is
 python -m pip install -e .
 ```
 
+## Install a verified CI wheel
+
+Every successful canonical `package` job uploads the exact wheel that passed
+the clean-install smoke test. Its artifact name contains both the package
+version and full source commit SHA:
+
+```text
+chulkharness-wheel-<version>-<full-commit-sha>
+```
+
+Choose the successful workflow run for the exact commit from the repository's
+[Actions page](https://github.com/JaviChulvi/ChulkHarness/actions), then download,
+verify, and install its artifact with the GitHub CLI:
+
+```bash
+repository=JaviChulvi/ChulkHarness
+run_id="WORKFLOW_RUN_ID"
+version="PACKAGE_VERSION"
+commit_sha="FULL_COMMIT_SHA"
+artifact_dir=.artifacts/chulkharness
+
+gh run download "$run_id" \
+  --repo "$repository" \
+  --name "chulkharness-wheel-${version}-${commit_sha}" \
+  --dir "$artifact_dir"
+
+(cd "$artifact_dir" && shasum -a 256 -c SHA256SUMS)
+python -m pip install "$artifact_dir"/chulkharness-*.whl
+```
+
+Pin both the workflow run and full commit SHA rather than selecting the latest
+successful artifact implicitly. CI artifacts are retained for 30 days and are
+intended for commit or pull-request testing, not as permanent releases. Treat
+artifacts built from unreviewed pull requests as untrusted.
+
 Save this as `quickstart.py`:
 
 ```python
