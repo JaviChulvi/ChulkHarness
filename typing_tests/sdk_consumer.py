@@ -328,6 +328,22 @@ assert GatewayScopeResolver is not None
 assert GatewayRunSubmitter is not None
 assert GatewayRunTarget is not None
 assert HostedScheduledOccurrence is not None
+
+
+async def create_typed_async_hosted_runtime(
+    services: AsyncRuntimeServices,
+    scope: ExecutionScope,
+) -> AsyncHostedRuntime:
+    return await AsyncHostedRuntime.create(
+        services=services,
+        execution_scope=scope,
+        config=config,
+        tools=[],
+        skills=[],
+        final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+        transcript_timeout_seconds=1.0,
+        tool_catalog_timeout_seconds=1.0,
+    )
 assert HostedScheduleRunSubmitter is not None
 
 durable_submission: RunSubmission = RunSubmission(

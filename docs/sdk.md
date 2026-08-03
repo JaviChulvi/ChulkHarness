@@ -146,7 +146,9 @@ streaming; providers without it retain a one-shot async compatibility stream.
 Native async hosted factories are resolved with
 `await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are
 closed with their `aclose()` method on the active event loop. Native async
-service methods and policy hooks are awaited directly; explicit synchronous
+construction exposes a closed, typed keyword-only option set; unknown or
+misspelled options raise `TypeError` before service or runtime assembly.
+Service methods and policy hooks are awaited directly; explicit synchronous
 bindings are isolated in worker threads. Ordered persistence and sink journals
 flush before model, tool, approval, and terminal boundaries. Cancellation and
 timeouts release active usage reservations and flush terminal evidence; close

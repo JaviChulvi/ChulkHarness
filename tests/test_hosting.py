@@ -466,6 +466,109 @@ async def test_async_hosted_create_forwards_output_streaming_options(
     assert forwarded[1]["output_policy_failure_mode"] is OutputPolicyFailureMode.CLOSED
 
 
+def test_async_hosted_create_rejects_unknown_options_before_construction() -> None:
+    with pytest.raises(TypeError, match="final_answer_streamng"):
+        AsyncHostedRuntime.create(
+            services=InMemoryServiceHub().async_services(),
+            execution_scope=_scope(),
+            final_answer_streamng="incremental",  # type: ignore[call-arg]
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_hosted_create_forwards_every_factory_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = create_async_hosted_agent
+    captured: dict[str, object] = {}
+
+    async def capture(config, **kwargs):
+        captured["config"] = config
+        captured.update(kwargs)
+        return await original(
+            config,
+            services=kwargs["services"],
+            execution_scope=kwargs["execution_scope"],
+            llm_client=FakeLLM([_final("unused")]),
+            tool_specs=[],
+            skill_specs=[],
+            capabilities=Capabilities.none(),
+        )
+
+    monkeypatch.setattr(
+        "chulk._sdk.hosted.create_async_hosted_agent",
+        capture,
+    )
+    services = InMemoryServiceHub().async_services()
+    scope = _scope()
+    config = AgentConfig(project_root=tmp_path)
+    values = {
+        "conversation_id": "conversation-typed",
+        "conversation_metadata": {"conversation": "metadata"},
+        "runtime_metadata": {"runtime": "metadata"},
+        "llm_client": object(),
+        "tool_specs": [object()],
+        "skill_specs": [object()],
+        "system_prompt": "typed prompt",
+        "permission_callback": object(),
+        "mcp_servers": (object(),),
+        "redaction_callback": object(),
+        "redaction_fail_closed": True,
+        "final_answer_streaming": FinalAnswerStreamingMode.INCREMENTAL,
+        "output_policy": object(),
+        "async_output_policy": object(),
+        "output_policy_failure_mode": OutputPolicyFailureMode.OPEN,
+        "capabilities": Capabilities.none(),
+        "deps": object(),
+        "shell_execution_policy": object(),
+        "require_shell_containment": True,
+        "run_budget": object(),
+        "usage_dimensions": object(),
+        "goal_execution": object(),
+        "async_transcript_resolver": object(),
+        "transcript_timeout_seconds": 1.5,
+        "async_tool_catalog_resolver": object(),
+        "tool_catalog_timeout_seconds": 2.5,
+    }
+    runtime = await AsyncHostedRuntime.create(
+        services=services,
+        execution_scope=scope,
+        config=config,
+        llm=values["llm_client"],
+        tools=values["tool_specs"],
+        skills=values["skill_specs"],
+        system_prompt=values["system_prompt"],
+        conversation_id=values["conversation_id"],
+        conversation_metadata=values["conversation_metadata"],
+        runtime_metadata=values["runtime_metadata"],
+        permission_callback=values["permission_callback"],
+        mcp=values["mcp_servers"],
+        redaction_callback=values["redaction_callback"],
+        redaction_fail_closed=values["redaction_fail_closed"],
+        final_answer_streaming=values["final_answer_streaming"],
+        output_policy=values["output_policy"],
+        async_output_policy=values["async_output_policy"],
+        output_policy_failure_mode=values["output_policy_failure_mode"],
+        capabilities=values["capabilities"],
+        deps=values["deps"],
+        shell_execution_policy=values["shell_execution_policy"],
+        require_shell_containment=values["require_shell_containment"],
+        run_budget=values["run_budget"],
+        usage_dimensions=values["usage_dimensions"],
+        goal_execution=values["goal_execution"],
+        async_transcript_resolver=values["async_transcript_resolver"],
+        transcript_timeout_seconds=values["transcript_timeout_seconds"],
+        async_tool_catalog_resolver=values["async_tool_catalog_resolver"],
+        tool_catalog_timeout_seconds=values["tool_catalog_timeout_seconds"],
+    )
+    await runtime.close()
+
+    assert captured["services"] is services
+    assert captured["execution_scope"] is scope
+    assert all(captured[name] is value for name, value in values.items())
+
+
 def test_hosted_construction_fails_before_resolving_services_without_scope(
     tmp_path: Path,
 ) -> None:

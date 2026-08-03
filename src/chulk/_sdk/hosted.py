@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from pathlib import Path
 from typing import Any, Callable, TypeVar, cast
 from uuid import uuid4
 
 from chulk._sdk.agent import Agent
 from chulk._sdk.async_agent import AsyncAgent
-from chulk._sdk.config import coerce_config
-from chulk._sdk.construction import _selected_capabilities
+from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config
+from chulk._sdk.construction import PermissionCallback, _selected_capabilities
 from chulk._sdk.error_mapping import map_public_error
 from chulk._sdk.event_channel import RunGate
+from chulk._sdk.events import EventCallback
 from chulk._sdk.handles import AgentHandle, AsyncAgentHandle
 from chulk._sdk.results import (
     governed_skill_snapshot,
@@ -24,12 +25,19 @@ from chulk._sdk.results import (
 from chulk.hosting import (
     AsyncRuntimeServices,
     AsyncServiceBinding,
+    AsyncTranscriptResolver,
     ExecutionScope,
     HostedServiceManifest,
     RuntimeServices,
 )
 from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.services import ResolvedRuntimeServices
+from chulk.hosting.tool_catalog import AsyncToolCatalogResolver
+from chulk.config import Config
+from chulk.capabilities import Capabilities, MemoryMode
+from chulk.goals import GoalExecutionContext
+from chulk.llm import LLMClient
+from chulk.mcp import MCPServerConfig
 from chulk.plugins import (
     LoadedPluginEntryPoint,
     PluginAuditReport,
@@ -47,7 +55,9 @@ from chulk.results import (
     MemoryProposal,
 )
 from chulk.streaming import (
+    AsyncIncrementalOutputPolicy,
     FinalAnswerStreamingMode,
+    IncrementalOutputPolicy,
     OutputPolicyFailureMode,
 )
 from chulk.runtime import create_async_hosted_agent
@@ -61,7 +71,14 @@ from chulk.tracing.artifacts import (
     ArtifactReadMode,
     DEFAULT_ARTIFACT_READ_BYTES,
 )
-from chulk.usage import UsageAggregate, UsageGroupBy, UsagePage
+from chulk.tools import ShellExecutionPolicy
+from chulk.usage import (
+    RunBudget,
+    UsageAggregate,
+    UsageDimensions,
+    UsageGroupBy,
+    UsagePage,
+)
 
 
 T = TypeVar("T")
@@ -128,114 +145,103 @@ class AsyncHostedRuntime(AsyncAgent):
         *,
         services: AsyncRuntimeServices,
         execution_scope: ExecutionScope,
-        **kwargs: Any,
+        config: Config | AgentConfig | None = None,
+        preset: AgentPreset | None = None,
+        llm: LLMClient | Any | None = None,
+        tools: Iterable[object] | None = None,
+        skills: object | Iterable[object] | None = None,
+        system_prompt: str | None = None,
+        conversation_id: str | None = None,
+        conversation_metadata: dict[str, object] | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+        permission_callback: PermissionCallback | None = None,
+        on_event: EventCallback | None = None,
+        mcp: Iterable[MCPServerConfig] | None = None,
+        redaction_callback: Callable[[str, str, dict], str] | None = None,
+        redaction_fail_closed: bool = False,
+        final_answer_streaming: FinalAnswerStreamingMode
+        | str = FinalAnswerStreamingMode.VALIDATED,
+        output_policy: IncrementalOutputPolicy | None = None,
+        async_output_policy: AsyncIncrementalOutputPolicy | None = None,
+        output_policy_failure_mode: OutputPolicyFailureMode
+        | str = OutputPolicyFailureMode.CLOSED,
+        capabilities: Capabilities | None = None,
+        memory_mode: MemoryMode | str | None = None,
+        deps: object | None = None,
+        shell_execution_policy: ShellExecutionPolicy | None = None,
+        require_shell_containment: bool = False,
+        run_budget: RunBudget | None = None,
+        usage_dimensions: UsageDimensions | None = None,
+        goal_execution: GoalExecutionContext | None = None,
+        async_transcript_resolver: AsyncTranscriptResolver | None = None,
+        transcript_timeout_seconds: float | None = None,
+        async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
+        tool_catalog_timeout_seconds: float | None = None,
     ) -> "AsyncHostedRuntime":
         """Build a native async hosted runtime without a sync service bridge."""
 
-        config_arg = kwargs.get("config")
-        preset = kwargs.get("preset")
         capabilities = _selected_capabilities(
-            config_arg,
-            kwargs.get("capabilities"),
-            kwargs.get("memory_mode"),
+            config,
+            capabilities,
+            memory_mode,
         )
-        conflicts = [
-            name
-            for name in (
-                "execution_backend",
-                "plugin_registry",
-                "content_store",
-                "media_processors",
-                "memory_namespace",
-            )
-            if kwargs.get(name) is not None
-        ]
-        if conflicts:
-            raise ValueError(
-                "hosted services cannot be combined with individual runtime "
-                "injections: " + ", ".join(conflicts)
-            )
-        selected_tools = kwargs.get("tools")
+        selected_tools = tools
         if selected_tools is None and preset is not None:
             selected_tools = preset.tools
-        selected_skills = kwargs.get("skills")
+        selected_skills = skills
         if selected_skills is None and preset is not None:
             selected_skills = preset.skills
-        selected_prompt = kwargs.get("system_prompt")
+        selected_prompt = system_prompt
         if selected_prompt is None and preset is not None:
             selected_prompt = preset.system_prompt
         try:
             core, resolved = await create_async_hosted_agent(
-                coerce_config(config_arg),
+                coerce_config(config),
                 services=services,
                 execution_scope=execution_scope,
-                conversation_id=kwargs.get("conversation_id"),
-                conversation_metadata=kwargs.get("conversation_metadata"),
-                runtime_metadata=kwargs.get("runtime_metadata"),
-                llm_client=kwargs.get("llm"),
+                conversation_id=conversation_id,
+                conversation_metadata=conversation_metadata,
+                runtime_metadata=runtime_metadata,
+                llm_client=llm,
                 tool_specs=selected_tools,
                 skill_specs=selected_skills,
                 system_prompt=selected_prompt,
-                permission_callback=kwargs.get("permission_callback"),
-                mcp_servers=(
-                    tuple(kwargs["mcp"])
-                    if kwargs.get("mcp") is not None
-                    else None
-                ),
-                redaction_callback=kwargs.get("redaction_callback"),
-                redaction_fail_closed=bool(
-                    kwargs.get("redaction_fail_closed", False)
-                ),
-                final_answer_streaming=kwargs.get(
-                    "final_answer_streaming",
-                    FinalAnswerStreamingMode.VALIDATED,
-                ),
-                output_policy=kwargs.get("output_policy"),
-                async_output_policy=kwargs.get("async_output_policy"),
-                output_policy_failure_mode=kwargs.get(
-                    "output_policy_failure_mode",
-                    OutputPolicyFailureMode.CLOSED,
-                ),
+                permission_callback=permission_callback,
+                mcp_servers=tuple(mcp) if mcp is not None else None,
+                redaction_callback=redaction_callback,
+                redaction_fail_closed=redaction_fail_closed,
+                final_answer_streaming=final_answer_streaming,
+                output_policy=output_policy,
+                async_output_policy=async_output_policy,
+                output_policy_failure_mode=output_policy_failure_mode,
                 capabilities=capabilities,
-                deps=kwargs.get("deps"),
-                shell_execution_policy=kwargs.get(
-                    "shell_execution_policy"
-                ),
-                require_shell_containment=bool(
-                    kwargs.get("require_shell_containment", False)
-                ),
-                run_budget=kwargs.get("run_budget"),
-                usage_dimensions=kwargs.get("usage_dimensions"),
-                goal_execution=kwargs.get("goal_execution"),
-                async_transcript_resolver=kwargs.get(
-                    "async_transcript_resolver"
-                ),
-                transcript_timeout_seconds=kwargs.get(
-                    "transcript_timeout_seconds"
-                ),
-                async_tool_catalog_resolver=kwargs.get(
-                    "async_tool_catalog_resolver"
-                ),
-                tool_catalog_timeout_seconds=kwargs.get(
-                    "tool_catalog_timeout_seconds"
-                ),
+                deps=deps,
+                shell_execution_policy=shell_execution_policy,
+                require_shell_containment=require_shell_containment,
+                run_budget=run_budget,
+                usage_dimensions=usage_dimensions,
+                goal_execution=goal_execution,
+                async_transcript_resolver=async_transcript_resolver,
+                transcript_timeout_seconds=transcript_timeout_seconds,
+                async_tool_catalog_resolver=async_tool_catalog_resolver,
+                tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
             )
         except Exception as exc:
             mapped = map_public_error(
                 exc,
-                config=config_arg,
+                config=config,
                 operation="construct",
             )
             if mapped is exc:
                 raise
             raise mapped from exc
 
-        handle = AgentHandle(core, on_event=kwargs.get("on_event"))
+        handle = AgentHandle(core, on_event=on_event)
         sync_facade = Agent.__new__(Agent)
         sync_facade._handle = handle
         sync_facade._run_gate = RunGate()
         sync_facade._capabilities = capabilities
-        sync_facade._deps = kwargs.get("deps")
+        sync_facade._deps = deps
 
         runtime = cls.__new__(cls)
         runtime._agent = sync_facade
