@@ -48,7 +48,13 @@ from chulk import (
     __version__,
 )
 from chulk._version import __version__ as source_version
-from chulk.config import DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MODEL, load_config
+from chulk.config import (
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_MODEL,
+    DEFAULT_MOONSHOT_MODEL,
+    load_config,
+)
 from chulk.core.actions import FinalAnswerAction
 from chulk.llm import (
     FallbackChain,
@@ -58,6 +64,7 @@ from chulk.llm import (
     LLMError,
     LLMModelCapabilities,
     LocalProvider,
+    MoonshotProvider,
     PlanningToolAvailability,
 )
 from chulk.presets import SoftwareEngineer, software_engineer
@@ -1416,6 +1423,12 @@ def test_public_agent_config_provider_constructors_ignore_cross_provider_env_mod
         api_key="deepseek",
         base_url="https://deepseek.example",
     )
+    moonshot_config = AgentConfig.moonshot(
+        project_root=tmp_path,
+        runtime_dir=tmp_path / "moonshot",
+        api_key="moonshot",
+        base_url="https://moonshot.example/v1",
+    )
     local_config = AgentConfig.local(
         project_root=tmp_path,
         runtime_dir=tmp_path / "local",
@@ -1432,6 +1445,10 @@ def test_public_agent_config_provider_constructors_ignore_cross_provider_env_mod
     assert deepseek_config.to_config().model == DEFAULT_DEEPSEEK_MODEL
     assert deepseek_config.to_config().deepseek_api_key == "deepseek"
     assert deepseek_config.to_config().deepseek_base_url == "https://deepseek.example"
+    assert moonshot_config.to_config().llm_provider == "moonshot"
+    assert moonshot_config.to_config().model == DEFAULT_MOONSHOT_MODEL
+    assert moonshot_config.to_config().moonshot_api_key == "moonshot"
+    assert moonshot_config.to_config().moonshot_base_url == "https://moonshot.example/v1"
     assert local_config.to_config().llm_provider == "local"
     assert local_config.to_config().model == "local-model"
     assert local_config.to_config().local_base_url == "http://localhost:1234/v1"
@@ -1449,6 +1466,8 @@ def test_local_context_overrides_do_not_shift_public_positional_arguments():
     provider_parameter = inspect.signature(LocalProvider).parameters[
         "context_window_tokens"
     ]
+    moonshot_key = inspect.signature(AgentConfig).parameters["moonshot_api_key"]
+    moonshot_url = inspect.signature(AgentConfig).parameters["moonshot_base_url"]
     provider = LocalProvider(
         "local-model",
         "local-key",
@@ -1458,9 +1477,24 @@ def test_local_context_overrides_do_not_shift_public_positional_arguments():
     )
 
     assert agent_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert moonshot_key.kind is inspect.Parameter.KEYWORD_ONLY
+    assert moonshot_url.kind is inspect.Parameter.KEYWORD_ONLY
     assert provider_parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert provider.timeout_seconds == 12.0
     assert provider.max_retries == 3
+
+
+def test_moonshot_provider_public_spec_keeps_connection_overrides():
+    provider = MoonshotProvider(
+        model="kimi-k3",
+        api_key="moonshot-key",
+        base_url="https://moonshot.example/v1",
+    )
+
+    assert provider.provider == "moonshot"
+    assert provider.model == "kimi-k3"
+    assert provider.api_key == "moonshot-key"
+    assert provider.base_url == "https://moonshot.example/v1"
 
 
 def test_public_agent_config_with_overrides_for_app_agents(tmp_path):
@@ -1696,6 +1730,7 @@ def test_wheel_install_exposes_sdk_defaults_and_bundled_skills(tmp_path):
     [
         ("local", "local-model", {"local_api_key": "local"}),
         ("deepseek", "deepseek-v4-flash", {"deepseek_api_key": "deepseek"}),
+        ("moonshot", "kimi-k3", {"moonshot_api_key": "moonshot"}),
     ],
 )
 def test_public_mcp_bridge_registers_for_non_openai_providers(monkeypatch, tmp_path, provider, model, extra_config):

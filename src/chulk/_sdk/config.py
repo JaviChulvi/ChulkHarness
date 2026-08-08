@@ -14,6 +14,7 @@ from chulk.config import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_MOONSHOT_MODEL,
     LLMFallbackProviderConfig,
     bundled_skills_dir,
     load_config,
@@ -51,6 +52,8 @@ class AgentConfig:
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str | None = None
+    moonshot_api_key: str | None = field(default=None, kw_only=True)
+    moonshot_base_url: str | None = field(default=None, kw_only=True)
     local_api_key: str | None = None
     local_base_url: str | None = None
     openai_compatible_api_key: str | None = None
@@ -172,6 +175,23 @@ class AgentConfig:
         return cls.from_env(provider="deepseek", model=model or DEFAULT_DEEPSEEK_MODEL, **values)
 
     @classmethod
+    def moonshot(
+        cls,
+        *,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> "AgentConfig":
+        """Create config for Moonshot AI-backed agents."""
+        values = dict(kwargs)
+        if api_key is not None:
+            values["moonshot_api_key"] = api_key
+        if base_url is not None:
+            values["moonshot_base_url"] = base_url
+        return cls.from_env(provider="moonshot", model=model or DEFAULT_MOONSHOT_MODEL, **values)
+
+    @classmethod
     def local(
         cls,
         *,
@@ -291,6 +311,8 @@ class AgentConfig:
         _set_env(env, "OPENAI_API_KEY", self.openai_api_key)
         _set_env(env, "CHULK_DEEPSEEK_API_KEY", self.deepseek_api_key)
         _set_env(env, "CHULK_DEEPSEEK_BASE_URL", self.deepseek_base_url)
+        _set_env(env, "CHULK_MOONSHOT_API_KEY", self.moonshot_api_key)
+        _set_env(env, "CHULK_MOONSHOT_BASE_URL", self.moonshot_base_url)
         _set_env(env, "CHULK_LOCAL_API_KEY", self.local_api_key)
         _set_env(env, "CHULK_LOCAL_BASE_URL", self.local_base_url)
         _set_env(

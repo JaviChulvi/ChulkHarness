@@ -10,7 +10,12 @@ import pytest
 from chulk import AgentConfig
 from chulk.config import ConfigValueError, load_config
 from chulk.core.actions import ToolCallAction
-from chulk.llm import OpenAICompatibleProvider, OpenRouterProvider, supported_llm_providers
+from chulk.llm import (
+    OpenAICompatibleProvider,
+    OpenRouterProvider,
+    resolve_model_capabilities,
+    supported_llm_providers,
+)
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.llm.factory import LLMProviderConnection, provider_connection_from_config
 from chulk.llm.providers import compatible as compatible_module
@@ -136,6 +141,38 @@ def test_compatible_providers_follow_native_single_tool_contract(
     )
     assert "parallel_tool_calls" not in completions.calls[0]
     assert result.metadata["action_transport"] == "provider_native"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "moonshotai/kimi-k3",
+        "deepseek/deepseek-v4-flash",
+        "qwen/qwen3.5-397b-a17b",
+        "z-ai/glm-5.2",
+        "minimax/minimax-m3",
+        "mistralai/mistral-medium-3-5",
+        "meta-llama/llama-4-maverick",
+        "google/gemma-4-26b-a4b-it",
+    ],
+)
+def test_current_openrouter_open_models_use_the_compatible_action_path(model: str) -> None:
+    completions = FakeChatCompletions(
+        [_response(content=None, tool_calls=[_tool_call()])]
+    )
+    client = OpenRouterChatCompletionsClient(
+        model=model,
+        api_key="test-key",
+        client=FakeClient(completions),
+    )
+
+    result = client.complete_action(MESSAGES, tools=[_calculator_tool()])
+    capabilities = resolve_model_capabilities("openrouter", model)
+
+    assert isinstance(result.action, ToolCallAction)
+    assert completions.calls[0]["model"] == model
+    assert completions.calls[0]["tool_choice"] == "auto"
+    assert capabilities.context_window_tokens == 8_192
 
 
 @pytest.mark.parametrize("client_factory", [_hosted, _openrouter])

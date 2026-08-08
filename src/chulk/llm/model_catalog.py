@@ -335,10 +335,14 @@ _ANTHROPIC_LIFECYCLE_CHECKED_ON = date(2026, 7, 13)
 _GEMINI_LIMITS_CHECKED_ON = date(2026, 7, 13)
 _GEMINI_PRICING_CHECKED_ON = date(2026, 7, 13)
 _GEMINI_LIFECYCLE_CHECKED_ON = date(2026, 7, 13)
-_DEEPSEEK_LIMITS_CHECKED_ON = date(2026, 7, 13)
-_DEEPSEEK_PRICING_CHECKED_ON = date(2026, 7, 13)
+_DEEPSEEK_LIMITS_CHECKED_ON = date(2026, 8, 8)
+_DEEPSEEK_PRICING_CHECKED_ON = date(2026, 8, 8)
 _DEEPSEEK_LIFECYCLE_CHECKED_ON = date(2026, 7, 13)
+_MOONSHOT_LIMITS_CHECKED_ON = date(2026, 8, 8)
+_MOONSHOT_PRICING_CHECKED_ON = date(2026, 8, 8)
+_MOONSHOT_LIFECYCLE_CHECKED_ON = date(2026, 8, 8)
 _LOCAL_LIMITS_CHECKED_ON = date(2026, 7, 13)
+_CATALOG_REFRESH_CHECKED_ON = date(2026, 8, 8)
 _OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/pricing"
 _OPENAI_DEPRECATIONS_URL = "https://developers.openai.com/api/docs/deprecations"
 _ANTHROPIC_LIMIT_URLS = (
@@ -365,6 +369,19 @@ _DEEPSEEK_V4_LIMIT_URLS = (
 _DEEPSEEK_V4_ANNOUNCEMENT_URL = (
     "https://api-docs.deepseek.com/news/news260424/"
 )
+_MOONSHOT_MODELS_URL = "https://platform.kimi.ai/docs/models"
+_MOONSHOT_MODEL_PARAMETERS_URL = (
+    "https://platform.kimi.ai/docs/api/models-overview"
+)
+_MOONSHOT_K3_QUICKSTART_URL = (
+    "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
+)
+_MOONSHOT_K3_PRICING_URL = "https://platform.kimi.ai/docs/pricing/chat-k3"
+_MOONSHOT_K27_PRICING_URL = (
+    "https://platform.kimi.ai/docs/pricing/chat-k27-code"
+)
+_MOONSHOT_K26_PRICING_URL = "https://platform.kimi.ai/docs/pricing/chat-k26"
+_MOONSHOT_K25_PRICING_URL = "https://platform.kimi.ai/docs/pricing/chat-k25"
 _GEMMA_4_API_LIMIT_URLS = (
     "https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api",
     "https://ai.google.dev/gemma/docs/core/model_card_4",
@@ -552,6 +569,7 @@ def _gemini_spec(
     long_context: LongContextPricing | None = None,
     status: ModelStatus = "stable",
     replacement_model: str | None = None,
+    retired_on: date | None = None,
     lifecycle_source_urls: tuple[str, ...] = (),
     limits_last_checked: date = _GEMINI_LIMITS_CHECKED_ON,
     pricing_last_checked: date = _GEMINI_PRICING_CHECKED_ON,
@@ -595,9 +613,58 @@ def _gemini_spec(
         pricing=pricing,
         status=status,
         replacement_model=replacement_model,
+        retired_on=retired_on,
         lifecycle_source_urls=lifecycle_source_urls,
         lifecycle_last_checked=(
             lifecycle_last_checked if lifecycle_source_urls else None
+        ),
+    )
+
+
+def _moonshot_spec(
+    model: str,
+    *,
+    context_window_tokens: int,
+    default_response_reserve_tokens: int,
+    max_output_tokens: int | None,
+    input_rate: str,
+    cached_input_rate: str,
+    output_rate: str,
+    pricing_source_url: str,
+    limits_source_urls: tuple[str, ...] | None = None,
+    status: ModelStatus = "stable",
+    replacement_model: str | None = None,
+    retired_on: date | None = None,
+) -> ModelSpec:
+    lifecycle_source_urls = (
+        (_MOONSHOT_MODELS_URL,) if status == "deprecated" else ()
+    )
+    return ModelSpec(
+        provider="moonshot",
+        model=model,
+        limits=ModelLimits(
+            context_window_tokens=context_window_tokens,
+            default_response_reserve_tokens=default_response_reserve_tokens,
+            max_output_tokens=max_output_tokens,
+            source_urls=limits_source_urls or (
+                pricing_source_url,
+                _MOONSHOT_MODEL_PARAMETERS_URL,
+            ),
+            last_checked=_MOONSHOT_LIMITS_CHECKED_ON,
+        ),
+        pricing=_pricing(
+            input_rate=input_rate,
+            cached_input_rate=cached_input_rate,
+            output_rate=output_rate,
+            source_urls=(pricing_source_url,),
+            last_checked=_MOONSHOT_PRICING_CHECKED_ON,
+        ),
+        status=status,
+        replacement_model=replacement_model,
+        retired_on=retired_on,
+        lifecycle_source_urls=lifecycle_source_urls,
+        lifecycle_last_checked=(
+            _MOONSHOT_LIFECYCLE_CHECKED_ON if lifecycle_source_urls else None
         ),
     )
 
@@ -625,35 +692,37 @@ _OPENAI_MODEL_SPECS = (
         "gpt-5.6-terra",
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
-        input_rate="2.50",
-        cached_input_rate="0.25",
-        cache_write_input_rate="3.125",
-        output_rate="15.00",
+        input_rate="2.00",
+        cached_input_rate="0.20",
+        cache_write_input_rate="2.50",
+        output_rate="12.00",
         pricing_source_urls=(_OPENAI_PRICING_URL,),
         long_context=_long_context_pricing(
             above_input_tokens=272_000,
-            input_rate="5.00",
-            cached_input_rate="0.50",
-            cache_write_input_rate="6.25",
-            output_rate="22.50",
+            input_rate="4.00",
+            cached_input_rate="0.40",
+            cache_write_input_rate="5.00",
+            output_rate="18.00",
         ),
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
     ),
     _openai_spec(
         "gpt-5.6-luna",
         context_window_tokens=1_050_000,
         max_output_tokens=128_000,
-        input_rate="1.00",
-        cached_input_rate="0.10",
-        cache_write_input_rate="1.25",
-        output_rate="6.00",
+        input_rate="0.20",
+        cached_input_rate="0.02",
+        cache_write_input_rate="0.25",
+        output_rate="1.20",
         pricing_source_urls=(_OPENAI_PRICING_URL,),
         long_context=_long_context_pricing(
             above_input_tokens=272_000,
-            input_rate="2.00",
-            cached_input_rate="0.20",
-            cache_write_input_rate="2.50",
-            output_rate="9.00",
+            input_rate="0.40",
+            cached_input_rate="0.04",
+            cache_write_input_rate="0.50",
+            output_rate="1.80",
         ),
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
     ),
     _openai_spec(
         "chat-latest",
@@ -1144,6 +1213,15 @@ _ANTHROPIC_MODEL_SPECS = (
         "claude-mythos-5",
         context_window_tokens=1_000_000,
         max_output_tokens=128_000,
+        status="preview",
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        lifecycle_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+    ),
+    _anthropic_spec(
+        "claude-opus-5",
+        context_window_tokens=1_000_000,
+        max_output_tokens=128_000,
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
     ),
     _anthropic_spec(
         "claude-opus-4-8",
@@ -1207,6 +1285,16 @@ _GEMINI_PRO_LONG_CONTEXT = _long_context_pricing(
 )
 _GEMINI_MODEL_SPECS = (
     _gemini_spec(
+        "gemini-3.6-flash",
+        context_window_tokens=1_048_576,
+        max_output_tokens=65_536,
+        input_rate="1.50",
+        cached_input_rate="0.15",
+        output_rate="7.50",
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+    ),
+    _gemini_spec(
         "gemini-3.5-flash",
         aliases=("gemini-flash-latest",),
         context_window_tokens=1_048_576,
@@ -1217,6 +1305,16 @@ _GEMINI_MODEL_SPECS = (
         lifecycle_source_urls=(_GEMINI_CHANGELOG_URL,),
     ),
     _gemini_spec(
+        "gemini-3.5-flash-lite",
+        context_window_tokens=1_048_576,
+        max_output_tokens=65_536,
+        input_rate="0.30",
+        cached_input_rate="0.03",
+        output_rate="2.50",
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+    ),
+    _gemini_spec(
         "gemini-3.1-flash-lite",
         aliases=("gemini-flash-lite-latest",),
         context_window_tokens=1_048_576,
@@ -1224,10 +1322,15 @@ _GEMINI_MODEL_SPECS = (
         input_rate="0.25",
         cached_input_rate="0.025",
         output_rate="1.50",
+        status="deprecated",
+        replacement_model="gemini-3.5-flash-lite",
+        retired_on=date(2027, 5, 7),
         lifecycle_source_urls=(
+            _GEMINI_DEPRECATIONS_URL,
             _GEMINI_FLASH_LITE_ALIAS_URL,
             _GEMINI_MODELS_URL,
         ),
+        lifecycle_last_checked=_CATALOG_REFRESH_CHECKED_ON,
     ),
     _gemini_spec(
         "gemini-3.1-pro-preview",
@@ -1306,12 +1409,31 @@ _GEMINI_MODEL_SPECS = (
         status="preview",
     ),
     _gemini_spec(
+        "gemini-robotics-er-2-preview",
+        context_window_tokens=131_072,
+        max_output_tokens=65_536,
+        input_rate="2.00",
+        cached_input_rate="0.20",
+        output_rate="10.00",
+        status="preview",
+        lifecycle_source_urls=(_GEMINI_CHANGELOG_URL,),
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        lifecycle_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+    ),
+    _gemini_spec(
         "gemini-robotics-er-1.6-preview",
         context_window_tokens=131_072,
         max_output_tokens=65_536,
         input_rate="1.00",
         output_rate="5.00",
-        status="preview",
+        status="deprecated",
+        replacement_model="gemini-robotics-er-2-preview",
+        retired_on=date(2026, 8, 31),
+        lifecycle_source_urls=(_GEMINI_DEPRECATIONS_URL,),
+        limits_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        pricing_last_checked=_CATALOG_REFRESH_CHECKED_ON,
+        lifecycle_last_checked=_CATALOG_REFRESH_CHECKED_ON,
     ),
     _gemini_spec(
         "gemma-4-26b-a4b-it",
@@ -1397,6 +1519,66 @@ _DEEPSEEK_MODEL_SPECS = (
     ),
 )
 
+_MOONSHOT_MODEL_SPECS = (
+    _moonshot_spec(
+        "kimi-k3",
+        context_window_tokens=1_048_576,
+        default_response_reserve_tokens=131_072,
+        max_output_tokens=1_048_576,
+        input_rate="3.00",
+        cached_input_rate="0.30",
+        output_rate="15.00",
+        pricing_source_url=_MOONSHOT_K3_PRICING_URL,
+        limits_source_urls=(
+            _MOONSHOT_K3_PRICING_URL,
+            _MOONSHOT_K3_QUICKSTART_URL,
+        ),
+    ),
+    _moonshot_spec(
+        "kimi-k2.7-code",
+        context_window_tokens=262_144,
+        default_response_reserve_tokens=16_384,
+        max_output_tokens=None,
+        input_rate="0.95",
+        cached_input_rate="0.19",
+        output_rate="4.00",
+        pricing_source_url=_MOONSHOT_K27_PRICING_URL,
+    ),
+    _moonshot_spec(
+        "kimi-k2.7-code-highspeed",
+        context_window_tokens=262_144,
+        default_response_reserve_tokens=16_384,
+        max_output_tokens=None,
+        input_rate="1.90",
+        cached_input_rate="0.38",
+        output_rate="8.00",
+        pricing_source_url=_MOONSHOT_K27_PRICING_URL,
+    ),
+    _moonshot_spec(
+        "kimi-k2.6",
+        context_window_tokens=262_144,
+        default_response_reserve_tokens=16_384,
+        max_output_tokens=None,
+        input_rate="0.95",
+        cached_input_rate="0.16",
+        output_rate="4.00",
+        pricing_source_url=_MOONSHOT_K26_PRICING_URL,
+    ),
+    _moonshot_spec(
+        "kimi-k2.5",
+        context_window_tokens=262_144,
+        default_response_reserve_tokens=16_384,
+        max_output_tokens=None,
+        input_rate="0.60",
+        cached_input_rate="0.10",
+        output_rate="3.00",
+        pricing_source_url=_MOONSHOT_K25_PRICING_URL,
+        status="deprecated",
+        replacement_model="kimi-k3",
+        retired_on=date(2026, 8, 31),
+    ),
+)
+
 _LOCAL_MODEL_SPECS = (
     ModelSpec(
         provider="local",
@@ -1455,6 +1637,7 @@ MODEL_SPECS = (
     *_ANTHROPIC_MODEL_SPECS,
     *_GEMINI_MODEL_SPECS,
     *_DEEPSEEK_MODEL_SPECS,
+    *_MOONSHOT_MODEL_SPECS,
     *_LOCAL_MODEL_SPECS,
 )
 

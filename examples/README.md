@@ -27,7 +27,7 @@ all provider SDKs or the matching individual extra first:
 python -m pip install -e ".[providers]"
 ```
 
-Use `[openai]` for `openai`, `deepseek`, `local`, `openai-compatible`,
+Use `[openai]` for `openai`, `deepseek`, `moonshot`, `local`, `openai-compatible`,
 `openrouter`, or `bedrock`; `[anthropic]` for `anthropic`; and `[gemini]` for
 `gemini`.
 
@@ -48,7 +48,7 @@ export CHULK_MODEL=your-local-model
 export CHULK_LOCAL_BASE_URL=http://localhost:1234/v1
 ```
 
-The exact provider names are `openai`, `deepseek`, `local`,
+The exact provider names are `openai`, `deepseek`, `moonshot`, `local`,
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`.
 `CHULK_MODEL` is mandatory for `openai-compatible`, `openrouter`, `anthropic`,
 `bedrock`, and `gemini`. See the provider guide for each provider's credential

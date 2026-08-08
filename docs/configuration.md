@@ -42,15 +42,15 @@ runtime authority is covered in [permissions](permissions.md).
 
 ## Shared model settings
 
-`CHULK_LLM_PROVIDER` selects one of `openai`, `deepseek`, `local`,
+`CHULK_LLM_PROVIDER` selects one of `openai`, `deepseek`, `moonshot`, `local`,
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, or `gemini`.
-`CHULK_MODEL` overrides the selected model. OpenAI, DeepSeek, and local have
+`CHULK_MODEL` overrides the selected model. OpenAI, DeepSeek, Moonshot, and local have
 documented defaults; the other five providers require a non-empty
 `CHULK_MODEL` so Chulk never guesses an account-specific model identifier.
 
 `CHULK_LLM_FALLBACK_PROVIDERS` is a comma-separated sequence of
-`provider:model` entries. A model may be omitted only for OpenAI, DeepSeek, or
-local, whose defaults are known. For example:
+`provider:model` entries. A model may be omitted only for OpenAI, DeepSeek,
+Moonshot, or local, whose defaults are known. For example:
 
 ```bash
 export CHULK_LLM_PROVIDER=anthropic

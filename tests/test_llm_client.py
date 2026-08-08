@@ -26,6 +26,7 @@ from chulk.llm import (
     LLMStreamChunk,
     LLMUsage,
     LocalOpenAICompatibleClient,
+    MoonshotChatCompletionsClient,
     OpenAIResponsesClient,
     PlanningToolAvailability,
     create_llm_client,
@@ -1731,6 +1732,20 @@ def test_create_llm_client_selects_deepseek_provider():
     assert isinstance(client, DeepSeekChatCompletionsClient)
 
 
+def test_create_llm_client_selects_moonshot_provider():
+    client = create_llm_client(
+        provider="moonshot",
+        model="kimi-k3",
+        moonshot_api_key="moonshot-key",
+        moonshot_base_url="https://api.moonshot.ai/v1",
+        timeout_seconds=60,
+        max_retries=2,
+    )
+
+    assert isinstance(client, MoonshotChatCompletionsClient)
+    assert client.model_capabilities.context_window_tokens == 1_048_576
+
+
 def test_create_llm_client_selects_local_provider():
     client = create_llm_client(
         provider="local",
@@ -1752,6 +1767,7 @@ def test_create_llm_client_selects_local_provider():
 def test_llm_provider_registry_exposes_provider_capabilities():
     openai_provider = LLM_PROVIDER_REGISTRY["openai"]
     deepseek_provider = LLM_PROVIDER_REGISTRY["deepseek"]
+    moonshot_provider = LLM_PROVIDER_REGISTRY["moonshot"]
     local_provider = LLM_PROVIDER_REGISTRY["local"]
 
     assert openai_provider.capabilities.supports_structured_output is True
@@ -1762,6 +1778,10 @@ def test_llm_provider_registry_exposes_provider_capabilities():
     assert deepseek_provider.capabilities.api_style == "chat_completions"
     assert deepseek_provider.capabilities.supports_native_tool_calling is True
     assert deepseek_provider.capabilities.supports_hosted_mcp_tools is False
+    assert moonshot_provider.capabilities.supports_structured_output is False
+    assert moonshot_provider.capabilities.supports_json_mode is True
+    assert moonshot_provider.capabilities.supports_native_tool_calling is True
+    assert moonshot_provider.capabilities.api_style == "chat_completions"
     assert local_provider.capabilities.api_style == "chat_completions"
     assert local_provider.capabilities.supports_structured_output is False
     assert local_provider.capabilities.supports_native_tool_calling is True
@@ -1771,6 +1791,7 @@ def test_llm_provider_registry_exposes_provider_capabilities():
 def test_resolve_model_capabilities_returns_context_window_and_reserve():
     openai_caps = resolve_model_capabilities("openai", "gpt-4.1-mini")
     deepseek_caps = resolve_model_capabilities("deepseek", "deepseek-v4-flash")
+    moonshot_caps = resolve_model_capabilities("moonshot", "kimi-k3")
     local_caps = resolve_model_capabilities("local", "google/gemma-4-12b-qat")
     local_qwen_caps = resolve_model_capabilities("local", "qwen/qwen3.5-35b-a3b")
 
@@ -1784,6 +1805,10 @@ def test_resolve_model_capabilities_returns_context_window_and_reserve():
     assert deepseek_caps.max_input_tokens is None
     assert deepseek_caps.max_output_tokens == 393_216
     assert deepseek_caps.input_budget_tokens == 1_032_192
+    assert moonshot_caps.context_window_tokens == 1_048_576
+    assert moonshot_caps.default_response_reserve_tokens == 131_072
+    assert moonshot_caps.max_output_tokens == 1_048_576
+    assert moonshot_caps.input_budget_tokens == 917_504
     assert local_caps.context_window_tokens == 262_144
     assert local_caps.default_response_reserve_tokens == 4_096
     assert local_qwen_caps.context_window_tokens == 262_144

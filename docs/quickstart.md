@@ -92,7 +92,7 @@ python examples/00_sdk_quickstart.py
 ```
 
 Live output is intentionally nondeterministic and may incur provider charges.
-The supported provider names are `openai`, `deepseek`, `local`,
+The supported provider names are `openai`, `deepseek`, `moonshot`, `local`,
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`. The
 last five require an explicit `CHULK_MODEL`; install all optional provider SDKs
 with `python -m pip install -e ".[providers]"`. Provider adapter tests

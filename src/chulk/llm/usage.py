@@ -153,7 +153,7 @@ def normalize_chat_completions_usage(usage: object) -> LLMUsage | None:
     prompt_details = _value(usage, "prompt_tokens_details")
     cache_hit = _int_value(_value(usage, "prompt_cache_hit_tokens")) or _int_value(
         _value(prompt_details, "cached_tokens")
-    )
+    ) or _int_value(_value(usage, "cached_tokens"))
     cache_write = _int_value(_value(prompt_details, "cache_write_tokens"))
     cache_miss = _int_value(_value(usage, "prompt_cache_miss_tokens"))
     cache_split_estimated = False
@@ -161,7 +161,10 @@ def normalize_chat_completions_usage(usage: object) -> LLMUsage | None:
         if prompt_details is not None:
             cache_miss = max(prompt_tokens - cache_hit - cache_write, 0)
             cache_split_estimated = cache_hit + cache_write > prompt_tokens
-        elif not cache_hit:
+        elif cache_hit or cache_write:
+            cache_miss = max(prompt_tokens - cache_hit - cache_write, 0)
+            cache_split_estimated = cache_hit + cache_write > prompt_tokens
+        else:
             cache_miss = prompt_tokens
             cache_split_estimated = True
     completion_details = _value(usage, "completion_tokens_details")

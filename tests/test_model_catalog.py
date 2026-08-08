@@ -89,6 +89,7 @@ EXPECTED_CANONICAL_MODELS = {
     "anthropic": {
         "claude-fable-5",
         "claude-mythos-5",
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
@@ -100,7 +101,9 @@ EXPECTED_CANONICAL_MODELS = {
         "claude-haiku-4-5-20251001",
     },
     "gemini": {
+        "gemini-3.6-flash",
         "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemini-3.1-pro-preview",
         "gemini-3.1-pro-preview-customtools",
@@ -109,6 +112,7 @@ EXPECTED_CANONICAL_MODELS = {
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.5-computer-use-preview-10-2025",
+        "gemini-robotics-er-2-preview",
         "gemini-robotics-er-1.6-preview",
         "gemma-4-26b-a4b-it",
         "gemma-4-31b-it",
@@ -118,6 +122,13 @@ EXPECTED_CANONICAL_MODELS = {
         "deepseek-v4-pro",
         "deepseek-chat",
         "deepseek-reasoner",
+    },
+    "moonshot": {
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+        "kimi-k2.6",
+        "kimi-k2.5",
     },
     "local": {
         "google/gemma-4-12b-qat",
@@ -228,11 +239,12 @@ def test_moving_flash_lite_alias_has_current_official_provenance() -> None:
 
     assert spec is not None
     assert spec.lifecycle_source_urls == (
+        "https://ai.google.dev/gemini-api/docs/deprecations",
         "https://developers.googleblog.com/en/continuing-to-bring-you-our-latest-"
         "models-with-an-improved-gemini-2-5-flash-and-flash-lite-release/",
         "https://ai.google.dev/gemini-api/docs/models",
     )
-    assert spec.lifecycle_last_checked == date(2026, 7, 13)
+    assert spec.lifecycle_last_checked == date(2026, 8, 8)
 
 
 def test_catalog_rejects_unlisted_snapshots_and_sibling_names() -> None:
@@ -542,6 +554,125 @@ def test_newest_provider_models_keep_exact_limits_and_pricing() -> None:
         resolve_model_capabilities("openai", "computer-use-preview").input_budget_tokens
         == 7_168
     )
+
+
+def test_august_model_refresh_keeps_exact_limits_pricing_and_lifecycle() -> None:
+    terra = resolve_model_spec("openai", "gpt-5.6-terra")
+    luna = resolve_model_spec("openai", "gpt-5.6-luna")
+    opus = resolve_model_spec("anthropic", "claude-opus-5")
+    mythos = resolve_model_spec("anthropic", "claude-mythos-5")
+    flash = resolve_model_spec("gemini", "gemini-3.6-flash")
+    flash_lite = resolve_model_spec("gemini", "gemini-3.5-flash-lite")
+    robotics = resolve_model_spec("gemini", "gemini-robotics-er-2-preview")
+    old_flash_lite = resolve_model_spec("gemini", "gemini-3.1-flash-lite")
+    old_robotics = resolve_model_spec("gemini", "gemini-robotics-er-1.6-preview")
+
+    assert terra is not None
+    assert terra.pricing is not None
+    assert terra.pricing.input_per_million == Decimal("2.00")
+    assert terra.pricing.cached_input_per_million == Decimal("0.20")
+    assert terra.pricing.cache_write_input_per_million == Decimal("2.50")
+    assert terra.pricing.output_per_million == Decimal("12.00")
+    assert terra.pricing.long_context is not None
+    assert terra.pricing.long_context.input_per_million == Decimal("4.00")
+    assert terra.pricing.long_context.output_per_million == Decimal("18.00")
+    assert terra.pricing.last_checked == date(2026, 8, 8)
+
+    assert luna is not None
+    assert luna.pricing is not None
+    assert luna.pricing.input_per_million == Decimal("0.20")
+    assert luna.pricing.cached_input_per_million == Decimal("0.02")
+    assert luna.pricing.cache_write_input_per_million == Decimal("0.25")
+    assert luna.pricing.output_per_million == Decimal("1.20")
+    assert luna.pricing.long_context is not None
+    assert luna.pricing.long_context.input_per_million == Decimal("0.40")
+    assert luna.pricing.long_context.output_per_million == Decimal("1.80")
+    assert luna.pricing.last_checked == date(2026, 8, 8)
+
+    assert opus is not None
+    assert opus.status == "stable"
+    assert opus.limits.max_input_tokens == 1_000_000
+    assert opus.limits.max_output_tokens == 128_000
+    assert opus.pricing is None
+    assert mythos is not None
+    assert mythos.status == "preview"
+
+    assert flash is not None
+    assert flash.status == "stable"
+    assert flash.limits.max_input_tokens == 1_048_576
+    assert flash.limits.max_output_tokens == 65_536
+    assert flash.pricing is not None
+    assert flash.pricing.input_per_million == Decimal("1.50")
+    assert flash.pricing.cached_input_per_million == Decimal("0.15")
+    assert flash.pricing.output_per_million == Decimal("7.50")
+
+    assert flash_lite is not None
+    assert flash_lite.status == "stable"
+    assert flash_lite.pricing is not None
+    assert flash_lite.pricing.input_per_million == Decimal("0.30")
+    assert flash_lite.pricing.cached_input_per_million == Decimal("0.03")
+    assert flash_lite.pricing.output_per_million == Decimal("2.50")
+
+    assert robotics is not None
+    assert robotics.status == "preview"
+    assert robotics.limits.max_input_tokens == 131_072
+    assert robotics.limits.max_output_tokens == 65_536
+    assert robotics.pricing is not None
+    assert robotics.pricing.input_per_million == Decimal("2.00")
+    assert robotics.pricing.cached_input_per_million == Decimal("0.20")
+    assert robotics.pricing.output_per_million == Decimal("10.00")
+
+    assert old_flash_lite is not None
+    assert old_flash_lite.status == "deprecated"
+    assert old_flash_lite.replacement_model == "gemini-3.5-flash-lite"
+    assert old_flash_lite.retired_on == date(2027, 5, 7)
+    assert old_robotics is not None
+    assert old_robotics.status == "deprecated"
+    assert old_robotics.replacement_model == "gemini-robotics-er-2-preview"
+    assert old_robotics.retired_on == date(2026, 8, 31)
+
+
+def test_moonshot_models_keep_exact_limits_pricing_and_lifecycle() -> None:
+    k3 = resolve_model_spec("moonshot", "kimi-k3")
+    code = resolve_model_spec("moonshot", "kimi-k2.7-code")
+    highspeed = resolve_model_spec("moonshot", "kimi-k2.7-code-highspeed")
+    k26 = resolve_model_spec("moonshot", "kimi-k2.6")
+    k25 = resolve_model_spec("moonshot", "kimi-k2.5")
+
+    assert k3 is not None
+    assert k3.limits.context_window_tokens == 1_048_576
+    assert k3.limits.default_response_reserve_tokens == 131_072
+    assert k3.limits.max_output_tokens == 1_048_576
+    assert k3.pricing is not None
+    assert k3.pricing.input_per_million == Decimal("3.00")
+    assert k3.pricing.cached_input_per_million == Decimal("0.30")
+    assert k3.pricing.output_per_million == Decimal("15.00")
+    assert k3.pricing.last_checked == date(2026, 8, 8)
+
+    assert code is not None and code.pricing is not None
+    assert code.limits.context_window_tokens == 262_144
+    assert code.limits.max_output_tokens is None
+    assert code.pricing.input_per_million == Decimal("0.95")
+    assert code.pricing.cached_input_per_million == Decimal("0.19")
+    assert code.pricing.output_per_million == Decimal("4.00")
+
+    assert highspeed is not None and highspeed.pricing is not None
+    assert highspeed.pricing.input_per_million == Decimal("1.90")
+    assert highspeed.pricing.cached_input_per_million == Decimal("0.38")
+    assert highspeed.pricing.output_per_million == Decimal("8.00")
+
+    assert k26 is not None and k26.pricing is not None
+    assert k26.pricing.input_per_million == Decimal("0.95")
+    assert k26.pricing.cached_input_per_million == Decimal("0.16")
+    assert k26.pricing.output_per_million == Decimal("4.00")
+
+    assert k25 is not None and k25.pricing is not None
+    assert k25.status == "deprecated"
+    assert k25.replacement_model == "kimi-k3"
+    assert k25.retired_on == date(2026, 8, 31)
+    assert k25.pricing.input_per_million == Decimal("0.60")
+    assert k25.pricing.cached_input_per_million == Decimal("0.10")
+    assert k25.pricing.output_per_million == Decimal("3.00")
 
 
 def test_deprecated_models_record_replacements_without_guessing_alias_lifecycle() -> None:
@@ -881,6 +1012,22 @@ def test_chat_completions_normalizes_nested_cache_write_details() -> None:
     assert usage.cache_hit_input_tokens == 20
     assert usage.cache_write_input_tokens == 30
     assert usage.cache_miss_input_tokens == 50
+    assert usage.cache_split_estimated is False
+
+
+def test_chat_completions_normalizes_moonshot_top_level_cached_tokens() -> None:
+    usage = normalize_chat_completions_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "cached_tokens": 30,
+        }
+    )
+
+    assert usage is not None
+    assert usage.cache_hit_input_tokens == 30
+    assert usage.cache_miss_input_tokens == 70
     assert usage.cache_split_estimated is False
 
 
