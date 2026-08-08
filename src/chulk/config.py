@@ -21,6 +21,8 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MOONSHOT_MODEL = "kimi-k3"
+DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1"
 DEFAULT_LOCAL_MODEL = "google/gemma-4-12b-qat"
 DEFAULT_LOCAL_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS
@@ -67,6 +69,8 @@ class Config:
     openai_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    moonshot_api_key: str | None = field(default=None, kw_only=True)
+    moonshot_base_url: str = field(default=DEFAULT_MOONSHOT_BASE_URL, kw_only=True)
     local_api_key: str | None = None
     local_base_url: str = DEFAULT_LOCAL_BASE_URL
     local_context_window_tokens: int = field(
@@ -221,6 +225,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> Config:
         openai_api_key=env.get("OPENAI_API_KEY") or None,
         deepseek_api_key=env.get("CHULK_DEEPSEEK_API_KEY") or env.get("DEEPSEEK_API_KEY") or None,
         deepseek_base_url=env.get("CHULK_DEEPSEEK_BASE_URL") or DEFAULT_DEEPSEEK_BASE_URL,
+        moonshot_api_key=env.get("CHULK_MOONSHOT_API_KEY") or env.get("MOONSHOT_API_KEY") or None,
+        moonshot_base_url=env.get("CHULK_MOONSHOT_BASE_URL") or DEFAULT_MOONSHOT_BASE_URL,
         local_api_key=env.get("CHULK_LOCAL_API_KEY") or None,
         local_base_url=env.get("CHULK_LOCAL_BASE_URL") or DEFAULT_LOCAL_BASE_URL,
         local_context_window_tokens=_local_context_window_tokens(env),
@@ -313,6 +319,7 @@ def _default_model_for_provider(provider: str) -> str | None:
     return {
         "openai": DEFAULT_MODEL,
         "deepseek": DEFAULT_DEEPSEEK_MODEL,
+        "moonshot": DEFAULT_MOONSHOT_MODEL,
         "local": DEFAULT_LOCAL_MODEL,
     }.get(provider)
 

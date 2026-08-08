@@ -26,6 +26,7 @@ from chulk.llm.providers.anthropic import AnthropicMessagesClient
 from chulk.llm.providers.bedrock import BedrockOpenAICompatibleClient
 from chulk.llm.providers.deepseek import DeepSeekChatCompletionsClient
 from chulk.llm.providers.gemini import GeminiGenerateContentClient
+from chulk.llm.providers.moonshot import MoonshotChatCompletionsClient
 from chulk.llm.providers.compatible import (
     HostedOpenAICompatibleClient,
     OpenRouterChatCompletionsClient,
@@ -60,6 +61,7 @@ __all__ = [
     "LLMStreamChunk",
     "LLMUsage",
     "LocalOpenAICompatibleClient",
+    "MoonshotChatCompletionsClient",
     "OpenAIResponsesClient",
     "OpenRouterChatCompletionsClient",
     "PlanningToolAvailability",

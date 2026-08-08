@@ -21,6 +21,7 @@ from chulk.llm import (
     LLMCapabilities,
     DeepSeekChatCompletionsClient,
     LocalOpenAICompatibleClient,
+    MoonshotChatCompletionsClient,
     PlanningToolAvailability,
     create_llm_client,
     provider_connection_from_config,
@@ -32,6 +33,7 @@ from chulk.testing import ScriptedLLMClient
 
 PROVIDERS = [
     pytest.param(DeepSeekChatCompletionsClient, "deepseek-v4-flash", "deepseek", id="deepseek"),
+    pytest.param(MoonshotChatCompletionsClient, "kimi-k3", "moonshot", id="moonshot"),
     pytest.param(LocalOpenAICompatibleClient, "local/test-model", "local", id="local"),
 ]
 
@@ -79,6 +81,10 @@ def _client(client_type, model: str, completions: FakeChatCompletions):
     return client_type(model=model, client=FakeClient(completions))
 
 
+def _output_limit_field(provider: str) -> str:
+    return "max_completion_tokens" if provider == "moonshot" else "max_tokens"
+
+
 def _response(*, content: str | None, tool_calls: list[object] | None = None, usage: object = None) -> object:
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=tool_calls))],
@@ -116,10 +122,10 @@ def test_provider_text_and_dynamic_output_limit_contract(client_type, model, pro
     client = _client(client_type, model, completions)
 
     assert client.complete([{"role": "user", "content": "hello"}]) == "first"
-    assert "max_tokens" not in completions.calls[0]
+    assert _output_limit_field(provider) not in completions.calls[0]
 
     assert client.complete([{"role": "user", "content": "hello"}], max_output_tokens=987_654) == "second"
-    assert completions.calls[1]["max_tokens"] == 987_654
+    assert completions.calls[1][_output_limit_field(provider)] == 987_654
 
 
 @pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
@@ -230,9 +236,9 @@ def test_provider_json_fallback_contract(client_type, model, provider):
     assert result.metadata["action_transport"] == "chulk_json_fallback"
     assert "native tools unsupported" in result.metadata["native_tool_call_error"]
     assert "parallel_tool_calls" not in completions.calls[0]
-    assert completions.calls[0]["max_tokens"] == 321
+    assert completions.calls[0][_output_limit_field(provider)] == 321
     assert "tools" not in completions.calls[1]
-    assert completions.calls[1]["max_tokens"] == 321
+    assert completions.calls[1][_output_limit_field(provider)] == 321
 
 
 @pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
@@ -295,7 +301,31 @@ def test_provider_streaming_contract(client_type, model, provider):
         raw={"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
     )
     assert completions.calls[0]["stream"] is True
-    assert completions.calls[0]["max_tokens"] == 42
+    assert completions.calls[0][_output_limit_field(provider)] == 42
+
+
+def test_moonshot_k2_models_do_not_send_unsupported_required_tool_choice():
+    completions = FakeChatCompletions(responses=[_response(content="native final")])
+    client = _client(MoonshotChatCompletionsClient, "kimi-k2.6", completions)
+
+    client.complete_action(
+        [{"role": "user", "content": "plan this"}],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    assert completions.calls[0]["tool_choice"] == "auto"
+
+
+def test_moonshot_k3_uses_required_tool_choice_for_planning():
+    completions = FakeChatCompletions(responses=[_response(content="native final")])
+    client = _client(MoonshotChatCompletionsClient, "kimi-k3", completions)
+
+    client.complete_action(
+        [{"role": "user", "content": "plan this"}],
+        planning_tools=PlanningToolAvailability(propose_plan=True),
+    )
+
+    assert completions.calls[0]["tool_choice"] == "required"
 
 
 @pytest.mark.parametrize(("client_type", "model", "provider"), PROVIDERS)
@@ -326,6 +356,8 @@ def test_provider_profile_binds_typed_connection_from_existing_config_fields():
         openai_api_key="openai-key",
         deepseek_api_key="deepseek-key",
         deepseek_base_url="https://deepseek.example/v1",
+        moonshot_api_key="moonshot-key",
+        moonshot_base_url="https://moonshot.example/v1",
         local_api_key="local-key",
         local_base_url="http://localhost:11434/v1",
     )
@@ -345,6 +377,10 @@ def test_provider_profile_binds_typed_connection_from_existing_config_fields():
     assert settings.openai_api_key is None
     assert settings.deepseek_api_key is None
     assert settings.local_api_key is None
+    assert provider_connection_from_config("moonshot", config) == LLMProviderConnection(
+        api_key="moonshot-key",
+        base_url="https://moonshot.example/v1",
+    )
 
 
 def test_llm_client_settings_accepts_original_positional_contract():

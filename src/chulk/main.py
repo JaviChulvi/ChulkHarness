@@ -50,6 +50,7 @@ from chulk.llm import (
     LLMConfigurationError,
     LLMError,
     LocalProvider,
+    MoonshotProvider,
     OpenAICompatibleProvider,
     OpenAIProvider,
     OpenRouterProvider,
@@ -106,6 +107,8 @@ def format_config(config: Config) -> str:
         "openai_api_key": "set" if config.openai_api_key else "not set",
         "deepseek_api_key": "set" if config.deepseek_api_key else "not set",
         "deepseek_base_url": _format_base_url(config.deepseek_base_url),
+        "moonshot_api_key": "set" if config.moonshot_api_key else "not set",
+        "moonshot_base_url": _format_base_url(config.moonshot_base_url),
         "local_api_key": "set" if config.local_api_key else "not set",
         "local_base_url": _format_base_url(config.local_base_url),
         "local_context_window_tokens": config.local_context_window_tokens,
@@ -341,6 +344,7 @@ def _create_provider_spec(
 ) -> (
     OpenAIProvider
     | DeepSeekProvider
+    | MoonshotProvider
     | LocalProvider
     | OpenAICompatibleProvider
     | OpenRouterProvider
@@ -352,6 +356,8 @@ def _create_provider_spec(
         return OpenAIProvider(model=model)
     if provider == "deepseek":
         return DeepSeekProvider(model=model)
+    if provider == "moonshot":
+        return MoonshotProvider(model=model)
     if provider == "local":
         return LocalProvider(model=model)
     if provider == "openai-compatible":

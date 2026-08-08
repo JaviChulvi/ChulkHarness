@@ -1,11 +1,12 @@
 # Model providers
 
-Chulk has eight built-in provider names:
+Chulk has nine built-in provider names:
 
 | Provider name | Transport | Install extra | Default model | Base URL |
 | --- | --- | --- | --- | --- |
 | `openai` | OpenAI Responses | `openai` | `gpt-4.1-mini` | Provider default |
 | `deepseek` | OpenAI-compatible Chat Completions | `openai` | `deepseek-v4-flash` | `https://api.deepseek.com` |
+| `moonshot` | OpenAI-compatible Chat Completions | `openai` | `kimi-k3` | `https://api.moonshot.ai/v1` |
 | `local` | OpenAI-compatible Chat Completions | `openai` | `google/gemma-4-12b-qat` | `http://localhost:1234/v1` |
 | `openai-compatible` | OpenAI-compatible Chat Completions | `openai` | Required | Required |
 | `openrouter` | OpenAI-compatible Chat Completions | `openai` | Required | `https://openrouter.ai/api/v1` |
@@ -26,7 +27,7 @@ python -m pip install -e ".[providers]"
 Run these commands from a ChulkHarness source checkout; the project is not yet
 published to PyPI.
 
-The `openai` extra is shared by OpenAI, DeepSeek, local, generic
+The `openai` extra is shared by OpenAI, DeepSeek, Moonshot, local, generic
 OpenAI-compatible, OpenRouter, and Bedrock because those adapters use the
 OpenAI Python SDK transport. The `providers` extra installs all three SDK
 families. It does not install the optional `mcp` extra.
@@ -35,8 +36,9 @@ families. It does not install the optional `mcp` extra.
 
 Select a provider with `CHULK_LLM_PROVIDER`. Set `CHULK_MODEL` for
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`; these
-five intentionally have no guessed model. The same rule applies to fallback
-entries: use `provider:model` in `CHULK_LLM_FALLBACK_PROVIDERS`.
+five intentionally have no guessed model. OpenAI, DeepSeek, Moonshot, and local
+have documented defaults. The same rule applies to fallback entries: use
+`provider:model` in `CHULK_LLM_FALLBACK_PROVIDERS`.
 
 Explicit `AgentConfig` fields override process environment values. Process
 environment values override duplicate entries in the project `.env`. Within a
@@ -46,6 +48,7 @@ provider's credential aliases, Chulk uses this exact first-nonempty order:
 | --- | --- | --- |
 | `openai` | `OPENAI_API_KEY` | Provider default |
 | `deepseek` | `CHULK_DEEPSEEK_API_KEY`, `DEEPSEEK_API_KEY` | `CHULK_DEEPSEEK_BASE_URL`, then the documented default |
+| `moonshot` | `CHULK_MOONSHOT_API_KEY`, `MOONSHOT_API_KEY` | `CHULK_MOONSHOT_BASE_URL`, then the documented default |
 | `local` | `CHULK_LOCAL_API_KEY` (optional) | `CHULK_LOCAL_BASE_URL`, then the documented default |
 | `openai-compatible` | `CHULK_OPENAI_COMPATIBLE_API_KEY` | `CHULK_OPENAI_COMPATIBLE_BASE_URL` (required) |
 | `openrouter` | `CHULK_OPENROUTER_API_KEY`, `OPENROUTER_API_KEY` | `CHULK_OPENROUTER_BASE_URL`, then the documented default |
@@ -71,12 +74,26 @@ native async provider cleanup runs after the turn unwinds.
 
 ## Configuration examples
 
-OpenAI, DeepSeek, and local can use their documented model defaults:
+OpenAI, DeepSeek, Moonshot, and local can use their documented model defaults:
 
 ```bash
 export CHULK_LLM_PROVIDER=openai
 export OPENAI_API_KEY=...
 ```
+
+```bash
+export CHULK_LLM_PROVIDER=moonshot
+export MOONSHOT_API_KEY=...
+```
+
+Moonshot defaults to `kimi-k3`. Chulk sends the provider's current
+`max_completion_tokens` field, normalizes Moonshot's top-level `cached_tokens`
+usage, and estimates costs from the direct Moonshot price sheet. Kimi K3 can
+use required tool choice during planning. Kimi K2.6, K2.7 Code, and K2.7 Code
+HighSpeed reject `tool_choice=required`, so Chulk uses `auto` for those models.
+See Moonshot's [API overview](https://platform.kimi.ai/docs/api/overview),
+[model list](https://platform.kimi.ai/docs/models), and
+[Kimi pricing](https://platform.kimi.ai/docs/pricing/chat).
 
 ```bash
 export CHULK_LLM_PROVIDER=local
@@ -143,6 +160,41 @@ export CHULK_BEDROCK_BASE_URL=https://your-bedrock-openai-endpoint/openai/v1
 `CHULK_BASE_URL` remains a legacy base-URL alias, but new configuration should
 use `CHULK_BEDROCK_BASE_URL`.
 
+## Current open-model routes
+
+Chulk can run open-weight models through a built-in direct provider, through
+OpenRouter, through a hosted `openai-compatible` endpoint, or through a local
+OpenAI-compatible server. The following representative OpenRouter IDs
+advertised tool calling on August 8, 2026 through the
+[OpenRouter models API](https://openrouter.ai/api/v1/models):
+
+| Family | Direct Chulk route | Current OpenRouter example |
+| --- | --- | --- |
+| Kimi K3 | `moonshot` / `kimi-k3` | `moonshotai/kimi-k3` |
+| DeepSeek V4 | `deepseek` / `deepseek-v4-flash` or `deepseek-v4-pro` | `deepseek/deepseek-v4-flash` |
+| Qwen 3.5 | compatible or local | `qwen/qwen3.5-397b-a17b` |
+| GLM | compatible or local | `z-ai/glm-5.2` |
+| MiniMax | compatible or local | `minimax/minimax-m3` |
+| Mistral | compatible or local | `mistralai/mistral-medium-3-5` |
+| Llama | compatible or local | `meta-llama/llama-4-maverick` |
+| Gemma | Gemini, compatible, or local | `google/gemma-4-26b-a4b-it` |
+
+Router inventories, endpoints, prices, and limits change independently. Treat
+the table as verified examples rather than a permanent allowlist, and query the
+configured endpoint before deployment:
+
+```bash
+curl -fsSL https://openrouter.ai/api/v1/models | jq -r '.data[].id'
+curl -fsSL http://localhost:1234/v1/models | jq -r '.data[].id'
+```
+
+Any current model ID returned by those compatible endpoints can be passed to
+`AgentConfig.openrouter(...)`, `AgentConfig.openai_compatible(...)`, or
+`AgentConfig.local(...)`. For local models, also set the context actually
+loaded by the server. Chulk deliberately leaves compatible-endpoint pricing
+unknown and uses conservative fallback token limits for uncatalogued hosted
+IDs, because the selected deployment owns both values.
+
 ## Model metadata catalog
 
 Bundled pricing and token limits live in the immutable Python catalog at
@@ -156,7 +208,8 @@ request.
 The bundled records cover currently callable direct-provider IDs that can use
 Chulk's text/action transport: OpenAI Responses models with function calling,
 Anthropic Claude models, Gemini GenerateContent models, DeepSeek API models,
-and a small set of explicitly identified local models. The catalog also keeps
+Moonshot Kimi models, and a small set of explicitly identified local models.
+The catalog also keeps
 deprecated IDs until their published shutdown date so existing configurations
 retain accurate migration metadata. Retired IDs and endpoint-specific audio,
 realtime, image, embedding, moderation, video, search, and managed-agent models
@@ -260,7 +313,7 @@ configuration does not publish a reliable value.
 
 ## SDK construction
 
-The matching builders are `AgentConfig.openai(...)`, `.deepseek(...)`,
+The matching builders are `AgentConfig.openai(...)`, `.deepseek(...)`, `.moonshot(...)`,
 `.local(...)`, `.openai_compatible(...)`, `.openrouter(...)`,
 `.anthropic(...)`, `.bedrock(...)`, and `.gemini(...)`. Applications can also
 inject an application-owned `LLMClient` through `Agent(llm=client)`. The shared
@@ -282,7 +335,7 @@ The provider wire mappings are:
 | Transport family | System and conversation data | Native declarations |
 | --- | --- | --- |
 | OpenAI Responses | `instructions` plus `input` | top-level `tools` and `tool_choice`; hosted MCP entries also use `tools` |
-| DeepSeek, local, OpenAI-compatible, OpenRouter, Bedrock | Chat Completions `messages`; local endpoints fold system instructions into the latest user message | top-level `tools` and `tool_choice` |
+| DeepSeek, Moonshot, local, OpenAI-compatible, OpenRouter, Bedrock | Chat Completions `messages`; local endpoints fold system instructions into the latest user message | top-level `tools` and `tool_choice` |
 | Anthropic Messages | top-level `system` plus `messages` | top-level `tools` using `input_schema`, with parallel tool use disabled |
 | Gemini GenerateContent | `config.system_instruction` plus `contents` | `config.tools` using `parameters_json_schema`, with automatic execution disabled |
 

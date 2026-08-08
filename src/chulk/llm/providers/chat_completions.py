@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from chulk.llm.base import (
     LLMClient,
@@ -46,6 +46,8 @@ class ChatCompletionsTransportProfile:
     json_response_format: dict[str, Any] | None = None
     missing_api_key_message: str | None = None
     default_api_key: str | None = None
+    max_output_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    models_supporting_required_tool_choice: frozenset[str] | None = None
 
 
 class OpenAICompatibleChatCompletionsClient(LLMClient):
@@ -482,11 +484,7 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             request.update(
                 {
                     "tools": native_tools,
-                    "tool_choice": (
-                        "required"
-                        if planning_tools is not None and planning_tools.enabled
-                        else "auto"
-                    ),
+                    "tool_choice": self._native_tool_choice(planning_tools),
                 }
             )
         response = self._create(request, operation="native tool action request", action_transport=True)
@@ -528,11 +526,7 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
             request.update(
                 {
                     "tools": native_tools,
-                    "tool_choice": (
-                        "required"
-                        if planning_tools is not None and planning_tools.enabled
-                        else "auto"
-                    ),
+                    "tool_choice": self._native_tool_choice(planning_tools),
                 }
             )
         response = await self._acreate(
@@ -575,8 +569,19 @@ class OpenAICompatibleChatCompletionsClient(LLMClient):
         }
         output_limit = _validate_max_output_tokens(max_output_tokens)
         if output_limit is not None:
-            request["max_tokens"] = output_limit
+            request[self.profile.max_output_tokens_field] = output_limit
         return request
+
+    def _native_tool_choice(
+        self,
+        planning_tools: PlanningToolAvailability | None,
+    ) -> str:
+        if planning_tools is None or not planning_tools.enabled:
+            return "auto"
+        supported_models = self.profile.models_supporting_required_tool_choice
+        if supported_models is None or self.model.lower() in supported_models:
+            return "required"
+        return "auto"
 
     def _create(
         self,

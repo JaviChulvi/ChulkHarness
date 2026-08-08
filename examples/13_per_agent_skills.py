@@ -50,6 +50,8 @@ def require_provider_credentials(config: Config) -> None:
         raise SystemExit("Set OPENAI_API_KEY or choose another CHULK_LLM_PROVIDER.")
     if config.llm_provider == "deepseek" and not configured(config.deepseek_api_key):
         raise SystemExit("Set CHULK_DEEPSEEK_API_KEY, DEEPSEEK_API_KEY, or choose another provider.")
+    if config.llm_provider == "moonshot" and not configured(config.moonshot_api_key):
+        raise SystemExit("Set CHULK_MOONSHOT_API_KEY, MOONSHOT_API_KEY, or choose another provider.")
     if config.llm_provider == "openai-compatible":
         if not configured(config.openai_compatible_api_key):
             raise SystemExit("Set CHULK_OPENAI_COMPATIBLE_API_KEY.")

@@ -61,6 +61,8 @@ def require_provider_credentials(provider: str, *, model: str | None = None) -> 
         require_env("OPENAI_API_KEY")
     elif provider == "deepseek":
         require_any_env(provider, "CHULK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
+    elif provider == "moonshot":
+        require_any_env(provider, "CHULK_MOONSHOT_API_KEY", "MOONSHOT_API_KEY")
     elif provider == "openai-compatible":
         require_env(
             "CHULK_OPENAI_COMPATIBLE_API_KEY",

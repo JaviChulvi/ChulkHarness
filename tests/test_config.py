@@ -16,6 +16,8 @@ from chulk.config import (
     DEFAULT_MAX_TOOL_STDERR_CHARS,
     DEFAULT_MAX_TOOL_STDOUT_CHARS,
     DEFAULT_MODEL,
+    DEFAULT_MOONSHOT_BASE_URL,
+    DEFAULT_MOONSHOT_MODEL,
     DEFAULT_PERMISSION_PROFILE,
     DEFAULT_TRACE_MAX_PROMPT_CHARS,
     load_config,
@@ -24,8 +26,12 @@ from chulk.config import (
 
 def test_local_context_config_field_is_keyword_only() -> None:
     parameter = inspect.signature(Config).parameters["local_context_window_tokens"]
+    moonshot_key = inspect.signature(Config).parameters["moonshot_api_key"]
+    moonshot_url = inspect.signature(Config).parameters["moonshot_base_url"]
 
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert moonshot_key.kind is inspect.Parameter.KEYWORD_ONLY
+    assert moonshot_url.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_load_config_uses_defaults(tmp_path):
@@ -40,6 +46,8 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.llm_fallback_providers == ()
     assert config.openai_api_key is None
     assert config.deepseek_api_key is None
+    assert config.moonshot_api_key is None
+    assert config.moonshot_base_url == DEFAULT_MOONSHOT_BASE_URL
     assert config.local_api_key is None
     assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
     assert config.local_context_window_tokens == DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
@@ -255,6 +263,21 @@ def test_deepseek_provider_uses_deepseek_default_model(tmp_path):
     assert config.deepseek_api_key == "deepseek-key"
 
 
+def test_moonshot_provider_uses_default_model_and_key_alias(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "moonshot",
+            "MOONSHOT_API_KEY": "moonshot-key",
+        }
+    )
+
+    assert config.llm_provider == "moonshot"
+    assert config.model == DEFAULT_MOONSHOT_MODEL
+    assert config.moonshot_api_key == "moonshot-key"
+    assert config.moonshot_base_url == DEFAULT_MOONSHOT_BASE_URL
+
+
 def test_local_provider_uses_local_default_model_and_base_url(tmp_path):
     config = load_config(
         {
@@ -297,6 +320,19 @@ def test_load_config_uses_provider_default_for_fallback_without_model(tmp_path):
 
     assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
         ("deepseek", DEFAULT_DEEPSEEK_MODEL),
+    ]
+
+
+def test_load_config_uses_moonshot_default_for_fallback_without_model(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_FALLBACK_PROVIDERS": "moonshot",
+        }
+    )
+
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
+        ("moonshot", DEFAULT_MOONSHOT_MODEL),
     ]
 
 

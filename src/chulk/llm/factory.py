@@ -27,6 +27,11 @@ from chulk.llm.providers.deepseek import (
     DeepSeekChatCompletionsClient,
 )
 from chulk.llm.providers.gemini import GEMINI_CAPABILITIES, GeminiGenerateContentClient
+from chulk.llm.providers.moonshot import (
+    DEFAULT_MOONSHOT_BASE_URL,
+    MOONSHOT_CAPABILITIES,
+    MoonshotChatCompletionsClient,
+)
 from chulk.llm.providers.local import (
     DEFAULT_LOCAL_BASE_URL,
     LOCAL_CAPABILITIES,
@@ -46,6 +51,12 @@ class LLMConnectionConfig(Protocol):
 
     @property
     def deepseek_base_url(self) -> str: ...
+
+    @property
+    def moonshot_api_key(self) -> str | None: ...
+
+    @property
+    def moonshot_base_url(self) -> str: ...
 
     @property
     def local_api_key(self) -> str | None: ...
@@ -197,6 +208,16 @@ LLM_PROVIDER_REGISTRY: dict[str, LLMProviderProfile] = {
         ),
         create_client=lambda settings: _create_deepseek_client(settings),
     ),
+    "moonshot": LLMProviderProfile(
+        name="moonshot",
+        capabilities=MOONSHOT_CAPABILITIES,
+        default_connection=LLMProviderConnection(base_url=DEFAULT_MOONSHOT_BASE_URL),
+        connection_from_config=lambda config: LLMProviderConnection(
+            api_key=config.moonshot_api_key,
+            base_url=config.moonshot_base_url,
+        ),
+        create_client=lambda settings: _create_moonshot_client(settings),
+    ),
     "local": LLMProviderProfile(
         name="local",
         capabilities=LOCAL_CAPABILITIES,
@@ -284,6 +305,8 @@ def create_llm_client(
     openai_api_key: str | None = None,
     deepseek_api_key: str | None = None,
     deepseek_base_url: str | None = None,
+    moonshot_api_key: str | None = None,
+    moonshot_base_url: str | None = None,
     local_api_key: str | None = None,
     local_base_url: str | None = None,
     local_context_window_tokens: int = LOCAL_DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -320,6 +343,8 @@ def create_llm_client(
         openai_api_key=openai_api_key,
         deepseek_api_key=deepseek_api_key,
         deepseek_base_url=deepseek_base_url,
+        moonshot_api_key=moonshot_api_key,
+        moonshot_base_url=moonshot_base_url,
         local_api_key=local_api_key,
         local_base_url=local_base_url,
         openai_compatible_api_key=openai_compatible_api_key,
@@ -388,6 +413,8 @@ def _legacy_connection(
     openai_api_key: str | None,
     deepseek_api_key: str | None,
     deepseek_base_url: str | None,
+    moonshot_api_key: str | None,
+    moonshot_base_url: str | None,
     local_api_key: str | None,
     local_base_url: str | None,
     openai_compatible_api_key: str | None,
@@ -405,6 +432,8 @@ def _legacy_connection(
         return LLMProviderConnection(api_key=openai_api_key)
     if profile.name == "deepseek":
         return LLMProviderConnection(api_key=deepseek_api_key, base_url=deepseek_base_url)
+    if profile.name == "moonshot":
+        return LLMProviderConnection(api_key=moonshot_api_key, base_url=moonshot_base_url)
     if profile.name == "local":
         return LLMProviderConnection(api_key=local_api_key, base_url=local_base_url)
     if profile.name == "openai-compatible":
@@ -437,6 +466,16 @@ def _create_deepseek_client(settings: LLMClientSettings) -> LLMClient:
         model=settings.model,
         api_key=settings.connection.api_key,
         base_url=settings.connection.base_url or DEFAULT_DEEPSEEK_BASE_URL,
+        timeout_seconds=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+    )
+
+
+def _create_moonshot_client(settings: LLMClientSettings) -> LLMClient:
+    return MoonshotChatCompletionsClient(
+        model=settings.model,
+        api_key=settings.connection.api_key,
+        base_url=settings.connection.base_url or DEFAULT_MOONSHOT_BASE_URL,
         timeout_seconds=settings.timeout_seconds,
         max_retries=settings.max_retries,
     )

@@ -13,6 +13,7 @@ from chulk.llm.providers.compatible import (
     OpenRouterChatCompletionsClient,
 )
 from chulk.llm.providers.local import LocalOpenAICompatibleClient
+from chulk.llm.providers.moonshot import MoonshotChatCompletionsClient
 from chulk.llm.providers.openai import OpenAIResponsesClient
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "HostedOpenAICompatibleClient",
     "GeminiGenerateContentClient",
     "LocalOpenAICompatibleClient",
+    "MoonshotChatCompletionsClient",
     "OpenAICompatibleChatCompletionsClient",
     "OpenRouterChatCompletionsClient",
     "OpenAIResponsesClient",

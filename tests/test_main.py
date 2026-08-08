@@ -15,6 +15,7 @@ from chulk.llm import (
     LLMCapabilities,
     LLMClient,
     LocalProvider,
+    MoonshotProvider,
     OpenAIProvider,
     OpenAIResponsesClient,
 )
@@ -801,6 +802,7 @@ def test_main_show_config_sanitizes_all_provider_base_urls(monkeypatch, tmp_path
     monkeypatch.setenv("CHULK_MODEL", "local-test-model")
     base_urls = {
         "CHULK_DEEPSEEK_BASE_URL": "https://deep-user:deep-secret@deepseek.example/v1?key=deep-query#deep-fragment",
+        "CHULK_MOONSHOT_BASE_URL": "https://moon-user:moon-secret@moonshot.example/v1?key=moon-query#moon-fragment",
         "CHULK_LOCAL_BASE_URL": "http://local-user:local-secret@localhost:1234/v1?key=local-query#local-fragment",
         "CHULK_OPENAI_COMPATIBLE_BASE_URL": "https://compatible-user:compatible-secret@models.example/v1?key=compatible-query#compatible-fragment",
         "CHULK_OPENROUTER_BASE_URL": "https://router-user:router-secret@openrouter.example/api/v1?key=router-query#router-fragment",
@@ -816,6 +818,7 @@ def test_main_show_config_sanitizes_all_provider_base_urls(monkeypatch, tmp_path
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "deepseek_base_url: https://deepseek.example/v1" in output
+    assert "moonshot_base_url: https://moonshot.example/v1" in output
     assert "local_base_url: http://localhost:1234/v1" in output
     assert "openai_compatible_base_url: https://models.example/v1" in output
     assert "openrouter_base_url: https://openrouter.example/api/v1" in output
@@ -828,6 +831,9 @@ def test_main_show_config_sanitizes_all_provider_base_urls(monkeypatch, tmp_path
             "deep-secret",
             "deep-query",
             "deep-fragment",
+            "moon-secret",
+            "moon-query",
+            "moon-fragment",
             "local-secret",
             "local-query",
             "local-fragment",
@@ -921,6 +927,24 @@ def test_create_cli_llm_supports_local_provider_specs(tmp_path):
         ("local", "google/gemma-4-12b-qat"),
         ("openai", "gpt-4.1-mini"),
     ]
+
+
+def test_create_cli_llm_supports_moonshot_provider_specs(tmp_path):
+    config = load_config(
+        {
+            "CHULK_PROJECT_ROOT": str(tmp_path),
+            "CHULK_LLM_PROVIDER": "moonshot",
+            "MOONSHOT_API_KEY": "moonshot-key",
+        }
+    )
+
+    chain = create_cli_llm(config)
+
+    assert isinstance(chain.providers[0], MoonshotProvider)
+    assert (chain.providers[0].provider, chain.providers[0].model) == (
+        "moonshot",
+        "kimi-k3",
+    )
 
 
 def test_main_runs_one_message_with_fake_llm(monkeypatch, tmp_path, capsys):

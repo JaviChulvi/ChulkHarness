@@ -55,7 +55,7 @@ under `.chulk/`. Read [configuration](docs/configuration.md),
 ## CLI
 
 Install a provider extra, configure its credentials in a local `.env`, then run.
-The exact provider names are `openai`, `deepseek`, `local`,
+The exact provider names are `openai`, `deepseek`, `moonshot`, `local`,
 `openai-compatible`, `openrouter`, `anthropic`, `bedrock`, and `gemini`.
 
 ```bash

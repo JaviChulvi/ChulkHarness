@@ -19,6 +19,7 @@ from chulk.tracing import Trace, TraceFormatError
 _PROVIDER_SDK_REQUIREMENTS = {
     "openai": ("openai", "openai", "openai"),
     "deepseek": ("openai", "openai", "openai"),
+    "moonshot": ("openai", "openai", "openai"),
     "local": ("openai", "openai", "openai"),
     "openai-compatible": ("openai", "openai", "openai"),
     "openrouter": ("openai", "openai", "openai"),
@@ -426,6 +427,12 @@ def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]
             ()
             if _has_provider_value(config.deepseek_api_key)
             else ("CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",)
+        )
+    if provider == "moonshot":
+        return (
+            ()
+            if _has_provider_value(config.moonshot_api_key)
+            else ("CHULK_MOONSHOT_API_KEY or MOONSHOT_API_KEY",)
         )
     if provider == "local":
         return ()

@@ -270,6 +270,12 @@ def test_doctor_rejects_missing_fallback_credentials(tmp_path):
             "CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",
         ),
         (
+            "moonshot",
+            "kimi-k3",
+            {},
+            "CHULK_MOONSHOT_API_KEY or MOONSHOT_API_KEY",
+        ),
+        (
             "openai-compatible",
             "vendor/model",
             {"CHULK_OPENAI_COMPATIBLE_BASE_URL": "https://models.example/v1"},
@@ -359,6 +365,13 @@ def test_doctor_checks_openai_compatible_endpoint_for_every_provider_position(
             "deepseek",
             "deepseek-chat",
             {"DEEPSEEK_API_KEY": "test-key"},
+            "openai",
+            "openai",
+        ),
+        (
+            "moonshot",
+            "kimi-k3",
+            {"MOONSHOT_API_KEY": "test-key"},
             "openai",
             "openai",
         ),
@@ -462,6 +475,7 @@ def test_doctor_rejects_blank_provider_credentials_and_endpoints(tmp_path):
     ("provider", "model", "environment"),
     [
         ("deepseek", "deepseek-chat", {"DEEPSEEK_API_KEY": "test-key"}),
+        ("moonshot", "kimi-k3", {"MOONSHOT_API_KEY": "test-key"}),
         ("openrouter", "vendor/model", {"OPENROUTER_API_KEY": "test-key"}),
         ("anthropic", "claude-test", {"ANTHROPIC_API_KEY": "test-key"}),
         (
