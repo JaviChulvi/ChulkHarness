@@ -19,22 +19,44 @@ def extract_memory_candidates(text: str) -> list[MemoryExtractionCandidate]:
         return []
 
     patterns = [
-        (r"\bremember that (?P<content>.+)", ["explicit", "user"]),
-        (r"\bplease remember (?P<content>.+)", ["explicit", "user"]),
-        (r"\bmy preference is (?P<content>.+)", ["preference", "user"]),
-        (r"\bi prefer (?P<content>.+)", ["preference", "user"]),
+        (r"\bremember that (?P<content>.+)", ["explicit", "user"], None),
+        (r"\bplease remember (?P<content>.+)", ["explicit", "user"], None),
+        (
+            r"\bmy preference is (?P<content>.+)",
+            ["preference", "user"],
+            "User prefers",
+        ),
+        (r"\bi prefer (?P<content>.+)", ["preference", "user"], "User prefers"),
+        (r"\brecuerda que (?P<content>.+)", ["explicit", "user"], None),
+        (
+            r"\bpor favor,? recuerda(?: que)? (?P<content>.+)",
+            ["explicit", "user"],
+            None,
+        ),
+        (
+            r"\bmi preferencia es (?P<content>.+)",
+            ["preference", "user"],
+            "El usuario prefiere",
+        ),
+        (
+            r"\bprefiero (?P<content>.+)",
+            ["preference", "user"],
+            "El usuario prefiere",
+        ),
     ]
     candidates: list[MemoryExtractionCandidate] = []
     seen_content: set[str] = set()
-    for pattern, tags in patterns:
+    for pattern, tags, preference_prefix in patterns:
         match = re.search(pattern, clean_text, flags=re.IGNORECASE)
         if not match:
             continue
         content = _strip_sentence(match.group("content"))
         if not content:
             continue
-        if "preference" in tags and not content.lower().startswith("user prefers"):
-            content = f"User prefers {content}"
+        if preference_prefix and not content.casefold().startswith(
+            preference_prefix.casefold()
+        ):
+            content = f"{preference_prefix} {content}"
         normalized = normalize_content(content)
         if normalized in seen_content:
             continue

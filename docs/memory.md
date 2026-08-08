@@ -35,6 +35,11 @@ conversation/turn identity, review time, and the accepted memory id when one was
 created. They also expose the namespace that owns the proposal. Rejection never
 creates a memory.
 
+Candidate extraction remains deliberately explicit rather than inferential. It
+recognizes direct English and Spanish requests such as `remember that`,
+`please remember`, `I prefer`, `recuerda que`, `por favor, recuerda`, and
+`prefiero`. Other statements are not promoted to durable memory automatically.
+
 ## Namespace isolation
 
 Every durable memory and proposal belongs to one opaque namespace. Existing

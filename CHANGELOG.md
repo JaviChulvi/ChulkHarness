@@ -40,6 +40,8 @@ API is still pre-1.0.
 
 ### Changed
 
+- Extended explicit long-term memory extraction to equivalent Spanish remember
+  and preference phrases without enabling implicit inference.
 - Replaced duplicated synchronous and asynchronous orchestration with shared
   transition, transport, tool, plan, and turn-effect components.
 - Added versioned SQLite migrations, explicit WAL and busy-timeout policy,

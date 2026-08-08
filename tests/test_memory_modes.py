@@ -8,6 +8,7 @@ from threading import Barrier
 
 from chulk import Agent, AgentConfig, Capabilities, MemoryProposalStatus
 from chulk.llm import LLMClient
+from chulk.memory import extract_memory_candidates
 
 
 class FakeLLM(LLMClient):
@@ -145,3 +146,18 @@ def test_manual_explicit_save_tool_creates_review_proposal(tmp_path):
     assert proposal.content == "User prefers concise answers"
     assert proposal.conversation_id == facade.conversation_id
     assert proposal.turn_id == result.turn_id
+
+
+def test_explicit_memory_extraction_supports_spanish_requests():
+    explicit = extract_memory_candidates(
+        "Por favor, recuerda que el cierre contable es el día 5."
+    )
+    preference = extract_memory_candidates("Prefiero respuestas breves.")
+
+    assert [candidate.content for candidate in explicit] == [
+        "el cierre contable es el día 5"
+    ]
+    assert [candidate.content for candidate in preference] == [
+        "El usuario prefiere respuestas breves"
+    ]
+    assert preference[0].tags == ["preference", "user"]
