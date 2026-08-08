@@ -5,14 +5,15 @@ permission profile.
 
 | Mode | Retrieval | Explicit save tool | Inferred candidates |
 |---|---|---|---|
-| `off` | Disabled | Hidden | Discarded |
-| `read-only` | Enabled | Hidden | Discarded |
+| `off` | Disabled | Hidden | Not extracted |
+| `read-only` | Enabled | Hidden | Not extracted |
 | `manual` | Enabled | Creates a proposal | Creates proposals |
 | `automatic` | Enabled | Saves immediately | Saves immediately |
 
 The SDK default is `read-only`, so a user message cannot silently create a
-durable memory. CLI/runtime assembly that does not opt into SDK capabilities
-retains its existing automatic behavior for compatibility.
+durable memory. Read-only mode performs retrieval without running phrase-based
+candidate extraction. CLI/runtime assembly that does not opt into SDK
+capabilities retains its existing automatic behavior for compatibility.
 
 ```python
 from chulk import Agent, AgentConfig, Capabilities

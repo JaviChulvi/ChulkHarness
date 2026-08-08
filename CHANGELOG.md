@@ -40,6 +40,8 @@ API is still pre-1.0.
 
 ### Changed
 
+- Read-only memory mode now performs retrieval without running candidate
+  extraction that cannot be persisted in that mode.
 - Replaced duplicated synchronous and asynchronous orchestration with shared
   transition, transport, tool, plan, and turn-effect components.
 - Added versioned SQLite migrations, explicit WAL and busy-timeout policy,

@@ -6,7 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from threading import Barrier
 
-from chulk import Agent, AgentConfig, Capabilities, MemoryProposalStatus
+import pytest
+
+from chulk import Agent, AgentConfig, Capabilities, MemoryMode, MemoryProposalStatus
 from chulk.llm import LLMClient
 
 
@@ -40,9 +42,19 @@ def test_off_mode_disables_tools_retrieval_and_inferred_writes(tmp_path):
     assert facade.list_memory_proposals() == ()
 
 
-def test_read_only_mode_retrieves_but_never_persists_inferred_memory(tmp_path):
+def test_read_only_mode_retrieves_without_running_memory_extraction(
+    tmp_path, monkeypatch
+):
     facade = _agent(tmp_path, "read-only")
     existing_id = facade.runtime.memory_store.save_memory("Project alpha uses SQLite", tags=["project"])
+
+    def fail_extraction(*_args, **_kwargs):
+        raise AssertionError("read-only memory must not run candidate extraction")
+
+    monkeypatch.setattr(
+        "chulk.core.agent.route_memory_candidates",
+        fail_extraction,
+    )
 
     result = facade.run_result("Remember that project beta uses Postgres. What database does alpha use?")
 
@@ -50,6 +62,31 @@ def test_read_only_mode_retrieves_but_never_persists_inferred_memory(tmp_path):
     contents = [memory.content for memory in facade.runtime.memory_store.list_memories()]
     assert contents == ["Project alpha uses SQLite"]
     assert facade.list_memory_proposals() == ()
+
+
+@pytest.mark.asyncio
+async def test_async_read_only_mode_skips_candidate_extraction(tmp_path, monkeypatch):
+    facade = _agent(tmp_path, "read-only")
+
+    class ReadOnlyPolicy:
+        mode = MemoryMode.READ_ONLY
+
+    facade.runtime.async_memory_policy = ReadOnlyPolicy()
+
+    def fail_extraction(*_args, **_kwargs):
+        raise AssertionError("read-only memory must not run candidate extraction")
+
+    monkeypatch.setattr(
+        "chulk.core.agent.extract_memory_candidates",
+        fail_extraction,
+    )
+
+    await facade.runtime._extract_long_term_memories_async(
+        "Remember that project beta uses Postgres."
+    )
+
+    assert facade.runtime.state.extracted_memory_ids == []
+    facade.close()
 
 
 def test_manual_mode_persists_proposals_across_restart_and_approves(tmp_path):
