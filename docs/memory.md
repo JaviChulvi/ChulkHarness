@@ -11,9 +11,10 @@ permission profile.
 | `automatic` | Enabled | Saves immediately | Saves immediately |
 
 The SDK default is `read-only`, so a user message cannot silently create a
-durable memory. Read-only mode performs retrieval without running phrase-based
-candidate extraction. CLI/runtime assembly that does not opt into SDK
-capabilities retains its existing automatic behavior for compatibility.
+durable memory. Modes that disable writes do not run phrase-based candidate
+extraction, avoiding unnecessary work on each turn. Read-only mode still
+performs retrieval. CLI/runtime assembly that does not opt into SDK capabilities
+retains its existing automatic behavior for compatibility.
 
 ```python
 from chulk import Agent, AgentConfig, Capabilities

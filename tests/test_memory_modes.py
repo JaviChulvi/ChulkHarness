@@ -10,6 +10,7 @@ import pytest
 
 from chulk import Agent, AgentConfig, Capabilities, MemoryMode, MemoryProposalStatus
 from chulk.llm import LLMClient
+from chulk.memory import AsyncMemoryPolicy
 
 
 class FakeLLM(LLMClient):
@@ -31,8 +32,21 @@ def _agent(root, mode: str, responses: list[str] | None = None) -> Agent:
     )
 
 
-def test_off_mode_disables_tools_retrieval_and_inferred_writes(tmp_path):
+def test_off_mode_disables_tools_retrieval_and_inferred_writes(
+    tmp_path,
+    monkeypatch,
+):
     facade = _agent(tmp_path, "off")
+
+    def fail_extraction(*_args, **_kwargs):
+        raise AssertionError(
+            "write-disabled memory must not run candidate extraction"
+        )
+
+    monkeypatch.setattr(
+        "chulk.core.agent.route_memory_candidates",
+        fail_extraction,
+    )
 
     result = facade.run_result("Please remember that project alpha uses SQLite.")
 
@@ -64,17 +78,21 @@ def test_read_only_mode_retrieves_without_running_memory_extraction(
     assert facade.list_memory_proposals() == ()
 
 
+@pytest.mark.parametrize("mode", [MemoryMode.OFF, MemoryMode.READ_ONLY])
 @pytest.mark.asyncio
-async def test_async_read_only_mode_skips_candidate_extraction(tmp_path, monkeypatch):
-    facade = _agent(tmp_path, "read-only")
-
-    class ReadOnlyPolicy:
-        mode = MemoryMode.READ_ONLY
-
-    facade.runtime.async_memory_policy = ReadOnlyPolicy()
+async def test_async_write_disabled_modes_skip_candidate_extraction(
+    tmp_path, monkeypatch, mode
+):
+    facade = _agent(tmp_path, mode.value)
+    facade.runtime.async_memory_policy = AsyncMemoryPolicy(
+        facade.runtime.memory_store,
+        mode,
+    )
 
     def fail_extraction(*_args, **_kwargs):
-        raise AssertionError("read-only memory must not run candidate extraction")
+        raise AssertionError(
+            "write-disabled memory must not run candidate extraction"
+        )
 
     monkeypatch.setattr(
         "chulk.core.agent.extract_memory_candidates",
