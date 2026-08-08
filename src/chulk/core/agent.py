@@ -11,6 +11,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from chulk.capabilities import MemoryMode
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
 from chulk.core.async_cleanup import await_cleanup_after_error
@@ -1948,6 +1949,8 @@ class Agent:
         self.state.extracted_memory_ids = []
         if self.memory_store is None or self.memory_policy is None:
             return
+        if self.memory_policy.mode in {MemoryMode.OFF, MemoryMode.READ_ONLY}:
+            return
         result = route_memory_candidates(
             user_message,
             self.memory_policy,
@@ -1990,6 +1993,8 @@ class Agent:
                 self._extract_long_term_memories,
                 user_message,
             )
+            return
+        if policy.mode in {MemoryMode.OFF, MemoryMode.READ_ONLY}:
             return
         result = await policy.handle_candidates(
             extract_memory_candidates(user_message),
