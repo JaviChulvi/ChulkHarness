@@ -30,22 +30,48 @@ the [provider guide](docs/providers.md).
 
 ## SDK
 
+A minimal DeepSeek agent:
+
 ```python
 from chulk import Agent, AgentConfig
-from chulk.testing import ScriptedLLMClient
-
-client = ScriptedLLMClient([
-    {"type": "final_answer", "content": "Hello from Chulk."}
-])
 
 with Agent(
-    config=AgentConfig(project_root="."),
-    llm=client,
+    config=AgentConfig.deepseek(model="deepseek-v4-flash"),
     tools=[],
     skills=[],
 ) as agent:
-    print(agent.run("Say hello"))
+    print(agent.run("Summarize: I was charged twice for order A-100."))
 ```
+
+The same agent with two tools and two illustrative, pre-registered workflow
+skills:
+
+```python
+from chulk import Agent, AgentConfig, Tool
+
+
+@Tool
+def order_status(order_id: str) -> dict:
+    return {"order_id": order_id, "status": "shipped", "eta": "Monday"}
+
+
+@Tool
+def refund_eligibility(days_since_delivery: int) -> dict:
+    return {"eligible": days_since_delivery <= 30, "window_days": 30}
+
+
+with Agent(
+    config=AgentConfig.deepseek(model="deepseek-v4-flash"),
+    tools=[order_status, refund_eligibility],
+    skills=["order-resolution", "returns-workflow"],
+    system_prompt="Be concise and friendly.",
+) as agent:
+    print(agent.run("Where is order A-100, and can I return it after 12 days?"))
+```
+
+See the [SDK quickstart](examples/00_sdk_quickstart.py) and
+[repository-review application](examples/repo_review_bot/README.md) for complete
+runnable examples.
 
 SDK agents default to read-only capabilities and store private runtime state
 under `.chulk/`. Read [configuration](docs/configuration.md),
