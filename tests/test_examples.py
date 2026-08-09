@@ -49,7 +49,8 @@ def test_quickstart_reaches_first_result_without_credentials(tmp_path: Path) -> 
 
     assert completed.returncode == 0, completed.stderr
     assert "mode: scripted" in completed.stdout
-    assert "Order A-100 is packed and ships tomorrow." in completed.stdout
+    assert "Order A-100 is packed and expected to ship tomorrow." in completed.stdout
+    assert "tool_calls: order_status" in completed.stdout
     assert "runtime_dir:" in completed.stdout
     assert "trace_path:" in completed.stdout
 

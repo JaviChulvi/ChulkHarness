@@ -46,30 +46,64 @@ artifacts built from unreviewed pull requests as untrusted.
 Save this as `quickstart.py`:
 
 ```python
-from chulk import Agent, AgentConfig
+from chulk import Agent, AgentConfig, Tool, ToolContext
 from chulk.testing import ScriptedLLMClient
 
+OrderStore = dict[str, dict[str, str]]
+orders: OrderStore = {
+    "A-100": {"status": "packed", "estimated_ship_date": "tomorrow"}
+}
+
+
+@Tool
+def order_status(order_id: str, context: ToolContext[OrderStore]) -> dict[str, str]:
+    """Look up one order in the host application's store."""
+    return context.require_deps().get(
+        order_id,
+        {"error": f"Unknown order: {order_id}"},
+    )
+
+
 client = ScriptedLLMClient([
-    {"type": "final_answer", "content": "Hello from Chulk."}
+    {
+        "type": "tool_call",
+        "tool_name": "order_status",
+        "arguments": {"order_id": "A-100"},
+    },
+    {
+        "type": "final_answer",
+        "content": "Order A-100 is packed and expected to ship tomorrow.",
+    },
 ])
 config = AgentConfig(project_root=".", runtime_dir=".chulk")
 
-with Agent(config=config, llm=client, tools=[], skills=[]) as agent:
-    result = agent.run_result("Say hello")
-    print(result.content)
-    print(f"trace_path: {result.trace_path}")
+with Agent(
+    config=config,
+    llm=client,
+    tools=[order_status],
+    skills=[],
+    deps=orders,
+) as agent:
+    result = agent.run_result("When will order A-100 ship?")
+
+print(result.content)
+print(f"trace_path: {result.trace_path}")
 ```
 
-Run `python quickstart.py`. From a source checkout, the richer tool-call example
-is `python examples/00_sdk_quickstart.py`.
+Run `python quickstart.py`. The model can only supply `order_id`; the order
+store is application-owned data injected through `ToolContext`. From a source
+checkout, run `python examples/00_sdk_quickstart.py` for the same pattern with
+an explicit scripted-or-live switch and isolated example state.
 
 Both paths default to `chulk.testing.ScriptedLLMClient`, so they need no API
-key, provider account, or network connection. It performs a normal validated
-tool-call loop and prints:
+key, provider account, or network connection. The scripted client makes the
+model decisions repeatable; Chulk still validates the request, executes the
+tool, and records the normal run lifecycle. The repository example prints:
 
 ```text
 mode: scripted
-Order A-100 is packed and ships tomorrow.
+Order A-100 is packed and expected to ship tomorrow.
+tool_calls: order_status
 runtime_dir: .../examples/runtime/00_sdk_quickstart
 trace_path: .../traces/<conversation-id>.jsonl
 ```

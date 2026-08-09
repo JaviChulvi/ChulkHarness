@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-from chulk import Agent, Tool
+from chulk import Agent, Tool, ToolContext
 
 from common import scripted_or_live
 
 
+OrderStore = dict[str, dict[str, str]]
+ORDERS: OrderStore = {
+    "A-100": {"status": "packed", "estimated_ship_date": "tomorrow"}
+}
+
+
 @Tool
-def order_status(order_id: str) -> str:
-    """Look up a demo order by id."""
-    return f"Order {order_id} is packed and ships tomorrow."
+def order_status(order_id: str, context: ToolContext[OrderStore]) -> dict[str, str]:
+    """Look up one order in the host application's store."""
+    return context.require_deps().get(
+        order_id,
+        {"error": f"Unknown order: {order_id}"},
+    )
 
 
 def main() -> None:
@@ -24,17 +33,24 @@ def main() -> None:
             },
             {
                 "type": "final_answer",
-                "content": "Order A-100 is packed and ships tomorrow.",
+                "content": "Order A-100 is packed and expected to ship tomorrow.",
             },
         ],
     )
 
-    with Agent(config=config, llm=llm, tools=[order_status], skills=[]) as assistant:
+    with Agent(
+        config=config,
+        llm=llm,
+        tools=[order_status],
+        skills=[],
+        deps=ORDERS,
+    ) as assistant:
         result = assistant.run_result(
-            "Use the order_status tool to check order A-100, then reply in one sentence."
+            "Use the order_status tool to say when order A-100 will ship."
         )
     print(f"mode: {mode}")
     print(result.content)
+    print("tool_calls: " + ", ".join(call.tool_name for call in result.tool_calls))
     print(f"runtime_dir: {config.to_config().runtime_dir}")
     print(f"trace_path: {result.trace_path}")
 
