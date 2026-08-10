@@ -223,34 +223,218 @@ def _case_duration(case: Mapping[str, Any]) -> float:
 
 def _html(report: Mapping[str, Any]) -> str:
     metrics = _number_mapping(report.get("metrics"))
-    rows = "".join(
-        f"<tr><th>{escape(name)}</th><td>{value:.6g}</td></tr>"
-        for name, value in metrics.items()
+    cases = [
+        item
+        for item in report.get("cases", [])
+        if isinstance(item, Mapping)
+    ] if isinstance(report.get("cases"), list) else []
+    passed = bool(report.get("passed"))
+    run_status = str(report.get("status", "completed"))
+    state = "pass" if passed and run_status == "completed" else "fail"
+    verdict = "Passed" if state == "pass" else "Needs attention"
+    status_copy = (
+        "All required checks and suite thresholds passed."
+        if state == "pass"
+        else "Review failed checks, thresholds, or operational errors below."
     )
-    case_rows = ""
-    for item in report.get("cases", []) if isinstance(report.get("cases"), list) else []:
-        if not isinstance(item, Mapping):
-            continue
-        state = "pass" if item.get("passed") else "fail"
-        case_rows += (
-            f'<tr><td>{escape(str(item.get("target_name", "")))}</td>'
-            f'<td>{escape(str(item.get("case_id", "")))}</td>'
-            f'<td><span class="status {state}">{state}</span></td></tr>'
+    summary_cards = "".join(
+        _summary_card(label, value, detail)
+        for label, value, detail in (
+            (
+                "Pass rate",
+                _format_percent(metrics.get("pass_rate", 0.0)),
+                "required quality gates",
+            ),
+            (
+                "Cases",
+                _format_count(metrics.get("case_count", float(len(cases)))),
+                _pluralize(len(cases), "evaluated case"),
+            ),
+            (
+                "P95 latency",
+                _format_duration(
+                    metrics.get(
+                        "p95_latency_seconds",
+                        metrics.get("mean_latency_seconds", 0.0),
+                    )
+                ),
+                "per trial",
+            ),
+            (
+                "Tokens",
+                _format_count(
+                    metrics.get("total_tokens", metrics.get("agent_tokens", 0.0))
+                ),
+                "agent and judge usage",
+            ),
+            (
+                "Cost",
+                _format_cost(metrics.get("total_cost", 0.0)),
+                "recorded total",
+            ),
         )
+    )
+    case_rows = "".join(_html_case_row(item) for item in cases)
+    if not case_rows:
+        case_rows = '<tr><td class="empty" colspan="5">No cases were recorded.</td></tr>'
+    grades = _html_grade_summary(cases)
+    grade_rows = "".join(
+        _html_grade_row(name, values)
+        for name, values in grades.items()
+    )
+    if not grade_rows:
+        grade_rows = '<tr><td class="empty" colspan="5">No grader results were recorded.</td></tr>'
+    metric_rows = "".join(
+        '<div class="metric"><dt>'
+        f'{escape(name)}</dt><dd>{escape(_format_number(value))}</dd></div>'
+        for name, value in sorted(metrics.items())
+    )
+    alerts = _html_alerts(report)
     title = escape(str(report.get("suite_name", "Chulk evaluation")))
+    report_id = escape(str(report.get("id", "")) or "not recorded")
+    started_at = escape(str(report.get("started_at", "")) or "not recorded")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} · evaluation report</title><style>
-:root{{--ink:#17202a;--muted:#65717d;--paper:#f5f7fa;--line:#d7dde4;--blue:#2457d6;--green:#167451;--red:#b42318}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,sans-serif}}
-main{{max-width:1080px;margin:auto;padding:48px 24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:end;border-bottom:3px solid var(--ink);padding-bottom:20px}}
-h1{{font-size:clamp(30px,5vw,58px);letter-spacing:-.05em;line-height:.95;margin:0;max-width:720px}}.run{{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted)}}
-.grid{{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:32px;margin-top:32px}}section{{background:white;border:1px solid var(--line);padding:24px}}h2{{font-size:13px;text-transform:uppercase;letter-spacing:.12em;margin:0 0 16px}}
-table{{width:100%;border-collapse:collapse}}th,td{{padding:10px 8px;border-top:1px solid var(--line);text-align:left}}th{{font-weight:600}}.status{{font:11px ui-monospace,monospace;text-transform:uppercase}}.pass{{color:var(--green)}}.fail{{color:var(--red)}}
-@media(max-width:760px){{header,.grid{{display:block}}.run{{margin-top:16px}}section{{margin-top:20px;overflow:auto}}}}
-</style></head><body><main><header><h1>{title}</h1><div class="run">run {escape(str(report.get('id', '')))}<br>{escape(str(report.get('started_at', '')))}</div></header>
-<div class="grid"><section><h2>Measures</h2><table>{rows}</table></section><section><h2>Cases</h2><table><thead><tr><th>Target</th><th>Case</th><th>Result</th></tr></thead><tbody>{case_rows}</tbody></table></section></div>
+:root{{--ink:#0d1b2a;--muted:#617080;--paper:#f3f6f8;--surface:#fff;--line:#d9e1e7;--line-strong:#b9c5cf;--green:#0f7b5d;--green-soft:#e8f5f0;--red:#b42318;--red-soft:#fff0ee;--blue:#315ee7;--shadow:0 18px 50px rgba(13,27,42,.07)}}
+*{{box-sizing:border-box}}html{{background:var(--paper)}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 "Avenir Next",Avenir,"Segoe UI",ui-sans-serif,system-ui,sans-serif}}
+main{{width:min(1180px,calc(100% - 40px));margin:0 auto;padding:48px 0 64px}}.hero{{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:40px;overflow:hidden;background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:34px 38px 32px;box-shadow:var(--shadow)}}
+.hero:before{{content:"";position:absolute;inset:0 auto 0 0;width:7px;background:var(--green)}}.hero.fail:before{{background:var(--red)}}.eyebrow{{margin:0 0 10px;color:var(--muted);font:700 11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.13em;text-transform:uppercase}}
+h1{{max-width:780px;margin:0;font:700 clamp(32px,5vw,55px)/1.02 ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold","Avenir Next",sans-serif;letter-spacing:-.045em;overflow-wrap:anywhere}}.lede{{max-width:650px;margin:17px 0 0;color:var(--muted);font-size:16px}}
+.verdict{{display:flex;min-width:190px;flex-direction:column;align-items:flex-end;justify-content:space-between;text-align:right}}.badge{{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 12px;background:var(--green-soft);color:var(--green);font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase}}.badge:before{{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}}.badge.fail{{background:var(--red-soft);color:var(--red)}}
+.run{{max-width:260px;margin-top:32px;color:var(--muted);font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:16px 0 28px}}.summary-card{{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:15px;padding:18px 19px}}.summary-card span{{display:block;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}}.summary-card strong{{display:block;margin-top:7px;font-size:25px;line-height:1.1;letter-spacing:-.03em;font-variant-numeric:tabular-nums}}.summary-card small{{display:block;margin-top:6px;color:var(--muted);font-size:11px}}
+.alerts{{display:grid;gap:10px;margin:0 0 20px}}.alert{{border:1px solid #f1c7c2;border-radius:14px;background:var(--red-soft);padding:15px 18px;color:#7d2018}}.alert strong{{display:block;margin-bottom:4px}}.alert ul{{margin:6px 0 0;padding-left:20px}}
+.panel{{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:25px 28px}}.section-heading{{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:18px}}h2{{margin:0;font-size:20px;line-height:1.2;letter-spacing:-.02em}}.count{{flex:none;border:1px solid var(--line);border-radius:999px;padding:5px 9px;color:var(--muted);font:11px/1 ui-monospace,SFMono-Regular,Menlo,monospace}}
+.table-wrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse}}th,td{{padding:14px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:middle}}thead th{{border-top:0;color:var(--muted);font-size:11px;letter-spacing:.07em;text-transform:uppercase}}tbody th{{font-weight:700}}td{{font-variant-numeric:tabular-nums}}.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}.empty{{padding:30px 12px;color:var(--muted);text-align:center}}
+.status{{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:6px 9px;font:800 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.07em;text-transform:uppercase}}.status:before{{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}}.status.pass{{background:var(--green-soft);color:var(--green)}}.status.fail{{background:var(--red-soft);color:var(--red)}}.status.info{{background:#edf2ff;color:var(--blue)}}
+details.panel{{padding:0}}details summary{{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:22px 28px;cursor:pointer;font-weight:750;list-style:none}}details summary::-webkit-details-marker{{display:none}}details summary:after{{content:"+";color:var(--muted);font:20px/1 ui-monospace,SFMono-Regular,Menlo,monospace}}details[open] summary:after{{content:"−"}}details summary:focus-visible{{outline:3px solid rgba(49,94,231,.25);outline-offset:3px;border-radius:14px}}.metric-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 28px;padding:0 28px 24px}}.metric{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;padding:11px 0;border-top:1px solid var(--line)}}.metric dt{{min-width:0;color:var(--muted);font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}}.metric dd{{margin:0;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}}
+footer{{display:flex;justify-content:space-between;gap:24px;margin-top:20px;padding:0 4px;color:var(--muted);font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}}footer span:last-child{{text-align:right;overflow-wrap:anywhere}}
+@media(max-width:900px){{.summary{{grid-template-columns:repeat(3,minmax(0,1fr))}}.metric-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:640px){{main{{width:min(100% - 24px,1180px);padding:20px 0 36px}}.hero{{display:block;padding:27px 24px 25px;border-radius:18px}}.verdict{{min-width:0;align-items:flex-start;margin-top:24px;text-align:left}}.run{{margin-top:18px}}.summary{{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:20px}}.panel{{padding:21px 18px}}.section-heading{{align-items:flex-start}}th,td{{padding:12px 10px;white-space:nowrap}}details summary{{padding:20px 18px}}.metric-grid{{grid-template-columns:1fr;padding:0 18px 20px}}footer{{display:block}}footer span{{display:block}}footer span:last-child{{margin-top:5px;text-align:left}}}}
+@media print{{html,body{{background:#fff}}main{{width:100%;padding:0}}.hero,.summary-card,.panel{{box-shadow:none}}details .metric-grid{{display:grid}}details summary:after{{display:none}}}}
+</style></head><body><main><header class="hero {state}"><div><p class="eyebrow">Agent evaluation report</p><h1>{title}</h1><p class="lede">{status_copy}</p></div><div class="verdict"><span class="badge {state}">{verdict}</span><div class="run">run {report_id}<br>{started_at}</div></div></header>
+<section class="summary" aria-label="Evaluation summary">{summary_cards}</section>{alerts}
+<section class="panel"><div class="section-heading"><div><p class="eyebrow">Execution</p><h2>Case results</h2></div><span class="count">{escape(_pluralize(len(cases), "case"))}</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Case</th><th scope="col">Target</th><th scope="col">Trials</th><th scope="col">Duration</th><th scope="col">Result</th></tr></thead><tbody>{case_rows}</tbody></table></div></section>
+<section class="panel"><div class="section-heading"><div><p class="eyebrow">Quality gates</p><h2>Grader outcomes</h2></div><span class="count">{escape(_pluralize(len(grades), "grader"))}</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Grader</th><th scope="col">Required</th><th scope="col">Score</th><th scope="col">Passed</th><th scope="col">Result</th></tr></thead><tbody>{grade_rows}</tbody></table></div></section>
+<details class="panel"><summary>All recorded metrics <span class="count">{len(metrics)}</span></summary><dl class="metric-grid">{metric_rows}</dl></details>
+<footer><span>Generated by Chulk evals</span><span>{report_id}</span></footer>
 </main></body></html>"""
+
+
+def _summary_card(label: str, value: str, detail: str) -> str:
+    return (
+        '<div class="summary-card">'
+        f"<span>{escape(label)}</span><strong>{escape(value)}</strong>"
+        f"<small>{escape(detail)}</small></div>"
+    )
+
+
+def _html_case_row(case: Mapping[str, Any]) -> str:
+    trials = case.get("trials")
+    trial_count = len(trials) if isinstance(trials, list) else 0
+    state = "pass" if case.get("passed") else "fail"
+    return (
+        f'<tr><th scope="row">{escape(str(case.get("case_id", "")))}</th>'
+        f'<td>{escape(str(case.get("target_name", "")))}</td>'
+        f'<td class="mono">{trial_count}</td>'
+        f'<td class="mono">{escape(_format_duration(_case_duration(case)))}</td>'
+        f'<td><span class="status {state}">{state}</span></td></tr>'
+    )
+
+
+def _html_grade_summary(
+    cases: list[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for case in cases:
+        trials = case.get("trials")
+        if not isinstance(trials, list):
+            continue
+        for trial in trials:
+            if not isinstance(trial, Mapping):
+                continue
+            grades = trial.get("grades")
+            if not isinstance(grades, list):
+                continue
+            for grade in grades:
+                if not isinstance(grade, Mapping):
+                    continue
+                name = str(grade.get("grader") or "unnamed grader")
+                details = grade.get("details")
+                details = details if isinstance(details, Mapping) else {}
+                item = summary.setdefault(
+                    name,
+                    {"required": False, "scores": [], "passed": 0, "total": 0},
+                )
+                item["required"] = bool(item["required"] or details.get("required"))
+                score = grade.get("score")
+                if isinstance(score, int | float) and not isinstance(score, bool):
+                    item["scores"].append(float(score))
+                item["total"] += 1
+                if grade.get("passed") and not grade.get("error"):
+                    item["passed"] += 1
+    return summary
+
+
+def _html_grade_row(name: str, values: Mapping[str, Any]) -> str:
+    scores = values.get("scores")
+    scores = scores if isinstance(scores, list) else []
+    average = sum(scores) / len(scores) if scores else 0.0
+    passed = int(values.get("passed", 0))
+    total = int(values.get("total", 0))
+    required = bool(values.get("required"))
+    state = "pass" if passed == total and total else "fail" if required else "info"
+    label = "pass" if state == "pass" else "fail" if state == "fail" else "info"
+    return (
+        f'<tr><th scope="row">{escape(name)}</th>'
+        f'<td>{"Yes" if required else "No"}</td>'
+        f'<td class="mono">{escape(_format_percent(average))}</td>'
+        f'<td class="mono">{passed}/{total}</td>'
+        f'<td><span class="status {state}">{label}</span></td></tr>'
+    )
+
+
+def _html_alerts(report: Mapping[str, Any]) -> str:
+    blocks: list[str] = []
+    for title, key in (
+        ("Threshold failures", "threshold_failures"),
+        ("Operational errors", "operational_errors"),
+    ):
+        values = report.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        items = "".join(f"<li>{escape(str(item))}</li>" for item in values)
+        blocks.append(f'<div class="alert"><strong>{title}</strong><ul>{items}</ul></div>')
+    return f'<section class="alerts" aria-label="Evaluation issues">{"".join(blocks)}</section>' if blocks else ""
+
+
+def _format_percent(value: float) -> str:
+    percentage = value * 100
+    return f"{percentage:.0f}%" if percentage.is_integer() else f"{percentage:.1f}%"
+
+
+def _format_duration(value: float) -> str:
+    if value < 1:
+        return f"{value * 1000:.0f} ms"
+    return f"{value:.2f} s"
+
+
+def _format_count(value: float) -> str:
+    return f"{int(value):,}" if value.is_integer() else f"{value:,.1f}"
+
+
+def _format_cost(value: float) -> str:
+    if value == 0:
+        return "$0.00"
+    return f"${value:.4f}" if value < 0.01 else f"${value:.2f}"
+
+
+def _format_number(value: float) -> str:
+    return f"{int(value):,}" if value.is_integer() else f"{value:.6g}"
+
+
+def _pluralize(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def _number_mapping(value: Any) -> dict[str, float]:

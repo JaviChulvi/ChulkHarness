@@ -286,6 +286,94 @@ def test_sqlite_store_baseline_comparison_and_all_exports(tmp_path: Path) -> Non
         compare_reports(stored, other)
 
 
+def test_html_export_prioritizes_verdict_cases_and_graders(tmp_path: Path) -> None:
+    report = {
+        "schema_version": 1,
+        "id": "run-123",
+        "suite_name": "support<script>",
+        "status": "completed",
+        "passed": True,
+        "started_at": "2026-08-10T21:20:46+00:00",
+        "threshold_failures": [],
+        "operational_errors": [],
+        "metrics": {
+            "pass_rate": 1.0,
+            "case_count": 1,
+            "p95_latency_seconds": 0.186,
+            "total_tokens": 26_285,
+            "total_cost": 0,
+            "grader.answer.exact.pass_rate": 1.0,
+        },
+        "cases": [
+            {
+                "target_name": "sdk<script>",
+                "case_id": "ready<script>",
+                "passed": True,
+                "trials": [
+                    {
+                        "duration_seconds": 0.186,
+                        "grades": [
+                            {
+                                "grader": "answer.exact<script>",
+                                "score": 1.0,
+                                "passed": True,
+                                "error": None,
+                                "details": {"required": True},
+                            },
+                            {
+                                "grader": "style.informational",
+                                "score": 0.5,
+                                "passed": False,
+                                "error": None,
+                                "details": {"required": False},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    output = export_report(report, tmp_path / "report.html", format="html")
+    html = output.read_text(encoding="utf-8")
+
+    assert '<span class="badge pass">Passed</span>' in html
+    assert "All required checks and suite thresholds passed." in html
+    assert "<strong>100%</strong>" in html
+    assert "Case results" in html
+    assert "Grader outcomes" in html
+    assert '<span class="status info">info</span>' in html
+    assert '<details class="panel">' in html
+    assert "All recorded metrics" in html
+    assert html.index("Case results") < html.index("All recorded metrics")
+    assert "support&lt;script&gt;" in html
+    assert "ready&lt;script&gt;" in html
+    assert "answer.exact&lt;script&gt;" in html
+    assert "<script>" not in html
+
+
+def test_html_export_surfaces_failed_quality_and_operational_details(tmp_path: Path) -> None:
+    report = {
+        "id": "failed-run",
+        "suite_name": "failed",
+        "status": "completed",
+        "passed": False,
+        "metrics": {"pass_rate": 0.0},
+        "cases": [],
+        "threshold_failures": ["pass_rate < 1"],
+        "operational_errors": ["provider <offline>"],
+    }
+
+    output = export_report(report, tmp_path / "failed.html", format="html")
+    html = output.read_text(encoding="utf-8")
+
+    assert '<span class="badge fail">Needs attention</span>' in html
+    assert "Threshold failures" in html
+    assert "pass_rate &lt; 1" in html
+    assert "Operational errors" in html
+    assert "provider &lt;offline&gt;" in html
+
+
 def test_thresholds_are_explicit_and_informational_graders_do_not_fail() -> None:
     case = EvalCase(
         "info",
