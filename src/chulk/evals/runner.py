@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import inspect
@@ -22,7 +22,13 @@ from chulk.events import AgentEvent, SerializedEventPayload
 from chulk.hosting import ExecutionScope
 from chulk.results import RunResult, RunStatus
 from chulk.testing import ScriptedLLMClient, ScriptedResponse
-from chulk.tools.permissions import ToolPermissionLevel
+from chulk.tools.permissions import (
+    PermissionDecision,
+    PermissionDecisionRecord,
+    PermissionRequest,
+    ToolPermissionLevel,
+    ToolPermissionPolicy,
+)
 
 from .models import (
     CaseResult,
@@ -366,8 +372,10 @@ def _run_trial_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_
     started = time.monotonic()
     turns: list[EvalTurnResult] = []
     exception: str | None = None
-    with tempfile.TemporaryDirectory(prefix="chulk-eval-") as temporary:
-        workspace = Path(temporary).resolve()
+    temporary = tempfile.TemporaryDirectory(prefix="chulk-eval-")
+    workspace = Path(temporary.name).resolve()
+    deferred_cleanup = False
+    try:
         client = _scripted_client(case) if suite.mode is EvaluationMode.SCRIPTED else None
         scope = ExecutionScope.local(
             profile_id=f"eval-{target.name}",
@@ -399,12 +407,25 @@ def _run_trial_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_
                 if not isinstance(result, RunResult):
                     raise TypeError("eval agent run_result() must return RunResult")
                 turns.append(EvalTurnResult(index, result, tuple(events), time.monotonic() - turn_started))
+        except _SyncTurnTimeout as exc:
+            deferred_cleanup = True
+            exc.defer(
+                lambda: _cleanup_sync_resources(agent, fixture, temporary)
+            )
+            exception = _format_exception(
+                TimeoutError(f"turn exceeded {suite.timeout_seconds:g}s timeout")
+            )
         except Exception as exc:
             exception = _format_exception(exc)
         finally:
-            _close_sync(agent)
-            _close_sync(fixture)
+            if not deferred_cleanup:
+                cleanup_errors = _cleanup_sync_resources(agent, fixture, temporary)
+                exception = _merge_exceptions(exception, cleanup_errors)
         return TrialResult(case.id, target.name, trial_number, tuple(turns), time.monotonic() - started, exception=exception, workspace=workspace)
+    except Exception:
+        if not deferred_cleanup:
+            temporary.cleanup()
+        raise
 
 
 async def _run_trial_async(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_number: int) -> TrialResult:
@@ -441,8 +462,8 @@ async def _run_trial_async(suite: EvalSuite, target: EvalTarget, case: EvalCase,
         except Exception as exc:
             exception = _format_exception(exc)
         finally:
-            await _close_async(agent)
-            await _close_async(fixture)
+            cleanup_errors = await _cleanup_async_resources(agent, fixture)
+            exception = _merge_exceptions(exception, cleanup_errors)
         return TrialResult(case.id, target.name, trial_number, tuple(turns), time.monotonic() - started, exception=exception, workspace=workspace)
 
 
@@ -564,13 +585,48 @@ def _validate_agent_safety(agent: object, suite: EvalSuite) -> None:
     registry = getattr(agent, "tool_registry", None)
     if registry is None or not callable(getattr(registry, "list_tools", None)):
         return
-    allowed = set(suite.safety.allowed_tool_names)
-    denied = [
-        tool.name for tool in registry.list_tools()
-        if tool.normalized_permission_level() is not ToolPermissionLevel.READ and tool.name not in allowed
-    ]
-    if denied:
-        raise PermissionError("eval denied side-effecting tools: " + ", ".join(sorted(denied)))
+    tools = registry.list_tools()
+    has_side_effects = any(
+        tool.normalized_permission_level() is not ToolPermissionLevel.READ
+        for tool in tools
+    )
+    runtime = getattr(agent, "runtime", agent)
+    if not hasattr(runtime, "permission_policy"):
+        if has_side_effects:
+            raise TypeError("eval agent cannot apply the required tool permission policy")
+        return
+    runtime.permission_policy = _EvalToolPermissionPolicy(
+        suite.safety.allowed_tool_names
+    )
+
+
+class _EvalToolPermissionPolicy(ToolPermissionPolicy):
+    """Allow READ tools and only the explicitly named side-effecting tools."""
+
+    def __init__(self, allowed_tool_names: tuple[str, ...]) -> None:
+        super().__init__(
+            name="evaluation",
+            default_decision=PermissionDecision.DENY,
+            confirmation_decision=PermissionDecision.ALLOW,
+            level_decisions={
+                level: PermissionDecision.ALLOW
+                for level in ToolPermissionLevel
+            },
+        )
+        self.allowed_tool_names = frozenset(allowed_tool_names)
+
+    def decide(self, request: PermissionRequest) -> PermissionDecisionRecord:
+        record = super().decide(request)
+        if (
+            request.permission_level is ToolPermissionLevel.READ
+            or request.tool_name in self.allowed_tool_names
+        ):
+            return record
+        return replace(
+            record,
+            decision=PermissionDecision.DENY,
+            reason="tool is not allowlisted by the evaluation suite",
+        )
 
 
 def _grade_sync(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialResult:
@@ -636,13 +692,24 @@ def _required_grader_errors(suite: EvalSuite, trial: TrialResult) -> list[str]:
 
 def _build_report(run_id: str, suite: EvalSuite, digest: str, started: datetime, cases: list[CaseResult], errors: list[str]) -> EvalReport:
     trials = [trial for case in cases for trial in case.trials]
+    agent_tokens = sum(
+        turn.result.usage.total_tokens
+        for trial in trials
+        for turn in trial.turns
+        if turn.result.usage
+    )
+    judge_tokens = sum(_trial_judge_tokens(trial) for trial in trials)
+    judge_cost = sum(_trial_judge_cost(trial) for trial in trials)
     metrics: dict[str, float] = {
         "case_count": float(len(cases)),
         "trial_count": float(len(trials)),
         "pass_rate": sum(case.passed for case in cases) / len(cases) if cases else 1.0,
         "pass_at_k": sum(any(_trial_required_passed(suite, trial) for trial in case.trials) for case in cases) / len(cases) if cases else 1.0,
         "mean_latency_seconds": sum(trial.duration_seconds for trial in trials) / len(trials) if trials else 0.0,
-        "total_tokens": float(sum(turn.result.usage.total_tokens for trial in trials for turn in trial.turns if turn.result.usage)),
+        "agent_tokens": float(agent_tokens),
+        "judge_tokens": float(judge_tokens),
+        "total_tokens": float(agent_tokens + judge_tokens),
+        "judge_cost": judge_cost,
         "total_cost": sum(_trial_cost(trial)[0] for trial in trials),
         "error_rate": sum(trial.exception is not None for trial in trials) / len(trials) if trials else 0.0,
     }
@@ -757,43 +824,121 @@ def _trial_cost(trial: TrialResult) -> tuple[float, bool]:
             known = False
         else:
             total += float(cost.amount)
+    for grade in trial.grades:
+        if not grade.details.get("judge"):
+            continue
+        cost = grade.details.get("cost")
+        if not isinstance(cost, Mapping) or cost.get("amount") is None:
+            known = False
+        else:
+            total += float(cost["amount"])
     return total, known
 
 
-def _close_sync(value: object | None) -> None:
-    if value is None:
-        return
-    close = getattr(value, "close", None)
-    if callable(close):
-        close()
+def _trial_judge_tokens(trial: TrialResult) -> int:
+    total = 0
+    for grade in trial.grades:
+        if not grade.details.get("judge"):
+            continue
+        usage = grade.details.get("usage")
+        if isinstance(usage, Mapping) and isinstance(usage.get("total_tokens"), int):
+            total += int(usage["total_tokens"])
+    return total
+
+
+def _trial_judge_cost(trial: TrialResult) -> float:
+    total = 0.0
+    for grade in trial.grades:
+        if not grade.details.get("judge"):
+            continue
+        cost = grade.details.get("cost")
+        if isinstance(cost, Mapping) and cost.get("amount") is not None:
+            total += float(cost["amount"])
+    return total
+
+
+class _SyncTurnTimeout(TimeoutError):
+    def __init__(self, future: Future[Any], executor: ThreadPoolExecutor) -> None:
+        super().__init__("evaluation turn timed out")
+        self.future = future
+        self.executor = executor
+
+    def defer(self, cleanup: Callable[[], object]) -> None:
+        def complete(_future: Future[Any]) -> None:
+            try:
+                cleanup()
+            finally:
+                self.executor.shutdown(wait=False, cancel_futures=True)
+
+        self.future.add_done_callback(complete)
+
+
+def _cleanup_sync_resources(
+    agent: object | None,
+    fixture: object | None,
+    temporary: tempfile.TemporaryDirectory[str],
+) -> list[str]:
+    errors: list[str] = []
+    for label, value in (("agent", agent), ("fixture", fixture)):
+        if value is None:
+            continue
+        close = getattr(value, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                errors.append(f"{label} cleanup failed: {_format_exception(exc)}")
+    try:
+        temporary.cleanup()
+    except Exception as exc:
+        errors.append(f"workspace cleanup failed: {_format_exception(exc)}")
+    return errors
 
 
 def _run_sync_with_timeout(operation: Callable[[], Any], timeout_seconds: float) -> Any:
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chulk-eval-turn")
     future = executor.submit(operation)
+    timed_out = False
     try:
         return future.result(timeout=timeout_seconds)
     except FutureTimeoutError as exc:
-        future.cancel()
-        raise TimeoutError(f"turn exceeded {timeout_seconds:g}s timeout") from exc
+        timed_out = True
+        raise _SyncTurnTimeout(future, executor) from exc
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if not timed_out:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
-async def _close_async(value: object | None) -> None:
-    if value is None:
-        return
-    aclose = getattr(value, "aclose", None)
-    if callable(aclose):
-        result = aclose()
-        if inspect.isawaitable(result):
-            await result
-        return
-    close = getattr(value, "close", None)
-    if callable(close):
-        result = close()
-        if inspect.isawaitable(result):
-            await result
+async def _cleanup_async_resources(
+    agent: object | None,
+    fixture: object | None,
+) -> list[str]:
+    errors: list[str] = []
+    for label, value in (("agent", agent), ("fixture", fixture)):
+        if value is None:
+            continue
+        try:
+            aclose = getattr(value, "aclose", None)
+            if callable(aclose):
+                result = aclose()
+                if inspect.isawaitable(result):
+                    await result
+                continue
+            close = getattr(value, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        except Exception as exc:
+            errors.append(f"{label} cleanup failed: {_format_exception(exc)}")
+    return errors
+
+
+def _merge_exceptions(exception: str | None, cleanup_errors: list[str]) -> str | None:
+    if not cleanup_errors:
+        return exception
+    cleanup = "; ".join(cleanup_errors)
+    return f"{exception}; {cleanup}" if exception else cleanup
 
 
 def _runtime_from_agent(agent: object) -> Any:

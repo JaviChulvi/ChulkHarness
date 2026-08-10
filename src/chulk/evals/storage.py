@@ -108,7 +108,7 @@ class SQLiteEvalStore:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             report.id, case.target_name, case.case_id, trial.trial,
-                            int(trial.exception is None and all(grade.passed for grade in trial.grades)),
+                            int(trial.passed),
                             trial.duration_seconds, trial.exception,
                             json.dumps(redact_data(trial.to_dict()), sort_keys=True, default=str),
                         ),

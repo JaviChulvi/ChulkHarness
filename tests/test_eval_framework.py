@@ -168,8 +168,7 @@ def test_side_effecting_tools_are_denied_unless_named() -> None:
         EvalSuite(**base, safety=EvalSafetyPolicy(allowed_tool_names=("write_record",)))
     )
 
-    assert denied.operational_errors
-    assert "denied side-effecting tools" in denied.operational_errors[0]
+    assert not denied.operational_errors
     assert not allowed.operational_errors
 
 

@@ -43,6 +43,9 @@ class CallableGrader:
     def grade(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         value = self.callable(case, trial)
         if inspect.isawaitable(value):
+            close = getattr(value, "close", None)
+            if callable(close):
+                close()
             raise TypeError(f"grader {self.name!r} is async; use AsyncEvalRunner")
         return _normalize_callable_grade(self.name, value)
 
@@ -252,8 +255,16 @@ class TokenBudgetGrader:
 
     def grade(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         del case
-        total = sum(turn.result.usage.total_tokens for turn in trial.turns if turn.result.usage)
-        return _binary(self.name, total <= self.max_tokens, f"used {total} tokens; maximum {self.max_tokens}", {"tokens": total})
+        usages = [turn.result.usage for turn in trial.turns]
+        known = bool(usages) and all(usage is not None for usage in usages)
+        total = sum(usage.total_tokens for usage in usages if usage is not None)
+        passed = known and total <= self.max_tokens
+        reason = (
+            f"used {total} tokens; maximum {self.max_tokens}"
+            if known
+            else "token usage is unknown"
+        )
+        return _binary(self.name, passed, reason, {"tokens": total, "known": known})
 
 
 @dataclass(frozen=True)
@@ -263,9 +274,10 @@ class CostBudgetGrader:
 
     def grade(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         del case
-        amounts = [float(turn.result.cost.amount) for turn in trial.turns if turn.result.cost and turn.result.cost.amount is not None]
+        costs = [turn.result.cost for turn in trial.turns]
+        amounts = [float(cost.amount) for cost in costs if cost is not None and cost.amount is not None]
         total = sum(amounts)
-        known = len(amounts) == sum(1 for turn in trial.turns if turn.result.cost)
+        known = bool(costs) and len(amounts) == len(costs)
         passed = known and total <= self.max_cost
         return _binary(self.name, passed, f"cost ${total:.6f}; maximum ${self.max_cost:.6f}" if known else "cost is unknown", {"cost": total, "known": known})
 
@@ -281,11 +293,23 @@ class LLMJudgeGrader:
 
     def grade(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         response = self.client.complete_response(self._messages(case, trial), max_output_tokens=self.max_output_tokens)
-        return self._parse(response.content, response.usage.to_dict() if response.usage else None, response.cost.to_dict() if response.cost else None)
+        return self._parse(
+            response.content,
+            response.usage.to_dict() if response.usage else None,
+            response.cost.to_dict() if response.cost else None,
+            response.provider,
+            response.model,
+        )
 
     async def grade_async(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         response = await self.client.acomplete_response(self._messages(case, trial), max_output_tokens=self.max_output_tokens)
-        return self._parse(response.content, response.usage.to_dict() if response.usage else None, response.cost.to_dict() if response.cost else None)
+        return self._parse(
+            response.content,
+            response.usage.to_dict() if response.usage else None,
+            response.cost.to_dict() if response.cost else None,
+            response.provider,
+            response.model,
+        )
 
     def grade_pairwise(
         self,
@@ -301,6 +325,8 @@ class LLMJudgeGrader:
             response.content,
             response.usage.to_dict() if response.usage else None,
             response.cost.to_dict() if response.cost else None,
+            response.provider,
+            response.model,
         )
 
     async def grade_pairwise_async(
@@ -317,6 +343,8 @@ class LLMJudgeGrader:
             response.content,
             response.usage.to_dict() if response.usage else None,
             response.cost.to_dict() if response.cost else None,
+            response.provider,
+            response.model,
         )
 
     def _messages(
@@ -338,11 +366,23 @@ class LLMJudgeGrader:
             {"role": "user", "content": f"Rubric:\n{self.rubric}\n\nEvaluation data:\n{json.dumps(payload, sort_keys=True)}"},
         ]
 
-    def _parse(self, content: str, usage: Mapping[str, Any] | None, cost: Mapping[str, Any] | None) -> GradeResult:
+    def _parse(
+        self,
+        content: str,
+        usage: Mapping[str, Any] | None,
+        cost: Mapping[str, Any] | None,
+        provider: str | None,
+        model: str | None,
+    ) -> GradeResult:
         try:
             payload = json.loads(content)
             if not isinstance(payload, Mapping):
                 raise ValueError("judge response must be an object")
+            expected_fields = {"score", "passed", "reason"}
+            if set(payload) != expected_fields:
+                raise ValueError(
+                    "judge response fields must be exactly: passed, reason, score"
+                )
             score = payload.get("score")
             passed = payload.get("passed")
             reason = payload.get("reason")
@@ -353,9 +393,10 @@ class LLMJudgeGrader:
             normalized_score = float(score)
             declared = passed and normalized_score >= self.threshold
             details = redact_data({
+                "judge": True,
                 "prompt_version": self.prompt_version,
-                "judge_model": getattr(self.client, "model", None),
-                "judge_provider": getattr(self.client, "provider", type(self.client).__name__),
+                "judge_model": model or getattr(self.client, "model", None),
+                "judge_provider": provider or getattr(self.client, "provider", type(self.client).__name__),
                 "raw_response": content,
                 "usage": usage,
                 "cost": cost,
