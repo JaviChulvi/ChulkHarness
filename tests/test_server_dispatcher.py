@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 from pathlib import Path
 import threading
@@ -77,6 +78,16 @@ def _dispatcher(tmp_path: Path, llm: LLMClient) -> ConversationDispatcher:
         )
 
     return ConversationDispatcher(factory, agent_builder=build)
+
+
+async def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 10.0,
+) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -170,11 +181,16 @@ async def test_dispatcher_cancels_active_and_queued_commands(tmp_path) -> None:
         "second",
         idempotency_key="second",
     )
-    await asyncio.to_thread(llm.started.wait, 2)
+    await _wait_until(llm.started.is_set)
 
     assert await dispatcher.cancel("default", conversation["id"])
     llm.release.set()
-    await asyncio.sleep(0.05)
+    await _wait_until(
+        lambda: dispatcher.get_command(
+            "default", conversation["id"], first.id
+        ).status
+        == "cancelled"
+    )
 
     assert dispatcher.get_command(
         "default", conversation["id"], first.id
