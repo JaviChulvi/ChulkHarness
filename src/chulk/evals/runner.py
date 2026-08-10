@@ -10,11 +10,14 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
+from decimal import Decimal
 from datetime import datetime, timezone
+from enum import Enum
 from hashlib import sha256
 import inspect
 import json
+import marshal
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,10 +25,23 @@ import time
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
 
+from chulk._sdk.results import (
+    cost_snapshot,
+    observation_snapshot,
+    plan_snapshot,
+    tool_call_snapshot,
+    usage_snapshot,
+)
 from chulk.core import Agent as CoreAgent
 from chulk.events import AgentEvent, SerializedEventPayload
 from chulk.hosting import ExecutionScope
-from chulk.results import RunResult, RunStatus, plain_data
+from chulk.llm.usage import (
+    aggregate_cost,
+    aggregate_usage,
+    cost_from_dict,
+    usage_from_dict,
+)
+from chulk.results import Cost, Observation, RunResult, RunStatus, ToolCall, Usage, plain_data
 from chulk.testing import ScriptedLLMClient, ScriptedResponse
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -182,7 +198,7 @@ class EvalRunner:
         try:
             if (
                 suite.concurrency > 1
-                and suite.mode is not EvaluationMode.LIVE
+                and suite.max_total_cost is None
                 and not suite.fail_fast
             ):
                 with ThreadPoolExecutor(
@@ -231,8 +247,10 @@ class EvalRunner:
             checkpoint(EvalRunStatus.INTERRUPTED)
             raise
 
-        if suite.mode is EvaluationMode.LIVE and unknown_cost and not suite.safety.allow_unknown_cost:
-            operational_errors.append("live evaluation produced unknown cost; opt in with allow_unknown_cost")
+        if _requires_known_cost(suite) and unknown_cost and not suite.safety.allow_unknown_cost:
+            operational_errors.append(
+                "metered evaluation produced unknown cost; opt in with allow_unknown_cost"
+            )
         return checkpoint(EvalRunStatus.COMPLETED)
 
     def _run_legacy(self, scenario: EvalScenario, *, agent: object | None = None) -> EvalResult:
@@ -366,7 +384,7 @@ class AsyncEvalRunner:
         known = all(_trial_cost(trial)[1] for trial in completed.values())
         tasks: list[asyncio.Task[TrialResult]] = []
         try:
-            if suite.mode is EvaluationMode.LIVE or suite.fail_fast:
+            if suite.max_total_cost is not None or suite.fail_fast:
                 for target, case, trial_number in combinations:
                     trial = await execute(target, case, trial_number)
                     _record_trial(suite, completed, operational_errors, trial)
@@ -403,8 +421,10 @@ class AsyncEvalRunner:
             operational_errors.append(
                 f"evaluation cost ${spent:.6f} exceeded cap ${suite.max_total_cost:.6f}"
             )
-        if suite.mode is EvaluationMode.LIVE and not known and not suite.safety.allow_unknown_cost:
-            operational_errors.append("live evaluation produced unknown cost; opt in with allow_unknown_cost")
+        if _requires_known_cost(suite) and not known and not suite.safety.allow_unknown_cost:
+            operational_errors.append(
+                "metered evaluation produced unknown cost; opt in with allow_unknown_cost"
+            )
         return await checkpoint(EvalRunStatus.COMPLETED)
 
 
@@ -708,8 +728,14 @@ def _run_replay_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial
     started = time.monotonic()
     try:
         fixture_path = _replay_path(suite, case)
-        replay = execute_replay_fixture(load_replay_fixture(fixture_path))
-        turn = _replay_turn_result(case, replay, time.monotonic() - started)
+        fixture = load_replay_fixture(fixture_path)
+        replay = execute_replay_fixture(fixture)
+        turn = _replay_turn_result(
+            case,
+            replay,
+            fixture,
+            time.monotonic() - started,
+        )
         return TrialResult(case.id, target.name, trial_number, (turn,), time.monotonic() - started)
     except Exception as exc:
         return TrialResult(case.id, target.name, trial_number, (), time.monotonic() - started, exception=_format_exception(exc))
@@ -722,11 +748,17 @@ async def _run_replay_async(suite: EvalSuite, target: EvalTarget, case: EvalCase
     started = time.monotonic()
     try:
         fixture_path = _replay_path(suite, case)
+        fixture = load_replay_fixture(fixture_path)
         replay = await asyncio.wait_for(
-            execute_replay_fixture_async(load_replay_fixture(fixture_path)),
+            execute_replay_fixture_async(fixture),
             timeout=suite.timeout_seconds,
         )
-        turn = _replay_turn_result(case, replay, time.monotonic() - started)
+        turn = _replay_turn_result(
+            case,
+            replay,
+            fixture,
+            time.monotonic() - started,
+        )
         return TrialResult(case.id, target.name, trial_number, (turn,), time.monotonic() - started)
     except asyncio.CancelledError:
         raise
@@ -746,10 +778,16 @@ def _replay_path(suite: EvalSuite, case: EvalCase) -> Path:
     return path
 
 
-def _replay_turn_result(case: EvalCase, replay: Any, duration: float) -> EvalTurnResult:
+def _replay_turn_result(
+    case: EvalCase,
+    replay: Any,
+    fixture: Any,
+    duration: float,
+) -> EvalTurnResult:
     actual = replay.actual
     result_payload = actual.get("result", {})
     state = actual.get("state", {})
+    recorded_turn = _replay_recorded_turn(fixture)
     content = result_payload.get("content")
     status = result_payload.get("status") or "unknown"
     errors = list(result_payload.get("errors") or [])
@@ -759,23 +797,146 @@ def _replay_turn_result(case: EvalCase, replay: Any, duration: float) -> EvalTur
     result = RunResult(
         content=str(content or ""),
         status=RunStatus(status) if status in {item.value for item in RunStatus} else RunStatus.UNKNOWN,
-        turn_id=None,
+        turn_id=(
+            str(recorded_turn.get("turn_id"))
+            if recorded_turn.get("turn_id") is not None
+            else None
+        ),
         conversation_id=conversation_id,
         trace_path=None,
+        usage=_replay_usage(actual),
+        cost=_replay_cost(actual),
+        tool_calls=_replay_tool_calls(fixture, recorded_turn),
+        observations=_replay_observations(fixture, recorded_turn),
         loaded_skill_names=tuple(state.get("loaded_skill_names") or ()),
         loaded_memory_ids=tuple(state.get("loaded_memory_ids") or ()),
         errors=tuple(str(error) for error in errors),
+        plan=plan_snapshot(result_payload.get("plan")),
         extension_metadata={"replay": replay.to_dict()},
     )
-    events = tuple(
-        AgentEvent(
-            name=str(event),
-            conversation_id=conversation_id,
-            payload=SerializedEventPayload(data={"replay": True}),
-        )
-        for event in actual.get("events", ())
-    )
+    events = _replay_events(actual, fixture, conversation_id)
     return EvalTurnResult(0, result, events, duration)
+
+
+def _replay_recorded_turn(fixture: Any) -> Mapping[str, Any]:
+    for event in reversed(fixture.expected.events):
+        if event.get("type") != "turn_finished":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, Mapping) and isinstance(payload.get("turn"), Mapping):
+            return cast(Mapping[str, Any], payload["turn"])
+    return {}
+
+
+def _replay_tool_calls(
+    fixture: Any,
+    recorded_turn: Mapping[str, Any],
+) -> tuple[ToolCall, ...]:
+    recorded = recorded_turn.get("tool_calls")
+    if isinstance(recorded, list | tuple):
+        return tuple(tool_call_snapshot(item) for item in recorded)
+    results = iter(fixture.tool_results)
+    calls = []
+    for index, action_record in enumerate(fixture.model_actions, 1):
+        action = action_record.action
+        if action.get("type") != "tool_call":
+            continue
+        result = next(results, None)
+        calls.append(
+            tool_call_snapshot(
+                {
+                    "tool_name": action.get("tool_name"),
+                    "arguments": action.get("arguments", {}),
+                    "iteration": getattr(result, "iteration", index),
+                    "phase": getattr(result, "phase", "execution"),
+                    "resolved_tool_name": getattr(result, "tool_name", None),
+                    "success": getattr(result, "success", None),
+                    "error": getattr(result, "error", None),
+                    "failure_kind": getattr(result, "failure_kind", None),
+                    "metadata": getattr(result, "metadata", None) or {},
+                }
+            )
+        )
+    return tuple(calls)
+
+
+def _replay_observations(
+    fixture: Any,
+    recorded_turn: Mapping[str, Any],
+) -> tuple[Observation, ...]:
+    recorded = recorded_turn.get("observations")
+    if isinstance(recorded, list | tuple):
+        return tuple(observation_snapshot(item) for item in recorded)
+    return tuple(
+        observation_snapshot(
+            {
+                "tool_name": result.tool_name,
+                "content": result.observation,
+                "output_metadata": result.output_metadata or {},
+            }
+        )
+        for result in fixture.tool_results
+    )
+
+
+def _replay_usage(actual: Mapping[str, Any]) -> Usage | None:
+    records = actual.get("usage")
+    if not isinstance(records, list | tuple):
+        return None
+    aggregate = aggregate_usage(
+        [
+            usage_from_dict(dict(payload))
+            for record in records
+            if isinstance(record, Mapping)
+            and isinstance((payload := record.get("usage")), Mapping)
+        ],
+        source="replay",
+    )
+    return usage_snapshot(aggregate)
+
+
+def _replay_cost(actual: Mapping[str, Any]) -> Cost | None:
+    records = actual.get("costs")
+    if not isinstance(records, list | tuple):
+        return None
+    aggregate = aggregate_cost(
+        [
+            cost_from_dict(dict(payload))
+            for record in records
+            if isinstance(record, Mapping)
+            and isinstance((payload := record.get("cost")), Mapping)
+        ]
+    )
+    return cost_snapshot(aggregate)
+
+
+def _replay_events(
+    actual: Mapping[str, Any],
+    fixture: Any,
+    conversation_id: str,
+) -> tuple[AgentEvent, ...]:
+    expected_events = fixture.expected.events
+    events: list[AgentEvent] = []
+    expected_index = 0
+    for event_name in actual.get("events", ()):
+        data: Mapping[str, Any] = {"replay": True}
+        while expected_index < len(expected_events):
+            expected = expected_events[expected_index]
+            expected_index += 1
+            if expected.get("type") != event_name:
+                continue
+            payload = expected.get("payload")
+            if isinstance(payload, Mapping):
+                data = payload
+            break
+        events.append(
+            AgentEvent(
+                name=str(event_name),
+                conversation_id=conversation_id,
+                payload=SerializedEventPayload(data=data),
+            )
+        )
+    return tuple(events)
 
 
 def _open_fixture_sync(suite: EvalSuite, case: EvalCase, context: EvalContext) -> tuple[object | None, EvalContext]:
@@ -1123,9 +1284,22 @@ def _grader_contract(grader: object) -> dict[str, str]:
     name = str(getattr(grader, "name", type(grader).__name__))
     version = str(getattr(grader, "version", "1"))
     type_name = f"{type(grader).__module__}:{type(grader).__qualname__}"
+    configuration = _grader_configuration(grader)
+    configuration_fingerprint = sha256(
+        json.dumps(
+            configuration,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     identity = sha256(
         json.dumps(
-            {"name": name, "version": version, "type": type_name},
+            {
+                "name": name,
+                "version": version,
+                "type": type_name,
+                "configuration": configuration_fingerprint,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -1134,8 +1308,84 @@ def _grader_contract(grader: object) -> dict[str, str]:
         "name": name,
         "version": version,
         "type": type_name,
+        "configuration_fingerprint": configuration_fingerprint,
         "identity": identity,
     }
+
+
+def _grader_configuration(grader: object) -> Any:
+    if is_dataclass(grader) and not isinstance(grader, type):
+        return {
+            item.name: _contract_value(getattr(grader, item.name))
+            for item in fields(grader)
+            if item.name not in {"name", "version"}
+        }
+    explicit = getattr(grader, "configuration", None)
+    return _contract_value(explicit) if explicit is not None else {}
+
+
+def _contract_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _contract_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list | tuple):
+        return [_contract_value(item) for item in value]
+    if isinstance(value, set | frozenset):
+        items = [_contract_value(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+    if inspect.isfunction(value) or inspect.ismethod(value):
+        return _callable_contract(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "type": f"{type(value).__module__}:{type(value).__qualname__}",
+            "fields": {
+                item.name: _contract_value(getattr(value, item.name))
+                for item in fields(value)
+            },
+        }
+    return {
+        "type": f"{type(value).__module__}:{type(value).__qualname__}",
+        "provider": getattr(value, "provider", None),
+        "model": getattr(value, "model", None),
+    }
+
+
+def _callable_contract(value: Callable[..., Any]) -> dict[str, Any]:
+    code = getattr(value, "__code__", None)
+    closure = getattr(value, "__closure__", None) or ()
+    payload: dict[str, Any] = {
+        "module": getattr(value, "__module__", ""),
+        "qualname": getattr(value, "__qualname__", type(value).__qualname__),
+        "defaults": _contract_value(getattr(value, "__defaults__", None)),
+        "kwdefaults": _contract_value(getattr(value, "__kwdefaults__", None)),
+        "closure": [
+            _contract_value(_closure_cell_value(cell))
+            for cell in closure
+        ],
+    }
+    if code is not None:
+        payload["code"] = sha256(marshal.dumps(code)).hexdigest()
+    return payload
+
+
+def _closure_cell_value(cell: Any) -> Any:
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return "<empty>"
 
 
 def _git_revision() -> str | None:
@@ -1151,6 +1401,13 @@ def _git_revision() -> str | None:
         return None
     value = completed.stdout.strip()
     return value if completed.returncode == 0 and value else None
+
+
+def _requires_known_cost(suite: EvalSuite) -> bool:
+    return suite.mode is EvaluationMode.LIVE or any(
+        bool(getattr(grader, "requires_cost_cap", False))
+        for grader in suite.graders
+    )
 
 
 def _trial_cost(trial: TrialResult) -> tuple[float, bool]:

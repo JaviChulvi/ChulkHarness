@@ -10,22 +10,23 @@ import time
 import pytest
 
 from chulk import Agent, AgentConfig
-from chulk.core import Agent as CoreAgent
 from chulk.evals import (
     AsyncEvalRunner,
     EvalCase,
     EvalDataset,
+    EvalReference,
     EvalRunner,
     EvalSafetyPolicy,
     EvalSuite,
     EvalTarget,
     EvalTurn,
     EvaluationMode,
+    ToolCallGrader,
 )
 from chulk.results import RunResult, RunStatus
 from chulk.testing import ScriptedLLMClient
 from chulk.tools import Tool, ToolPermissionLevel
-from chulk.tracing import JSONLTraceLogger, Trace, export_replay_fixture
+from chulk.tracing import Trace, export_replay_fixture
 
 
 def _result(content: str = "done") -> RunResult:
@@ -232,32 +233,71 @@ def test_scripted_exhaustion_is_an_operational_failure() -> None:
 
 
 def test_replay_and_live_fake_modes_execute_without_credentials(tmp_path: Path) -> None:
-    logger = JSONLTraceLogger(tmp_path / "traces", "replay")
-    captured = CoreAgent(
-        ScriptedLLMClient([{"type": "final_answer", "content": "recorded"}]),
-        trace_logger=logger,
+    lookup = Tool(
+        name="lookup",
+        description="Return deterministic replay evidence.",
+        args_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        callable=lambda arguments: '{"value":"' + arguments["query"] + '"}',
+        permission_level=ToolPermissionLevel.READ,
     )
-    captured.run_turn("record this")
+    captured = Agent(
+        config=AgentConfig(project_root=tmp_path / "captured"),
+        llm=ScriptedLLMClient(
+            [
+                {
+                    "type": "tool_call",
+                    "tool_name": "lookup",
+                    "arguments": {"query": "alpha"},
+                },
+                {"type": "final_answer", "content": "recorded"},
+            ]
+        ),
+        tools=[lookup],
+        skills=[],
+    )
+    captured.run("record this")
+    trace_path = captured.trace_path
     captured.close()
     export_replay_fixture(
-        Trace.from_jsonl(logger.path),
+        Trace.from_jsonl(trace_path),
         tmp_path / "replay.json",
         acknowledge_sensitive_data=True,
     )
     replay_case = EvalCase(
         "replay",
         (EvalTurn("ignored"),),
+        EvalReference(
+            tool_sequence=("lookup",),
+            tool_arguments={"lookup": {"query": "alpha"}},
+            tool_results={"lookup": {"value": "alpha"}},
+        ),
         replay_fixture="replay.json",
     )
     replay_suite = EvalSuite(
         "replay",
         EvalDataset((replay_case,), source=tmp_path / "cases.jsonl"),
         (EvalTarget("target", lambda _context: object()),),
+        (ToolCallGrader(),),
         mode=EvaluationMode.REPLAY,
+        required_graders=("tools.calls",),
     )
     replay_report = EvalRunner().run(replay_suite)
     assert not replay_report.operational_errors
-    assert replay_report.cases[0].trials[0].final_result.content == "recorded"
+    replay_trial = replay_report.cases[0].trials[0]
+    replay_result = replay_trial.final_result
+    assert replay_result is not None
+    assert replay_result.content == "recorded"
+    assert replay_result.usage is not None
+    assert replay_result.cost is not None
+    assert replay_result.tool_calls[0].arguments == {"query": "alpha"}
+    assert replay_result.observations[0].content.endswith('{"value":"alpha"}')
+    assert replay_trial.grades[0].passed
+    assert any(event.to_dict()["payload"] for event in replay_trial.turns[0].events)
 
     def live_factory(context):
         del context

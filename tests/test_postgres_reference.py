@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 from threading import Barrier, Event, Lock, local
@@ -570,8 +570,11 @@ def test_postgres_eval_store_matches_scope_and_idempotency_contracts(
         postgres_database.engine,
         scope=_scope(tenant_id="tenant-b"),
     )
+    with pytest.raises(PermissionError, match="different execution scope"):
+        isolated.save_report(replace(report, suite_name="foreign-suite"))
     with pytest.raises(KeyError):
         isolated.get_report(report.id)
+    assert store.get_report(report.id)["suite_name"] == report.suite_name
 
 
 @pytest.mark.asyncio

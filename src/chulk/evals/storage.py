@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from chulk.hosting import ExecutionScope
-from chulk.redaction import redact_data
+from chulk.redaction import redact_data, redact_text
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
 from .models import EvalReport
@@ -102,7 +102,7 @@ class SQLiteEvalStore:
         updated_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
+            upsert = conn.execute(
                 """
                 INSERT INTO eval_runs (
                     id, tenant_id, workspace_id, suite_name, dataset_digest, mode,
@@ -112,6 +112,10 @@ class SQLiteEvalStore:
                     grader_versions_json, sampling_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    suite_name = excluded.suite_name,
+                    dataset_digest = excluded.dataset_digest,
+                    mode = excluded.mode,
+                    started_at = excluded.started_at,
                     ended_at = excluded.ended_at,
                     passed = excluded.passed,
                     case_count = excluded.case_count,
@@ -126,6 +130,8 @@ class SQLiteEvalStore:
                     target_fingerprints_json = excluded.target_fingerprints_json,
                     grader_versions_json = excluded.grader_versions_json,
                     sampling_json = excluded.sampling_json
+                WHERE eval_runs.tenant_id = excluded.tenant_id
+                    AND eval_runs.workspace_id = excluded.workspace_id
                 """,
                 (
                     report.id, self.scope.tenant_id, self.scope.workspace_id,
@@ -142,6 +148,10 @@ class SQLiteEvalStore:
                     json.dumps(metadata.get("sampling", {}), sort_keys=True, default=str),
                 ),
             )
+            if upsert.rowcount != 1:
+                raise PermissionError(
+                    "eval report id belongs to a different execution scope"
+                )
             conn.execute("DELETE FROM eval_trials WHERE run_id = ?", (report.id,))
             conn.execute("DELETE FROM eval_turns WHERE run_id = ?", (report.id,))
             conn.execute("DELETE FROM eval_grades WHERE run_id = ?", (report.id,))
@@ -154,7 +164,8 @@ class SQLiteEvalStore:
                         (
                             report.id, case.target_name, case.case_id, trial.trial,
                             int(trial.passed),
-                            trial.duration_seconds, trial.exception,
+                            trial.duration_seconds,
+                            redact_text(trial.exception) if trial.exception else None,
                             json.dumps(redact_data(trial.to_dict()), sort_keys=True, default=str),
                             target_fingerprints.get(case.target_name, ""),
                         ),
@@ -177,7 +188,8 @@ class SQLiteEvalStore:
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 report.id, case.target_name, case.case_id, trial.trial, grade.grader,
-                                grade.score, int(grade.passed), grade.error,
+                                grade.score, int(grade.passed),
+                                redact_text(grade.error) if grade.error else None,
                                 json.dumps(redact_data(grade.to_dict()), sort_keys=True, default=str),
                                 str(grade.details.get("grader_version") or "1"),
                                 str(grade.details.get("grader_identity") or ""),

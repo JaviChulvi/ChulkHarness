@@ -86,7 +86,10 @@ tool calls, arguments, results and failures, ordered event milestones, skills, m
 latency, tokens, and cost. `CallableGrader` accepts application checks.
 `LLMJudgeGrader` uses a separate tool-free `LLMClient`, requires strict JSON,
 supports reference and pairwise grading, and records its redacted response,
-judge model/provider, prompt version, usage, and cost.
+judge model/provider, prompt version, usage, and cost. Because judging performs
+metered model calls, suites containing an `LLMJudgeGrader` also require
+`max_total_cost`; unknown judge pricing requires the same explicit
+`allow_unknown_cost` opt-in as live target execution.
 
 Only names in `required_graders` affect case pass/fail. Only declared
 `MetricThreshold` values affect the suite quality gate. Other graders are
@@ -121,14 +124,14 @@ store:
 report = EvalRunner().run(suite, resume_from="RUN_ID")
 ```
 
-Resume validates the suite, filtered dataset digest, targets, graders,
-thresholds, safety settings, and execution configuration before running new
-work. Reports have `to_dict()` and `EvalReport.from_dict(...)` round trips for
-portable recovery.
+Resume validates the suite, filtered dataset digest, targets, grader versions
+and behavior-affecting configuration, thresholds, safety settings, and
+execution configuration before running new work. Reports have `to_dict()` and
+`EvalReport.from_dict(...)` round trips for portable recovery.
 
 Baselines match only the same suite plus target fingerprint, case id, and
-grader identity/version. Comparisons report new and removed cases or graders,
-per-grader score deltas, and `baseline_coverage`. Declare a
+grader identity/version/configuration fingerprint. Comparisons report new and
+removed cases or graders, per-grader score deltas, and `baseline_coverage`. Declare a
 `baseline_coverage` threshold when incomplete baseline coverage should fail a
 suite; otherwise coverage changes remain informational.
 

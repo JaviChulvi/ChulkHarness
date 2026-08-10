@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import sqlite3
@@ -14,6 +14,7 @@ from chulk.evals import (
     AsyncEvalRunner,
     AsyncEvalStore,
     AsyncSQLiteEvalStore,
+    CallableGrader,
     EvalCase,
     EvalDataset,
     EvalReference,
@@ -25,10 +26,13 @@ from chulk.evals import (
     EvalTarget,
     EvalTurn,
     ExactAnswerGrader,
+    GradeResult,
+    LatencyGrader,
     MetricThreshold,
     SQLiteEvalStore,
     compare_reports,
 )
+from chulk.hosting import ExecutionScope
 from chulk.results import RunResult, RunStatus
 from chulk.storage import SQLITE_MIGRATIONS, initialize_sqlite_database, sqlite_connection
 
@@ -233,6 +237,40 @@ def test_v20_store_migrates_provenance_and_idempotent_normalized_records(
         ).fetchone()[0] == 1
 
 
+def test_store_rejects_report_id_collisions_across_execution_scopes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "scoped.sqlite"
+    first_scope = ExecutionScope(
+        "tenant-a", "workspace-a", None, "agent", "1", "run-a"
+    )
+    second_scope = ExecutionScope(
+        "tenant-b", "workspace-b", None, "agent", "1", "run-b"
+    )
+    first = SQLiteEvalStore(path, scope=first_scope)
+    second = SQLiteEvalStore(path, scope=second_scope)
+    report = EvalRunner().run(
+        EvalSuite(
+            "tenant-a-suite",
+            EvalDataset((_case("one"),)),
+            (EvalTarget("agent", lambda _context: _Agent()),),
+        )
+    )
+    assert isinstance(report, EvalReport)
+    first.save_report(report)
+
+    with pytest.raises(PermissionError, match="different execution scope"):
+        second.save_report(replace(report, suite_name="tenant-b-suite"))
+
+    assert first.get_report(report.id)["suite_name"] == "tenant-a-suite"
+    with pytest.raises(KeyError):
+        second.get_report(report.id)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM eval_trials WHERE run_id = ?", (report.id,)
+        ).fetchone()[0] == 1
+
+
 def test_store_redacts_report_and_normalized_payloads(tmp_path: Path) -> None:
     secret = "sk-testsecret123456"
 
@@ -261,6 +299,24 @@ def test_store_redacts_report_and_normalized_payloads(tmp_path: Path) -> None:
         )
     )
     assert isinstance(report, EvalReport)
+    trial = report.cases[0].trials[0]
+    secret_grade = GradeResult(
+        "secret.error",
+        0.0,
+        False,
+        "provider failed",
+        error=f"provider failed with {secret}",
+    )
+    trial = replace(
+        trial,
+        grades=(secret_grade,),
+        exception=f"request failed with {secret}",
+    )
+    report = replace(
+        report,
+        cases=(replace(report.cases[0], trials=(trial,), passed=False),),
+    )
+    store.save_report(report)
 
     with sqlite3.connect(path) as connection:
         payloads = [
@@ -274,6 +330,20 @@ def test_store_redacts_report_and_normalized_payloads(tmp_path: Path) -> None:
             for row in connection.execute(
                 f"SELECT payload_json FROM {table} WHERE run_id = ?", (report.id,)
             )
+        )
+        payloads.extend(
+            str(item)
+            for item in connection.execute(
+                "SELECT exception FROM eval_trials WHERE run_id = ?", (report.id,)
+            ).fetchone()
+            if item is not None
+        )
+        payloads.extend(
+            str(item)
+            for item in connection.execute(
+                "SELECT error FROM eval_grades WHERE run_id = ?", (report.id,)
+            ).fetchone()
+            if item is not None
         )
     persisted = "\n".join(payloads)
     assert secret not in persisted
@@ -346,6 +416,34 @@ def test_baseline_identity_score_deltas_and_coverage_gate(tmp_path: Path) -> Non
     assert not grader_comparison.matched_graders
     assert grader_comparison.new_graders
     assert grader_comparison.removed_graders
+
+
+def test_grader_identity_tracks_configuration_and_callable_behavior() -> None:
+    dataset = EvalDataset((_case("one"),))
+    target = EvalTarget("agent", lambda _context: _Agent())
+
+    def contract(grader: object) -> tuple[str, str]:
+        report = EvalRunner().run(
+            EvalSuite("identity", dataset, (target,), (grader,))
+        )
+        assert isinstance(report, EvalReport)
+        grader_metadata = report.metadata["graders"][0]
+        return (
+            str(grader_metadata["identity"]),
+            str(report.metadata["suite_fingerprint"]),
+        )
+
+    assert contract(LatencyGrader(1.0)) != contract(LatencyGrader(10.0))
+
+    def passing(_case, _trial):
+        return True
+
+    def failing(_case, _trial):
+        return False
+
+    assert contract(CallableGrader("custom", passing)) != contract(
+        CallableGrader("custom", failing)
+    )
 
 
 class _Agent:

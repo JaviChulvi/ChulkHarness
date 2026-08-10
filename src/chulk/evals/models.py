@@ -9,7 +9,6 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, TypeAlias
 
 from chulk.events import AgentEvent
@@ -32,6 +31,7 @@ from chulk.results import (
     ToolAttempt,
     ToolCall,
     Usage,
+    freeze_mapping,
     plain_data,
 )
 from chulk.streaming import FinalAnswerDeliveryStatus
@@ -54,7 +54,7 @@ class EvalRunStatus(StrEnum):
 
 
 def _mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value or {}))
+    return freeze_mapping(value)
 
 
 def _required_text(value: str, name: str) -> str:
@@ -421,8 +421,16 @@ class EvalSuite:
             raise TypeError("EvalSuite thresholds must be MetricThreshold values")
         if self.max_total_cost is not None and self.max_total_cost < 0:
             raise ValueError("EvalSuite.max_total_cost cannot be negative")
-        if self.mode is EvaluationMode.LIVE and self.max_total_cost is None:
-            raise ValueError("live eval suites require max_total_cost")
+        if (
+            self.mode is EvaluationMode.LIVE
+            or any(
+                bool(getattr(grader, "requires_cost_cap", False))
+                for grader in self.graders
+            )
+        ) and self.max_total_cost is None:
+            raise ValueError(
+                "live eval suites and model judges require max_total_cost"
+            )
 
 
 @dataclass(frozen=True)

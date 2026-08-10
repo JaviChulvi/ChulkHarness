@@ -92,6 +92,33 @@ def test_dataset_rejects_duplicates_and_unsafe_replay_paths() -> None:
         EvalCase("unsafe", (EvalTurn("hello"),), replay_fixture="../secret.json")
 
 
+def test_eval_models_deep_freeze_nested_public_data() -> None:
+    metadata = {"nested": {"values": [1, 2]}}
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+    }
+    reference = EvalReference(json_schema=schema)
+    case = EvalCase(
+        "immutable",
+        (EvalTurn("hello"),),
+        reference,
+        metadata=metadata,
+    )
+    dataset = EvalDataset((case,))
+    digest = dataset.digest
+
+    metadata["nested"]["values"].append(3)
+    schema["properties"]["answer"]["type"] = "number"
+
+    assert dataset.digest == digest
+    assert case.metadata["nested"]["values"] == (1, 2)
+    assert reference.json_schema is not None
+    assert reference.json_schema["properties"]["answer"]["type"] == "string"
+    with pytest.raises(TypeError):
+        case.metadata["nested"]["changed"] = True
+
+
 def test_runner_executes_multiturn_public_agent_and_quality_gate() -> None:
     case = EvalCase(
         "conversation",
@@ -187,6 +214,8 @@ def test_callable_and_llm_judge_graders_are_normalized() -> None:
             LLMJudgeGrader(judge, "The answer must be clear."),
         ),
         required_graders=("custom", "quality.judge"),
+        max_total_cost=1.0,
+        safety=EvalSafetyPolicy(allow_unknown_cost=True),
     )
 
     report = EvalRunner().run(suite)

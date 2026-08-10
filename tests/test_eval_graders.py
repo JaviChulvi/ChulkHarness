@@ -236,6 +236,7 @@ def test_judge_provider_failure_is_an_operational_error_and_is_accounted() -> No
         (EvalTarget("target", lambda _context: Agent()),),
         (LLMJudgeGrader(_JudgeClient('{"score": 1, "passed": true, "reason": "ok"}'), "Good"),),
         required_graders=("quality.judge",),
+        max_total_cost=1.0,
     )
     report = EvalRunner().run(successful)
     assert report.metrics["agent_tokens"] == 7
@@ -250,7 +251,58 @@ def test_judge_provider_failure_is_an_operational_error_and_is_accounted() -> No
         (EvalTarget("target", lambda _context: Agent()),),
         (LLMJudgeGrader(_FailingJudgeClient(), "Good"),),
         required_graders=("quality.judge",),
+        max_total_cost=1.0,
     )
     failed_report = EvalRunner().run(failing)
     assert failed_report.operational_errors
     assert "judge unavailable" in failed_report.operational_errors[0]
+
+
+def test_model_judges_require_and_incrementally_enforce_a_cost_cap() -> None:
+    class CountingJudgeClient(_JudgeClient):
+        calls = 0
+
+        def complete_response(self, messages, *, max_output_tokens=None):
+            self.calls += 1
+            response = super().complete_response(
+                messages,
+                max_output_tokens=max_output_tokens,
+            )
+            return LLMResponse(
+                response.content,
+                usage=response.usage,
+                cost=LLMCost(Decimal("0.60"), pricing_known=True),
+                provider=response.provider,
+                model=response.model,
+            )
+
+    judge = CountingJudgeClient(
+        '{"score": 1, "passed": true, "reason": "ok"}'
+    )
+    cases = tuple(
+        EvalCase(f"case-{index}", (EvalTurn("question"),))
+        for index in range(3)
+    )
+
+    class Agent:
+        def run_result(self, _message, **_kwargs):
+            return _trial().final_result
+
+        def close(self):
+            return None
+
+    base = {
+        "name": "judge-budget",
+        "dataset": EvalDataset(cases),
+        "targets": (EvalTarget("target", lambda _context: Agent()),),
+        "graders": (LLMJudgeGrader(judge, "Good"),),
+    }
+
+    with pytest.raises(ValueError, match="model judges require max_total_cost"):
+        EvalSuite(**base)
+
+    report = EvalRunner().run(EvalSuite(**base, max_total_cost=1.0))
+
+    assert judge.calls == 2
+    assert len(report.cases) == 2
+    assert any("exceeded cap" in error for error in report.operational_errors)

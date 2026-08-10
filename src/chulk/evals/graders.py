@@ -7,10 +7,11 @@ from dataclasses import dataclass
 import inspect
 import json
 import re
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from chulk.llm import LLMClient
 from chulk.redaction import redact_data, redact_text
+from chulk.results import plain_data
 from chulk.tools.schema import validate_tool_output, validate_tool_output_schema
 
 from .models import EvalCase, GradeResult, TrialResult
@@ -104,7 +105,7 @@ class JSONSchemaGrader:
 
     def grade(self, case: EvalCase, trial: TrialResult) -> GradeResult:
         reference = _reference(case, trial)
-        schema = dict(reference.json_schema) if reference and reference.json_schema else None
+        schema = plain_data(reference.json_schema) if reference and reference.json_schema else None
         if schema is None:
             return _not_configured(self.name)
         try:
@@ -284,6 +285,7 @@ class CostBudgetGrader:
 
 @dataclass(frozen=True)
 class LLMJudgeGrader:
+    requires_cost_cap: ClassVar[bool] = True
     client: LLMClient
     rubric: str
     threshold: float = 0.8
@@ -422,6 +424,16 @@ def _observation_value(content: str) -> Any:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(content):
+            if character not in "[{":
+                continue
+            try:
+                value, end = decoder.raw_decode(content[index:])
+            except json.JSONDecodeError:
+                continue
+            if not content[index + end :].strip():
+                return value
         return content
 
 
