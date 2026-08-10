@@ -165,6 +165,12 @@ chulk eval run examples/evaluation_suite/app.py:suite \
 The command's exit code gates the job, while the JUnit file is uploaded with
 `if: always()` so failed quality and operational evidence remains inspectable.
 
+For a tool-driven coding example, `examples/software_engineer_eval/app.py`
+evaluates the public `SoftwareEngineer()` preset against a disposable buggy
+Python project. It requires the agent to read the implementation, apply a
+minimal patch, run the regression test, and pass answer, status, error, and
+tool-call graders without provider credentials.
+
 Start the authenticated, read-only result viewer with:
 
 ```bash

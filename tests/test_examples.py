@@ -101,3 +101,15 @@ def test_evaluation_suite_is_credential_free_and_passes_quality_gate(
     assert "suite: sdk-example" in completed.stdout
     assert "cases: 2" in completed.stdout
     assert "pass_rate: 100%" in completed.stdout
+
+
+def test_software_engineer_eval_repairs_and_validates_disposable_project(
+    tmp_path: Path,
+) -> None:
+    completed = _run_example("examples/software_engineer_eval/app.py", cwd=tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "suite: software-engineer-preset" in completed.stdout
+    assert "target: software-engineer" in completed.stdout
+    assert "tools: read_file -> apply_patch -> run_cmd" in completed.stdout
+    assert "pass_rate: 100%" in completed.stdout

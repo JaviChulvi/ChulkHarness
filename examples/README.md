@@ -23,6 +23,7 @@ python examples/hosted_runtime/resilience_contract.py
 python examples/hosted_runtime/postgres_app.py
 python examples/portable_agent/portable_agent.py
 python examples/evaluation_suite/app.py
+python examples/software_engineer_eval/app.py
 ```
 
 They use `chulk.testing.ScriptedLLMClient`, need no credentials, and make stable
@@ -90,6 +91,8 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `portable_agent/portable_agent.py` compiles, reviews, publishes, and runs one immutable definition without credentials or local runtime files.
 - `evaluation_suite/app.py` runs a multi-turn, credential-free SDK evaluation
   with explicit graders and a quality threshold.
+- `software_engineer_eval/app.py` evaluates the real `SoftwareEngineer()`
+  preset as it reads, repairs, and tests a disposable Python project.
 - `01_basic_agent.py` creates an agent and returns a plain string.
 - `02_agent_config.py` builds an agent with explicit `AgentConfig` paths.
 - `03_builtin_tools.py` enables the built-in calculator tool.
