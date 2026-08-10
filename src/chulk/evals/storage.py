@@ -29,6 +29,7 @@ class StoredEvalSummary:
     case_count: int
     pass_rate: float
     total_cost: float
+    status: str = "completed"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class StoredEvalSummary:
             "ended_at": self.ended_at, "passed": self.passed, "mode": self.mode,
             "case_count": self.case_count, "pass_rate": self.pass_rate,
             "total_cost": self.total_cost,
+            "status": self.status,
         }
 
 
@@ -73,6 +75,11 @@ class SQLiteEvalStore:
     def save_report(self, report: EvalReport) -> None:
         payload = redact_data(report.to_dict())
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        metadata = payload.get("metadata", {})
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        target_fingerprints = _target_fingerprints(metadata)
+        grader_contracts = _grader_contracts(metadata)
+        updated_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -80,21 +87,39 @@ class SQLiteEvalStore:
                 INSERT INTO eval_runs (
                     id, tenant_id, workspace_id, suite_name, dataset_digest, mode,
                     started_at, ended_at, passed, case_count, pass_rate, total_cost,
-                    report_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    report_json, status, updated_at, chulk_version, git_revision,
+                    suite_fingerprint, target_fingerprints_json,
+                    grader_versions_json, sampling_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     ended_at = excluded.ended_at,
                     passed = excluded.passed,
                     case_count = excluded.case_count,
                     pass_rate = excluded.pass_rate,
                     total_cost = excluded.total_cost,
-                    report_json = excluded.report_json
+                    report_json = excluded.report_json,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    chulk_version = excluded.chulk_version,
+                    git_revision = excluded.git_revision,
+                    suite_fingerprint = excluded.suite_fingerprint,
+                    target_fingerprints_json = excluded.target_fingerprints_json,
+                    grader_versions_json = excluded.grader_versions_json,
+                    sampling_json = excluded.sampling_json
                 """,
                 (
                     report.id, self.scope.tenant_id, self.scope.workspace_id,
                     report.suite_name, report.dataset_digest, str(report.metadata.get("mode", "unknown")),
                     report.started_at, report.ended_at, int(report.passed), len(report.cases),
                     float(report.metrics.get("pass_rate", 0.0)), float(report.metrics.get("total_cost", 0.0)), encoded,
+                    report.status.value,
+                    updated_at,
+                    str(metadata.get("chulk_version") or ""),
+                    metadata.get("git_revision"),
+                    str(metadata.get("suite_fingerprint") or ""),
+                    json.dumps(target_fingerprints, sort_keys=True),
+                    json.dumps(grader_contracts, sort_keys=True),
+                    json.dumps(metadata.get("sampling", {}), sort_keys=True, default=str),
                 ),
             )
             conn.execute("DELETE FROM eval_trials WHERE run_id = ?", (report.id,))
@@ -104,13 +129,14 @@ class SQLiteEvalStore:
                 for trial in case.trials:
                     conn.execute(
                         """INSERT INTO eval_trials
-                        (run_id, target_name, case_id, trial_number, passed, duration_seconds, exception, payload_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (run_id, target_name, case_id, trial_number, passed, duration_seconds, exception, payload_json, target_fingerprint)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             report.id, case.target_name, case.case_id, trial.trial,
                             int(trial.passed),
                             trial.duration_seconds, trial.exception,
                             json.dumps(redact_data(trial.to_dict()), sort_keys=True, default=str),
+                            target_fingerprints.get(case.target_name, ""),
                         ),
                     )
                     for turn in trial.turns:
@@ -127,12 +153,14 @@ class SQLiteEvalStore:
                     for grade in trial.grades:
                         conn.execute(
                             """INSERT INTO eval_grades
-                            (run_id, target_name, case_id, trial_number, grader, score, passed, error, payload_json)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (run_id, target_name, case_id, trial_number, grader, score, passed, error, payload_json, grader_version, grader_identity)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 report.id, case.target_name, case.case_id, trial.trial, grade.grader,
                                 grade.score, int(grade.passed), grade.error,
                                 json.dumps(redact_data(grade.to_dict()), sort_keys=True, default=str),
+                                str(grade.details.get("grader_version") or "1"),
+                                str(grade.details.get("grader_identity") or ""),
                             ),
                         )
 
@@ -162,7 +190,7 @@ class SQLiteEvalStore:
         params.extend((limit, offset))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, suite_name, started_at, ended_at, passed, mode, case_count, pass_rate, total_cost "
+                "SELECT id, suite_name, started_at, ended_at, passed, mode, case_count, pass_rate, total_cost, status "
                 f"FROM eval_runs WHERE {' AND '.join(clauses)} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
                 tuple(params),
             ).fetchall()
@@ -170,7 +198,7 @@ class SQLiteEvalStore:
             StoredEvalSummary(
                 row["id"], row["suite_name"], row["started_at"], row["ended_at"],
                 bool(row["passed"]), row["mode"], int(row["case_count"]),
-                float(row["pass_rate"]), float(row["total_cost"]),
+                float(row["pass_rate"]), float(row["total_cost"]), row["status"],
             )
             for row in rows
         )
@@ -179,6 +207,8 @@ class SQLiteEvalStore:
         report = self.get_report(report_id)
         if report.get("suite_name") != suite_name:
             raise ValueError("baseline report belongs to a different suite")
+        if report.get("status", "completed") != "completed":
+            raise ValueError("only completed evaluation runs can become baselines")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -222,6 +252,31 @@ class AsyncSQLiteEvalStore:
 
     async def get_baseline_async(self, suite_name: str) -> Mapping[str, Any] | None:
         return await asyncio.to_thread(self.store.get_baseline, suite_name)
+
+
+def _target_fingerprints(metadata: Mapping[str, Any]) -> dict[str, str]:
+    targets = metadata.get("targets")
+    if not isinstance(targets, list):
+        return {}
+    return {
+        str(target.get("name") or ""): str(target.get("fingerprint") or "")
+        for target in targets
+        if isinstance(target, Mapping)
+    }
+
+
+def _grader_contracts(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    graders = metadata.get("graders")
+    if not isinstance(graders, list):
+        return {}
+    return {
+        str(grader.get("name") or ""): {
+            "version": str(grader.get("version") or "1"),
+            "identity": str(grader.get("identity") or ""),
+        }
+        for grader in graders
+        if isinstance(grader, Mapping)
+    }
 
 
 __all__ = [

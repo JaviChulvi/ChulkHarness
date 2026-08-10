@@ -106,6 +106,7 @@ from chulk.evals import (
     EvalContext,
     EvalDataset,
     EvalReport,
+    EvalRunStatus,
     EvalRunner,
     EvalSuite,
     EvalTarget,
@@ -465,4 +466,11 @@ def consume_eval_contract(
     )
     report = EvalRunner().run(suite)
     _ = context.workspace
+    _ = context.sampling
+    target_fingerprint: str = target.fingerprint
+    _ = target_fingerprint
+    if isinstance(report, EvalReport):
+        restored = EvalReport.from_dict(report.to_dict())
+        status: EvalRunStatus = restored.status
+        _ = status
     return report, AsyncEvalRunner()

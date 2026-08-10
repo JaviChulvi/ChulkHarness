@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+    as_completed,
+)
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -20,7 +25,7 @@ from uuid import uuid4
 from chulk.core import Agent as CoreAgent
 from chulk.events import AgentEvent, SerializedEventPayload
 from chulk.hosting import ExecutionScope
-from chulk.results import RunResult, RunStatus
+from chulk.results import RunResult, RunStatus, plain_data
 from chulk.testing import ScriptedLLMClient, ScriptedResponse
 from chulk.tools.permissions import (
     PermissionDecision,
@@ -35,6 +40,7 @@ from .models import (
     EvalCase,
     EvalContext,
     EvalReport,
+    EvalRunStatus,
     EvalSuite,
     EvalTarget,
     EvalTurnResult,
@@ -107,113 +113,127 @@ class EvalRunner:
         *,
         agent: object | None = None,
         tags: tuple[str, ...] = (),
+        resume_from: str | None = None,
     ) -> EvalReport | EvalResult:
         if isinstance(evaluation, EvalScenario):
+            if resume_from is not None:
+                raise ValueError("legacy eval scenarios cannot be resumed")
             return self._run_legacy(evaluation, agent=agent)
         if agent is not None or self.agent_factory is not None:
             raise ValueError("suite execution uses EvalTarget factories, not EvalRunner.agent_factory")
-        return self._run_suite(evaluation, tags=tags)
+        return self._run_suite(evaluation, tags=tags, resume_from=resume_from)
 
     def run_many(self, scenarios: Iterable[EvalScenario]) -> tuple[EvalResult, ...]:
         return tuple(self._run_legacy(scenario) for scenario in scenarios)
 
-    def _run_suite(self, suite: EvalSuite, *, tags: tuple[str, ...]) -> EvalReport:
-        started = datetime.now(timezone.utc)
-        run_id = uuid4().hex
-        case_results: list[CaseResult] = []
-        operational_errors: list[str] = []
+    def _run_suite(
+        self,
+        suite: EvalSuite,
+        *,
+        tags: tuple[str, ...],
+        resume_from: str | None,
+    ) -> EvalReport:
         dataset = suite.dataset.filtered(tags=tags)
-        total_cost = 0.0
-        unknown_cost = False
-        cost_exhausted = False
+        started, run_id, completed, operational_errors = _load_resume_sync(
+            suite, dataset.digest, resume_from
+        )
+        baseline = _load_baseline_sync(suite, operational_errors)
+        total_cost = sum(_trial_cost(trial)[0] for trial in completed.values())
+        unknown_cost = any(not _trial_cost(trial)[1] for trial in completed.values())
 
-        if suite.concurrency > 1 and suite.mode is not EvaluationMode.LIVE and not suite.fail_fast:
-            combinations = [
-                (target, case, trial_number)
-                for target in suite.targets
-                for case in dataset.cases
-                for trial_number in range(1, suite.trials + 1)
-            ]
-            with ThreadPoolExecutor(max_workers=suite.concurrency, thread_name_prefix="chulk-eval") as executor:
-                futures = [
-                    executor.submit(_execute_trial_sync, suite, target, case, trial_number)
-                    for target, case, trial_number in combinations
-                ]
-                completed = [future.result() for future in futures]
-            grouped: dict[tuple[str, str], list[TrialResult]] = {}
-            for trial in completed:
-                grouped.setdefault((trial.target_name, trial.case_id), []).append(trial)
-                operational_errors.extend(_required_grader_errors(suite, trial))
-                cost, known = _trial_cost(trial)
-                total_cost += cost
-                unknown_cost = unknown_cost or not known
-                if trial.exception:
-                    operational_errors.append(
-                        f"{trial.target_name}/{trial.case_id}/trial-{trial.trial}: {trial.exception}"
+        def checkpoint(status: EvalRunStatus = EvalRunStatus.RUNNING) -> EvalReport:
+            report = _build_report(
+                run_id,
+                suite,
+                dataset.digest,
+                started,
+                _case_results_from_trials(suite, dataset.cases, completed),
+                operational_errors,
+                status=status,
+                baseline=baseline,
+            )
+            if suite.store is not None:
+                try:
+                    cast(Any, suite.store).save_report(report)
+                except Exception as exc:
+                    message = f"store failed: {_format_exception(exc)}"
+                    if message not in operational_errors:
+                        operational_errors.append(message)
+                    report = _build_report(
+                        run_id,
+                        suite,
+                        dataset.digest,
+                        started,
+                        _case_results_from_trials(suite, dataset.cases, completed),
+                        operational_errors,
+                        status=status,
+                        baseline=baseline,
                     )
-            for target in suite.targets:
-                for case in dataset.cases:
-                    trials = sorted(grouped.get((target.name, case.id), ()), key=lambda item: item.trial)
-                    case_results.append(
-                        CaseResult(
-                            case.id,
-                            target.name,
-                            tuple(trials),
-                            bool(trials) and all(_trial_required_passed(suite, trial) for trial in trials),
+            return report
+
+        checkpoint()
+        combinations = [
+            (target, case, trial_number)
+            for target in suite.targets
+            for case in dataset.cases
+            for trial_number in range(1, suite.trials + 1)
+            if (target.name, case.id, trial_number) not in completed
+        ]
+        try:
+            if (
+                suite.concurrency > 1
+                and suite.mode is not EvaluationMode.LIVE
+                and not suite.fail_fast
+            ):
+                with ThreadPoolExecutor(
+                    max_workers=suite.concurrency,
+                    thread_name_prefix="chulk-eval",
+                ) as executor:
+                    futures = [
+                        executor.submit(
+                            _execute_trial_sync,
+                            suite,
+                            target,
+                            case,
+                            trial_number,
                         )
-                    )
-            if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
-                operational_errors.append(
-                    f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
-                )
-        else:
-            for target in suite.targets:
-                for case in dataset.cases:
-                    trials = []
-                    for trial_number in range(1, suite.trials + 1):
-                        trial = _execute_trial_sync(suite, target, case, trial_number)
-                        trials.append(trial)
-                        operational_errors.extend(_required_grader_errors(suite, trial))
+                        for target, case, trial_number in combinations
+                    ]
+                    for future in as_completed(futures):
+                        trial = future.result()
+                        _record_trial(suite, completed, operational_errors, trial)
                         cost, known = _trial_cost(trial)
                         total_cost += cost
                         unknown_cost = unknown_cost or not known
-                        if trial.exception:
-                            operational_errors.append(
-                                f"{target.name}/{case.id}/trial-{trial_number}: {trial.exception}"
-                            )
-                        if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
-                            operational_errors.append(
-                                f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
-                            )
-                            cost_exhausted = True
-                            break
-                        if suite.fail_fast and (trial.exception or not _trial_required_passed(suite, trial)):
-                            break
-                    case_results.append(
-                        CaseResult(
-                            case.id,
-                            target.name,
-                            tuple(trials),
-                            bool(trials) and all(_trial_required_passed(suite, trial) for trial in trials),
-                        )
+                        checkpoint()
+                if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
+                    operational_errors.append(
+                        f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
                     )
-                    if operational_errors and suite.fail_fast:
+            else:
+                for target, case, trial_number in combinations:
+                    trial = _execute_trial_sync(suite, target, case, trial_number)
+                    _record_trial(suite, completed, operational_errors, trial)
+                    cost, known = _trial_cost(trial)
+                    total_cost += cost
+                    unknown_cost = unknown_cost or not known
+                    checkpoint()
+                    if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
+                        operational_errors.append(
+                            f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
+                        )
                         break
-                    if cost_exhausted:
+                    if suite.fail_fast and (
+                        trial.exception or not _trial_required_passed(suite, trial)
+                    ):
                         break
-                if (operational_errors and suite.fail_fast) or cost_exhausted:
-                    break
+        except BaseException:
+            checkpoint(EvalRunStatus.INTERRUPTED)
+            raise
 
         if suite.mode is EvaluationMode.LIVE and unknown_cost and not suite.safety.allow_unknown_cost:
             operational_errors.append("live evaluation produced unknown cost; opt in with allow_unknown_cost")
-        report = _build_report(run_id, suite, dataset.digest, started, case_results, operational_errors)
-        if suite.store is not None:
-            try:
-                cast(Any, suite.store).save_report(report)
-            except Exception as exc:
-                operational_errors.append(f"store failed: {_format_exception(exc)}")
-                report = _build_report(run_id, suite, dataset.digest, started, case_results, operational_errors)
-        return report
+        return checkpoint(EvalRunStatus.COMPLETED)
 
     def _run_legacy(self, scenario: EvalScenario, *, agent: object | None = None) -> EvalResult:
         if agent is not None and self.agent_factory is not None:
@@ -275,10 +295,18 @@ class EvalRunner:
 class AsyncEvalRunner:
     """Run suites natively against AsyncAgent factories."""
 
-    async def run(self, suite: EvalSuite, *, tags: tuple[str, ...] = ()) -> EvalReport:
-        started = datetime.now(timezone.utc)
-        run_id = uuid4().hex
+    async def run(
+        self,
+        suite: EvalSuite,
+        *,
+        tags: tuple[str, ...] = (),
+        resume_from: str | None = None,
+    ) -> EvalReport:
         dataset = suite.dataset.filtered(tags=tags)
+        started, run_id, completed, operational_errors = await _load_resume_async(
+            suite, dataset.digest, resume_from
+        )
+        baseline = await _load_baseline_async(suite, operational_errors)
         semaphore = asyncio.Semaphore(suite.concurrency)
 
         async def execute(target: EvalTarget, case: EvalCase, trial_number: int) -> TrialResult:
@@ -286,62 +314,98 @@ class AsyncEvalRunner:
                 trial = await _run_trial_async(suite, target, case, trial_number)
                 return await _grade_async(suite, case, trial)
 
-        combinations = [
-            (target, case, trial_number)
-            for target in suite.targets
-            for case in dataset.cases
-            for trial_number in range(1, suite.trials + 1)
-        ]
-        if suite.mode is EvaluationMode.LIVE or suite.fail_fast:
-            trials = []
-            spent = 0.0
-            for target, case, trial_number in combinations:
-                trial = await execute(target, case, trial_number)
-                trials.append(trial)
-                spent += _trial_cost(trial)[0]
-                if suite.max_total_cost is not None and spent > suite.max_total_cost:
-                    break
-                if suite.fail_fast and (trial.exception or not _trial_required_passed(suite, trial)):
-                    break
-        else:
-            tasks = [
-                asyncio.create_task(execute(target, case, trial_number))
-                for target, case, trial_number in combinations
-            ]
-            trials = list(await asyncio.gather(*tasks))
-        grouped: dict[tuple[str, str], list[TrialResult]] = {}
-        operational_errors: list[str] = []
-        for trial in trials:
-            grouped.setdefault((trial.target_name, trial.case_id), []).append(trial)
-            if trial.exception:
-                operational_errors.append(
-                    f"{trial.target_name}/{trial.case_id}/trial-{trial.trial}: {trial.exception}"
-                )
-            operational_errors.extend(_required_grader_errors(suite, trial))
-        case_results = [
-            CaseResult(case_id, target_name, tuple(sorted(items, key=lambda item: item.trial)), all(_trial_required_passed(suite, item) for item in items))
-            for (target_name, case_id), items in grouped.items()
-        ]
-        total_cost = sum(_trial_cost(trial)[0] for trial in trials)
-        known = all(_trial_cost(trial)[1] for trial in trials)
-        if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
-            operational_errors.append(
-                f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
+        async def checkpoint(
+            status: EvalRunStatus = EvalRunStatus.RUNNING,
+        ) -> EvalReport:
+            report = _build_report(
+                run_id,
+                suite,
+                dataset.digest,
+                started,
+                _case_results_from_trials(suite, dataset.cases, completed),
+                operational_errors,
+                status=status,
+                baseline=baseline,
             )
-        if suite.mode is EvaluationMode.LIVE and not known and not suite.safety.allow_unknown_cost:
-            operational_errors.append("live evaluation produced unknown cost; opt in with allow_unknown_cost")
-        report = _build_report(run_id, suite, dataset.digest, started, case_results, operational_errors)
-        if suite.store is not None:
+            if suite.store is None:
+                return report
             save_async = getattr(suite.store, "save_report_async", None)
             try:
                 if callable(save_async):
                     await save_async(report)
                 else:
-                    await asyncio.to_thread(cast(Any, suite.store).save_report, report)
+                    await asyncio.to_thread(
+                        cast(Any, suite.store).save_report,
+                        report,
+                    )
             except Exception as exc:
-                operational_errors.append(f"store failed: {_format_exception(exc)}")
-                report = _build_report(run_id, suite, dataset.digest, started, case_results, operational_errors)
-        return report
+                message = f"store failed: {_format_exception(exc)}"
+                if message not in operational_errors:
+                    operational_errors.append(message)
+                report = _build_report(
+                    run_id,
+                    suite,
+                    dataset.digest,
+                    started,
+                    _case_results_from_trials(suite, dataset.cases, completed),
+                    operational_errors,
+                    status=status,
+                    baseline=baseline,
+                )
+            return report
+
+        await checkpoint()
+        combinations = [
+            (target, case, trial_number)
+            for target in suite.targets
+            for case in dataset.cases
+            for trial_number in range(1, suite.trials + 1)
+            if (target.name, case.id, trial_number) not in completed
+        ]
+        spent = sum(_trial_cost(trial)[0] for trial in completed.values())
+        known = all(_trial_cost(trial)[1] for trial in completed.values())
+        tasks: list[asyncio.Task[TrialResult]] = []
+        try:
+            if suite.mode is EvaluationMode.LIVE or suite.fail_fast:
+                for target, case, trial_number in combinations:
+                    trial = await execute(target, case, trial_number)
+                    _record_trial(suite, completed, operational_errors, trial)
+                    cost, cost_known = _trial_cost(trial)
+                    spent += cost
+                    known = known and cost_known
+                    await checkpoint()
+                    if suite.max_total_cost is not None and spent > suite.max_total_cost:
+                        break
+                    if suite.fail_fast and (
+                        trial.exception or not _trial_required_passed(suite, trial)
+                    ):
+                        break
+            else:
+                tasks = [
+                    asyncio.create_task(execute(target, case, trial_number))
+                    for target, case, trial_number in combinations
+                ]
+                for future in asyncio.as_completed(tasks):
+                    trial = await future
+                    _record_trial(suite, completed, operational_errors, trial)
+                    cost, cost_known = _trial_cost(trial)
+                    spent += cost
+                    known = known and cost_known
+                    await checkpoint()
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.shield(checkpoint(EvalRunStatus.INTERRUPTED))
+            raise
+        if suite.max_total_cost is not None and spent > suite.max_total_cost:
+            operational_errors.append(
+                f"evaluation cost ${spent:.6f} exceeded cap ${suite.max_total_cost:.6f}"
+            )
+        if suite.mode is EvaluationMode.LIVE and not known and not suite.safety.allow_unknown_cost:
+            operational_errors.append("live evaluation produced unknown cost; opt in with allow_unknown_cost")
+        return await checkpoint(EvalRunStatus.COMPLETED)
 
 
 def run_eval(
@@ -351,6 +415,171 @@ def run_eval(
     agent_factory: EvalAgentFactory | None = None,
 ) -> EvalResult:
     return EvalRunner(agent_factory).run(scenario, agent=agent)  # type: ignore[return-value]
+
+
+def _load_resume_sync(
+    suite: EvalSuite,
+    dataset_digest: str,
+    resume_from: str | None,
+) -> tuple[
+    datetime,
+    str,
+    dict[tuple[str, str, int], TrialResult],
+    list[str],
+]:
+    if resume_from is None:
+        return datetime.now(timezone.utc), uuid4().hex, {}, []
+    if suite.store is None:
+        raise ValueError("resuming an evaluation requires a configured store")
+    payload = cast(Any, suite.store).get_report(resume_from)
+    return _resume_state(suite, dataset_digest, resume_from, payload)
+
+
+async def _load_resume_async(
+    suite: EvalSuite,
+    dataset_digest: str,
+    resume_from: str | None,
+) -> tuple[
+    datetime,
+    str,
+    dict[tuple[str, str, int], TrialResult],
+    list[str],
+]:
+    if resume_from is None:
+        return datetime.now(timezone.utc), uuid4().hex, {}, []
+    if suite.store is None:
+        raise ValueError("resuming an evaluation requires a configured store")
+    get_async = getattr(suite.store, "get_report_async", None)
+    if callable(get_async):
+        payload = await get_async(resume_from)
+    else:
+        payload = await asyncio.to_thread(
+            cast(Any, suite.store).get_report,
+            resume_from,
+        )
+    return _resume_state(suite, dataset_digest, resume_from, payload)
+
+
+def _load_baseline_sync(
+    suite: EvalSuite,
+    operational_errors: list[str],
+) -> Mapping[str, Any] | None:
+    if suite.store is None:
+        return None
+    try:
+        return cast(Any, suite.store).get_baseline(suite.name)
+    except Exception as exc:
+        message = f"baseline store failed: {_format_exception(exc)}"
+        if message not in operational_errors:
+            operational_errors.append(message)
+        return None
+
+
+async def _load_baseline_async(
+    suite: EvalSuite,
+    operational_errors: list[str],
+) -> Mapping[str, Any] | None:
+    if suite.store is None:
+        return None
+    get_async = getattr(suite.store, "get_baseline_async", None)
+    try:
+        if callable(get_async):
+            return await get_async(suite.name)
+        return await asyncio.to_thread(
+            cast(Any, suite.store).get_baseline,
+            suite.name,
+        )
+    except Exception as exc:
+        message = f"baseline store failed: {_format_exception(exc)}"
+        if message not in operational_errors:
+            operational_errors.append(message)
+        return None
+
+
+def _resume_state(
+    suite: EvalSuite,
+    dataset_digest: str,
+    resume_from: str,
+    payload: Mapping[str, Any],
+) -> tuple[
+    datetime,
+    str,
+    dict[tuple[str, str, int], TrialResult],
+    list[str],
+]:
+    report = EvalReport.from_dict(payload)
+    if report.id != resume_from:
+        raise ValueError("stored evaluation id does not match the requested resume id")
+    if report.status is EvalRunStatus.COMPLETED:
+        raise ValueError("completed evaluation runs cannot be resumed")
+    if report.suite_name != suite.name:
+        raise ValueError("resume run belongs to a different evaluation suite")
+    if report.dataset_digest != dataset_digest:
+        raise ValueError("resume run uses a different evaluation dataset")
+    expected_fingerprint = _report_metadata(suite, dataset_digest)["suite_fingerprint"]
+    if report.metadata.get("suite_fingerprint") != expected_fingerprint:
+        raise ValueError("resume run uses a different suite configuration")
+    try:
+        started = datetime.fromisoformat(report.started_at)
+    except ValueError as exc:
+        raise ValueError("resume run has an invalid start timestamp") from exc
+    completed = {
+        (trial.target_name, trial.case_id, trial.trial): trial
+        for case in report.cases
+        for trial in case.trials
+    }
+    return started, report.id, completed, list(report.operational_errors)
+
+
+def _record_trial(
+    suite: EvalSuite,
+    completed: dict[tuple[str, str, int], TrialResult],
+    operational_errors: list[str],
+    trial: TrialResult,
+) -> None:
+    completed[(trial.target_name, trial.case_id, trial.trial)] = trial
+    for message in _required_grader_errors(suite, trial):
+        if message not in operational_errors:
+            operational_errors.append(message)
+    if trial.exception:
+        message = (
+            f"{trial.target_name}/{trial.case_id}/trial-{trial.trial}: "
+            f"{trial.exception}"
+        )
+        if message not in operational_errors:
+            operational_errors.append(message)
+
+
+def _case_results_from_trials(
+    suite: EvalSuite,
+    cases: tuple[EvalCase, ...],
+    completed: Mapping[tuple[str, str, int], TrialResult],
+) -> list[CaseResult]:
+    results: list[CaseResult] = []
+    for target in suite.targets:
+        for case in cases:
+            trials = tuple(
+                sorted(
+                    (
+                        trial
+                        for (target_name, case_id, _), trial in completed.items()
+                        if target_name == target.name and case_id == case.id
+                    ),
+                    key=lambda item: item.trial,
+                )
+            )
+            if not trials:
+                continue
+            results.append(
+                CaseResult(
+                    case.id,
+                    target.name,
+                    trials,
+                    len(trials) == suite.trials
+                    and all(_trial_required_passed(suite, trial) for trial in trials),
+                )
+            )
+    return results
 
 
 def _execute_trial_sync(
@@ -384,6 +613,7 @@ def _run_trial_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_
         context = EvalContext(
             suite.name, target.name, case.id, trial_number, workspace, suite.mode, scope,
             llm=client, provider=target.provider, model=target.model, safety=suite.safety,
+            sampling=suite.sampling,
         )
         fixture = None
         agent = None
@@ -438,7 +668,7 @@ async def _run_trial_async(suite: EvalSuite, target: EvalTarget, case: EvalCase,
         workspace = Path(temporary).resolve()
         client = _scripted_client(case) if suite.mode is EvaluationMode.SCRIPTED else None
         scope = ExecutionScope.local(profile_id=f"eval-{target.name}", run_id=f"eval-{uuid4().hex}")
-        context = EvalContext(suite.name, target.name, case.id, trial_number, workspace, suite.mode, scope, llm=client, provider=target.provider, model=target.model, safety=suite.safety)
+        context = EvalContext(suite.name, target.name, case.id, trial_number, workspace, suite.mode, scope, llm=client, provider=target.provider, model=target.model, safety=suite.safety, sampling=suite.sampling)
         fixture = None
         agent = None
         try:
@@ -577,7 +807,7 @@ def _replace_context_deps(context: EvalContext, deps: object) -> EvalContext:
     return EvalContext(
         context.suite_name, context.target_name, context.case_id, context.trial,
         context.workspace, context.mode, context.scope, context.llm, deps,
-        context.provider, context.model, context.safety,
+        context.provider, context.model, context.safety, context.sampling,
     )
 
 
@@ -671,6 +901,18 @@ def _trial_required_passed(suite: EvalSuite, trial: TrialResult) -> bool:
 def _mark_required(grade: GradeResult, suite: EvalSuite) -> GradeResult:
     details = dict(grade.details)
     details["required"] = grade.grader in suite.required_graders
+    grader = next(
+        (
+            item
+            for item in suite.graders
+            if str(getattr(item, "name", type(item).__name__)) == grade.grader
+        ),
+        None,
+    )
+    if grader is not None:
+        contract = _grader_contract(grader)
+        details["grader_version"] = contract["version"]
+        details["grader_identity"] = contract["identity"]
     return GradeResult(
         grade.grader,
         grade.score,
@@ -690,7 +932,17 @@ def _required_grader_errors(suite: EvalSuite, trial: TrialResult) -> list[str]:
     ]
 
 
-def _build_report(run_id: str, suite: EvalSuite, digest: str, started: datetime, cases: list[CaseResult], errors: list[str]) -> EvalReport:
+def _build_report(
+    run_id: str,
+    suite: EvalSuite,
+    digest: str,
+    started: datetime,
+    cases: list[CaseResult],
+    errors: list[str],
+    *,
+    status: EvalRunStatus = EvalRunStatus.COMPLETED,
+    baseline: Mapping[str, Any] | None = None,
+) -> EvalReport:
     trials = [trial for case in cases for trial in case.trials]
     agent_tokens = sum(
         turn.result.usage.total_tokens
@@ -750,6 +1002,25 @@ def _build_report(run_id: str, suite: EvalSuite, digest: str, started: datetime,
         if grades:
             metrics[f"grader.{name}.score"] = sum(grade.score for grade in grades) / len(grades)
             metrics[f"grader.{name}.pass_rate"] = sum(grade.passed for grade in grades) / len(grades)
+    metadata = _report_metadata(suite, digest)
+    if baseline is not None:
+        from .reporting import compare_reports
+
+        comparison = compare_reports(
+            {
+                "id": run_id,
+                "suite_name": suite.name,
+                "cases": [case.to_dict() for case in cases],
+                "metrics": metrics,
+                "metadata": metadata,
+            },
+            baseline,
+        )
+        metrics["baseline_coverage"] = comparison.baseline_coverage
+        metadata["baseline_comparison"] = comparison.to_dict()
+    elif "baseline_coverage" in suite.thresholds:
+        metrics["baseline_coverage"] = 0.0
+        metadata["baseline_comparison"] = None
     threshold_failures = tuple(
         f"{name}: value {metrics.get(name)!r} did not satisfy {threshold}"
         for name, threshold in suite.thresholds.items()
@@ -758,7 +1029,7 @@ def _build_report(run_id: str, suite: EvalSuite, digest: str, started: datetime,
     return EvalReport(
         run_id, suite.name, digest, started.isoformat(), datetime.now(timezone.utc).isoformat(),
         tuple(cases), metrics, threshold_failures, tuple(errors),
-        _report_metadata(suite),
+        metadata, status,
     )
 
 
@@ -769,22 +1040,34 @@ def _percentile(values: list[float], quantile: float) -> float:
     return values[index]
 
 
-def _report_metadata(suite: EvalSuite) -> dict[str, Any]:
+def _report_metadata(suite: EvalSuite, dataset_digest: str) -> dict[str, Any]:
     from chulk._version import __version__
 
     targets = [
-        {"name": target.name, "provider": target.provider, "model": target.model}
+        {
+            "name": target.name,
+            "provider": target.provider,
+            "model": target.model,
+            "fingerprint": target.fingerprint,
+        }
         for target in suite.targets
     ]
-    graders = [str(getattr(grader, "name", type(grader).__name__)) for grader in suite.graders]
+    graders = [_grader_contract(grader) for grader in suite.graders]
     fingerprint_payload = {
         "suite": suite.name,
-        "dataset": suite.dataset.digest,
+        "dataset": dataset_digest,
         "mode": suite.mode.value,
         "targets": targets,
         "graders": graders,
         "required_graders": list(suite.required_graders),
         "trials": suite.trials,
+        "concurrency": suite.concurrency,
+        "timeout_seconds": suite.timeout_seconds,
+        "thresholds": plain_data(suite.thresholds),
+        "safety": plain_data(suite.safety),
+        "sampling": plain_data(suite.sampling),
+        "max_total_cost": suite.max_total_cost,
+        "fail_fast": suite.fail_fast,
     }
     return {
         "mode": suite.mode.value,
@@ -794,9 +1077,29 @@ def _report_metadata(suite: EvalSuite) -> dict[str, Any]:
         "git_revision": _git_revision(),
         "targets": targets,
         "graders": graders,
+        "sampling": plain_data(suite.sampling),
         "suite_fingerprint": sha256(
             json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
+    }
+
+
+def _grader_contract(grader: object) -> dict[str, str]:
+    name = str(getattr(grader, "name", type(grader).__name__))
+    version = str(getattr(grader, "version", "1"))
+    type_name = f"{type(grader).__module__}:{type(grader).__qualname__}"
+    identity = sha256(
+        json.dumps(
+            {"name": name, "version": version, "type": type_name},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "name": name,
+        "version": version,
+        "type": type_name,
+        "identity": identity,
     }
 
 

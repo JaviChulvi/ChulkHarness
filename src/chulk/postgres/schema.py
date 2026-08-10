@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-SCHEMA_REVISION = "0004"
+SCHEMA_REVISION = "0005"
 
 
 POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -695,18 +695,42 @@ EVAL_SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+EVAL_RESUME_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS chulk_version TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS git_revision TEXT",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS suite_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS target_fingerprints_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS grader_versions_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS sampling_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_trials ADD COLUMN IF NOT EXISTS target_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_grades ADD COLUMN IF NOT EXISTS grader_version TEXT NOT NULL DEFAULT '1'",
+    "ALTER TABLE eval_grades ADD COLUMN IF NOT EXISTS grader_identity TEXT NOT NULL DEFAULT ''",
+    "UPDATE eval_runs SET updated_at = ended_at WHERE updated_at = ''",
+    """CREATE INDEX IF NOT EXISTS idx_eval_runs_status
+    ON eval_runs(tenant_id, workspace_id, status, updated_at, id)""",
+)
+
+
 def create_schema(connection: Any) -> None:
     """Create the initial hosted schema on a SQLAlchemy connection."""
 
     from sqlalchemy import text
 
-    for statement in POSTGRES_SCHEMA_STATEMENTS + AUTOMATION_SCHEMA_STATEMENTS + EVAL_SCHEMA_STATEMENTS:
+    for statement in (
+        POSTGRES_SCHEMA_STATEMENTS
+        + AUTOMATION_SCHEMA_STATEMENTS
+        + EVAL_SCHEMA_STATEMENTS
+        + EVAL_RESUME_SCHEMA_STATEMENTS
+    ):
         connection.execute(text(statement))
 
 
 __all__ = [
     "AUTOMATION_SCHEMA_STATEMENTS",
     "EVAL_SCHEMA_STATEMENTS",
+    "EVAL_RESUME_SCHEMA_STATEMENTS",
     "POSTGRES_SCHEMA_STATEMENTS",
     "SCHEMA_REVISION",
     "create_schema",

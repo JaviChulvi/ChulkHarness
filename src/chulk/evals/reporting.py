@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape
 import json
 from pathlib import Path
@@ -27,6 +27,8 @@ class EvalComparison:
     matched_graders: tuple[str, ...] = ()
     new_graders: tuple[str, ...] = ()
     removed_graders: tuple[str, ...] = ()
+    grade_score_deltas: Mapping[str, float] = field(default_factory=dict)
+    baseline_coverage: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +41,8 @@ class EvalComparison:
             "matched_graders": list(self.matched_graders),
             "new_graders": list(self.new_graders),
             "removed_graders": list(self.removed_graders),
+            "grade_score_deltas": dict(self.grade_score_deltas),
+            "baseline_coverage": self.baseline_coverage,
         }
 
 
@@ -53,16 +57,27 @@ def compare_reports(current: Mapping[str, Any], baseline: Mapping[str, Any]) -> 
     }
     current_cases = _case_keys(current)
     baseline_cases = _case_keys(baseline)
-    current_graders = _grader_keys(current)
-    baseline_graders = _grader_keys(baseline)
+    current_graders = _grader_scores(current)
+    baseline_graders = _grader_scores(baseline)
+    matched_case_ids = set(current_cases) & set(baseline_cases)
+    new_case_ids = set(current_cases) - set(baseline_cases)
+    removed_case_ids = set(baseline_cases) - set(current_cases)
+    matched_grader_ids = set(current_graders) & set(baseline_graders)
+    new_grader_ids = set(current_graders) - set(baseline_graders)
+    removed_grader_ids = set(baseline_graders) - set(current_graders)
     return EvalComparison(
         str(current.get("id", "")), str(baseline.get("id", "")), deltas,
-        tuple(sorted(current_cases & baseline_cases)),
-        tuple(sorted(current_cases - baseline_cases)),
-        tuple(sorted(baseline_cases - current_cases)),
-        tuple(sorted(current_graders & baseline_graders)),
-        tuple(sorted(current_graders - baseline_graders)),
-        tuple(sorted(baseline_graders - current_graders)),
+        tuple(sorted(current_cases[item] for item in matched_case_ids)),
+        tuple(sorted(_identity_label(current_cases[item], item[0]) for item in new_case_ids)),
+        tuple(sorted(_identity_label(baseline_cases[item], item[0]) for item in removed_case_ids)),
+        tuple(sorted(current_graders[item][0] for item in matched_grader_ids)),
+        tuple(sorted(_identity_label(current_graders[item][0], item[2]) for item in new_grader_ids)),
+        tuple(sorted(_identity_label(baseline_graders[item][0], item[2]) for item in removed_grader_ids)),
+        {
+            current_graders[item][0]: current_graders[item][1] - baseline_graders[item][1]
+            for item in sorted(matched_grader_ids)
+        },
+        len(matched_case_ids) / len(baseline_cases) if baseline_cases else 1.0,
     )
 
 
@@ -156,25 +171,39 @@ def _number_mapping(value: Any) -> dict[str, float]:
     }
 
 
-def _case_keys(report: Mapping[str, Any]) -> set[str]:
+def _case_keys(report: Mapping[str, Any]) -> dict[tuple[str, str], str]:
     cases = report.get("cases")
     if not isinstance(cases, list):
-        return set()
-    return {
-        f"{item.get('target_name', '')}:{item.get('case_id', '')}"
-        for item in cases if isinstance(item, Mapping)
-    }
+        return {}
+    targets = _target_identities(report)
+    output: dict[tuple[str, str], str] = {}
+    for item in cases:
+        if not isinstance(item, Mapping):
+            continue
+        target_name = str(item.get("target_name") or "")
+        case_id = str(item.get("case_id") or "")
+        output[(targets.get(target_name, target_name), case_id)] = (
+            f"{target_name}:{case_id}"
+        )
+    return output
 
 
-def _grader_keys(report: Mapping[str, Any]) -> set[str]:
-    keys: set[str] = set()
+def _grader_scores(
+    report: Mapping[str, Any],
+) -> dict[tuple[str, str, str], tuple[str, float]]:
+    scores: dict[tuple[str, str, str], list[float]] = {}
+    labels: dict[tuple[str, str, str], str] = {}
     cases = report.get("cases")
     if not isinstance(cases, list):
-        return keys
+        return {}
+    targets = _target_identities(report)
+    graders = _grader_identities(report)
     for case in cases:
         if not isinstance(case, Mapping):
             continue
-        prefix = f"{case.get('target_name', '')}:{case.get('case_id', '')}"
+        target_name = str(case.get("target_name") or "")
+        case_id = str(case.get("case_id") or "")
+        prefix = f"{target_name}:{case_id}"
         trials = case.get("trials")
         if not isinstance(trials, list):
             continue
@@ -186,8 +215,78 @@ def _grader_keys(report: Mapping[str, Any]) -> set[str]:
                 continue
             for grade in grades:
                 if isinstance(grade, Mapping):
-                    keys.add(f"{prefix}:{grade.get('grader', '')}")
-    return keys
+                    grader_name = str(grade.get("grader") or "")
+                    details = grade.get("details")
+                    details = details if isinstance(details, Mapping) else {}
+                    identity = str(
+                        details.get("grader_identity")
+                        or graders.get(grader_name)
+                        or grader_name
+                    )
+                    key = (
+                        targets.get(target_name, target_name),
+                        case_id,
+                        identity,
+                    )
+                    labels[key] = f"{prefix}:{grader_name}"
+                    score = grade.get("score")
+                    if isinstance(score, int | float) and not isinstance(score, bool):
+                        scores.setdefault(key, []).append(float(score))
+    return {
+        key: (labels[key], sum(values) / len(values))
+        for key, values in scores.items()
+        if values
+    }
+
+
+def _target_identities(report: Mapping[str, Any]) -> dict[str, str]:
+    metadata = report.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    targets = metadata.get("targets")
+    if not isinstance(targets, list):
+        return {}
+    output: dict[str, str] = {}
+    for target in targets:
+        if not isinstance(target, Mapping):
+            continue
+        name = str(target.get("name") or "")
+        identity = str(
+            target.get("fingerprint")
+            or json.dumps(
+                {
+                    "name": name,
+                    "provider": target.get("provider"),
+                    "model": target.get("model"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        output[name] = identity
+    return output
+
+
+def _grader_identities(report: Mapping[str, Any]) -> dict[str, str]:
+    metadata = report.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    graders = metadata.get("graders")
+    if not isinstance(graders, list):
+        return {}
+    output: dict[str, str] = {}
+    for grader in graders:
+        if isinstance(grader, str):
+            output[grader] = grader
+        elif isinstance(grader, Mapping):
+            name = str(grader.get("name") or "")
+            output[name] = str(
+                grader.get("identity")
+                or f"{name}@{grader.get('version', '1')}"
+            )
+    return output
+
+
+def _identity_label(label: str, identity: str) -> str:
+    return f"{label}@{identity[:12]}"
 
 
 def _format_from_suffix(path: Path) -> ReportFormat:

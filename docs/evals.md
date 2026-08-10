@@ -55,6 +55,8 @@ trial receives a fresh agent and temporary workspace. Sync suites are serial
 by default and honor explicit `concurrency`; async suites use bounded
 concurrency. CLI overrides include `--trials`, `--concurrency`, `--timeout`,
 `--mode`, `--provider`, `--model`, `--max-total-cost`, and `--fail-fast`.
+Optional `sampling` values are exposed through `EvalContext` and retained in
+the report provenance.
 
 ## Dataset schema
 
@@ -106,6 +108,26 @@ redaction owner before persistence. Credentials are never stored in reports.
 `SQLiteEvalStore` uses the shared forward-migrated database. The optional
 Postgres package exports `PostgreSQLEvalStore` and async-callable adapters.
 Both stores scope reports and baselines with `ExecutionScope`.
+
+Stored runs are checkpointed after each completed trial and have an explicit
+`running`, `interrupted`, or `completed` status. Resume a process interruption
+without repeating completed trials by passing the same configured suite and
+store:
+
+```python
+report = EvalRunner().run(suite, resume_from="RUN_ID")
+```
+
+Resume validates the suite, filtered dataset digest, targets, graders,
+thresholds, safety settings, and execution configuration before running new
+work. Reports have `to_dict()` and `EvalReport.from_dict(...)` round trips for
+portable recovery.
+
+Baselines match only the same suite plus target fingerprint, case id, and
+grader identity/version. Comparisons report new and removed cases or graders,
+per-grader score deltas, and `baseline_coverage`. Declare a
+`baseline_coverage` threshold when incomplete baseline coverage should fail a
+suite; otherwise coverage changes remain informational.
 
 ```bash
 chulk eval list

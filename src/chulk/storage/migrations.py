@@ -1660,10 +1660,81 @@ def _migrate_to_agent_evaluations(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_resumable_agent_evaluations(conn: sqlite3.Connection) -> None:
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "status",
+        "TEXT NOT NULL DEFAULT 'completed'",
+    )
+    _ensure_column(conn, "eval_runs", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "eval_runs", "chulk_version", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "eval_runs", "git_revision", "TEXT")
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "suite_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "target_fingerprints_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "grader_versions_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "sampling_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_trials",
+        "target_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        conn,
+        "eval_grades",
+        "grader_version",
+        "TEXT NOT NULL DEFAULT '1'",
+    )
+    _ensure_column(
+        conn,
+        "eval_grades",
+        "grader_identity",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    conn.execute(
+        "UPDATE eval_runs SET updated_at = ended_at WHERE updated_at = ''"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_status
+        ON eval_runs(tenant_id, workspace_id, status, updated_at, id)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        except sqlite3.OperationalError as exc:
+            refreshed = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in refreshed or "duplicate column" not in str(exc).lower():
+                raise
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -1728,6 +1799,11 @@ SQLITE_MIGRATIONS = (
         _migrate_to_durable_parent_child_runs,
     ),
     SQLiteMigration(20, "agent-evaluations", _migrate_to_agent_evaluations),
+    SQLiteMigration(
+        21,
+        "resumable-agent-evaluations",
+        _migrate_to_resumable_agent_evaluations,
+    ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

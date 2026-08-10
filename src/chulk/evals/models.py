@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -13,7 +14,27 @@ from typing import Any, TypeAlias
 
 from chulk.events import AgentEvent
 from chulk.hosting import ExecutionScope
-from chulk.results import RunResult, plain_data
+from chulk.resources import HostResource
+from chulk.results import (
+    ContextBudget,
+    ContextReport,
+    ContextSection,
+    Cost,
+    FinalAnswerDelivery,
+    Observation,
+    Plan,
+    PlanStatus,
+    PlanStep,
+    PlanStepEvidence,
+    PlanStepStatus,
+    RunResult,
+    RunStatus,
+    ToolAttempt,
+    ToolCall,
+    Usage,
+    plain_data,
+)
+from chulk.streaming import FinalAnswerDeliveryStatus
 from chulk.testing import ScriptedResponse
 
 
@@ -24,6 +45,12 @@ class EvaluationMode(StrEnum):
     SCRIPTED = "scripted"
     REPLAY = "replay"
     LIVE = "live"
+
+
+class EvalRunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
 
 
 def _mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -293,6 +320,10 @@ class EvalContext:
     provider: str | None = None
     model: str | None = None
     safety: EvalSafetyPolicy = field(default_factory=EvalSafetyPolicy)
+    sampling: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sampling", _mapping(self.sampling))
 
 
 AgentFactory: TypeAlias = Callable[[EvalContext], object]
@@ -310,6 +341,23 @@ class EvalTarget:
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _required_text(self.name, "EvalTarget.name"))
         object.__setattr__(self, "metadata", _mapping(self.metadata))
+
+    @property
+    def fingerprint(self) -> str:
+        factory_name = (
+            f"{getattr(self.agent_factory, '__module__', '')}:"
+            f"{getattr(self.agent_factory, '__qualname__', type(self.agent_factory).__qualname__)}"
+        )
+        payload = {
+            "name": self.name,
+            "factory": factory_name,
+            "provider": self.provider,
+            "model": self.model,
+            "metadata": plain_data(self.metadata),
+        }
+        return sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -329,6 +377,7 @@ class EvalSuite:
     max_total_cost: float | None = None
     fail_fast: bool = False
     store: object | None = None
+    sampling: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _required_text(self.name, "EvalSuite.name"))
@@ -337,6 +386,7 @@ class EvalSuite:
         object.__setattr__(self, "required_graders", tuple(self.required_graders))
         object.__setattr__(self, "thresholds", _mapping(self.thresholds))
         object.__setattr__(self, "fixtures", _mapping(self.fixtures))
+        object.__setattr__(self, "sampling", _mapping(self.sampling))
         object.__setattr__(self, "mode", EvaluationMode(self.mode))
         if not self.targets:
             raise ValueError("EvalSuite.targets cannot be empty")
@@ -393,6 +443,17 @@ class GradeResult:
     def to_dict(self) -> dict[str, Any]:
         return plain_data(self)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "GradeResult":
+        return cls(
+            grader=str(value.get("grader") or ""),
+            score=float(value.get("score", 0.0)),
+            passed=bool(value.get("passed")),
+            reason=str(value.get("reason") or ""),
+            details=_required_mapping(value.get("details", {}), "grade.details"),
+            error=_optional_string(value.get("error"), "grade.error"),
+        )
+
 
 @dataclass(frozen=True)
 class EvalTurnResult:
@@ -408,6 +469,23 @@ class EvalTurnResult:
             "events": [event.to_dict() for event in self.events],
             "duration_seconds": self.duration_seconds,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EvalTurnResult":
+        raw_events = value.get("events", ())
+        if not isinstance(raw_events, list | tuple):
+            raise ValueError("turn result events must be an array")
+        return cls(
+            index=int(value.get("index", 0)),
+            result=_run_result_from_dict(
+                _required_mapping(value.get("result"), "turn result.result")
+            ),
+            events=tuple(
+                AgentEvent.from_dict(_required_mapping(event, "turn result event"))
+                for event in raw_events
+            ),
+            duration_seconds=float(value.get("duration_seconds", 0.0)),
+        )
 
 
 @dataclass(frozen=True)
@@ -442,6 +520,32 @@ class TrialResult:
             "workspace": str(self.workspace) if self.workspace is not None else None,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "TrialResult":
+        raw_turns = value.get("turns", ())
+        raw_grades = value.get("grades", ())
+        if not isinstance(raw_turns, list | tuple):
+            raise ValueError("trial turns must be an array")
+        if not isinstance(raw_grades, list | tuple):
+            raise ValueError("trial grades must be an array")
+        workspace = value.get("workspace")
+        return cls(
+            case_id=str(value.get("case_id") or ""),
+            target_name=str(value.get("target_name") or ""),
+            trial=int(value.get("trial", 0)),
+            turns=tuple(
+                EvalTurnResult.from_dict(_required_mapping(turn, "trial turn"))
+                for turn in raw_turns
+            ),
+            duration_seconds=float(value.get("duration_seconds", 0.0)),
+            grades=tuple(
+                GradeResult.from_dict(_required_mapping(grade, "trial grade"))
+                for grade in raw_grades
+            ),
+            exception=_optional_string(value.get("exception"), "trial.exception"),
+            workspace=Path(workspace) if isinstance(workspace, str) else None,
+        )
+
 
 @dataclass(frozen=True)
 class CaseResult:
@@ -458,6 +562,21 @@ class CaseResult:
             "passed": self.passed,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CaseResult":
+        raw_trials = value.get("trials", ())
+        if not isinstance(raw_trials, list | tuple):
+            raise ValueError("case result trials must be an array")
+        return cls(
+            case_id=str(value.get("case_id") or ""),
+            target_name=str(value.get("target_name") or ""),
+            trials=tuple(
+                TrialResult.from_dict(_required_mapping(trial, "case trial"))
+                for trial in raw_trials
+            ),
+            passed=bool(value.get("passed")),
+        )
+
 
 @dataclass(frozen=True)
 class EvalReport:
@@ -471,14 +590,20 @@ class EvalReport:
     threshold_failures: tuple[str, ...] = ()
     operational_errors: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    status: EvalRunStatus = EvalRunStatus.COMPLETED
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metrics", _mapping(self.metrics))
         object.__setattr__(self, "metadata", _mapping(self.metadata))
+        object.__setattr__(self, "status", EvalRunStatus(self.status))
 
     @property
     def passed(self) -> bool:
-        return not self.threshold_failures and not self.operational_errors
+        return (
+            self.status is EvalRunStatus.COMPLETED
+            and not self.threshold_failures
+            and not self.operational_errors
+        )
 
     def assert_thresholds(self) -> None:
         if self.operational_errors:
@@ -494,6 +619,7 @@ class EvalReport:
             "dataset_digest": self.dataset_digest,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "status": self.status.value,
             "passed": self.passed,
             "cases": [case.to_dict() for case in self.cases],
             "metrics": dict(self.metrics),
@@ -501,6 +627,259 @@ class EvalReport:
             "operational_errors": list(self.operational_errors),
             "metadata": plain_data(self.metadata),
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EvalReport":
+        version = value.get("schema_version", 1)
+        if version != 1:
+            raise ValueError(f"unsupported eval report schema_version: {version}")
+        raw_cases = value.get("cases", ())
+        if not isinstance(raw_cases, list | tuple):
+            raise ValueError("eval report cases must be an array")
+        return cls(
+            id=str(value.get("id") or ""),
+            suite_name=str(value.get("suite_name") or ""),
+            dataset_digest=str(value.get("dataset_digest") or ""),
+            started_at=str(value.get("started_at") or ""),
+            ended_at=str(value.get("ended_at") or ""),
+            cases=tuple(
+                CaseResult.from_dict(_required_mapping(case, "report case"))
+                for case in raw_cases
+            ),
+            metrics={
+                str(key): float(item)
+                for key, item in _required_mapping(
+                    value.get("metrics", {}), "report.metrics"
+                ).items()
+            },
+            threshold_failures=_string_tuple(
+                value.get("threshold_failures", ()), "report.threshold_failures"
+            ),
+            operational_errors=_string_tuple(
+                value.get("operational_errors", ()), "report.operational_errors"
+            ),
+            metadata=_required_mapping(value.get("metadata", {}), "report.metadata"),
+            status=EvalRunStatus(str(value.get("status") or "completed")),
+        )
+
+
+def _run_result_from_dict(value: Mapping[str, Any]) -> RunResult:
+    usage_value = value.get("usage")
+    cost_value = value.get("cost")
+    context_value = value.get("context_report")
+    plan_value = value.get("plan")
+    delivery_value = value.get("final_answer_delivery")
+    return RunResult(
+        content=str(value.get("content") or ""),
+        status=RunStatus(str(value.get("status") or "unknown")),
+        turn_id=_optional_string(value.get("turn_id"), "run result.turn_id"),
+        conversation_id=str(value.get("conversation_id") or ""),
+        trace_path=(
+            Path(value["trace_path"])
+            if isinstance(value.get("trace_path"), str)
+            else None
+        ),
+        usage=(
+            Usage(**dict(_required_mapping(usage_value, "run result.usage")))
+            if usage_value is not None
+            else None
+        ),
+        cost=(
+            _cost_from_dict(_required_mapping(cost_value, "run result.cost"))
+            if cost_value is not None
+            else None
+        ),
+        context_report=(
+            _context_report_from_dict(
+                _required_mapping(context_value, "run result.context_report")
+            )
+            if context_value is not None
+            else None
+        ),
+        tool_calls=tuple(
+            _tool_call_from_dict(_required_mapping(item, "run result tool call"))
+            for item in _array(value.get("tool_calls", ()), "run result.tool_calls")
+        ),
+        observations=tuple(
+            Observation(
+                tool_name=str(item.get("tool_name") or ""),
+                content=str(item.get("content") or ""),
+                output_metadata=_required_mapping(
+                    item.get("output_metadata", {}), "observation.output_metadata"
+                ),
+                created_at=_optional_string(
+                    item.get("created_at"), "observation.created_at"
+                ),
+            )
+            for raw in _array(value.get("observations", ()), "run result.observations")
+            if (item := _required_mapping(raw, "run result observation"))
+        ),
+        loaded_skill_names=_string_tuple(
+            value.get("loaded_skill_names", ()), "run result.loaded_skill_names"
+        ),
+        loaded_memory_ids=_string_tuple(
+            value.get("loaded_memory_ids", ()), "run result.loaded_memory_ids"
+        ),
+        errors=_string_tuple(value.get("errors", ()), "run result.errors"),
+        plan=(
+            _plan_from_dict(_required_mapping(plan_value, "run result.plan"))
+            if plan_value is not None
+            else None
+        ),
+        extension_metadata=_required_mapping(
+            value.get("extension_metadata", {}), "run result.extension_metadata"
+        ),
+        final_answer_delivery=(
+            FinalAnswerDelivery(
+                status=FinalAnswerDeliveryStatus(
+                    str(
+                        _required_mapping(
+                            delivery_value, "run result.final_answer_delivery"
+                        ).get("status")
+                        or "complete"
+                    )
+                ),
+                public_delta_count=int(
+                    _required_mapping(
+                        delivery_value, "run result.final_answer_delivery"
+                    ).get("public_delta_count", 0)
+                ),
+                provider_completed=bool(
+                    _required_mapping(
+                        delivery_value, "run result.final_answer_delivery"
+                    ).get("provider_completed", True)
+                ),
+                error=_optional_string(
+                    _required_mapping(
+                        delivery_value, "run result.final_answer_delivery"
+                    ).get("error"),
+                    "run result.final_answer_delivery.error",
+                ),
+            )
+            if delivery_value is not None
+            else None
+        ),
+        resources=tuple(
+            HostResource.from_dict(_required_mapping(item, "run result resource"))
+            for item in _array(value.get("resources", ()), "run result.resources")
+        ),
+    )
+
+
+def _cost_from_dict(value: Mapping[str, Any]) -> Cost:
+    decimal_fields = {
+        "amount",
+        "input_cost",
+        "cached_input_cost",
+        "cache_write_input_cost",
+        "output_cost",
+    }
+    payload = dict(value)
+    for field_name in decimal_fields:
+        raw = payload.get(field_name)
+        payload[field_name] = Decimal(str(raw)) if raw is not None else None
+    return Cost(**payload)
+
+
+def _tool_call_from_dict(value: Mapping[str, Any]) -> ToolCall:
+    attempts = tuple(
+        ToolAttempt(**dict(_required_mapping(item, "tool call attempt")))
+        for item in _array(value.get("attempts", ()), "tool call.attempts")
+    )
+    return ToolCall(
+        tool_name=str(value.get("tool_name") or ""),
+        arguments=_required_mapping(value.get("arguments", {}), "tool call.arguments"),
+        iteration=int(value.get("iteration", 0)),
+        phase=str(value.get("phase") or "execution"),
+        plan_step_id=_optional_string(value.get("plan_step_id"), "tool call.plan_step_id"),
+        started_at=_optional_string(value.get("started_at"), "tool call.started_at"),
+        ended_at=_optional_string(value.get("ended_at"), "tool call.ended_at"),
+        resolved_tool_name=_optional_string(
+            value.get("resolved_tool_name"), "tool call.resolved_tool_name"
+        ),
+        success=value.get("success") if isinstance(value.get("success"), bool) else None,
+        error=_optional_string(value.get("error"), "tool call.error"),
+        failure_kind=_optional_string(
+            value.get("failure_kind"), "tool call.failure_kind"
+        ),
+        attempts=attempts,
+        metadata=_required_mapping(value.get("metadata", {}), "tool call.metadata"),
+    )
+
+
+def _context_report_from_dict(value: Mapping[str, Any]) -> ContextReport:
+    budget = ContextBudget(
+        **dict(_required_mapping(value.get("budget"), "context report.budget"))
+    )
+    sections = tuple(
+        ContextSection(**dict(_required_mapping(item, "context report section")))
+        for item in _array(value.get("sections", ()), "context report.sections")
+    )
+    return ContextReport(
+        total_char_count=int(value.get("total_char_count", 0)),
+        estimated_tokens=int(value.get("estimated_tokens", 0)),
+        section_estimated_tokens=int(value.get("section_estimated_tokens", 0)),
+        budget=budget,
+        over_budget_tokens=int(value.get("over_budget_tokens", 0)),
+        trimmed=bool(value.get("trimmed")),
+        included_message_count=int(value.get("included_message_count", 0)),
+        omitted_message_count=int(value.get("omitted_message_count", 0)),
+        omitted_observation_count=int(value.get("omitted_observation_count", 0)),
+        sections=sections,
+    )
+
+
+def _plan_from_dict(value: Mapping[str, Any]) -> Plan:
+    steps: list[PlanStep] = []
+    for raw_step in _array(value.get("steps", ()), "plan.steps"):
+        step = _required_mapping(raw_step, "plan step")
+        evidence = tuple(
+            PlanStepEvidence(**dict(_required_mapping(item, "plan evidence")))
+            for item in _array(step.get("evidence", ()), "plan step.evidence")
+        )
+        steps.append(
+            PlanStep(
+                id=str(step.get("id") or ""),
+                title=str(step.get("title") or ""),
+                description=str(step.get("description") or ""),
+                status=PlanStepStatus(str(step.get("status") or "unknown")),
+                depends_on=_string_tuple(
+                    step.get("depends_on", ()), "plan step.depends_on"
+                ),
+                acceptance_criteria=_string_tuple(
+                    step.get("acceptance_criteria", ()),
+                    "plan step.acceptance_criteria",
+                ),
+                retry_limit=int(step.get("retry_limit", 0)),
+                evidence=evidence,
+                started_at=_optional_string(
+                    step.get("started_at"), "plan step.started_at"
+                ),
+                completed_at=_optional_string(
+                    step.get("completed_at"), "plan step.completed_at"
+                ),
+                blocked_at=_optional_string(
+                    step.get("blocked_at"), "plan step.blocked_at"
+                ),
+                blocked_reason=_optional_string(
+                    step.get("blocked_reason"), "plan step.blocked_reason"
+                ),
+            )
+        )
+    return Plan(
+        summary=str(value.get("summary") or ""),
+        status=PlanStatus(str(value.get("status") or "unknown")),
+        steps=tuple(steps),
+        created_at=_optional_string(value.get("created_at"), "plan.created_at"),
+        approved_at=_optional_string(value.get("approved_at"), "plan.approved_at"),
+        rejected_at=_optional_string(value.get("rejected_at"), "plan.rejected_at"),
+    )
+
+
+def _array(value: Any, name: str) -> list[Any] | tuple[Any, ...]:
+    if not isinstance(value, list | tuple):
+        raise ValueError(f"{name} must be an array")
+    return value
 
 
 def _required_mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -550,6 +929,6 @@ def _safe_relative_path(value: str, name: str) -> str:
 __all__ = [
     "AgentFactory", "CaseResult", "EVAL_DATASET_SCHEMA_VERSION",
     "EvalCase", "EvalContext", "EvalDataset", "EvalReference", "EvalReport",
-    "EvalSafetyPolicy", "EvalSuite", "EvalTarget", "EvalTurn", "EvalTurnResult",
+    "EvalRunStatus", "EvalSafetyPolicy", "EvalSuite", "EvalTarget", "EvalTurn", "EvalTurnResult",
     "EvaluationMode", "FixtureFactory", "GradeResult", "MetricThreshold", "TrialResult",
 ]
