@@ -98,7 +98,19 @@ def public_api_smoke_source() -> str:
 
         import chulk
         from chulk import Agent, AgentConfig, Skills, Tool, Tools
+        from chulk.evals import (
+            EvalCase,
+            EvalDataset,
+            EvalReference,
+            EvalReport,
+            EvalRunner,
+            EvalSuite,
+            EvalTarget,
+            EvalTurn,
+            ExactAnswerGrader,
+        )
         from chulk.presets import SoftwareEngineer
+        from chulk.results import RunResult, RunStatus
         from chulk.skills import SkillRegistry, bundled_skills_dir
 
 
@@ -119,6 +131,10 @@ def public_api_smoke_source() -> str:
         source_root = Path(os.environ["CHULK_SMOKE_SOURCE_ROOT"]).resolve()
         assert not package_root.is_relative_to(source_root)
         assert (package_root / "py.typed").is_file()
+        eval_dashboard = package_root / "server" / "eval_dashboard"
+        assert (eval_dashboard / "index.html").is_file()
+        assert (eval_dashboard / "evals.css").is_file()
+        assert (eval_dashboard / "evals.js").is_file()
 
         package_metadata = metadata("chulkharness")
         assert package_metadata["Name"] == "chulkharness"
@@ -151,7 +167,37 @@ def public_api_smoke_source() -> str:
         assert preset.tools
         assert preset.skills is None
 
-        print("metadata, typing, public API, resources, and runtime defaults are available")
+        class FakeAgent:
+            def run_result(self, message, **kwargs):
+                del message, kwargs
+                return RunResult(
+                    "wheel ready",
+                    RunStatus.COMPLETED,
+                    None,
+                    "wheel-smoke",
+                    None,
+                )
+
+            def close(self):
+                pass
+
+        eval_case = EvalCase(
+            "wheel",
+            (EvalTurn("run"),),
+            EvalReference(answer="wheel ready"),
+        )
+        eval_suite = EvalSuite(
+            "wheel-smoke",
+            EvalDataset((eval_case,)),
+            (EvalTarget("fake", lambda _context: FakeAgent()),),
+            (ExactAnswerGrader(),),
+            required_graders=("answer.exact",),
+        )
+        eval_report = EvalRunner().run(eval_suite)
+        assert isinstance(eval_report, EvalReport)
+        assert eval_report.passed
+
+        print("metadata, typing, evals, dashboard assets, resources, and runtime defaults are available")
         """
     ).strip()
 
