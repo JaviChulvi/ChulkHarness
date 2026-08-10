@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from chulk.core.action_runtime import ActionLoopPort
+from chulk.core.action_runtime import ActionLoopPort, AgentTurnCancelled
 from chulk.core.actions import AgentAction, PlanStepUpdateAction
 from chulk.core.model_transport import ProtocolFailure
 from chulk.core.state import TurnState
@@ -32,6 +32,7 @@ def run_action_loop(
 ) -> str:
     """Drive a turn through blocking model, tool, and reflection transports."""
     while True:
+        _raise_if_cancelled(runtime)
         preparation = _apply_signal(
             runtime,
             turn,
@@ -54,6 +55,7 @@ def run_action_loop(
             prompt,
             require_plan=require_plan,
         )
+        _raise_if_cancelled(runtime)
         application = _apply_signal(
             runtime,
             turn,
@@ -68,6 +70,7 @@ def run_action_loop(
                     pending.effect.action.arguments,
                     turn,
                 )
+                _raise_if_cancelled(runtime)
                 application = _apply_signal(
                     runtime,
                     turn,
@@ -78,6 +81,7 @@ def run_action_loop(
                 )
             elif isinstance(pending, PendingReflection):
                 reflection = runtime.model.reflect(pending.proposed_answer, turn)
+                _raise_if_cancelled(runtime)
                 application = _apply_signal(
                     runtime,
                     turn,
@@ -106,6 +110,7 @@ async def run_action_loop_async(
 ) -> str:
     """Drive a turn through async model, tool, and reflection transports."""
     while True:
+        _raise_if_cancelled(runtime)
         preparation = await _apply_signal_async(
             runtime,
             turn,
@@ -129,6 +134,7 @@ async def run_action_loop_async(
             prompt,
             require_plan=require_plan,
         )
+        _raise_if_cancelled(runtime)
         application = await _apply_signal_async(
             runtime,
             turn,
@@ -144,6 +150,7 @@ async def run_action_loop_async(
                     pending.effect.action.arguments,
                     turn,
                 )
+                _raise_if_cancelled(runtime)
                 application = await _apply_signal_async(
                     runtime,
                     turn,
@@ -158,6 +165,7 @@ async def run_action_loop_async(
                     pending.proposed_answer,
                     turn,
                 )
+                _raise_if_cancelled(runtime)
                 application = await _apply_signal_async(
                     runtime,
                     turn,
@@ -221,6 +229,11 @@ async def _apply_signal_async(
 async def _flush(runtime: ActionLoopPort) -> None:
     if runtime.async_flush is not None:
         await runtime.async_flush()
+
+
+def _raise_if_cancelled(runtime: ActionLoopPort) -> None:
+    if runtime.is_cancelled():
+        raise AgentTurnCancelled("Turn cancelled by the host")
 
 
 def _model_signal(result: AgentAction | ProtocolFailure) -> TransitionSignal:

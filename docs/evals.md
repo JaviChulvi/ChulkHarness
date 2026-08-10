@@ -56,7 +56,10 @@ by default and honor explicit `concurrency`; async suites use bounded
 concurrency. CLI overrides include `--trials`, `--concurrency`, `--timeout`,
 `--mode`, `--provider`, `--model`, `--max-total-cost`, and `--fail-fast`.
 Optional `sampling` values are exposed through `EvalContext` and retained in
-the report provenance.
+the report provenance. A synchronous timeout requests cooperative cancellation,
+waits briefly for the active turn to stop, and halts the suite before launching
+another trial so unreported provider cost cannot compound. Custom synchronous
+agent doubles should expose `cancel()` or make `close()` stop active work.
 
 ## Dataset schema
 
@@ -107,7 +110,8 @@ return injected dependencies through `context.deps`; this keeps production
 side effects out of tests.
 
 Inputs, answers, tool data, judge output, and events pass through Chulk's
-redaction owner before persistence. Credentials are never stored in reports.
+redaction owner before persistence or export. Credentials are never stored in
+reports or written to JSON, JSONL, JUnit, or HTML artifacts.
 
 ## Reports, baselines, and CI
 

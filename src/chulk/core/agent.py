@@ -8,12 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from copy import deepcopy
 import inspect
 import json
+import threading
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from chulk.capabilities import MemoryMode
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
-from chulk.core.action_runtime import ActionLoopRuntime
+from chulk.core.action_runtime import ActionLoopRuntime, AgentTurnCancelled
 from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
@@ -253,6 +254,7 @@ class Agent:
         self.mcp_bridge_tool_names = list(mcp_bridge_tool_names or [])
         self._owned_resources = list(owned_resources or [])
         self._closed = False
+        self._cancel_requested = threading.Event()
         self._tool_contexts: dict[str, ToolExecutionContext | None] = {}
         self.default_tool_context = default_tool_context
         self.runtime_metadata = deepcopy(runtime_metadata or {})
@@ -367,6 +369,7 @@ class Agent:
             tools=self._tool_executor,
             effects=self._turn_effects,
             async_flush=self._flush_async_services,
+            cancelled=self._cancel_requested.is_set,
         )
 
     @property
@@ -378,6 +381,7 @@ class Agent:
         """Finalize owned closeable resources exactly once."""
         if self._closed:
             return
+        self._cancel_requested.set()
         self._closed = True
         failures: list[Exception] = []
         for context in tuple(self._tool_contexts.values()):
@@ -410,6 +414,7 @@ class Agent:
         """Finalize owned closeable resources exactly once from an async host."""
         if self._closed:
             return
+        self._cancel_requested.set()
         failures: list[Exception] = []
         for context_id, context in tuple(self._tool_contexts.items()):
             if context is None or self.tool_context_lifecycle is None:
@@ -444,6 +449,15 @@ class Agent:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("Agent is closed")
+
+    def cancel_active_turn(self) -> bool:
+        """Request cooperative cancellation and interrupt the active model transport."""
+        active = any(turn.status == "in_progress" for turn in self.state.turns)
+        if not active:
+            return False
+        self._cancel_requested.set()
+        close_resources((self.llm_client,))
+        return True
 
     def run_turn(
         self,
@@ -596,6 +610,7 @@ class Agent:
         turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
+        self._cancel_requested.clear()
         effective_turn_id = turn_id or str(uuid4())
         if self.transcript_resolver is not None or self.async_transcript_resolver is not None:
             snapshot = self._resolve_external_transcript(effective_turn_id)
@@ -666,6 +681,7 @@ class Agent:
         turn_id: str | None = None,
     ) -> str:
         """Start a user turn and run it with async tool execution."""
+        self._cancel_requested.clear()
         effective_turn_id = turn_id or str(uuid4())
         if self.transcript_resolver is not None or self.async_transcript_resolver is not None:
             snapshot = await self._resolve_external_transcript_async(
@@ -1267,6 +1283,7 @@ class Agent:
     def approve_plan(self) -> str:
         """Approve the pending plan and continue the paused turn."""
         self._ensure_open()
+        self._cancel_requested.clear()
         self._revalidate_external_transcript_for_resume()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
         if turn is not None:
@@ -1289,6 +1306,7 @@ class Agent:
     async def approve_plan_async(self) -> str:
         """Approve the pending plan and continue it with async tool execution."""
         self._ensure_open()
+        self._cancel_requested.clear()
         await self._revalidate_external_transcript_for_resume_async()
         turn = self._pending_plan_turn() or self._resumable_plan_turn()
         if turn is not None:
@@ -1816,6 +1834,7 @@ class Agent:
         effects.max_tool_stderr_chars = self.max_tool_stderr_chars
         effects.async_artifact_writer = self._write_tool_output_artifact_async
         self._action_runtime.async_flush = self._flush_async_services
+        self._action_runtime.cancelled = self._cancel_requested.is_set
 
     def _restore_plan_turn_context(self) -> None:
         """Restore context that shaped a pending or resumable approved plan."""
@@ -2612,7 +2631,10 @@ class Agent:
         """Finish an active turn without masking the exception that escaped it."""
         if turn.status not in {"in_progress", "waiting_for_approval"}:
             return
-        cancelled = isinstance(exc, asyncio.CancelledError)
+        cancelled = (
+            isinstance(exc, (asyncio.CancelledError, AgentTurnCancelled))
+            or self._cancel_requested.is_set()
+        )
         if cancelled:
             message = "Turn cancelled."
             turn.cancel(message)

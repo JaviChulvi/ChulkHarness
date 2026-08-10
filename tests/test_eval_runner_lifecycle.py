@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+import chulk.evals.runner as eval_runner
 from chulk import Agent, AgentConfig
 from chulk.evals import (
     AsyncEvalRunner,
@@ -105,8 +106,9 @@ def test_cleanup_failures_are_operational_and_other_resources_still_close() -> N
     assert "agent cleanup failed" in report.operational_errors[0]
 
 
-def test_sync_timeout_returns_promptly_and_defers_cleanup_until_worker_finishes() -> None:
+def test_sync_timeout_cooperatively_cancels_before_cleanup() -> None:
     release = threading.Event()
+    cancelled = threading.Event()
     closed = threading.Event()
     workspaces: list[Path] = []
 
@@ -114,6 +116,10 @@ def test_sync_timeout_returns_promptly_and_defers_cleanup_until_worker_finishes(
         def run_result(self, _message, **_kwargs):
             release.wait(timeout=2)
             return _result()
+
+        def cancel(self):
+            cancelled.set()
+            release.set()
 
         def close(self):
             closed.set()
@@ -135,9 +141,56 @@ def test_sync_timeout_returns_promptly_and_defers_cleanup_until_worker_finishes(
 
     assert elapsed < 0.3
     assert report.operational_errors and "turn exceeded" in report.operational_errors[0]
+    assert cancelled.is_set()
+    assert closed.is_set()
+    assert not workspaces[0].exists()
+
+
+def test_sync_timeout_halts_suite_when_agent_does_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(eval_runner, "_SYNC_CANCELLATION_GRACE_SECONDS", 0.03)
+    release = threading.Event()
+    workspaces: list[Path] = []
+    calls = 0
+
+    class BlockingAgent:
+        def run_result(self, _message, **_kwargs):
+            nonlocal calls
+            calls += 1
+            release.wait(timeout=2)
+            return _result()
+
+        def close(self):
+            return None
+
+    def factory(context):
+        workspaces.append(context.workspace)
+        return BlockingAgent()
+
+    suite = EvalSuite(
+        "unstoppable-timeout",
+        EvalDataset(
+            (
+                EvalCase("case-1", (EvalTurn("wait"),)),
+                EvalCase("case-2", (EvalTurn("must-not-run"),)),
+            )
+        ),
+        (EvalTarget("target", factory),),
+        timeout_seconds=0.03,
+    )
+
+    started = time.monotonic()
+    report = EvalRunner().run(suite)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.3
+    assert calls == 1
+    assert len(report.cases) == 1
+    assert "timed-out turn did not stop" in report.operational_errors[0]
     assert workspaces[0].exists()
+
     release.set()
-    assert closed.wait(timeout=1)
     for _ in range(100):
         if not workspaces[0].exists():
             break

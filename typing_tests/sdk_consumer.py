@@ -198,6 +198,7 @@ agent = Agent(
 )
 
 result: str = agent.run("Calculate 2 + 2")
+cancelled: bool = agent.cancel()
 
 
 def error_category(error: ChulkError) -> str:

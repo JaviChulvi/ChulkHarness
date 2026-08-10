@@ -21,6 +21,7 @@ import marshal
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
@@ -68,6 +69,14 @@ from .models import (
 
 # Compatibility contracts retained from the original deterministic harness.
 EvalAgentFactory: TypeAlias = Callable[[ScriptedLLMClient], object]
+_SYNC_CANCELLATION_GRACE_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class _SyncTrialExecution:
+    trial: TrialResult
+    halt: bool = False
+    cost_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -216,11 +225,14 @@ class EvalRunner:
                         for target, case, trial_number in combinations
                     ]
                     for future in as_completed(futures):
-                        trial = future.result()
+                        execution = future.result()
+                        trial = execution.trial
                         _record_trial(suite, completed, operational_errors, trial)
                         cost, known = _trial_cost(trial)
                         total_cost += cost
-                        unknown_cost = unknown_cost or not known
+                        unknown_cost = (
+                            unknown_cost or execution.cost_unknown or not known
+                        )
                         checkpoint()
                 if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
                     operational_errors.append(
@@ -233,12 +245,19 @@ class EvalRunner:
                         and total_cost >= suite.max_total_cost
                     ):
                         break
-                    trial = _execute_trial_sync(suite, target, case, trial_number)
+                    execution = _execute_trial_sync(
+                        suite, target, case, trial_number
+                    )
+                    trial = execution.trial
                     _record_trial(suite, completed, operational_errors, trial)
                     cost, known = _trial_cost(trial)
                     total_cost += cost
-                    unknown_cost = unknown_cost or not known
+                    unknown_cost = (
+                        unknown_cost or execution.cost_unknown or not known
+                    )
                     checkpoint()
+                    if execution.halt:
+                        break
                     if (
                         suite.max_total_cost is not None
                         and total_cost >= suite.max_total_cost
@@ -641,23 +660,31 @@ def _execute_trial_sync(
     target: EvalTarget,
     case: EvalCase,
     trial_number: int,
-) -> TrialResult:
-    return _grade_sync(
-        suite,
-        case,
-        _run_trial_sync(suite, target, case, trial_number),
-    )
+) -> _SyncTrialExecution:
+    execution = _run_trial_sync(suite, target, case, trial_number)
+    if execution.halt:
+        return execution
+    return replace(execution, trial=_grade_sync(suite, case, execution.trial))
 
 
-def _run_trial_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_number: int) -> TrialResult:
+def _run_trial_sync(
+    suite: EvalSuite,
+    target: EvalTarget,
+    case: EvalCase,
+    trial_number: int,
+) -> _SyncTrialExecution:
     if suite.mode is EvaluationMode.REPLAY:
-        return _run_replay_sync(suite, target, case, trial_number)
+        return _SyncTrialExecution(
+            _run_replay_sync(suite, target, case, trial_number)
+        )
     started = time.monotonic()
     turns: list[EvalTurnResult] = []
     exception: str | None = None
     temporary = tempfile.TemporaryDirectory(prefix="chulk-eval-")
     workspace = Path(temporary.name).resolve()
     deferred_cleanup = False
+    halt = False
+    cost_unknown = False
     try:
         client = _scripted_client(case) if suite.mode is EvaluationMode.SCRIPTED else None
         scope = ExecutionScope.local(
@@ -687,25 +714,48 @@ def _run_trial_sync(suite: EvalSuite, target: EvalTarget, case: EvalCase, trial_
                         deps=context.deps,
                     ),
                     suite.timeout_seconds,
+                    lambda: _cancel_sync_agent(agent),
                 )
                 if not isinstance(result, RunResult):
                     raise TypeError("eval agent run_result() must return RunResult")
                 turns.append(EvalTurnResult(index, result, tuple(events), time.monotonic() - turn_started))
         except _SyncTurnTimeout as exc:
-            deferred_cleanup = True
-            exc.defer(
-                lambda: _cleanup_sync_resources(agent, fixture, temporary)
-            )
+            halt = True
+            cost_unknown = True
+            if not exc.stopped:
+                deferred_cleanup = True
+                exc.defer(
+                    lambda: _cleanup_sync_resources(agent, fixture, temporary)
+                )
             exception = _format_exception(
                 TimeoutError(f"turn exceeded {suite.timeout_seconds:g}s timeout")
             )
+            if exc.cancellation_error is not None:
+                exception = (
+                    f"{exception}; cancellation failed: "
+                    f"{_format_exception(exc.cancellation_error)}"
+                )
+            if not exc.stopped:
+                exception = f"{exception}; timed-out turn did not stop"
         except Exception as exc:
             exception = _format_exception(exc)
         finally:
             if not deferred_cleanup:
                 cleanup_errors = _cleanup_sync_resources(agent, fixture, temporary)
                 exception = _merge_exceptions(exception, cleanup_errors)
-        return TrialResult(case.id, target.name, trial_number, tuple(turns), time.monotonic() - started, exception=exception, workspace=workspace)
+        return _SyncTrialExecution(
+            TrialResult(
+                case.id,
+                target.name,
+                trial_number,
+                tuple(turns),
+                time.monotonic() - started,
+                exception=exception,
+                workspace=workspace,
+            ),
+            halt=halt,
+            cost_unknown=cost_unknown,
+        )
     except Exception:
         if not deferred_cleanup:
             temporary.cleanup()
@@ -1495,17 +1545,23 @@ def _trial_judge_cost(trial: TrialResult) -> float:
 
 
 class _SyncTurnTimeout(TimeoutError):
-    def __init__(self, future: Future[Any], executor: ThreadPoolExecutor) -> None:
+    def __init__(
+        self,
+        future: Future[Any],
+        worker: threading.Thread,
+        *,
+        stopped: bool,
+        cancellation_error: BaseException | None,
+    ) -> None:
         super().__init__("evaluation turn timed out")
         self.future = future
-        self.executor = executor
+        self.worker = worker
+        self.stopped = stopped
+        self.cancellation_error = cancellation_error
 
     def defer(self, cleanup: Callable[[], object]) -> None:
         def complete(_future: Future[Any]) -> None:
-            try:
-                cleanup()
-            finally:
-                self.executor.shutdown(wait=False, cancel_futures=True)
+            cleanup()
 
         self.future.add_done_callback(complete)
 
@@ -1532,18 +1588,93 @@ def _cleanup_sync_resources(
     return errors
 
 
-def _run_sync_with_timeout(operation: Callable[[], Any], timeout_seconds: float) -> Any:
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chulk-eval-turn")
-    future = executor.submit(operation)
-    timed_out = False
+def _run_sync_with_timeout(
+    operation: Callable[[], Any],
+    timeout_seconds: float,
+    cancel: Callable[[], object],
+) -> Any:
+    future, worker = _submit_daemon(operation, name="chulk-eval-turn")
     try:
         return future.result(timeout=timeout_seconds)
     except FutureTimeoutError as exc:
-        timed_out = True
-        raise _SyncTurnTimeout(future, executor) from exc
+        if future.done():
+            return future.result()
+        cancellation_error: BaseException | None = None
+        cancel_future, cancel_worker = _submit_daemon(
+            cancel,
+            name="chulk-eval-cancel",
+        )
+        deadline = time.monotonic() + _SYNC_CANCELLATION_GRACE_SECONDS
+        try:
+            cancel_future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except FutureTimeoutError:
+            cancellation_error = TimeoutError(
+                "agent cancellation hook did not return within "
+                f"{_SYNC_CANCELLATION_GRACE_SECONDS:g}s"
+            )
+        except BaseException as cancel_exc:
+            cancellation_error = cancel_exc
+        if cancel_future.done():
+            cancel_worker.join()
+
+        stopped = future.done()
+        if not stopped:
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except FutureTimeoutError:
+                stopped = future.done()
+            except BaseException:
+                stopped = True
+            else:
+                stopped = True
+        if stopped:
+            worker.join()
+        raise _SyncTurnTimeout(
+            future,
+            worker,
+            stopped=stopped,
+            cancellation_error=cancellation_error,
+        ) from exc
     finally:
-        if not timed_out:
-            executor.shutdown(wait=True, cancel_futures=True)
+        if future.done():
+            worker.join()
+
+
+def _submit_daemon(
+    operation: Callable[[], Any],
+    *,
+    name: str,
+) -> tuple[Future[Any], threading.Thread]:
+    future: Future[Any] = Future()
+
+    def run() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            result = operation()
+        except BaseException as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+
+    worker = threading.Thread(target=run, name=name, daemon=True)
+    worker.start()
+    return future, worker
+
+
+def _cancel_sync_agent(agent: object | None) -> None:
+    if agent is None:
+        raise RuntimeError("timed-out agent was not constructed")
+    cancel = getattr(agent, "cancel", None)
+    if callable(cancel):
+        result = cancel()
+        if result is not False:
+            return
+    close = getattr(agent, "close", None)
+    if callable(close):
+        close()
+        return
+    raise RuntimeError("sync eval agent must expose cancel() or close()")
 
 
 async def _cleanup_async_resources(

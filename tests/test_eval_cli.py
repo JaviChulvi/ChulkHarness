@@ -335,6 +335,30 @@ def test_yaml_paths_are_relative_and_real_main_eval_flow_is_credential_free(
     assert not errors
 
 
+def test_eval_run_output_redacts_report_before_store_roundtrip(tmp_path: Path) -> None:
+    suite_path = tmp_path / "secret_suite.py"
+    secret = "sk-liveoutput123456"
+    suite_path.write_text(
+        _suite_source(answer=secret, expected=secret),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "live-report.json"
+
+    exit_code = run_eval_command(
+        "run",
+        store=SQLiteEvalStore(tmp_path / "runs.sqlite"),
+        suite_ref=f"{suite_path}:suite",
+        output_path=output_path,
+        export_format="json",
+        output_func=lambda _message: None,
+    )
+
+    rendered = output_path.read_text(encoding="utf-8")
+    assert exit_code == 0
+    assert secret not in rendered
+    assert "[redacted]" in rendered
+
+
 def _suite_source(*, answer: str, expected: str) -> str:
     return f'''from chulk.evals import EvalCase, EvalDataset, EvalReference, EvalSuite, EvalTarget, EvalTurn, ExactAnswerGrader, MetricThreshold
 from chulk.results import RunResult, RunStatus

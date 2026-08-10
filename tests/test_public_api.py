@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import tomllib
 import warnings
@@ -631,6 +632,47 @@ async def test_public_async_agent_does_not_block_event_loop_for_llm(tmp_path):
 
     assert result.content == "async response"
     assert events.index("tick") < events.index("llm-end")
+
+
+def test_public_sync_agent_cooperatively_cancels_active_turn(tmp_path):
+    started = threading.Event()
+    released = threading.Event()
+    failures: list[BaseException] = []
+
+    class BlockingLLM(LLMClient):
+        def complete(self, _messages: list[dict[str, str]]) -> str:
+            started.set()
+            released.wait(timeout=2)
+            return json.dumps({"type": "final_answer", "content": "too late"})
+
+        def close(self) -> None:
+            released.set()
+
+    handle = Agent(
+        config=load_config({"CHULK_PROJECT_ROOT": str(tmp_path)}),
+        llm=BlockingLLM(),
+        tools=[],
+        skills=[],
+    )
+
+    def run() -> None:
+        try:
+            handle.run_result("wait")
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(timeout=1)
+
+    assert handle.cancel() is True
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert failures
+    assert handle.state.turns[-1].status == "cancelled"
+    assert handle.cancel() is False
+    handle.close()
 
 
 @pytest.mark.asyncio

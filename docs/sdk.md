@@ -132,6 +132,11 @@ adapter can preserve unknown metadata without weakening the typed contract.
 
 One facade serializes work-starting calls so one conversation cannot interleave
 turn state or callbacks. Use separate agent instances for true parallel runs.
+Synchronous hosts can call `agent.cancel()` from another thread to request
+cooperative cancellation of the active turn; it returns `False` when no turn is
+running. Cancellation closes the active model transport and is observed between
+model, tool, and reflection operations. Custom blocking tools must still provide
+their own bounded I/O or react to resource closure.
 `AsyncAgent` uses native async model requests for every built-in provider,
 including planning, action repair, context summaries, reflection, and fallback
 chains. Sync-only custom clients and some compatibility operations use a

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Literal
 from xml.etree.ElementTree import Element, SubElement, tostring
 
+from chulk.redaction import redact_data
+
 from .models import EvalReport
 
 
@@ -116,7 +118,10 @@ def report_matches_filters(
 
 def export_report(report: EvalReport | Mapping[str, Any], path: Path | str, *, format: ReportFormat | None = None) -> Path:
     destination = Path(path).expanduser().resolve()
-    payload = report.to_dict() if isinstance(report, EvalReport) else dict(report)
+    raw_payload = report.to_dict() if isinstance(report, EvalReport) else dict(report)
+    payload = redact_data(raw_payload)
+    if not isinstance(payload, dict):  # pragma: no cover - reports are mappings
+        raise TypeError("redacted evaluation report must remain an object")
     selected = format or _format_from_suffix(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if selected == "json":

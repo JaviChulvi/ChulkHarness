@@ -285,6 +285,10 @@ class Agent:
     def close(self) -> None:
         self._invoke("close", self._handle.close, serialized=True)
 
+    def cancel(self) -> bool:
+        """Cooperatively cancel the active synchronous turn, if any."""
+        return self._invoke("cancel", self._handle.cancel)
+
     def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         """Return pending manual-memory proposals as immutable snapshots."""
         def operation() -> tuple[MemoryProposal, ...]:

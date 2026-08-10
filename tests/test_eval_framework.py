@@ -287,6 +287,79 @@ def test_sqlite_store_baseline_comparison_and_all_exports(tmp_path: Path) -> Non
         compare_reports(stored, other)
 
 
+def test_all_export_formats_redact_live_report_payloads(tmp_path: Path) -> None:
+    report = {
+        "id": "live-secret-run",
+        "suite_name": "live",
+        "status": "completed",
+        "passed": False,
+        "metrics": {"pass_rate": 0.0},
+        "threshold_failures": [],
+        "operational_errors": ["provider failed with Bearer live-secret-token"],
+        "metadata": {"api_key": "metadata-secret"},
+        "cases": [
+            {
+                "target_name": "api_key=target-secret",
+                "case_id": "secret-case",
+                "passed": False,
+                "trials": [
+                    {
+                        "duration_seconds": 0.1,
+                        "exception": "password=trial-secret",
+                        "turns": [
+                            {
+                                "result": {
+                                    "content": "sk-liveanswer123456",
+                                    "tool_calls": [
+                                        {
+                                            "tool_name": "lookup",
+                                            "arguments": {"authorization": "tool-secret"},
+                                        }
+                                    ],
+                                    "observations": [
+                                        {"content": "token=observation-secret"}
+                                    ],
+                                    "errors": ["cookie=error-secret"],
+                                },
+                                "events": [
+                                    {"payload": {"credential": "event-secret"}}
+                                ],
+                            }
+                        ],
+                        "grades": [],
+                    }
+                ],
+            }
+        ],
+    }
+    secrets = (
+        "live-secret-token",
+        "metadata-secret",
+        "target-secret",
+        "trial-secret",
+        "sk-liveanswer123456",
+        "tool-secret",
+        "observation-secret",
+        "error-secret",
+        "event-secret",
+    )
+
+    for suffix, format_name in (
+        ("json", "json"),
+        ("jsonl", "jsonl"),
+        ("xml", "junit"),
+        ("html", "html"),
+    ):
+        output = export_report(
+            report,
+            tmp_path / f"live-report.{suffix}",
+            format=format_name,
+        )
+        rendered = output.read_text(encoding="utf-8")
+        assert "[redacted]" in rendered
+        assert all(secret not in rendered for secret in secrets)
+
+
 def test_html_export_prioritizes_verdict_cases_and_graders(tmp_path: Path) -> None:
     report = {
         "schema_version": 1,
