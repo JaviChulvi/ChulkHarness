@@ -137,9 +137,16 @@ chulk eval compare RUN_ID
 chulk eval export RUN_ID report.xml --format junit
 ```
 
+Use `chulk eval run module:suite --resume RUN_ID` to continue a checkpointed
+run. `eval list` filters by suite, lifecycle status, mode, target, provider,
+model, tag, ISO start timestamps, limit, and offset. `eval compare
+--min-coverage` can turn incomplete baseline coverage into exit code `1`.
+
 Exports support JSON, case JSONL, JUnit XML, and standalone HTML. Exit codes
 are `0` for passed, `1` for quality-gate failure, `2` for invalid
-configuration/datasets, and `3` for operational failures.
+configuration/datasets, and `3` for operational failures. JUnit exports retain
+case durations and represent threshold failures and operational or incomplete
+runs as explicit failing test cases.
 
 Start the authenticated, read-only result viewer with:
 

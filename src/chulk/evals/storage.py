@@ -45,7 +45,17 @@ class StoredEvalSummary:
 class EvalStore(Protocol):
     def save_report(self, report: EvalReport) -> None: ...
     def get_report(self, report_id: str) -> Mapping[str, Any]: ...
-    def list_reports(self, *, suite_name: str | None = None, limit: int = 100, offset: int = 0) -> tuple[StoredEvalSummary, ...]: ...
+    def list_reports(
+        self,
+        *,
+        suite_name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[StoredEvalSummary, ...]: ...
     def set_baseline(self, suite_name: str, report_id: str) -> None: ...
     def get_baseline(self, suite_name: str) -> Mapping[str, Any] | None: ...
 
@@ -54,7 +64,17 @@ class EvalStore(Protocol):
 class AsyncEvalStore(Protocol):
     async def save_report_async(self, report: EvalReport) -> None: ...
     async def get_report_async(self, report_id: str) -> Mapping[str, Any]: ...
-    async def list_reports_async(self, *, suite_name: str | None = None, limit: int = 100, offset: int = 0) -> tuple[StoredEvalSummary, ...]: ...
+    async def list_reports_async(
+        self,
+        *,
+        suite_name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[StoredEvalSummary, ...]: ...
     async def set_baseline_async(self, suite_name: str, report_id: str) -> None: ...
     async def get_baseline_async(self, suite_name: str) -> Mapping[str, Any] | None: ...
 
@@ -177,16 +197,46 @@ class SQLiteEvalStore:
             raise ValueError("stored eval report is invalid")
         return payload
 
-    def list_reports(self, *, suite_name: str | None = None, limit: int = 100, offset: int = 0) -> tuple[StoredEvalSummary, ...]:
+    def list_reports(
+        self,
+        *,
+        suite_name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[StoredEvalSummary, ...]:
         if limit < 1 or limit > 10_000:
             raise ValueError("limit must be between 1 and 10000")
         if offset < 0:
             raise ValueError("offset must be non-negative")
+        if status is not None and status not in {
+            "running",
+            "interrupted",
+            "completed",
+        }:
+            raise ValueError("status must be running, interrupted, or completed")
+        if mode is not None and mode not in {"scripted", "replay", "live"}:
+            raise ValueError("mode must be scripted, replay, or live")
         clauses = ["tenant_id = ?", "workspace_id = ?"]
         params: list[object] = [self.scope.tenant_id, self.scope.workspace_id]
         if suite_name is not None:
             clauses.append("suite_name = ?")
             params.append(suite_name)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if mode is not None:
+            clauses.append("mode = ?")
+            params.append(mode)
+        if started_after is not None:
+            clauses.append("started_at >= ?")
+            params.append(started_after)
+        if started_before is not None:
+            clauses.append("started_at <= ?")
+            params.append(started_before)
         params.extend((limit, offset))
         with self._connect() as conn:
             rows = conn.execute(
@@ -244,8 +294,27 @@ class AsyncSQLiteEvalStore:
     async def get_report_async(self, report_id: str) -> Mapping[str, Any]:
         return await asyncio.to_thread(self.store.get_report, report_id)
 
-    async def list_reports_async(self, *, suite_name: str | None = None, limit: int = 100, offset: int = 0) -> tuple[StoredEvalSummary, ...]:
-        return await asyncio.to_thread(self.store.list_reports, suite_name=suite_name, limit=limit, offset=offset)
+    async def list_reports_async(
+        self,
+        *,
+        suite_name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[StoredEvalSummary, ...]:
+        return await asyncio.to_thread(
+            self.store.list_reports,
+            suite_name=suite_name,
+            status=status,
+            mode=mode,
+            started_after=started_after,
+            started_before=started_before,
+            limit=limit,
+            offset=offset,
+        )
 
     async def set_baseline_async(self, suite_name: str, report_id: str) -> None:
         await asyncio.to_thread(self.store.set_baseline, suite_name, report_id)

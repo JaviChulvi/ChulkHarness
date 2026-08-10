@@ -564,6 +564,7 @@ def test_postgres_eval_store_matches_scope_and_idempotency_contracts(
 
     assert store.get_report(report.id)["status"] == "completed"
     assert store.list_reports()[0].status == "completed"
+    assert store.list_reports(status="completed", mode="scripted")[0].id == report.id
     assert store.get_baseline(report.suite_name)["id"] == report.id
     isolated = PostgreSQLEvalStore(
         postgres_database.engine,

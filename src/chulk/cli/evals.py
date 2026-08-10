@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 import importlib
 import importlib.util
 import json
@@ -38,6 +39,7 @@ def run_eval_command(
     report_id: str | None = None,
     baseline_id: str | None = None,
     suite_name: str | None = None,
+    resume_from: str | None = None,
     tags: tuple[str, ...] = (),
     trials: int | None = None,
     concurrency: int | None = None,
@@ -48,6 +50,13 @@ def run_eval_command(
     max_total_cost: float | None = None,
     allow_unknown_cost: bool = False,
     fail_fast: bool = False,
+    status: str | None = None,
+    target_name: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    min_baseline_coverage: float | None = None,
     output_path: Path | str | None = None,
     export_format: str | None = None,
     init_path: Path | str | None = None,
@@ -90,7 +99,11 @@ def run_eval_command(
             )
             if suite.store is None:
                 suite = replace(suite, store=store)
-            report = EvalRunner().run(suite, tags=tags)
+            report = EvalRunner().run(
+                suite,
+                tags=tags,
+                resume_from=resume_from,
+            )
             if not isinstance(report, EvalReport):
                 raise TypeError("suite execution did not return EvalReport")
             if output_path is not None:
@@ -100,12 +113,51 @@ def run_eval_command(
                 return EXIT_EVAL_OPERATIONAL
             return EXIT_EVAL_OK if report.passed else EXIT_EVAL_QUALITY
         if command == "list":
-            summaries = store.list_reports(suite_name=suite_name)
+            if not 1 <= limit <= 10_000:
+                raise ValueError("eval list limit must be between 1 and 10000")
+            if offset < 0:
+                raise ValueError("eval list offset must be non-negative")
+            normalized_after = _optional_iso_timestamp(started_after, "started-after")
+            normalized_before = _optional_iso_timestamp(started_before, "started-before")
+            payload_filters = bool(target_name or provider or model or tags)
+            summaries = store.list_reports(
+                suite_name=suite_name,
+                status=status,
+                mode=mode,
+                started_after=normalized_after,
+                started_before=normalized_before,
+                limit=10_000 if payload_filters else limit,
+                offset=0 if payload_filters else offset,
+            )
+            if payload_filters:
+                summaries = tuple(
+                    summary
+                    for summary in summaries
+                    if _matches_report_filters(
+                        store.get_report(summary.id),
+                        target_name=target_name,
+                        provider=provider,
+                        model=model,
+                        tags=tags,
+                    )
+                )[offset : offset + limit]
             return _emit({"reports": [item.to_dict() for item in summaries]}, json_output, output_func)
         if command == "show":
             if report_id is None:
                 raise ValueError("eval show requires a report id")
-            return _emit(store.get_report(report_id), json_output, output_func)
+            payload = store.get_report(report_id)
+            if json_output:
+                return _emit(payload, True, output_func)
+            output_func(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+            return EXIT_EVAL_OK
         if command == "compare":
             if report_id is None:
                 raise ValueError("eval compare requires a report id")
@@ -113,7 +165,18 @@ def run_eval_command(
             baseline = store.get_report(baseline_id) if baseline_id else store.get_baseline(str(current["suite_name"]))
             if baseline is None:
                 raise ValueError("no baseline is configured for this suite")
-            return _emit(compare_reports(current, baseline).to_dict(), json_output, output_func)
+            if min_baseline_coverage is not None and not (
+                0.0 <= min_baseline_coverage <= 1.0
+            ):
+                raise ValueError("minimum baseline coverage must be between 0 and 1")
+            comparison = compare_reports(current, baseline)
+            _emit(comparison.to_dict(), json_output, output_func)
+            if (
+                min_baseline_coverage is not None
+                and comparison.baseline_coverage < min_baseline_coverage
+            ):
+                return EXIT_EVAL_QUALITY
+            return EXIT_EVAL_OK
         if command == "baseline-set":
             if suite_name is None or report_id is None:
                 raise ValueError("eval baseline set requires suite name and report id")
@@ -125,7 +188,7 @@ def run_eval_command(
             destination = export_report(store.get_report(report_id), output_path, format=export_format)  # type: ignore[arg-type]
             return _emit({"report_id": report_id, "output": str(destination)}, json_output, output_func)
         raise ValueError(f"unknown eval command: {command}")
-    except (ImportError, OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
+    except (FileNotFoundError, ImportError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
         error_func(json.dumps({"status": "configuration_error", "error": str(exc)}) if json_output else f"evaluation configuration error: {exc}")
         return EXIT_EVAL_CONFIG
     except Exception as exc:
@@ -135,10 +198,14 @@ def run_eval_command(
 
 def load_eval_suite(reference: str) -> EvalSuite:
     if reference.endswith((".yaml", ".yml")):
-        payload = yaml.safe_load(Path(reference).expanduser().read_text(encoding="utf-8"))
+        yaml_path = Path(reference).expanduser().resolve()
+        payload = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping) or not isinstance(payload.get("suite"), str):
             raise ValueError("eval YAML must contain a suite: module:symbol reference")
         reference = payload["suite"]
+        source, separator, symbol = reference.rpartition(":")
+        if separator and source.endswith(".py") and not Path(source).is_absolute():
+            reference = f"{(yaml_path.parent / source).resolve()}:{symbol}"
     if ":" not in reference:
         raise ValueError("suite reference must use module:symbol or path.py:symbol")
     source, symbol = reference.rsplit(":", 1)
@@ -192,7 +259,8 @@ def _emit(payload: Mapping[str, Any], json_output: bool, output_func: Callable[[
     elif "reports" in payload:
         reports = payload["reports"]
         output_func("No evaluation runs." if not reports else "\n".join(
-            f"{item['id']}  {item['suite_name']}  {'pass' if item['passed'] else 'fail'}  {item['pass_rate']:.1%}"
+            f"{item['id']}  {item['suite_name']}  {item.get('status', 'completed')}  "
+            f"{'pass' if item['passed'] else 'fail'}  {item['pass_rate']:.1%}"
             for item in reports
         ))
     elif "suite_name" in payload and "metrics" in payload:
@@ -203,6 +271,50 @@ def _emit(payload: Mapping[str, Any], json_output: bool, output_func: Callable[[
     else:
         output_func(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return EXIT_EVAL_OK
+
+
+def _optional_iso_timestamp(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"eval list {name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _matches_report_filters(
+    report: Mapping[str, Any],
+    *,
+    target_name: str | None,
+    provider: str | None,
+    model: str | None,
+    tags: tuple[str, ...],
+) -> bool:
+    metadata = report.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    targets = metadata.get("targets")
+    targets = targets if isinstance(targets, list) else []
+    matching_targets = [item for item in targets if isinstance(item, Mapping)]
+    if target_name is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("name") == target_name
+        ]
+    if provider is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("provider") == provider
+        ]
+    if model is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("model") == model
+        ]
+    if (target_name is not None or provider is not None or model is not None) and not matching_targets:
+        return False
+    metrics = report.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return all(f"tag.{tag}.pass_rate" in metrics for tag in tags)
 
 
 __all__ = [

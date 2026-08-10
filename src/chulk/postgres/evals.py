@@ -34,10 +34,24 @@ class AsyncPostgreSQLEvalStore:
     async def get_report_async(self, report_id: str) -> Mapping[str, Any]:
         return await asyncio.to_thread(self.store.get_report, report_id)
 
-    async def list_reports_async(self, *, suite_name: str | None = None, limit: int = 100, offset: int = 0) -> tuple[StoredEvalSummary, ...]:
+    async def list_reports_async(
+        self,
+        *,
+        suite_name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[StoredEvalSummary, ...]:
         return await asyncio.to_thread(
             self.store.list_reports,
             suite_name=suite_name,
+            status=status,
+            mode=mode,
+            started_after=started_after,
+            started_before=started_before,
             limit=limit,
             offset=offset,
         )

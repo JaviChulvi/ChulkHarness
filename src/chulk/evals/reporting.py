@@ -104,12 +104,31 @@ def export_report(report: EvalReport | Mapping[str, Any], path: Path | str, *, f
 def _junit(report: Mapping[str, Any]) -> str:
     cases = report.get("cases", [])
     cases = cases if isinstance(cases, list) else []
+    threshold_failures = report.get("threshold_failures")
+    threshold_failures = (
+        threshold_failures if isinstance(threshold_failures, list) else []
+    )
+    operational_errors = report.get("operational_errors")
+    operational_errors = (
+        operational_errors if isinstance(operational_errors, list) else []
+    )
+    lifecycle_error = report.get("status", "completed") != "completed"
+    quality_gate = bool(threshold_failures)
+    operational_gate = bool(operational_errors or lifecycle_error)
     suite = Element(
         "testsuite",
         {
             "name": str(report.get("suite_name", "chulk-evals")),
-            "tests": str(len(cases)),
-            "failures": str(sum(not bool(item.get("passed")) for item in cases if isinstance(item, Mapping))),
+            "tests": str(len(cases) + int(quality_gate) + int(operational_gate)),
+            "failures": str(
+                sum(
+                    not bool(item.get("passed"))
+                    for item in cases
+                    if isinstance(item, Mapping)
+                )
+                + int(bool(threshold_failures))
+            ),
+            "errors": str(int(bool(operational_errors or lifecycle_error))),
         },
     )
     for item in cases:
@@ -121,12 +140,52 @@ def _junit(report: Mapping[str, Any]) -> str:
             {
                 "classname": str(item.get("target_name", "agent")),
                 "name": str(item.get("case_id", "case")),
+                "time": f"{_case_duration(item):.6f}",
             },
         )
         if not item.get("passed"):
             failure = SubElement(node, "failure", {"message": "evaluation quality gate failed"})
             failure.text = json.dumps(item, ensure_ascii=False, default=str)
+    if quality_gate:
+        gate = SubElement(
+            suite,
+            "testcase",
+            {"classname": "chulk.evals", "name": "suite.quality_gate"},
+        )
+        failure = SubElement(
+            gate,
+            "failure",
+            {"message": "evaluation threshold failed"},
+        )
+        failure.text = "\n".join(str(item) for item in threshold_failures)
+    if operational_gate:
+        gate = SubElement(
+            suite,
+            "testcase",
+            {"classname": "chulk.evals", "name": "suite.operational"},
+        )
+        error = SubElement(
+            gate,
+            "error",
+            {"message": "evaluation operational failure"},
+        )
+        messages = [str(item) for item in operational_errors]
+        if lifecycle_error:
+            messages.append(f"run status is {report.get('status')}")
+        error.text = "\n".join(messages)
     return '<?xml version="1.0" encoding="utf-8"?>\n' + tostring(suite, encoding="unicode") + "\n"
+
+
+def _case_duration(case: Mapping[str, Any]) -> float:
+    trials = case.get("trials")
+    if not isinstance(trials, list):
+        return 0.0
+    return sum(
+        float(trial.get("duration_seconds", 0.0))
+        for trial in trials
+        if isinstance(trial, Mapping)
+        and isinstance(trial.get("duration_seconds", 0.0), int | float)
+    )
 
 
 def _html(report: Mapping[str, Any]) -> str:
