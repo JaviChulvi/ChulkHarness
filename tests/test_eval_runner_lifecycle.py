@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 import threading
 import time
@@ -23,7 +24,7 @@ from chulk.evals import (
     EvaluationMode,
     ToolCallGrader,
 )
-from chulk.results import RunResult, RunStatus
+from chulk.results import Cost, RunResult, RunStatus
 from chulk.testing import ScriptedLLMClient
 from chulk.tools import Tool, ToolPermissionLevel
 from chulk.tracing import Trace, export_replay_fixture
@@ -181,6 +182,95 @@ async def test_async_runner_bounds_concurrency_and_closes_every_agent() -> None:
     assert not report.operational_errors
     assert peak == 2
     assert closed == 4
+
+
+def test_sync_runner_stops_when_cost_cap_is_exactly_exhausted() -> None:
+    calls = 0
+
+    class MeteredAgent:
+        def run_result(self, _message, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return RunResult(
+                "done",
+                RunStatus.COMPLETED,
+                None,
+                "conversation",
+                None,
+                cost=Cost(Decimal("1.00"), pricing_known=True),
+            )
+
+        def close(self):
+            return None
+
+    suite = _exact_cost_cap_suite(lambda _context: MeteredAgent())
+
+    report = EvalRunner().run(suite)
+
+    assert calls == 1
+    assert len(report.cases) == 1
+    assert report.metrics["total_cost"] == 1.0
+    assert report.passed is False
+    assert "exhausted before all trials completed" in report.operational_errors[0]
+    assert "exceeded" not in report.operational_errors[0]
+
+    complete = EvalRunner().run(
+        _exact_cost_cap_suite(lambda _context: MeteredAgent(), case_count=1)
+    )
+    assert calls == 2
+    assert complete.passed is True
+
+
+@pytest.mark.asyncio
+async def test_async_runner_stops_when_cost_cap_is_exactly_exhausted() -> None:
+    calls = 0
+
+    class AsyncMeteredAgent:
+        async def run_result(self, _message, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return RunResult(
+                "done",
+                RunStatus.COMPLETED,
+                None,
+                "conversation",
+                None,
+                cost=Cost(Decimal("1.00"), pricing_known=True),
+            )
+
+        async def aclose(self):
+            return None
+
+    suite = _exact_cost_cap_suite(lambda _context: AsyncMeteredAgent())
+
+    report = await AsyncEvalRunner().run(suite)
+
+    assert calls == 1
+    assert len(report.cases) == 1
+    assert report.metrics["total_cost"] == 1.0
+    assert report.passed is False
+    assert "exhausted before all trials completed" in report.operational_errors[0]
+    assert "exceeded" not in report.operational_errors[0]
+
+    complete = await AsyncEvalRunner().run(
+        _exact_cost_cap_suite(lambda _context: AsyncMeteredAgent(), case_count=1)
+    )
+    assert calls == 2
+    assert complete.passed is True
+
+
+def _exact_cost_cap_suite(factory, *, case_count: int = 3) -> EvalSuite:
+    cases = tuple(
+        EvalCase(f"case-{index}", (EvalTurn("run"),))
+        for index in range(case_count)
+    )
+    return EvalSuite(
+        "exact-cost-cap",
+        EvalDataset(cases),
+        (EvalTarget("target", factory, provider="fake", model="fake"),),
+        mode=EvaluationMode.LIVE,
+        max_total_cost=1.0,
+    )
 
 
 @pytest.mark.asyncio

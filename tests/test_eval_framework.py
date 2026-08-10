@@ -24,6 +24,7 @@ from chulk.evals import (
     EvalTurn,
     EvalTurnResult,
     ExactAnswerGrader,
+    GradeResult,
     LLMJudgeGrader,
     MetricThreshold,
     SQLiteEvalStore,
@@ -505,3 +506,39 @@ def test_required_grader_errors_are_operational_and_report_has_provenance() -> N
     assert report.metadata["chulk_version"]
     assert len(report.metadata["suite_fingerprint"]) == 64
     assert "p95_latency_seconds" in report.metrics
+
+
+@pytest.mark.asyncio
+async def test_runners_reject_grades_for_a_different_grader_identity() -> None:
+    class MismatchedGrader:
+        name = "required"
+
+        def grade(self, _case, _trial):
+            return GradeResult("typo", 1.0, True, "incorrect identity")
+
+        async def grade_async(self, _case, _trial):
+            return GradeResult("typo", 1.0, True, "incorrect identity")
+
+    case = EvalCase(
+        "mismatched-grader",
+        (EvalTurn("Answer", ({"type": "final_answer", "content": "answer"},)),),
+    )
+    suite = EvalSuite(
+        "mismatched-grader",
+        EvalDataset((case,)),
+        (EvalTarget("sdk", _agent),),
+        (MismatchedGrader(),),
+        required_graders=("required",),
+    )
+
+    reports = (EvalRunner().run(suite), await AsyncEvalRunner().run(suite))
+
+    for report in reports:
+        grade = report.cases[0].trials[0].grades[0]
+        assert report.passed is False
+        assert report.metrics["pass_rate"] == 0.0
+        assert report.operational_errors
+        assert grade.grader == "required"
+        assert grade.details["required"] is True
+        assert grade.error is not None
+        assert "returned GradeResult for 'typo'" in grade.error

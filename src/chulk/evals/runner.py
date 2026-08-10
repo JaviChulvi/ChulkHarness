@@ -228,16 +228,21 @@ class EvalRunner:
                     )
             else:
                 for target, case, trial_number in combinations:
+                    if (
+                        suite.max_total_cost is not None
+                        and total_cost >= suite.max_total_cost
+                    ):
+                        break
                     trial = _execute_trial_sync(suite, target, case, trial_number)
                     _record_trial(suite, completed, operational_errors, trial)
                     cost, known = _trial_cost(trial)
                     total_cost += cost
                     unknown_cost = unknown_cost or not known
                     checkpoint()
-                    if suite.max_total_cost is not None and total_cost > suite.max_total_cost:
-                        operational_errors.append(
-                            f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
-                        )
+                    if (
+                        suite.max_total_cost is not None
+                        and total_cost >= suite.max_total_cost
+                    ):
                         break
                     if suite.fail_fast and (
                         trial.exception or not _trial_required_passed(suite, trial)
@@ -246,6 +251,19 @@ class EvalRunner:
         except BaseException:
             checkpoint(EvalRunStatus.INTERRUPTED)
             raise
+
+        if suite.max_total_cost is not None:
+            if total_cost > suite.max_total_cost:
+                operational_errors.append(
+                    f"evaluation cost ${total_cost:.6f} exceeded cap ${suite.max_total_cost:.6f}"
+                )
+            elif total_cost >= suite.max_total_cost and any(
+                (target.name, case.id, trial_number) not in completed
+                for target, case, trial_number in combinations
+            ):
+                operational_errors.append(
+                    f"evaluation cost cap ${suite.max_total_cost:.6f} exhausted before all trials completed"
+                )
 
         if _requires_known_cost(suite) and unknown_cost and not suite.safety.allow_unknown_cost:
             operational_errors.append(
@@ -386,13 +404,21 @@ class AsyncEvalRunner:
         try:
             if suite.max_total_cost is not None or suite.fail_fast:
                 for target, case, trial_number in combinations:
+                    if (
+                        suite.max_total_cost is not None
+                        and spent >= suite.max_total_cost
+                    ):
+                        break
                     trial = await execute(target, case, trial_number)
                     _record_trial(suite, completed, operational_errors, trial)
                     cost, cost_known = _trial_cost(trial)
                     spent += cost
                     known = known and cost_known
                     await checkpoint()
-                    if suite.max_total_cost is not None and spent > suite.max_total_cost:
+                    if (
+                        suite.max_total_cost is not None
+                        and spent >= suite.max_total_cost
+                    ):
                         break
                     if suite.fail_fast and (
                         trial.exception or not _trial_required_passed(suite, trial)
@@ -417,10 +443,18 @@ class AsyncEvalRunner:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.shield(checkpoint(EvalRunStatus.INTERRUPTED))
             raise
-        if suite.max_total_cost is not None and spent > suite.max_total_cost:
-            operational_errors.append(
-                f"evaluation cost ${spent:.6f} exceeded cap ${suite.max_total_cost:.6f}"
-            )
+        if suite.max_total_cost is not None:
+            if spent > suite.max_total_cost:
+                operational_errors.append(
+                    f"evaluation cost ${spent:.6f} exceeded cap ${suite.max_total_cost:.6f}"
+                )
+            elif spent >= suite.max_total_cost and any(
+                (target.name, case.id, trial_number) not in completed
+                for target, case, trial_number in combinations
+            ):
+                operational_errors.append(
+                    f"evaluation cost cap ${suite.max_total_cost:.6f} exhausted before all trials completed"
+                )
         if _requires_known_cost(suite) and not known and not suite.safety.allow_unknown_cost:
             operational_errors.append(
                 "metered evaluation produced unknown cost; opt in with allow_unknown_cost"
@@ -1023,14 +1057,18 @@ class _EvalToolPermissionPolicy(ToolPermissionPolicy):
 def _grade_sync(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialResult:
     grades: list[GradeResult] = []
     for grader in suite.graders:
+        name = str(getattr(grader, "name", type(grader).__name__))
         try:
             grade = cast(Any, grader).grade(case, trial)
             if inspect.isawaitable(grade):
                 raise TypeError("async grader requires AsyncEvalRunner")
             if not isinstance(grade, GradeResult):
                 raise TypeError("grader must return GradeResult")
+            if grade.grader != name:
+                raise ValueError(
+                    f"grader {name!r} returned GradeResult for {grade.grader!r}"
+                )
         except Exception as exc:
-            name = str(getattr(grader, "name", type(grader).__name__))
             grade = GradeResult(name, 0.0, False, f"grader failed: {exc}", error=_format_exception(exc))
         grades.append(_mark_required(grade, suite))
     return TrialResult(trial.case_id, trial.target_name, trial.trial, trial.turns, trial.duration_seconds, tuple(grades), trial.exception, trial.workspace)
@@ -1039,6 +1077,7 @@ def _grade_sync(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialRe
 async def _grade_async(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialResult:
     grades: list[GradeResult] = []
     for grader in suite.graders:
+        name = str(getattr(grader, "name", type(grader).__name__))
         try:
             grade_async = getattr(grader, "grade_async", None)
             if callable(grade_async):
@@ -1047,8 +1086,11 @@ async def _grade_async(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> 
                 grade = await asyncio.to_thread(cast(Any, grader).grade, case, trial)
             if not isinstance(grade, GradeResult):
                 raise TypeError("grader must return GradeResult")
+            if grade.grader != name:
+                raise ValueError(
+                    f"grader {name!r} returned GradeResult for {grade.grader!r}"
+                )
         except Exception as exc:
-            name = str(getattr(grader, "name", type(grader).__name__))
             grade = GradeResult(name, 0.0, False, f"grader failed: {exc}", error=_format_exception(exc))
         grades.append(_mark_required(grade, suite))
     return TrialResult(trial.case_id, trial.target_name, trial.trial, trial.turns, trial.duration_seconds, tuple(grades), trial.exception, trial.workspace)
