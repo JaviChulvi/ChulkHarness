@@ -266,8 +266,8 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
                 "WHERE table_schema = current_schema()"
             )
         ).scalar_one()
-    assert revision == "0003"
-    assert table_count == 25
+    assert revision == "0004"
+    assert table_count == 30
 
 
 def test_upgrade_from_0001_preserves_idempotency_rows(
@@ -296,7 +296,7 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert revision == "0003"
+        assert revision == "0004"
     finally:
         engine.dispose()
         with admin.begin() as connection:
