@@ -14,8 +14,8 @@ The supported top-level names are governed by `chulk.__all__`. They are
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
-`chulk.resources`, `chulk.tools`, `chulk.testing`, and the optional
-`chulk.postgres` module.
+`chulk.resources`, `chulk.tools`, `chulk.testing`, `chulk.evals`, and the
+optional `chulk.postgres` module.
 The final-answer streaming modes, chunk/policy decisions, sync/async output
 policy protocols, failure mode, and terminal delivery record are public-stable.
 `ScriptedLLMClient` is stable only from `chulk.testing`.

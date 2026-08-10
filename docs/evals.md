@@ -1,0 +1,129 @@
+# Agent evaluations
+
+`chulk.evals` is the public-stable framework for testing agents created with
+the Chulk SDK. It executes the same `Agent.run_result(...)` or
+`AsyncAgent.run_result(...)` boundary used by applications and records typed
+results and public events for grading.
+
+## Start a suite
+
+Create a starter Python suite and JSONL dataset without overwriting files:
+
+```bash
+chulk eval init
+chulk eval run evals/suite.py:suite
+```
+
+The starter is deterministic and needs no credentials. A suite supplies an
+agent factory; the factory receives an isolated `EvalContext` for every case
+and trial:
+
+```python
+from chulk import Agent, AgentConfig
+from chulk.evals import (
+    EvalDataset,
+    EvalSuite,
+    EvalTarget,
+    ExactAnswerGrader,
+    MetricThreshold,
+    StatusGrader,
+)
+
+
+def create_agent(context):
+    return Agent(
+        config=AgentConfig(project_root=context.workspace),
+        llm=context.llm,
+        tools=[],
+        skills=[],
+    )
+
+
+suite = EvalSuite(
+    name="support",
+    dataset=EvalDataset.from_jsonl("evals/cases.jsonl"),
+    targets=(EvalTarget("support-agent", create_agent),),
+    graders=(ExactAnswerGrader(), StatusGrader()),
+    required_graders=("answer.exact", "run.status"),
+    thresholds={"pass_rate": MetricThreshold(min=0.95)},
+)
+```
+
+Call `EvalRunner().run(suite)` in Python, or use `AsyncEvalRunner` with an
+`AsyncAgent` factory. One agent is reused across a case's turns, while every
+trial receives a fresh agent and temporary workspace. Sync suites are serial
+by default and honor explicit `concurrency`; async suites use bounded
+concurrency. CLI overrides include `--trials`, `--concurrency`, `--timeout`,
+`--mode`, `--provider`, `--model`, `--max-total-cost`, and `--fail-fast`.
+
+## Dataset schema
+
+The canonical format is JSONL schema version `1`, with one case per line:
+
+```json
+{"schema_version":1,"id":"refund","turns":[{"input":"Refund order 123","scripted_responses":[{"type":"final_answer","content":"Refunded."}]}],"reference":{"answer":"Refunded.","status":"completed","tool_sequence":[]},"tags":["refund","smoke"]}
+```
+
+Cases may contain multiple turns, a case-level or final-turn reference, tags,
+metadata, a named Python fixture, and a dataset-relative replay fixture. The
+loader rejects duplicate ids, unknown fields and versions, malformed values,
+and replay paths that leave the dataset directory. Optional YAML contains a
+Python suite reference such as `suite: my_project.evals:suite`.
+
+## Modes and graders
+
+- `scripted` injects `ScriptedLLMClient` through `EvalContext.llm` and is the
+  default offline regression mode.
+- `replay` executes a bounded Chulk replay fixture without providers or real
+  tools.
+- `live` uses the target factory's provider. It requires `max_total_cost`;
+  unknown pricing requires `EvalSafetyPolicy(allow_unknown_cost=True)`.
+
+Built-in graders cover exact/contained/regex/JSON answers, status and errors,
+tool calls, arguments, results and failures, ordered event milestones, skills, memories, plans,
+latency, tokens, and cost. `CallableGrader` accepts application checks.
+`LLMJudgeGrader` uses a separate tool-free `LLMClient`, requires strict JSON,
+supports reference and pairwise grading, and records its redacted response,
+judge model/provider, prompt version, usage, and cost.
+
+Only names in `required_graders` affect case pass/fail. Only declared
+`MetricThreshold` values affect the suite quality gate. Other graders are
+informational. Configuration and runtime failures remain operational errors.
+
+## Safety and fixtures
+
+Evaluation agents allow only tools declared with `READ` permission by default.
+Network, memory mutation, write, shell, external, and destructive tools must be
+named in `EvalSafetyPolicy.allowed_tool_names`. Prefer named fixtures that
+return injected dependencies through `context.deps`; this keeps production
+side effects out of tests.
+
+Inputs, answers, tool data, judge output, and events pass through Chulk's
+redaction owner before persistence. Credentials are never stored in reports.
+
+## Reports, baselines, and CI
+
+`SQLiteEvalStore` uses the shared forward-migrated database. The optional
+Postgres package exports `PostgreSQLEvalStore` and async-callable adapters.
+Both stores scope reports and baselines with `ExecutionScope`.
+
+```bash
+chulk eval list
+chulk eval show RUN_ID --json
+chulk eval baseline set support RUN_ID
+chulk eval compare RUN_ID
+chulk eval export RUN_ID report.xml --format junit
+```
+
+Exports support JSON, case JSONL, JUnit XML, and standalone HTML. Exit codes
+are `0` for passed, `1` for quality-gate failure, `2` for invalid
+configuration/datasets, and `3` for operational failures.
+
+Start the authenticated, read-only result viewer with:
+
+```bash
+chulk server start --eval-dashboard
+```
+
+Open `/evals`. The dashboard can inspect redacted results but cannot execute
+suites or change baselines.

@@ -100,6 +100,19 @@ from chulk import (
     Usage,
     VersionedReference,
 )
+from chulk.evals import (
+    AsyncEvalRunner,
+    EvalCase,
+    EvalContext,
+    EvalDataset,
+    EvalReport,
+    EvalRunner,
+    EvalSuite,
+    EvalTarget,
+    EvalTurn,
+    ExactAnswerGrader,
+    MetricThreshold,
+)
 from chulk.postgres import (
     AsyncPostgreSQLApprovalStore,
     AsyncPostgreSQLGatewayStore,
@@ -436,3 +449,20 @@ def consume_plugin_lifecycle(
     plan: PluginUpdatePlan,
 ) -> tuple[str, bool]:
     return receipt.action.value, plan.requires_reapproval
+
+
+def consume_eval_contract(
+    context: EvalContext,
+    target: EvalTarget,
+) -> tuple[EvalReport | object, AsyncEvalRunner]:
+    case = EvalCase("typed", (EvalTurn("hello"),))
+    suite = EvalSuite(
+        "typed",
+        EvalDataset((case,)),
+        (target,),
+        (ExactAnswerGrader(),),
+        thresholds={"pass_rate": MetricThreshold(min=1.0)},
+    )
+    report = EvalRunner().run(suite)
+    _ = context.workspace
+    return report, AsyncEvalRunner()

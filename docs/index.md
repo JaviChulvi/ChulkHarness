@@ -16,6 +16,7 @@ Choose the path that matches what you are doing:
 
 - [Quickstart](quickstart.md): install to first deterministic result.
 - [SDK](sdk.md): facades, lifecycle, results, exceptions, and async boundaries.
+- [Agent evaluations](evals.md): datasets, graders, quality gates, and reports.
 - [Hosted runtime](hosting.md): service injection, execution scope, and tool policy.
 - [PostgreSQL](postgres.md): optional relational stores, migrations, pools, and recovery.
 - [Hosted gateway](gateway.md): durable ingress, definition routing, delivery, and reconciliation.
