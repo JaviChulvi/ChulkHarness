@@ -891,6 +891,37 @@ def main(
                 output_func=output_func,
                 error_func=error_func,
             )
+        if args.command == "eval":
+            from chulk.cli.evals import run_eval_command
+            from chulk.evals import SQLiteEvalStore
+
+            eval_command = args.eval_command
+            if eval_command == "baseline":
+                eval_command = f"baseline-{args.eval_baseline_command}"
+            return run_eval_command(
+                eval_command,
+                store=SQLiteEvalStore(config.store_path),
+                suite_ref=getattr(args, "suite", None),
+                report_id=getattr(args, "report_id", None),
+                baseline_id=getattr(args, "baseline_id", None),
+                suite_name=getattr(args, "suite_name", None),
+                tags=tuple(getattr(args, "tag", ())),
+                trials=getattr(args, "trials", None),
+                concurrency=getattr(args, "concurrency", None),
+                timeout_seconds=getattr(args, "timeout_seconds", None),
+                mode=getattr(args, "mode", None),
+                provider=getattr(args, "provider", None),
+                model=getattr(args, "model", None),
+                max_total_cost=getattr(args, "max_total_cost", None),
+                allow_unknown_cost=bool(getattr(args, "allow_unknown_cost", False)),
+                fail_fast=bool(getattr(args, "fail_fast", False)),
+                output_path=getattr(args, "output", None),
+                export_format=getattr(args, "format", None),
+                init_path=getattr(args, "path", None),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
         model_service = ModelProfileService(
             ModelProfileStore(
                 base_config.runtime_dir / "control.sqlite",
