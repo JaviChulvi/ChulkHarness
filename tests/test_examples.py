@@ -90,3 +90,14 @@ def test_review_bot_uses_only_supported_public_import_boundaries() -> None:
     assert "from chulk.testing import ScriptedLLMClient" in source
     assert "from chulk.core" not in source
     assert "from chulk._sdk" not in source
+
+
+def test_evaluation_suite_is_credential_free_and_passes_quality_gate(
+    tmp_path: Path,
+) -> None:
+    completed = _run_example("examples/evaluation_suite/app.py", cwd=tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "suite: sdk-example" in completed.stdout
+    assert "cases: 2" in completed.stdout
+    assert "pass_rate: 100%" in completed.stdout

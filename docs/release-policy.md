@@ -45,6 +45,12 @@ hosts implementing `RunStore` or `AsyncRunStore` must provide them before
 advertising compatibility with this release. Other concrete SQLite
 implementations remain internal.
 
+The evaluation models, runner and grader protocols, built-in graders,
+reporting contracts, and `EvalStore`/`AsyncEvalStore` protocols exported by
+`chulk.evals` are **public-stable**. `SQLiteEvalStore` and
+`AsyncSQLiteEvalStore` are **public-provisional** reference adapters. The
+PostgreSQL evaluation stores follow the provisional adapter policy below.
+
 Gateway and scheduling protocols, run-target records, and hosted
 definition/run submitters are public-stable. The SQLite gateway ledger remains
 a public-provisional reference adapter.

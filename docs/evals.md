@@ -91,6 +91,9 @@ judge model/provider, prompt version, usage, and cost.
 Only names in `required_graders` affect case pass/fail. Only declared
 `MetricThreshold` values affect the suite quality gate. Other graders are
 informational. Configuration and runtime failures remain operational errors.
+Reports aggregate pass rate, pass@k, grader scores, latency percentiles,
+tokens, cost, and exceptions. Target, provider, model, and tag dimensions also
+record case/trial counts, pass@k, latency, token/cost totals, and error rates.
 
 ## Safety and fixtures
 
@@ -147,6 +150,17 @@ are `0` for passed, `1` for quality-gate failure, `2` for invalid
 configuration/datasets, and `3` for operational failures. JUnit exports retain
 case durations and represent threshold failures and operational or incomplete
 runs as explicit failing test cases.
+
+The repository's `Deterministic agent quality gate` CI job is a credential-free
+example. Its gating step is intentionally just the ordinary CLI contract:
+
+```bash
+chulk eval run examples/evaluation_suite/app.py:suite \
+  --output evaluation-report.xml --format junit --json
+```
+
+The command's exit code gates the job, while the JUnit file is uploaded with
+`if: always()` so failed quality and operational evidence remains inspectable.
 
 Start the authenticated, read-only result viewer with:
 

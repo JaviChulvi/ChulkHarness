@@ -315,9 +315,20 @@ def test_metrics_are_grouped_by_target_provider_model_and_tag() -> None:
     metrics = EvalRunner().run(suite).metrics
 
     assert metrics["target.sdk.pass_rate"] == 1.0
+    assert metrics["target.sdk.case_count"] == 1.0
+    assert metrics["target.sdk.trial_count"] == 1.0
+    assert metrics["target.sdk.pass_at_k"] == 1.0
+    assert metrics["target.sdk.p95_latency_seconds"] >= 0.0
+    assert metrics["target.sdk.total_tokens"] == metrics["total_tokens"]
+    assert metrics["target.sdk.total_cost"] == metrics["total_cost"]
+    assert metrics["target.sdk.exception_count"] == 0.0
+    assert metrics["target.sdk.error_rate"] == 0.0
     assert metrics["provider.fake.pass_rate"] == 1.0
+    assert metrics["provider.fake.case_count"] == 1.0
     assert metrics["model.model-1.pass_rate"] == 1.0
+    assert metrics["model.model-1.pass_at_k"] == 1.0
     assert metrics["tag.smoke.pass_rate"] == 1.0
+    assert metrics["tag.smoke.trial_count"] == 1.0
 
 
 def test_sync_runner_honors_explicit_bounded_concurrency() -> None:

@@ -39,9 +39,14 @@ suite = EvalSuite(
 )
 
 
-report = EvalRunner().run(suite)
-assert isinstance(report, EvalReport)
-report.assert_thresholds()
-print(f"suite: {report.suite_name}")
-print(f"cases: {int(report.metrics['case_count'])}")
-print(f"pass_rate: {report.metrics['pass_rate']:.0%}")
+def main() -> None:
+    report = EvalRunner().run(suite)
+    assert isinstance(report, EvalReport)
+    report.assert_thresholds()
+    print(f"suite: {report.suite_name}")
+    print(f"cases: {int(report.metrics['case_count'])}")
+    print(f"pass_rate: {report.metrics['pass_rate']:.0%}")
+
+
+if __name__ == "__main__":
+    main()

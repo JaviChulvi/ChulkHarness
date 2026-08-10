@@ -280,6 +280,16 @@ def test_replay_and_live_fake_modes_execute_without_credentials(tmp_path: Path) 
     assert not live_report.operational_errors
     assert live_report.cases[0].trials[0].final_result.content == "live-fake"
 
+    unknown_cost_suite = EvalSuite(
+        "live-unknown-cost",
+        EvalDataset((EvalCase("live", (EvalTurn("run"),)),)),
+        (EvalTarget("target", live_factory, provider="fake", model="fake-model"),),
+        mode=EvaluationMode.LIVE,
+        max_total_cost=1,
+    )
+    unknown_cost_report = EvalRunner().run(unknown_cost_suite)
+    assert "unknown cost" in unknown_cost_report.operational_errors[0]
+
 
 def test_denied_tool_never_runs_and_allowlisted_tool_uses_fixture_double() -> None:
     write_calls = 0

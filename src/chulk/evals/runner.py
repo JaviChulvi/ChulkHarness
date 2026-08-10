@@ -963,6 +963,7 @@ def _build_report(
         "total_tokens": float(agent_tokens + judge_tokens),
         "judge_cost": judge_cost,
         "total_cost": sum(_trial_cost(trial)[0] for trial in trials),
+        "exception_count": float(sum(trial.exception is not None for trial in trials)),
         "error_rate": sum(trial.exception is not None for trial in trials) / len(trials) if trials else 0.0,
     }
     durations = sorted(trial.duration_seconds for trial in trials)
@@ -970,9 +971,7 @@ def _build_report(
     metrics["p95_latency_seconds"] = _percentile(durations, 0.95)
     for target in suite.targets:
         selected = [case for case in cases if case.target_name == target.name]
-        metrics[f"target.{target.name}.pass_rate"] = (
-            sum(case.passed for case in selected) / len(selected) if selected else 1.0
-        )
+        _add_group_metrics(metrics, f"target.{target.name}", selected)
     for dimension in ("provider", "model"):
         values = sorted(
             {
@@ -987,15 +986,11 @@ def _build_report(
                 if getattr(target, dimension) == value
             }
             selected = [case for case in cases if case.target_name in target_names]
-            metrics[f"{dimension}.{value}.pass_rate"] = (
-                sum(case.passed for case in selected) / len(selected) if selected else 1.0
-            )
+            _add_group_metrics(metrics, f"{dimension}.{value}", selected)
     tags_by_case = {case.id: case.tags for case in suite.dataset.cases}
     for tag in sorted({tag for values in tags_by_case.values() for tag in values}):
         selected = [case for case in cases if tag in tags_by_case.get(case.case_id, ())]
-        metrics[f"tag.{tag}.pass_rate"] = (
-            sum(case.passed for case in selected) / len(selected) if selected else 1.0
-        )
+        _add_group_metrics(metrics, f"tag.{tag}", selected)
     grader_names = sorted({grade.grader for trial in trials for grade in trial.grades})
     for name in grader_names:
         grades = [grade for trial in trials for grade in trial.grades if grade.grader == name and not grade.details.get("skipped")]
@@ -1031,6 +1026,46 @@ def _build_report(
         tuple(cases), metrics, threshold_failures, tuple(errors),
         metadata, status,
     )
+
+
+def _add_group_metrics(
+    metrics: dict[str, float],
+    prefix: str,
+    cases: list[CaseResult],
+) -> None:
+    trials = [trial for case in cases for trial in case.trials]
+    durations = sorted(trial.duration_seconds for trial in trials)
+    agent_tokens = sum(
+        turn.result.usage.total_tokens
+        for trial in trials
+        for turn in trial.turns
+        if turn.result.usage is not None
+    )
+    judge_tokens = sum(_trial_judge_tokens(trial) for trial in trials)
+    exceptions = sum(trial.exception is not None for trial in trials)
+    values = {
+        "case_count": float(len(cases)),
+        "trial_count": float(len(trials)),
+        "pass_rate": (
+            sum(case.passed for case in cases) / len(cases) if cases else 1.0
+        ),
+        "pass_at_k": (
+            sum(any(trial.passed for trial in case.trials) for case in cases)
+            / len(cases)
+            if cases
+            else 1.0
+        ),
+        "mean_latency_seconds": (
+            sum(durations) / len(durations) if durations else 0.0
+        ),
+        "p50_latency_seconds": _percentile(durations, 0.50),
+        "p95_latency_seconds": _percentile(durations, 0.95),
+        "total_tokens": float(agent_tokens + judge_tokens),
+        "total_cost": sum(_trial_cost(trial)[0] for trial in trials),
+        "exception_count": float(exceptions),
+        "error_rate": exceptions / len(trials) if trials else 0.0,
+    }
+    metrics.update({f"{prefix}.{name}": value for name, value in values.items()})
 
 
 def _percentile(values: list[float], quantile: float) -> float:

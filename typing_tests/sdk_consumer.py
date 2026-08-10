@@ -101,25 +101,41 @@ from chulk import (
     VersionedReference,
 )
 from chulk.evals import (
+    AgentFactory,
     AsyncEvalRunner,
+    AsyncEvalStore,
+    AsyncGrader,
+    CallableGrader,
+    CaseResult,
     EvalCase,
     EvalContext,
     EvalDataset,
+    EvalReference,
     EvalReport,
     EvalRunStatus,
     EvalRunner,
+    EvalSafetyPolicy,
+    EvalStore,
     EvalSuite,
     EvalTarget,
     EvalTurn,
+    EvalTurnResult,
+    EvaluationMode,
     ExactAnswerGrader,
+    FixtureFactory,
+    GradeResult,
+    Grader,
     MetricThreshold,
+    TrialResult,
 )
 from chulk.postgres import (
+    AsyncPostgreSQLEvalStore,
     AsyncPostgreSQLApprovalStore,
     AsyncPostgreSQLGatewayStore,
     AsyncPostgreSQLRunStore,
     AsyncPostgreSQLScheduleStore,
     PostgreSQLApprovalStore,
+    PostgreSQLEvalStore,
     PostgreSQLGatewayStore,
     PostgreSQLRunStore,
     PostgreSQLScheduleStore,
@@ -474,3 +490,54 @@ def consume_eval_contract(
         status: EvalRunStatus = restored.status
         _ = status
     return report, AsyncEvalRunner()
+
+
+def consume_complete_eval_contract(
+    case: EvalCase,
+    turn: EvalTurn,
+    reference: EvalReference,
+    dataset: EvalDataset,
+    suite: EvalSuite,
+    target: EvalTarget,
+    context: EvalContext,
+    turn_result: EvalTurnResult,
+    trial_result: TrialResult,
+    case_result: CaseResult,
+    grade_result: GradeResult,
+    report: EvalReport,
+    grader: Grader,
+    async_grader: AsyncGrader,
+    store: EvalStore,
+    async_store: AsyncEvalStore,
+    agent_factory: AgentFactory,
+    fixture_factory: FixtureFactory,
+    postgres_store: PostgreSQLEvalStore,
+    async_postgres_store: AsyncPostgreSQLEvalStore,
+) -> tuple[EvaluationMode, EvalSafetyPolicy, EvalRunStatus, str]:
+    mode: EvaluationMode = context.mode
+    safety: EvalSafetyPolicy = context.safety
+    status: EvalRunStatus = report.status
+    sync_store: EvalStore = postgres_store
+    native_async_store: AsyncEvalStore = async_postgres_store
+    callable_grader = CallableGrader("typed.callable", lambda _case, _trial: True)
+    checked_grade: GradeResult = grader.grade(case, trial_result)
+    _ = (
+        turn,
+        reference,
+        dataset,
+        suite,
+        target,
+        turn_result,
+        case_result,
+        grade_result,
+        async_grader.grade_async,
+        store.save_report,
+        async_store.save_report_async,
+        sync_store,
+        native_async_store,
+        agent_factory(context),
+        fixture_factory(context),
+        callable_grader.grade,
+        checked_grade,
+    )
+    return mode, safety, status, target.fingerprint
