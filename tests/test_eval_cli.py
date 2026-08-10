@@ -317,7 +317,7 @@ def test_yaml_paths_are_relative_and_real_main_eval_flow_is_credential_free(
         output_func=output.append,
         error_func=errors.append,
     ) == 0
-    assert main(
+    exit_code = main(
         [
             "eval",
             "run",
@@ -328,8 +328,10 @@ def test_yaml_paths_are_relative_and_real_main_eval_flow_is_credential_free(
         ],
         output_func=output.append,
         error_func=errors.append,
-    ) == 0
-    assert json.loads(output[-1])["passed"] is True
+    )
+    report = json.loads(output[-1])
+    assert exit_code == 0, report["operational_errors"]
+    assert report["passed"] is True
     assert not errors
 
 
