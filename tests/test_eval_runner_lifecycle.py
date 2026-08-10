@@ -9,7 +9,6 @@ import time
 
 import pytest
 
-import chulk.evals.runner as eval_runner_module
 from chulk import Agent, AgentConfig
 from chulk.evals import (
     AsyncEvalRunner,
@@ -103,26 +102,6 @@ def test_cleanup_failures_are_operational_and_other_resources_still_close() -> N
     assert fixture_closed
     assert report.operational_errors
     assert "agent cleanup failed" in report.operational_errors[0]
-
-
-def test_workspace_cleanup_retries_transient_file_lock_errors(monkeypatch) -> None:
-    cleanup_calls = 0
-    sleeps: list[float] = []
-
-    class TemporaryDirectoryDouble:
-        def cleanup(self) -> None:
-            nonlocal cleanup_calls
-            cleanup_calls += 1
-            if cleanup_calls < 3:
-                raise PermissionError("workspace is still locked")
-
-    monkeypatch.setattr(eval_runner_module.time, "sleep", sleeps.append)
-
-    error = eval_runner_module._cleanup_workspace(TemporaryDirectoryDouble())
-
-    assert error is None
-    assert cleanup_calls == 3
-    assert sleeps == [0.05, 0.1]
 
 
 def test_sync_timeout_returns_promptly_and_defers_cleanup_until_worker_finishes() -> None:

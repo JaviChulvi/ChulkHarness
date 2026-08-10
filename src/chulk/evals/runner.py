@@ -1483,27 +1483,11 @@ def _cleanup_sync_resources(
                 close()
             except Exception as exc:
                 errors.append(f"{label} cleanup failed: {_format_exception(exc)}")
-    workspace_error = _cleanup_workspace(temporary)
-    if workspace_error is not None:
-        errors.append(f"workspace cleanup failed: {workspace_error}")
+    try:
+        temporary.cleanup()
+    except Exception as exc:
+        errors.append(f"workspace cleanup failed: {_format_exception(exc)}")
     return errors
-
-
-def _cleanup_workspace(
-    temporary: tempfile.TemporaryDirectory[str],
-    *,
-    attempts: int = 5,
-) -> str | None:
-    """Retry transient Windows file-lock failures before reporting cleanup."""
-    for attempt in range(attempts):
-        try:
-            temporary.cleanup()
-            return None
-        except OSError as exc:
-            if attempt == attempts - 1:
-                return _format_exception(exc)
-            time.sleep(0.05 * (attempt + 1))
-    return None
 
 
 def _run_sync_with_timeout(operation: Callable[[], Any], timeout_seconds: float) -> Any:
