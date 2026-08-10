@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Chulk evaluation ledger</title>
+    <link rel="stylesheet" href="/evals/assets/evals.css">
+    <script src="/evals/assets/evals.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#runs">Skip to evaluation runs</a>
+    <header class="masthead">
+      <a class="wordmark" href="/evals"><span class="mark">E</span><span><strong>CHULK</strong><small>evaluation ledger</small></span></a>
+      <button id="refresh" type="button" hidden>Refresh results</button>
+      <span class="connection" id="connection">Locked</span>
+    </header>
+    <main>
+      <section class="unlock" id="unlock">
+        <div><p class="kicker">Measured agent behavior</p><h1>Find the regression.<br><em>Keep the evidence.</em></h1><p>Authenticate with the local control token to inspect redacted evaluation results. This surface never starts runs or changes baselines.</p></div>
+        <form id="unlock-form"><label for="token">Control token</label><input id="token" type="password" autocomplete="off" required><button type="submit">Open evaluation ledger</button><p id="error" role="alert"></p></form>
+      </section>
+      <section id="ledger" hidden>
+        <header class="brief"><div><p class="kicker">Latest evidence</p><h1 id="suite-title">Evaluation runs</h1></div><dl><div><dt>Runs</dt><dd id="run-count">0</dd></div><div><dt>Passing</dt><dd id="pass-count">0</dd></div><div><dt>Mean pass rate</dt><dd id="mean-rate">—</dd></div></dl></header>
+        <div class="workspace">
+          <aside><label for="suite-filter">Suite</label><select id="suite-filter"><option value="">All suites</option></select><div id="run-rail" class="run-rail"></div></aside>
+          <article id="runs" class="detail" tabindex="-1"><div class="empty"><h2>Select a run</h2><p>Choose one result from the ledger to inspect its cases, graders, cost, and latency.</p></div></article>
+        </div>
+      </section>
+    </main>
+    <footer><span>Read-only · redacted · scope-bound</span><span id="updated">Not connected</span></footer>
+  </body>
+</html>

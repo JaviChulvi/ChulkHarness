@@ -81,6 +81,7 @@ def create_control_app(
     ),
     max_body_bytes: int = 1_000_000,
     sse_heartbeat_seconds: float = 15.0,
+    enable_eval_dashboard: bool = False,
 ):
     """Build the optional ASGI app without adding imports to the base SDK."""
     try:
@@ -103,6 +104,12 @@ def create_control_app(
     router = SQLiteGatewayRouter(config.runtime_dir / "control.sqlite")
     webchat_root = Path(__file__).with_name("webchat")
     dashboard_root = Path(__file__).with_name("dashboard")
+    eval_dashboard_root = Path(__file__).with_name("eval_dashboard")
+    eval_store = None
+    if enable_eval_dashboard:
+        from chulk.evals import SQLiteEvalStore
+
+        eval_store = SQLiteEvalStore(config.store_path)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -244,6 +251,41 @@ def create_control_app(
                 content_security=False,
             ),
         )
+
+    async def eval_dashboard(_request):
+        return FileResponse(
+            eval_dashboard_root / "index.html",
+            media_type="text/html",
+            headers=_webchat_headers(cache_control="no-store"),
+        )
+
+    async def eval_dashboard_asset(request):
+        name = request.path_params["name"]
+        assets = {"evals.css": "text/css", "evals.js": "text/javascript"}
+        media_type = assets.get(name)
+        if media_type is None:
+            raise ApiProblem(404, "asset_not_found", "evaluation dashboard asset not found")
+        return FileResponse(
+            eval_dashboard_root / name,
+            media_type=media_type,
+            headers=_webchat_headers(cache_control="public, max-age=300", content_security=False),
+        )
+
+    async def eval_runs(request):
+        assert eval_store is not None
+        limit = integer_query(request.query_params.get("limit"), field="limit", default=100, minimum=1, maximum=1000)
+        offset = integer_query(request.query_params.get("offset"), field="offset", default=0, minimum=0, maximum=1_000_000)
+        suite_name = request.query_params.get("suite") or None
+        runs = eval_store.list_reports(suite_name=suite_name, limit=limit, offset=offset)
+        return _json({"runs": [item.to_dict() for item in runs], "limit": limit, "offset": offset})
+
+    async def eval_run(request):
+        assert eval_store is not None
+        try:
+            report = eval_store.get_report(request.path_params["report_id"])
+        except KeyError as exc:
+            raise ApiProblem(404, "eval_run_not_found", str(exc)) from exc
+        return _json({"run": report})
 
     async def create_conversation(request):
         body = ConversationCreateRequest.from_dict(await _json_body(request))
@@ -930,6 +972,16 @@ def create_control_app(
         Route("/v1/openapi.json", schema, methods=["GET"]),
         WebSocketRoute("/v1/gateway/ws", gateway_websocket),
     ]
+    if enable_eval_dashboard:
+        routes.extend(
+            [
+                Route("/evals", eval_dashboard, methods=["GET"]),
+                Route("/evals/", eval_dashboard, methods=["GET"]),
+                Route("/evals/assets/{name:str}", eval_dashboard_asset, methods=["GET"]),
+                Route("/v1/evals/runs", eval_runs, methods=["GET"]),
+                Route("/v1/evals/runs/{report_id:str}", eval_run, methods=["GET"]),
+            ]
+        )
     app = Starlette(
         routes=routes,
         lifespan=lifespan,
@@ -943,13 +995,18 @@ def create_control_app(
     )
     app.state.dispatcher = controller
     app.state.token_store = credentials
+    app.state.eval_dashboard_enabled = enable_eval_dashboard
     app.add_middleware(
         ControlSecurityMiddleware,
         token_store=credentials,
         allowed_origins=allowed_origins,
         max_body_bytes=max_body_bytes,
         audit_log=ControlAuditLog(config.runtime_dir / "control-audit.jsonl"),
-        public_get_prefixes=("/webchat", "/dashboard"),
+        public_get_prefixes=(
+            "/webchat",
+            "/dashboard",
+            *(("/evals",) if enable_eval_dashboard else ()),
+        ),
     )
     return app
 

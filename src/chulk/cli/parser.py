@@ -300,6 +300,11 @@ def _add_server_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Explicitly permit a non-loopback bind.",
     )
+    start.add_argument(
+        "--eval-dashboard",
+        action="store_true",
+        help="Enable the read-only evaluation results dashboard.",
+    )
     status = commands.add_parser("status", help="Show durable server status.")
     status.add_argument("--json", action="store_true", dest="json_output")
     stop = commands.add_parser("stop", help="Request the running server to stop.")

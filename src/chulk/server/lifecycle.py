@@ -205,6 +205,7 @@ async def serve_control_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     allow_remote: bool = False,
+    enable_eval_dashboard: bool = False,
 ) -> int:
     """Run Uvicorn until signal or cooperative `server stop`."""
     if not allow_remote and not _is_loopback(host):
@@ -221,7 +222,10 @@ async def serve_control_server(
     instance_token = ledger.acquire(host=host, port=port)
     watcher: asyncio.Task[None] | None = None
     try:
-        application = create_control_app(config)
+        application = create_control_app(
+            config,
+            enable_eval_dashboard=enable_eval_dashboard,
+        )
         server = uvicorn.Server(
             uvicorn.Config(
                 application,
@@ -259,6 +263,7 @@ def run_server_command(
     host: str,
     port: int,
     allow_remote: bool,
+    enable_eval_dashboard: bool = False,
     json_output: bool,
     output_func: Callable[[str], None],
     error_func: Callable[[str], None],
@@ -278,6 +283,7 @@ def run_server_command(
                         host=host,
                         port=port,
                         allow_remote=allow_remote,
+                        enable_eval_dashboard=enable_eval_dashboard,
                     )
                 )
             )

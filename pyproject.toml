@@ -117,6 +117,9 @@ exclude = ["chulkharness.egg-info*"]
   "dashboard/*.html",
   "dashboard/*.css",
   "dashboard/*.js",
+  "eval_dashboard/*.html",
+  "eval_dashboard/*.css",
+  "eval_dashboard/*.js",
 ]
 
 [tool.pytest.ini_options]

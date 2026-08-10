@@ -654,6 +654,7 @@ def main(
                 host=getattr(args, "host", "127.0.0.1"),
                 port=getattr(args, "port", 8765),
                 allow_remote=bool(getattr(args, "allow_remote", False)),
+                enable_eval_dashboard=bool(getattr(args, "eval_dashboard", False)),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,
