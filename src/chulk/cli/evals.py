@@ -23,6 +23,7 @@ from chulk.evals import (
     compare_reports,
     export_report,
 )
+from chulk.evals.reporting import report_matches_filters
 
 
 EXIT_EVAL_OK = 0
@@ -133,7 +134,7 @@ def run_eval_command(
                 summaries = tuple(
                     summary
                     for summary in summaries
-                    if _matches_report_filters(
+                    if report_matches_filters(
                         store.get_report(summary.id),
                         target_name=target_name,
                         provider=provider,
@@ -283,38 +284,6 @@ def _optional_iso_timestamp(value: str | None, name: str) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
-
-
-def _matches_report_filters(
-    report: Mapping[str, Any],
-    *,
-    target_name: str | None,
-    provider: str | None,
-    model: str | None,
-    tags: tuple[str, ...],
-) -> bool:
-    metadata = report.get("metadata")
-    metadata = metadata if isinstance(metadata, Mapping) else {}
-    targets = metadata.get("targets")
-    targets = targets if isinstance(targets, list) else []
-    matching_targets = [item for item in targets if isinstance(item, Mapping)]
-    if target_name is not None:
-        matching_targets = [
-            item for item in matching_targets if item.get("name") == target_name
-        ]
-    if provider is not None:
-        matching_targets = [
-            item for item in matching_targets if item.get("provider") == provider
-        ]
-    if model is not None:
-        matching_targets = [
-            item for item in matching_targets if item.get("model") == model
-        ]
-    if (target_name is not None or provider is not None or model is not None) and not matching_targets:
-        return False
-    metrics = report.get("metrics")
-    metrics = metrics if isinstance(metrics, Mapping) else {}
-    return all(f"tag.{tag}.pass_rate" in metrics for tag in tags)
 
 
 __all__ = [

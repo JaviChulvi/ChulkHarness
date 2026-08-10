@@ -81,6 +81,39 @@ def compare_reports(current: Mapping[str, Any], baseline: Mapping[str, Any]) -> 
     )
 
 
+def report_matches_filters(
+    report: Mapping[str, Any],
+    *,
+    target_name: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    tags: tuple[str, ...] = (),
+) -> bool:
+    """Match report payload dimensions that are not indexed by evaluation stores."""
+    metadata = report.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    targets = metadata.get("targets")
+    targets = targets if isinstance(targets, list) else []
+    matching_targets = [item for item in targets if isinstance(item, Mapping)]
+    if target_name is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("name") == target_name
+        ]
+    if provider is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("provider") == provider
+        ]
+    if model is not None:
+        matching_targets = [
+            item for item in matching_targets if item.get("model") == model
+        ]
+    if (target_name is not None or provider is not None or model is not None) and not matching_targets:
+        return False
+    metrics = report.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    return all(f"tag.{tag}.pass_rate" in metrics for tag in tags)
+
+
 def export_report(report: EvalReport | Mapping[str, Any], path: Path | str, *, format: ReportFormat | None = None) -> Path:
     destination = Path(path).expanduser().resolve()
     payload = report.to_dict() if isinstance(report, EvalReport) else dict(report)
