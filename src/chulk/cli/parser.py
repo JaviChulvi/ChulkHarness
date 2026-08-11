@@ -70,7 +70,67 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_parser(subparsers)
     _add_tui_parser(subparsers)
     _add_trace_parser(subparsers)
+    _add_eval_parser(subparsers)
     return parser
+
+
+def _add_eval_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("eval", help="Run and inspect agent evaluation suites.")
+    commands = parser.add_subparsers(dest="eval_command", required=True)
+    init = commands.add_parser("init", help="Create a starter eval suite without overwriting files.")
+    init.add_argument("path", nargs="?", default=".")
+    init.add_argument("--json", action="store_true", dest="json_output")
+    run = commands.add_parser("run", help="Run a Python or YAML evaluation suite.")
+    run.add_argument("suite")
+    run.add_argument("--tag", action="append", default=[])
+    run.add_argument("--trials", type=int)
+    run.add_argument("--concurrency", type=int)
+    run.add_argument("--timeout", type=float, dest="timeout_seconds")
+    run.add_argument("--mode", choices=("scripted", "replay", "live"))
+    run.add_argument("--provider")
+    run.add_argument("--model")
+    run.add_argument("--max-total-cost", type=float)
+    run.add_argument("--allow-unknown-cost", action="store_true")
+    run.add_argument("--fail-fast", action="store_true")
+    run.add_argument("--resume", dest="resume_from")
+    run.add_argument("--output")
+    run.add_argument("--format", choices=("json", "jsonl", "junit", "html"))
+    run.add_argument("--json", action="store_true", dest="json_output")
+    listing = commands.add_parser("list", help="List stored evaluation runs.")
+    listing.add_argument("--suite-name")
+    listing.add_argument(
+        "--status",
+        choices=("running", "interrupted", "completed"),
+    )
+    listing.add_argument("--mode", choices=("scripted", "replay", "live"))
+    listing.add_argument("--target", dest="target_name")
+    listing.add_argument("--provider")
+    listing.add_argument("--model")
+    listing.add_argument("--tag", action="append", default=[])
+    listing.add_argument("--started-after")
+    listing.add_argument("--started-before")
+    listing.add_argument("--limit", type=int, default=100)
+    listing.add_argument("--offset", type=int, default=0)
+    listing.add_argument("--json", action="store_true", dest="json_output")
+    show = commands.add_parser("show", help="Show one stored evaluation run.")
+    show.add_argument("report_id")
+    show.add_argument("--json", action="store_true", dest="json_output")
+    compare = commands.add_parser("compare", help="Compare a run with another run or its baseline.")
+    compare.add_argument("report_id")
+    compare.add_argument("--baseline-id")
+    compare.add_argument("--min-coverage", type=float, dest="min_baseline_coverage")
+    compare.add_argument("--json", action="store_true", dest="json_output")
+    baseline = commands.add_parser("baseline", help="Manage suite baselines.")
+    baseline_commands = baseline.add_subparsers(dest="eval_baseline_command", required=True)
+    baseline_set = baseline_commands.add_parser("set", help="Promote a run as the suite baseline.")
+    baseline_set.add_argument("suite_name")
+    baseline_set.add_argument("report_id")
+    baseline_set.add_argument("--json", action="store_true", dest="json_output")
+    export = commands.add_parser("export", help="Export a stored report.")
+    export.add_argument("report_id")
+    export.add_argument("output")
+    export.add_argument("--format", choices=("json", "jsonl", "junit", "html"))
+    export.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_exec_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -254,6 +314,11 @@ def _add_server_parser(subparsers: argparse._SubParsersAction) -> None:
         "--allow-remote",
         action="store_true",
         help="Explicitly permit a non-loopback bind.",
+    )
+    start.add_argument(
+        "--eval-dashboard",
+        action="store_true",
+        help="Enable the read-only evaluation results dashboard.",
     )
     status = commands.add_parser("status", help="Show durable server status.")
     status.add_argument("--json", action="store_true", dest="json_output")

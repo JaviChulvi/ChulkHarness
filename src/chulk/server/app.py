@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import timezone
 import json
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ def create_control_app(
     ),
     max_body_bytes: int = 1_000_000,
     sse_heartbeat_seconds: float = 15.0,
+    enable_eval_dashboard: bool = False,
 ):
     """Build the optional ASGI app without adding imports to the base SDK."""
     try:
@@ -103,6 +105,18 @@ def create_control_app(
     router = SQLiteGatewayRouter(config.runtime_dir / "control.sqlite")
     webchat_root = Path(__file__).with_name("webchat")
     dashboard_root = Path(__file__).with_name("dashboard")
+    eval_dashboard_root = Path(__file__).with_name("eval_dashboard")
+    eval_store = None
+    if enable_eval_dashboard:
+        from chulk.evals import SQLiteEvalStore
+        from chulk.server.eval_dashboard_data import (
+            eval_run_detail,
+            list_eval_summaries,
+            load_eval_trace,
+        )
+        from chulk.tracing import TraceFormatError
+
+        eval_store = SQLiteEvalStore(config.store_path)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -244,6 +258,136 @@ def create_control_app(
                 content_security=False,
             ),
         )
+
+    async def eval_dashboard(_request):
+        return FileResponse(
+            eval_dashboard_root / "index.html",
+            media_type="text/html",
+            headers=_webchat_headers(cache_control="no-store"),
+        )
+
+    async def eval_dashboard_asset(request):
+        name = request.path_params["name"]
+        assets = {"evals.css": "text/css", "evals.js": "text/javascript"}
+        media_type = assets.get(name)
+        if media_type is None:
+            raise ApiProblem(404, "asset_not_found", "evaluation dashboard asset not found")
+        return FileResponse(
+            eval_dashboard_root / name,
+            media_type=media_type,
+            headers=_webchat_headers(cache_control="public, max-age=300", content_security=False),
+        )
+
+    async def eval_runs(request):
+        assert eval_store is not None
+        limit = integer_query(
+            request.query_params.get("limit"),
+            field="limit",
+            default=50,
+            minimum=1,
+            maximum=500,
+        )
+        offset = integer_query(
+            request.query_params.get("offset"),
+            field="offset",
+            default=0,
+            minimum=0,
+            maximum=1_000_000,
+        )
+        suite_name = request.query_params.get("suite") or None
+        started_after = parse_timestamp(
+            request.query_params.get("started_after"), field="started_after"
+        )
+        started_before = parse_timestamp(
+            request.query_params.get("started_before"), field="started_before"
+        )
+        tags = tuple(
+            tag.strip()
+            for value in request.query_params.getlist("tag")
+            for tag in value.split(",")
+            if tag.strip()
+        )
+        status = request.query_params.get("status") or None
+        mode = request.query_params.get("mode") or None
+        normalized_after = (
+            started_after.astimezone(timezone.utc).isoformat()
+            if started_after is not None
+            else None
+        )
+        normalized_before = (
+            started_before.astimezone(timezone.utc).isoformat()
+            if started_before is not None
+            else None
+        )
+        target_name = request.query_params.get("target") or None
+        provider = request.query_params.get("provider") or None
+        model = request.query_params.get("model") or None
+        runs, has_more = list_eval_summaries(
+            eval_store,
+            suite_name=suite_name,
+            status=status,
+            mode=mode,
+            started_after=normalized_after,
+            started_before=normalized_before,
+            target_name=target_name,
+            provider=provider,
+            model=model,
+            tags=tags,
+            limit=limit,
+            offset=offset,
+        )
+        return _json(
+            {
+                "runs": [item.to_dict() for item in runs],
+                "limit": limit,
+                "offset": offset,
+                "has_more": has_more,
+                "next_offset": offset + limit if has_more else None,
+                "filters": {
+                    "suite_name": suite_name,
+                    "status": status,
+                    "mode": mode,
+                    "started_after": normalized_after,
+                    "started_before": normalized_before,
+                    "target_name": target_name,
+                    "provider": provider,
+                    "model": model,
+                    "tags": list(tags),
+                },
+            }
+        )
+
+    async def eval_run(request):
+        assert eval_store is not None
+        try:
+            report = eval_store.get_report(request.path_params["report_id"])
+        except KeyError as exc:
+            raise ApiProblem(404, "eval_run_not_found", str(exc)) from exc
+        baseline = eval_store.get_baseline(str(report.get("suite_name") or ""))
+        return _json(
+            eval_run_detail(
+                report,
+                baseline=baseline,
+                traces_dir=config.traces_dir,
+            )
+        )
+
+    async def eval_trace(request):
+        assert eval_store is not None
+        try:
+            report = eval_store.get_report(request.path_params["report_id"])
+            value = load_eval_trace(
+                report,
+                request.path_params["trace_id"],
+                traces_dir=config.traces_dir,
+            )
+        except KeyError as exc:
+            raise ApiProblem(404, "eval_trace_not_found", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiProblem(404, "eval_trace_unavailable", str(exc)) from exc
+        except TraceFormatError as exc:
+            raise ApiProblem(422, "eval_trace_invalid", str(exc)) from exc
+        return _json(value)
 
     async def create_conversation(request):
         body = ConversationCreateRequest.from_dict(await _json_body(request))
@@ -930,6 +1074,21 @@ def create_control_app(
         Route("/v1/openapi.json", schema, methods=["GET"]),
         WebSocketRoute("/v1/gateway/ws", gateway_websocket),
     ]
+    if enable_eval_dashboard:
+        routes.extend(
+            [
+                Route("/evals", eval_dashboard, methods=["GET"]),
+                Route("/evals/", eval_dashboard, methods=["GET"]),
+                Route("/evals/assets/{name:str}", eval_dashboard_asset, methods=["GET"]),
+                Route("/v1/evals/runs", eval_runs, methods=["GET"]),
+                Route(
+                    "/v1/evals/runs/{report_id:str}/traces/{trace_id:str}",
+                    eval_trace,
+                    methods=["GET"],
+                ),
+                Route("/v1/evals/runs/{report_id:str}", eval_run, methods=["GET"]),
+            ]
+        )
     app = Starlette(
         routes=routes,
         lifespan=lifespan,
@@ -943,13 +1102,18 @@ def create_control_app(
     )
     app.state.dispatcher = controller
     app.state.token_store = credentials
+    app.state.eval_dashboard_enabled = enable_eval_dashboard
     app.add_middleware(
         ControlSecurityMiddleware,
         token_store=credentials,
         allowed_origins=allowed_origins,
         max_body_bytes=max_body_bytes,
         audit_log=ControlAuditLog(config.runtime_dir / "control-audit.jsonl"),
-        public_get_prefixes=("/webchat", "/dashboard"),
+        public_get_prefixes=(
+            "/webchat",
+            "/dashboard",
+            *(("/evals",) if enable_eval_dashboard else ()),
+        ),
     )
     return app
 

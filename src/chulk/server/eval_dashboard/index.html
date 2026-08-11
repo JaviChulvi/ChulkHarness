@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Chulk evaluation ledger</title>
+    <link rel="stylesheet" href="/evals/assets/evals.css">
+    <script src="/evals/assets/evals.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#runs">Skip to evaluation runs</a>
+    <header class="masthead">
+      <a class="wordmark" href="/evals"><span class="mark">E</span><span><strong>CHULK</strong><small>evaluation ledger</small></span></a>
+      <button id="refresh" type="button" hidden>Refresh results</button>
+      <span class="connection" id="connection">Locked</span>
+    </header>
+    <main>
+      <section class="unlock" id="unlock">
+        <div><p class="kicker">Measured agent behavior</p><h1>Find the regression.<br><em>Keep the evidence.</em></h1><p>Authenticate with the local control token to inspect redacted evaluation results. This surface never starts runs or changes baselines.</p></div>
+        <form id="unlock-form"><label for="token">Control token</label><input id="token" type="password" autocomplete="off" required><button type="submit">Open evaluation ledger</button><p id="error" role="alert"></p></form>
+      </section>
+      <section id="ledger" hidden>
+        <header class="brief"><div><p class="kicker">Latest evidence</p><h1 id="suite-title">Evaluation runs</h1></div><dl><div><dt>Runs on page</dt><dd id="run-count">0</dd></div><div><dt>Passing</dt><dd id="pass-count">0</dd></div><div><dt>Mean pass rate</dt><dd id="mean-rate">—</dd></div></dl></header>
+        <div class="workspace">
+          <aside>
+            <form id="filter-form" class="filters">
+              <div class="filter-heading"><h2>Run index</h2><button id="clear-filters" type="button" class="text-button">Clear</button></div>
+              <label for="suite-filter">Suite</label><input id="suite-filter" name="suite" placeholder="All suites">
+              <div class="filter-pair">
+                <div><label for="status-filter">Lifecycle</label><select id="status-filter" name="status"><option value="">Any status</option><option value="completed">Completed</option><option value="running">Running</option><option value="interrupted">Interrupted</option></select></div>
+                <div><label for="mode-filter">Mode</label><select id="mode-filter" name="mode"><option value="">Any mode</option><option value="scripted">Scripted</option><option value="replay">Replay</option><option value="live">Live</option></select></div>
+              </div>
+              <label for="target-filter">Target</label><input id="target-filter" name="target" placeholder="Any target">
+              <div class="filter-pair">
+                <div><label for="provider-filter">Provider</label><input id="provider-filter" name="provider" placeholder="Any"></div>
+                <div><label for="model-filter">Model</label><input id="model-filter" name="model" placeholder="Any"></div>
+              </div>
+              <label for="tag-filter">Tags</label><input id="tag-filter" name="tag" placeholder="smoke, safety">
+              <label for="started-after-filter">Started after</label><input id="started-after-filter" name="started_after" type="datetime-local">
+              <button type="submit">Apply filters</button>
+            </form>
+            <div id="run-rail" class="run-rail"></div>
+            <nav class="pagination" aria-label="Evaluation run pages"><button id="prev-page" type="button">Previous</button><span id="page-label">Page 1</span><button id="next-page" type="button">Next</button></nav>
+          </aside>
+          <article id="runs" class="detail" tabindex="-1"><div class="empty"><h2>Select a run</h2><p>Choose one result from the ledger to inspect its cases, graders, cost, and latency.</p></div></article>
+        </div>
+      </section>
+    </main>
+    <footer><span>Read-only · redacted · scope-bound</span><span id="updated">Not connected</span></footer>
+  </body>
+</html>

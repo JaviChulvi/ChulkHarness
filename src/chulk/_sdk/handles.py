@@ -232,6 +232,11 @@ class AgentHandle:
         self._closed = True
         self.runtime.close()
 
+    def cancel(self) -> bool:
+        """Cooperatively cancel the active synchronous turn, if any."""
+        self._ensure_open()
+        return self.runtime.cancel_active_turn()
+
     def read_artifact(
         self,
         artifact_id: str,

@@ -1581,10 +1581,160 @@ def _migrate_to_durable_parent_child_runs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_agent_evaluations(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            suite_name TEXT NOT NULL,
+            dataset_digest TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            case_count INTEGER NOT NULL,
+            pass_rate REAL NOT NULL,
+            total_cost REAL NOT NULL,
+            report_json TEXT NOT NULL,
+            CHECK (passed IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_scope
+            ON eval_runs(tenant_id, workspace_id, suite_name, started_at, id);
+        CREATE TABLE IF NOT EXISTS eval_trials (
+            run_id TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            trial_number INTEGER NOT NULL,
+            passed INTEGER NOT NULL,
+            duration_seconds REAL NOT NULL,
+            exception TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, target_name, case_id, trial_number),
+            FOREIGN KEY (run_id) REFERENCES eval_runs(id) ON DELETE CASCADE,
+            CHECK (passed IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_trials_case
+            ON eval_trials(run_id, target_name, case_id, trial_number);
+        CREATE TABLE IF NOT EXISTS eval_turns (
+            run_id TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            trial_number INTEGER NOT NULL,
+            turn_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            duration_seconds REAL NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, target_name, case_id, trial_number, turn_index),
+            FOREIGN KEY (run_id, target_name, case_id, trial_number)
+                REFERENCES eval_trials(run_id, target_name, case_id, trial_number) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS eval_grades (
+            run_id TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            trial_number INTEGER NOT NULL,
+            grader TEXT NOT NULL,
+            score REAL NOT NULL,
+            passed INTEGER NOT NULL,
+            error TEXT,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, target_name, case_id, trial_number, grader),
+            FOREIGN KEY (run_id, target_name, case_id, trial_number)
+                REFERENCES eval_trials(run_id, target_name, case_id, trial_number) ON DELETE CASCADE,
+            CHECK (passed IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_grades_grader
+            ON eval_grades(run_id, grader, score);
+        CREATE TABLE IF NOT EXISTS eval_baselines (
+            tenant_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            suite_name TEXT NOT NULL,
+            report_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, workspace_id, suite_name),
+            FOREIGN KEY (report_id) REFERENCES eval_runs(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+
+def _migrate_to_resumable_agent_evaluations(conn: sqlite3.Connection) -> None:
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "status",
+        "TEXT NOT NULL DEFAULT 'completed'",
+    )
+    _ensure_column(conn, "eval_runs", "updated_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "eval_runs", "chulk_version", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "eval_runs", "git_revision", "TEXT")
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "suite_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "target_fingerprints_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "grader_versions_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_runs",
+        "sampling_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "eval_trials",
+        "target_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        conn,
+        "eval_grades",
+        "grader_version",
+        "TEXT NOT NULL DEFAULT '1'",
+    )
+    _ensure_column(
+        conn,
+        "eval_grades",
+        "grader_identity",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    conn.execute(
+        "UPDATE eval_runs SET updated_at = ended_at WHERE updated_at = ''"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_eval_runs_status
+        ON eval_runs(tenant_id, workspace_id, status, updated_at, id)
+        """
+    )
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        except sqlite3.OperationalError as exc:
+            refreshed = {
+                str(row["name"])
+                for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in refreshed or "duplicate column" not in str(exc).lower():
+                raise
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -1647,6 +1797,12 @@ SQLITE_MIGRATIONS = (
         19,
         "durable-parent-child-runs",
         _migrate_to_durable_parent_child_runs,
+    ),
+    SQLiteMigration(20, "agent-evaluations", _migrate_to_agent_evaluations),
+    SQLiteMigration(
+        21,
+        "resumable-agent-evaluations",
+        _migrate_to_resumable_agent_evaluations,
     ),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version

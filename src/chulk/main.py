@@ -654,6 +654,7 @@ def main(
                 host=getattr(args, "host", "127.0.0.1"),
                 port=getattr(args, "port", 8765),
                 allow_remote=bool(getattr(args, "allow_remote", False)),
+                enable_eval_dashboard=bool(getattr(args, "eval_dashboard", False)),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,
@@ -887,6 +888,49 @@ def main(
                 after=getattr(args, "after", 3),
                 limit=getattr(args, "limit", 20),
                 cursor=getattr(args, "cursor", None),
+                json_output=bool(getattr(args, "json_output", False)),
+                output_func=output_func,
+                error_func=error_func,
+            )
+        if args.command == "eval":
+            from chulk.cli.evals import run_eval_command
+            from chulk.evals import SQLiteEvalStore
+
+            eval_command = args.eval_command
+            if eval_command == "baseline":
+                eval_command = f"baseline-{args.eval_baseline_command}"
+            return run_eval_command(
+                eval_command,
+                store=SQLiteEvalStore(config.store_path),
+                suite_ref=getattr(args, "suite", None),
+                report_id=getattr(args, "report_id", None),
+                baseline_id=getattr(args, "baseline_id", None),
+                suite_name=getattr(args, "suite_name", None),
+                resume_from=getattr(args, "resume_from", None),
+                tags=tuple(getattr(args, "tag", ())),
+                trials=getattr(args, "trials", None),
+                concurrency=getattr(args, "concurrency", None),
+                timeout_seconds=getattr(args, "timeout_seconds", None),
+                mode=getattr(args, "mode", None),
+                provider=getattr(args, "provider", None),
+                model=getattr(args, "model", None),
+                max_total_cost=getattr(args, "max_total_cost", None),
+                allow_unknown_cost=bool(getattr(args, "allow_unknown_cost", False)),
+                fail_fast=bool(getattr(args, "fail_fast", False)),
+                status=getattr(args, "status", None),
+                target_name=getattr(args, "target_name", None),
+                started_after=getattr(args, "started_after", None),
+                started_before=getattr(args, "started_before", None),
+                limit=getattr(args, "limit", 100),
+                offset=getattr(args, "offset", 0),
+                min_baseline_coverage=getattr(
+                    args,
+                    "min_baseline_coverage",
+                    None,
+                ),
+                output_path=getattr(args, "output", None),
+                export_format=getattr(args, "format", None),
+                init_path=getattr(args, "path", None),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,

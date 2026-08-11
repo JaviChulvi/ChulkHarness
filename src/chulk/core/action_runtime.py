@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from chulk.core.model_transport import ModelTransport
@@ -19,6 +19,8 @@ class ActionLoopPort(Protocol):
     effects: TurnEffects
     async_flush: Callable[[], Awaitable[None]] | None
 
+    def is_cancelled(self) -> bool: ...
+
 
 @dataclass
 class ActionLoopRuntime:
@@ -28,3 +30,15 @@ class ActionLoopRuntime:
     tools: ToolExecutor
     effects: TurnEffects
     async_flush: Callable[[], Awaitable[None]] | None = None
+    cancelled: Callable[[], bool] = field(default_factory=lambda: _never_cancelled)
+
+    def is_cancelled(self) -> bool:
+        return self.cancelled()
+
+
+class AgentTurnCancelled(RuntimeError):
+    """Raised internally when a host cooperatively cancels a synchronous turn."""
+
+
+def _never_cancelled() -> bool:
+    return False

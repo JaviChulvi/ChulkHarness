@@ -14,8 +14,8 @@ The supported top-level names are governed by `chulk.__all__`. They are
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
 `chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
-`chulk.resources`, `chulk.tools`, `chulk.testing`, and the optional
-`chulk.postgres` module.
+`chulk.resources`, `chulk.tools`, `chulk.testing`, `chulk.evals`, and the
+optional `chulk.postgres` module.
 The final-answer streaming modes, chunk/policy decisions, sync/async output
 policy protocols, failure mode, and terminal delivery record are public-stable.
 `ScriptedLLMClient` is stable only from `chulk.testing`.
@@ -44,6 +44,12 @@ coordinators are public-stable. New parent/child store methods are additive;
 hosts implementing `RunStore` or `AsyncRunStore` must provide them before
 advertising compatibility with this release. Other concrete SQLite
 implementations remain internal.
+
+The evaluation models, runner and grader protocols, built-in graders,
+reporting contracts, and `EvalStore`/`AsyncEvalStore` protocols exported by
+`chulk.evals` are **public-stable**. `SQLiteEvalStore` and
+`AsyncSQLiteEvalStore` are **public-provisional** reference adapters. The
+PostgreSQL evaluation stores follow the provisional adapter policy below.
 
 Gateway and scheduling protocols, run-target records, and hosted
 definition/run submitters are public-stable. The SQLite gateway ledger remains

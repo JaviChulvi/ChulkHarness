@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 from threading import Barrier, Event, Lock, local
@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 
 import chulk.postgres._compat as postgres_compat_module
 from chulk.approvals import ApprovalDecision, ApprovalSubmission
+from chulk.evals import AsyncEvalStore, EvalReport, EvalRunStatus, EvalStore
 from chulk.gateway import (
     AuthenticationState,
     ChannelIdentity,
@@ -42,10 +43,12 @@ from chulk.gateway import (
 from chulk.hosting import ExecutionScope
 from chulk.postgres import (
     AsyncPostgreSQLApprovalStore,
+    AsyncPostgreSQLEvalStore,
     AsyncPostgreSQLGatewayStore,
     AsyncPostgreSQLRunStore,
     AsyncPostgreSQLScheduleStore,
     PostgreSQLApprovalStore,
+    PostgreSQLEvalStore,
     PostgreSQLGatewayStore,
     PostgreSQLRunStore,
     PostgreSQLScheduleStore,
@@ -170,6 +173,28 @@ def _submission(
     )
 
 
+def _eval_report(report_id: str = "eval-contract") -> EvalReport:
+    now = datetime.now(timezone.utc).isoformat()
+    return EvalReport(
+        id=report_id,
+        suite_name="postgres-contract",
+        dataset_digest="sha256:dataset",
+        started_at=now,
+        ended_at=now,
+        cases=(),
+        metrics={"pass_rate": 1.0, "total_cost": 0.0},
+        metadata={
+            "mode": "scripted",
+            "chulk_version": "test",
+            "suite_fingerprint": "fingerprint",
+            "targets": [],
+            "graders": [],
+            "sampling": {"seed": 42},
+        },
+        status=EvalRunStatus.COMPLETED,
+    )
+
+
 def _submit_parent_with_child(
     store: PostgreSQLRunStore,
     parent_scope: ExecutionScope,
@@ -266,8 +291,8 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
                 "WHERE table_schema = current_schema()"
             )
         ).scalar_one()
-    assert revision == "0003"
-    assert table_count == 25
+    assert revision == "0005"
+    assert table_count == 30
 
 
 def test_upgrade_from_0001_preserves_idempotency_rows(
@@ -296,7 +321,58 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-        assert revision == "0003"
+        assert revision == "0005"
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+def test_upgrade_from_0004_preserves_evaluation_rows(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    schema = f"chulk_eval_upgrade_{uuid4().hex}"
+    admin = create_postgres_engine(postgres_database.url)
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_postgres_engine(
+        postgres_database.url,
+        connect_args={"options": f"-csearch_path={schema}"},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        upgrade_postgres(engine, "0004")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """INSERT INTO eval_runs
+                    (id, tenant_id, workspace_id, suite_name, dataset_digest,
+                     mode, started_at, ended_at, passed, case_count, pass_rate,
+                     total_cost, report_json)
+                    VALUES
+                    ('old-eval', 'tenant', 'workspace', 'suite', 'digest',
+                     'scripted', :now, :now, 1, 0, 1.0, 0.0, '{}')"""
+                ),
+                {"now": now},
+            )
+
+        upgrade_postgres(engine)
+
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT status, updated_at, suite_fingerprint "
+                    "FROM eval_runs WHERE id = 'old-eval'"
+                )
+            ).mappings().one()
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+        assert row["status"] == "completed"
+        assert row["updated_at"] == now
+        assert row["suite_fingerprint"] == ""
+        assert revision == "0005"
     finally:
         engine.dispose()
         with admin.begin() as connection:
@@ -472,6 +548,52 @@ def test_sync_public_contracts_and_scope_isolation(
             ),
             scope.run_id,
         )
+
+
+def test_postgres_eval_store_matches_scope_and_idempotency_contracts(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    scope = _scope()
+    store = PostgreSQLEvalStore(postgres_database.engine, scope=scope)
+    assert isinstance(store, EvalStore)
+    report = _eval_report()
+
+    store.save_report(report)
+    store.save_report(report)
+    store.set_baseline(report.suite_name, report.id)
+
+    assert store.get_report(report.id)["status"] == "completed"
+    assert store.list_reports()[0].status == "completed"
+    assert store.list_reports(status="completed", mode="scripted")[0].id == report.id
+    assert store.get_baseline(report.suite_name)["id"] == report.id
+    isolated = PostgreSQLEvalStore(
+        postgres_database.engine,
+        scope=_scope(tenant_id="tenant-b"),
+    )
+    with pytest.raises(PermissionError, match="different execution scope"):
+        isolated.save_report(replace(report, suite_name="foreign-suite"))
+    with pytest.raises(KeyError):
+        isolated.get_report(report.id)
+    assert store.get_report(report.id)["suite_name"] == report.suite_name
+
+
+@pytest.mark.asyncio
+async def test_async_postgres_eval_store_matches_public_contract(
+    postgres_database: PostgreSQLTestDatabase,
+) -> None:
+    store = AsyncPostgreSQLEvalStore(
+        postgres_database.engine,
+        scope=_scope(run_id="async-eval"),
+    )
+    assert isinstance(store, AsyncEvalStore)
+    report = _eval_report("async-eval-contract")
+
+    await store.save_report_async(report)
+    await store.set_baseline_async(report.suite_name, report.id)
+
+    assert (await store.get_report_async(report.id))["id"] == report.id
+    assert (await store.list_reports_async())[0].status == "completed"
+    assert (await store.get_baseline_async(report.suite_name))["id"] == report.id
 
 
 @pytest.mark.asyncio

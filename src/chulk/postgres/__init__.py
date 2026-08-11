@@ -4,6 +4,7 @@ from chulk.postgres.factory import (
     create_async_postgres_engine,
     create_postgres_engine,
 )
+from chulk.postgres.evals import AsyncPostgreSQLEvalStore, PostgreSQLEvalStore
 from chulk.postgres.migrations import (
     alembic_config,
     upgrade_postgres,
@@ -28,11 +29,13 @@ from chulk.postgres.transactions import (
 
 
 __all__ = [
+    "AsyncPostgreSQLEvalStore",
     "AsyncPostgreSQLApprovalStore",
     "AsyncPostgreSQLGatewayStore",
     "AsyncPostgreSQLRunStore",
     "AsyncPostgreSQLScheduleStore",
     "PostgreSQLApprovalStore",
+    "PostgreSQLEvalStore",
     "PostgreSQLGatewayStore",
     "PostgreSQLRunStore",
     "PostgreSQLScheduleStore",

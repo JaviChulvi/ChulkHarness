@@ -48,6 +48,33 @@ def test_new_database_uses_shared_schema_and_explicit_connection_policy(tmp_path
     assert {"memories", "memory_proposals", "conversations", "conversation_messages"} <= tables
 
 
+def test_schema_version_probes_close_their_connections(tmp_path, monkeypatch):
+    path = tmp_path / "store.sqlite"
+    real_connect = sqlite3.connect
+    connections: list[TrackingConnection] = []
+
+    class TrackingConnection(sqlite3.Connection):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            super().close()
+
+    def tracked_connect(*args, **kwargs):
+        kwargs["factory"] = TrackingConnection
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite_policy_module.sqlite3, "connect", tracked_connect)
+
+    initialize_sqlite_database(path)
+    initialize_sqlite_database(path)
+
+    assert connections
+    assert all(connection.closed for connection in connections)
+
+
 def test_legacy_database_is_backed_up_migrated_and_deterministically_renumbered(tmp_path):
     path = tmp_path / "legacy.sqlite"
     with sqlite3.connect(path) as conn:

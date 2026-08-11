@@ -1,0 +1,2 @@
+{"schema_version":1,"id":"ready","turns":[{"input":"Are you ready?","scripted_responses":[{"type":"final_answer","content":"Ready."}]}],"reference":{"answer":"Ready.","status":"completed"},"tags":["smoke"]}
+{"schema_version":1,"id":"two-turn","turns":[{"input":"Remember alpha.","scripted_responses":[{"type":"final_answer","content":"Remembered."}]},{"input":"What should you remember?","scripted_responses":[{"type":"final_answer","content":"alpha"}]}],"reference":{"answer":"alpha","status":"completed"},"tags":["conversation"]}

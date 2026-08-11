@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
@@ -239,7 +239,7 @@ def _user_version(conn: sqlite3.Connection) -> int:
 
 
 def _read_user_version(path: Path) -> int:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         return _user_version(conn)
 
 
@@ -248,7 +248,7 @@ def _read_existing_user_version(path: Path) -> int | None:
     if not path.exists():
         return None
     uri = f"{path.resolve().as_uri()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as conn:
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
         return _user_version(conn)
 
 

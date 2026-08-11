@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-SCHEMA_REVISION = "0003"
+SCHEMA_REVISION = "0005"
 
 
 POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -609,17 +609,128 @@ AUTOMATION_SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+EVAL_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS eval_runs (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        suite_name TEXT NOT NULL,
+        dataset_digest TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT NOT NULL,
+        passed INTEGER NOT NULL,
+        case_count INTEGER NOT NULL,
+        pass_rate DOUBLE PRECISION NOT NULL,
+        total_cost DOUBLE PRECISION NOT NULL,
+        report_json TEXT NOT NULL,
+        CHECK (passed IN (0, 1))
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS idx_eval_runs_scope
+    ON eval_runs(tenant_id, workspace_id, suite_name, started_at, id)""",
+    """
+    CREATE TABLE IF NOT EXISTS eval_trials (
+        run_id TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        trial_number INTEGER NOT NULL,
+        passed INTEGER NOT NULL,
+        duration_seconds DOUBLE PRECISION NOT NULL,
+        exception TEXT,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, target_name, case_id, trial_number),
+        FOREIGN KEY (run_id) REFERENCES eval_runs(id) ON DELETE CASCADE,
+        CHECK (passed IN (0, 1))
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS idx_eval_trials_case
+    ON eval_trials(run_id, target_name, case_id, trial_number)""",
+    """
+    CREATE TABLE IF NOT EXISTS eval_turns (
+        run_id TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        trial_number INTEGER NOT NULL,
+        turn_index INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        duration_seconds DOUBLE PRECISION NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, target_name, case_id, trial_number, turn_index),
+        FOREIGN KEY (run_id, target_name, case_id, trial_number)
+            REFERENCES eval_trials(run_id, target_name, case_id, trial_number) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS eval_grades (
+        run_id TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        case_id TEXT NOT NULL,
+        trial_number INTEGER NOT NULL,
+        grader TEXT NOT NULL,
+        score DOUBLE PRECISION NOT NULL,
+        passed INTEGER NOT NULL,
+        error TEXT,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, target_name, case_id, trial_number, grader),
+        FOREIGN KEY (run_id, target_name, case_id, trial_number)
+            REFERENCES eval_trials(run_id, target_name, case_id, trial_number) ON DELETE CASCADE,
+        CHECK (passed IN (0, 1))
+    )
+    """,
+    """CREATE INDEX IF NOT EXISTS idx_eval_grades_grader
+    ON eval_grades(run_id, grader, score)""",
+    """
+    CREATE TABLE IF NOT EXISTS eval_baselines (
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        suite_name TEXT NOT NULL,
+        report_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, suite_name),
+        FOREIGN KEY (report_id) REFERENCES eval_runs(id) ON DELETE CASCADE
+    )
+    """,
+)
+
+
+EVAL_RESUME_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS chulk_version TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS git_revision TEXT",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS suite_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS target_fingerprints_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS grader_versions_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS sampling_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE eval_trials ADD COLUMN IF NOT EXISTS target_fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE eval_grades ADD COLUMN IF NOT EXISTS grader_version TEXT NOT NULL DEFAULT '1'",
+    "ALTER TABLE eval_grades ADD COLUMN IF NOT EXISTS grader_identity TEXT NOT NULL DEFAULT ''",
+    "UPDATE eval_runs SET updated_at = ended_at WHERE updated_at = ''",
+    """CREATE INDEX IF NOT EXISTS idx_eval_runs_status
+    ON eval_runs(tenant_id, workspace_id, status, updated_at, id)""",
+)
+
+
 def create_schema(connection: Any) -> None:
     """Create the initial hosted schema on a SQLAlchemy connection."""
 
     from sqlalchemy import text
 
-    for statement in POSTGRES_SCHEMA_STATEMENTS + AUTOMATION_SCHEMA_STATEMENTS:
+    for statement in (
+        POSTGRES_SCHEMA_STATEMENTS
+        + AUTOMATION_SCHEMA_STATEMENTS
+        + EVAL_SCHEMA_STATEMENTS
+        + EVAL_RESUME_SCHEMA_STATEMENTS
+    ):
         connection.execute(text(statement))
 
 
 __all__ = [
     "AUTOMATION_SCHEMA_STATEMENTS",
+    "EVAL_SCHEMA_STATEMENTS",
+    "EVAL_RESUME_SCHEMA_STATEMENTS",
     "POSTGRES_SCHEMA_STATEMENTS",
     "SCHEMA_REVISION",
     "create_schema",
