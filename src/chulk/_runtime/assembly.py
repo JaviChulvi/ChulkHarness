@@ -259,13 +259,6 @@ def assemble_agent(
             "conversation metadata profile_id does not match the runtime profile"
         )
     effective_conversation_metadata["profile_id"] = effective_profile_id
-    if execution_scope is not None:
-        effective_conversation_metadata["execution_scope"] = (
-            execution_scope.to_dict()
-        )
-        effective_conversation_metadata["execution_scope_key"] = (
-            execution_scope.key
-        )
     memory_enabled = (
         resolved_services is None
         or resolved_services.is_enabled("memory")

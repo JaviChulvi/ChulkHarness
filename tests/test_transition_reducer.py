@@ -35,7 +35,6 @@ from chulk.core.transitions import (
     StartPlanStepEffect,
     ToolResultSignal,
     TransitionOutcome,
-    reduce_action,
     reduce_transition,
 )
 
@@ -279,23 +278,23 @@ def _step_update(
         "block-step",
     ],
 )
-def test_reduce_action_table(
+def test_reduce_transition_table(
     snapshot: ActionLoopSnapshot,
     action: object,
     effect_type: type[object],
     outcome: TransitionOutcome,
 ) -> None:
-    transition = reduce_action(snapshot, ModelActionSignal(action=action))  # type: ignore[arg-type]
+    transition = reduce_transition(snapshot, ModelActionSignal(action=action))  # type: ignore[arg-type]
 
     assert isinstance(transition.effect, effect_type)
     assert transition.outcome is outcome
 
 
-def test_reduce_action_returns_transport_details_without_mutating_inputs() -> None:
+def test_reduce_transition_returns_transport_details_without_mutating_inputs() -> None:
     snapshot = _snapshot(require_plan=True)
     action = _tool_call()
 
-    transition = reduce_action(snapshot, ModelActionSignal(action=action))
+    transition = reduce_transition(snapshot, ModelActionSignal(action=action))
 
     assert transition == transition.__class__(
         effect=ExecuteToolEffect(action=action, phase="planning"),
@@ -312,7 +311,7 @@ def test_planning_tool_limit_effect_explicitly_requests_one_way_flag_update() ->
         max_tool_calls_per_turn=5,
     )
 
-    transition = reduce_action(snapshot, ModelActionSignal(action=_tool_call()))
+    transition = reduce_transition(snapshot, ModelActionSignal(action=_tool_call()))
 
     assert isinstance(transition.effect, RequestPlanRevisionEffect)
     assert transition.effect.mark_tool_limit_feedback_sent is True
@@ -320,11 +319,11 @@ def test_planning_tool_limit_effect_explicitly_requests_one_way_flag_update() ->
 
 
 def test_tool_call_limit_is_shared_by_planning_and_execution() -> None:
-    planning_transition = reduce_action(
+    planning_transition = reduce_transition(
         _snapshot(require_plan=True, tool_call_count=4, max_tool_calls_per_turn=5),
         ModelActionSignal(action=_tool_call()),
     )
-    execution_transition = reduce_action(
+    execution_transition = reduce_transition(
         _snapshot(tool_call_count=5, max_tool_calls_per_turn=5),
         ModelActionSignal(action=_tool_call("shell")),
     )

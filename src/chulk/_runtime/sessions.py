@@ -124,26 +124,7 @@ def create_agent_state(
                     latest_turn,
                     unreconciled_calls,
                 )
-    state.current_turn_id = latest_turn.turn_id
-    state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
-    state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
-    state.loaded_skill_names = list(latest_turn.loaded_skill_names)
-    state.available_tool_names = list(latest_turn.available_tool_names)
-    state.errors = [error for turn in state.turns for error in turn.errors]
-    state.final_answer = latest_turn.final_answer
-    if latest_turn.context_reports:
-        state.last_context_report = latest_turn.context_reports[-1]
-    if latest_turn.model_usage_totals:
-        state.last_usage_report = latest_turn.model_usage_totals
-    if (
-        latest_turn.status == "waiting_for_approval"
-        and latest_turn.active_plan is not None
-        and not latest_turn.plan_approved
-    ):
-        state.active_plan = latest_turn.active_plan
-        state.pending_plan_turn_id = latest_turn.turn_id
-    elif latest_turn.can_continue_approved_plan():
-        state.active_plan = latest_turn.active_plan
+    _restore_state_from_latest_turn(state, latest_turn)
     return state
 
 
@@ -215,26 +196,7 @@ def _restore_external_latest_turn(
                 "before retrying."
             )
             recovered = True
-    state.current_turn_id = latest_turn.turn_id
-    state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
-    state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
-    state.loaded_skill_names = list(latest_turn.loaded_skill_names)
-    state.available_tool_names = list(latest_turn.available_tool_names)
-    state.errors = [error for turn in state.turns for error in turn.errors]
-    state.final_answer = latest_turn.final_answer
-    if latest_turn.context_reports:
-        state.last_context_report = latest_turn.context_reports[-1]
-    if latest_turn.model_usage_totals:
-        state.last_usage_report = latest_turn.model_usage_totals
-    if (
-        latest_turn.status == "waiting_for_approval"
-        and latest_turn.active_plan is not None
-        and not latest_turn.plan_approved
-    ):
-        state.active_plan = latest_turn.active_plan
-        state.pending_plan_turn_id = latest_turn.turn_id
-    elif latest_turn.can_continue_approved_plan():
-        state.active_plan = latest_turn.active_plan
+    _restore_state_from_latest_turn(state, latest_turn)
     return recovered
 
 
@@ -407,6 +369,14 @@ async def create_agent_state_async(
                     metadata={"recovery": "unresolved_tool_intent"},
                 )
 
+    _restore_state_from_latest_turn(state, latest_turn)
+    return state
+
+
+def _restore_state_from_latest_turn(
+    state: AgentState,
+    latest_turn: TurnState,
+) -> None:
     state.current_turn_id = latest_turn.turn_id
     state.loaded_memory_ids = list(latest_turn.loaded_memory_ids)
     state.extracted_memory_ids = list(latest_turn.extracted_memory_ids)
@@ -427,7 +397,6 @@ async def create_agent_state_async(
         state.pending_plan_turn_id = latest_turn.turn_id
     elif latest_turn.can_continue_approved_plan():
         state.active_plan = latest_turn.active_plan
-    return state
 
 
 async def _save_recovery_terminal_async(

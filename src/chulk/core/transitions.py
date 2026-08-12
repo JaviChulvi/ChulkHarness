@@ -259,11 +259,6 @@ def reduce_transition(
     raise TypeError(f"Unsupported agent action: {type(action).__name__}")
 
 
-def reduce_action(snapshot: ActionLoopSnapshot, signal: ModelActionSignal) -> ActionTransition:
-    """Backward-compatible validated-action entrypoint."""
-    return reduce_transition(snapshot, signal)
-
-
 def _reduce_plan_action(snapshot: ActionLoopSnapshot, action: PlanAction) -> ActionTransition:
     if not snapshot.require_plan:
         return _stop_with_failure("Model proposed a new plan after execution had already been approved.")

@@ -6,6 +6,7 @@ import sqlite3
 
 import chulk.main as main_module
 import chulk.runtime as runtime_module
+from chulk._runtime.sessions import block_unresolved_tool_intent
 import chulk.sessions.sqlite_store as session_store_module
 import pytest
 from chulk import AgentHandle
@@ -1248,7 +1249,7 @@ def test_unresolved_tool_recovery_persists_status_and_message_atomically(
         lambda *_args, **_kwargs: pytest.fail("recovery must not save the message separately"),
     )
 
-    runtime_module._block_unresolved_tool_intent(
+    block_unresolved_tool_intent(
         store,
         conversation_id,
         turn,
