@@ -71,24 +71,17 @@ def test_runtime_facade_passes_compatibility_seams_to_assembly(monkeypatch):
     bridge_factory = object()
     bridge_required = object()
     provider_path = object()
-    recovery_handler = object()
     monkeypatch.setattr(runtime_module, "assemble_agent", fake_assemble)
     monkeypatch.setattr(runtime_module, "Agent", agent_factory)
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", bridge_factory)
     monkeypatch.setattr(runtime_module, "_mcp_bridge_required", bridge_required)
     monkeypatch.setattr(runtime_module, "_mcp_provider_path", provider_path)
-    monkeypatch.setattr(
-        runtime_module,
-        "_block_unresolved_tool_intent",
-        recovery_handler,
-    )
-
     assert runtime_module.create_agent(object()) is assembled_agent  # type: ignore[arg-type]
     assert captured["agent_factory"] is agent_factory
     assert captured["bridge_tool_factory"] is bridge_factory
     assert captured["mcp_bridge_required"] is bridge_required
     assert captured["mcp_provider_path"] is provider_path
-    assert captured["unresolved_tool_handler"] is recovery_handler
+    assert "unresolved_tool_handler" not in captured
 
 
 def test_runtime_implementation_does_not_import_compatibility_facade():

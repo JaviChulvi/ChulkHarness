@@ -6,18 +6,17 @@ from chulk.config import Config
 from chulk.llm import (
     LLMClient,
     LLMModelCapabilities,
-    create_llm_client,
-    provider_connection_from_config,
 )
 from chulk.llm.capabilities import resolve_runtime_model_capabilities
+from chulk.llm.factory import _bind_llm_client
 
 
 def default_llm_client_factory(config: Config) -> LLMClient:
     """Create the configured model client."""
-    return create_llm_client(
+    return _bind_llm_client(
+        config,
         provider=config.llm_provider,
         model=config.model,
-        connection=provider_connection_from_config(config.llm_provider, config),
         local_context_window_tokens=config.local_context_window_tokens,
         timeout_seconds=config.llm_timeout_seconds,
         max_retries=config.llm_max_retries,

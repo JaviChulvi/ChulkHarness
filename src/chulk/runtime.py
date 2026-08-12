@@ -10,13 +10,12 @@ from chulk._runtime.assembly import (
     assemble_agent,
     assemble_async_hosted_agent,
 )
-from chulk._runtime.sessions import block_unresolved_tool_intent
 from chulk._runtime.skills import SkillSpecResolution as SkillSpecResolution
 from chulk._runtime.tools import RuntimeToolContext as RuntimeToolContext
 from chulk._version import __version__ as __version__
 from chulk.capabilities import Capabilities
 from chulk.config import Config
-from chulk.core import Agent, TurnState
+from chulk.core import Agent
 from chulk.core.events import AgentEvent
 from chulk.execution import ExecutionBackend
 from chulk.goals.runtime import GoalExecutionContext
@@ -41,7 +40,6 @@ from chulk.llm.capabilities import (
 from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
 from chulk.media import ContentStore, MediaProcessorRegistry
 from chulk.plugins import LocalPluginRegistry
-from chulk.sessions import SQLiteSessionStore
 from chulk.skills import LearningReviewPolicy, LearningReviewQuota
 from chulk.tools import ShellExecutionPolicy
 from chulk.tools.permissions import (
@@ -174,7 +172,6 @@ def create_agent(
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,
         mcp_provider_path=_mcp_provider_path,
-        unresolved_tool_handler=_block_unresolved_tool_intent,
     )
 
 
@@ -250,21 +247,6 @@ async def create_async_hosted_agent(
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,
-    )
-
-
-def _block_unresolved_tool_intent(
-    session_store: SQLiteSessionStore,
-    conversation_id: str,
-    turn: TurnState,
-    unresolved_calls: list[dict[str, object]],
-) -> None:
-    """Preserve the runtime recovery seam at its historical import path."""
-    block_unresolved_tool_intent(
-        session_store,
-        conversation_id,
-        turn,
-        unresolved_calls,
     )
 
 

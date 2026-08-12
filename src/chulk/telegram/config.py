@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from chulk.config import _parse_dotenv
+
 
 class TelegramConfigError(ValueError):
     """Raised when Telegram environment configuration is missing or invalid."""
@@ -37,7 +39,7 @@ def load_telegram_config(
 ) -> TelegramConfig:
     """Load Telegram credentials and policy exclusively from environment values."""
     process_env = dict(os.environ if environ is None else environ)
-    env = {**_parse_env_file(env_file), **process_env}
+    env = {**_parse_dotenv(env_file), **process_env}
     token = (env.get("CHULK_TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         raise TelegramConfigError("CHULK_TELEGRAM_BOT_TOKEN is required")
@@ -103,19 +105,6 @@ def _timezone(value: str) -> str:
     except ZoneInfoNotFoundError as exc:
         raise TelegramConfigError("CHULK_TELEGRAM_TIMEZONE must be a valid IANA timezone") from exc
     return clean
-
-
-def _parse_env_file(path: Path | None) -> dict[str, str]:
-    if path is None or not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
 
 
 def _parse_user_ids(value: str) -> frozenset[int]:

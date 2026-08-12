@@ -23,7 +23,7 @@ from chulk.llm.base import (
     call_with_supported_kwargs,
 )
 from chulk.llm.capabilities import LLMModelCapabilities, conservative_model_capabilities
-from chulk.llm.factory import create_llm_client, provider_connection_from_config
+from chulk.llm.factory import _bind_llm_client
 from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.tools import PlanningToolAvailability
 from chulk.llm.usage import LLMCost, LLMResponse, LLMUsage
@@ -63,17 +63,13 @@ class OpenAIProvider:
     provider: str = "openai"
 
     def bind_config(self, config: "Config") -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(api_key=self.api_key or None)
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -89,20 +85,14 @@ class DeepSeekProvider:
     provider: str = "deepseek"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -118,20 +108,14 @@ class MoonshotProvider:
     provider: str = "moonshot"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -148,25 +132,19 @@ class LocalProvider:
     provider: str = "local"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
             local_context_window_tokens=(
                 self.context_window_tokens
                 if self.context_window_tokens is not None
                 else config.local_context_window_tokens
             ),
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
         )
 
 
@@ -182,20 +160,14 @@ class OpenAICompatibleProvider:
     provider: str = "openai-compatible"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -211,20 +183,14 @@ class OpenRouterProvider:
     provider: str = "openrouter"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -240,20 +206,14 @@ class AnthropicProvider:
     provider: str = "anthropic"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -269,20 +229,14 @@ class BedrockProvider:
     provider: str = "bedrock"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 
@@ -298,20 +252,14 @@ class GeminiProvider:
     provider: str = "gemini"
 
     def bind_config(self, config: Config) -> LLMClient:
-        connection = provider_connection_from_config(
-            self.provider, config
-        ).with_overrides(
-            api_key=self.api_key or None,
-            base_url=self.base_url or None,
-        )
-        return create_llm_client(
+        return _bind_llm_client(
+            config,
             provider=self.provider,
             model=self.model,
-            connection=connection,
-            timeout_seconds=self.timeout_seconds or config.llm_timeout_seconds,
-            max_retries=self.max_retries
-            if self.max_retries is not None
-            else config.llm_max_retries,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
         )
 
 

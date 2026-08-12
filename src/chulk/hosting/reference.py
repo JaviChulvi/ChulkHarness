@@ -32,8 +32,8 @@ from chulk.hosting.services import (
 )
 from chulk.hosting.sinks import (
     AsyncInMemoryEventSink,
+    InMemoryAuditSink,
     InMemoryEventSink,
-    safe_audit_payload,
 )
 from chulk.llm import LLMCost, LLMUsage
 from chulk.media import MediaProcessorRegistry
@@ -193,7 +193,7 @@ class InMemoryServiceHub:
         self._memory: dict[str, InMemoryMemoryService] = {}
         self._artifacts: dict[str, InMemoryArtifactService] = {}
         self._traces: dict[str, InMemoryTraceService] = {}
-        self._audit: dict[str, InMemoryAuditService] = {}
+        self._audit: dict[str, InMemoryAuditSink] = {}
         self._usage: dict[str, InMemoryUsageService] = {}
         self._runs: dict[str, InMemoryRunStore] = {}
         self._approvals: dict[str, InMemoryApprovalStore] = {}
@@ -270,7 +270,7 @@ class InMemoryServiceHub:
             audit=host_factory(
                 lambda scope: self._audit.setdefault(
                     scope.key,
-                    InMemoryAuditService(scope),
+                    InMemoryAuditSink(scope),
                 )
             ),
             execution=host_factory(InMemoryExecutionBackend),
@@ -1560,28 +1560,6 @@ class InMemoryTraceService:
 
     def close(self) -> None:
         self.closed = True
-
-
-class InMemoryAuditService:
-    def __init__(self, scope: ExecutionScope) -> None:
-        self.scope = scope
-        self.events: list[dict[str, Any]] = []
-
-    def record(
-        self,
-        event_type: str,
-        payload: dict[str, Any],
-        *,
-        scope: ExecutionScope,
-    ) -> None:
-        self.scope.assert_same_authority(scope)
-        self.events.append(
-            {
-                "type": event_type,
-                "payload": safe_audit_payload(payload),
-                "scope": scope.to_dict(),
-            }
-        )
 
 
 class InMemoryUsageService:

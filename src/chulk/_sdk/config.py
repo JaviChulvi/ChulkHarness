@@ -16,6 +16,7 @@ from chulk.config import (
     DEFAULT_MODEL,
     DEFAULT_MOONSHOT_MODEL,
     LLMFallbackProviderConfig,
+    _iter_dotenv,
     bundled_skills_dir,
     load_config,
 )
@@ -460,21 +461,9 @@ def _config_key_value(project_root: Path, env: dict[str, str], key: str) -> str 
     value = env.get(key)
     if value is not None and value != "":
         return value
-    return _dotenv_key_value(project_root / ".env", key)
-
-
-def _dotenv_key_value(path: Path, key: str) -> str | None:
-    if not path.exists():
-        return None
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        raw_key, raw_value = line.split("=", 1)
-        if raw_key.strip() != key:
-            continue
-        value = raw_value.strip().strip("'\"")
-        return value or None
+    for dotenv_key, dotenv_value in _iter_dotenv(project_root / ".env"):
+        if dotenv_key == key:
+            return dotenv_value or None
     return None
 
 
