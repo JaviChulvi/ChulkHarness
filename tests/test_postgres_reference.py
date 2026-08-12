@@ -308,10 +308,32 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
     )
     try:
         upgrade_postgres(engine, "0001")
+        with engine.connect() as connection:
+            initial_tables = set(
+                connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = current_schema()"
+                    )
+                ).scalars()
+            )
+        assert "durable_run_parents" not in initial_tables
+        assert "durable_child_runs" not in initial_tables
         runs = PostgreSQLRunStore(engine)
         scope = _scope()
         submission = _submission(idempotency_key="existing-run-key")
         created = runs.submit(scope, submission)
+
+        upgrade_postgres(engine, "0002")
+        with engine.connect() as connection:
+            intermediate_revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            intermediate_parent_table = connection.execute(
+                text("SELECT to_regclass('durable_run_parents')")
+            ).scalar_one()
+        assert intermediate_revision == "0002"
+        assert intermediate_parent_table is None
 
         upgrade_postgres(engine)
 
@@ -321,7 +343,17 @@ def test_upgrade_from_0001_preserves_idempotency_rows(
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
+            upgraded_tables = set(
+                connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = current_schema()"
+                    )
+                ).scalars()
+            )
         assert revision == "0005"
+        assert "durable_run_parents" in upgraded_tables
+        assert "durable_child_runs" in upgraded_tables
     finally:
         engine.dispose()
         with admin.begin() as connection:
