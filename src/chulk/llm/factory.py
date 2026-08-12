@@ -94,6 +94,15 @@ class LLMConnectionConfig(Protocol):
     @property
     def gemini_base_url(self) -> str | None: ...
 
+    @property
+    def local_context_window_tokens(self) -> int: ...
+
+    @property
+    def llm_timeout_seconds(self) -> float: ...
+
+    @property
+    def llm_max_retries(self) -> int: ...
+
 
 @dataclass(frozen=True)
 class LLMProviderConnection:
@@ -293,6 +302,43 @@ def provider_connection_from_config(
 ) -> LLMProviderConnection:
     """Resolve one registered provider connection from runtime config."""
     return _provider_profile(provider).bind_connection(config)
+
+
+def _bind_llm_client(
+    config: LLMConnectionConfig,
+    *,
+    provider: str,
+    model: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout_seconds: float | None = None,
+    max_retries: int | None = None,
+    local_context_window_tokens: int | None = None,
+) -> LLMClient:
+    """Bind one provider specification through the shared factory owner."""
+    connection = provider_connection_from_config(
+        provider,
+        config,
+    ).with_overrides(
+        api_key=api_key or None,
+        base_url=base_url or None,
+    )
+    return create_llm_client(
+        provider=provider,
+        model=model,
+        connection=connection,
+        local_context_window_tokens=(
+            local_context_window_tokens
+            if local_context_window_tokens is not None
+            else config.local_context_window_tokens
+        ),
+        timeout_seconds=timeout_seconds or config.llm_timeout_seconds,
+        max_retries=(
+            max_retries
+            if max_retries is not None
+            else config.llm_max_retries
+        ),
+    )
 
 
 def create_llm_client(
