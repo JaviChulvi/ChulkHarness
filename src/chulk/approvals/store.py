@@ -17,6 +17,7 @@ from chulk.approvals.models import (
     ApprovalSubmission,
 )
 from chulk.hosting.scope import ExecutionScope, ExecutionScopeError
+from chulk.hosting.sinks import safe_audit_payload
 from chulk.redaction import redact_data
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 
@@ -578,7 +579,7 @@ def _audit(
     idempotency_key: str,
     now: datetime,
 ) -> None:
-    safe = _safe_audit_payload(payload)
+    safe = safe_audit_payload(payload)
     conn.execute(
         """
         INSERT OR IGNORE INTO durable_audit_events (
@@ -598,38 +599,6 @@ def _audit(
             _iso(now),
         ),
     )
-
-
-def _safe_audit_payload(value: Mapping[str, Any]) -> dict[str, Any]:
-    forbidden = {
-        "api_key",
-        "authorization",
-        "credential",
-        "credentials",
-        "password",
-        "prompt",
-        "raw_arguments",
-        "secret",
-        "token",
-    }
-
-    def inspect(item: object) -> None:
-        if isinstance(item, Mapping):
-            for key, nested in item.items():
-                if str(key).casefold() in forbidden:
-                    raise ValueError(
-                        f"durable audit payload cannot contain {key!r}"
-                    )
-                inspect(nested)
-        elif isinstance(item, (list, tuple)):
-            for nested in item:
-                inspect(nested)
-
-    inspect(value)
-    redacted = redact_data(dict(value))
-    if not isinstance(redacted, dict):
-        raise ValueError("audit payload must remain an object after redaction")
-    return redacted
 
 
 def _json(value: Mapping[str, Any]) -> str:
