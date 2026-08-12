@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from chulk.config import _parse_dotenv
+
 
 class DiscordConfigError(ValueError):
     """Raised when Discord credentials or limits are invalid."""
@@ -40,7 +42,7 @@ def load_discord_config(
     env_file: Path | None = None,
 ) -> DiscordConfig:
     process_env = dict(os.environ if environ is None else environ)
-    env = {**_parse_env_file(env_file), **process_env}
+    env = {**_parse_dotenv(env_file), **process_env}
     token = (env.get("CHULK_DISCORD_BOT_TOKEN") or "").strip()
     if not token:
         raise DiscordConfigError("CHULK_DISCORD_BOT_TOKEN is required")
@@ -56,19 +58,6 @@ def load_discord_config(
         account_id=(env.get("CHULK_DISCORD_ACCOUNT_ID") or "primary"),
         max_pending=max_pending,
     )
-
-
-def _parse_env_file(path: Path | None) -> dict[str, str]:
-    if path is None or not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
 
 
 __all__ = [

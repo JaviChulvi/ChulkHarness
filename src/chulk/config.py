@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -104,19 +104,21 @@ class Config:
     profile_id: str = "default"
 
 
-def _parse_dotenv(path: Path) -> dict[str, str]:
+def _iter_dotenv(path: Path | None) -> Iterator[tuple[str, str]]:
     """Parse a simple .env file without adding a runtime dependency."""
-    if not path.exists():
-        return {}
+    if path is None or not path.exists():
+        return
 
-    values: dict[str, str] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
+        yield key.strip(), value.strip().strip("'\"")
+
+
+def _parse_dotenv(path: Path | None) -> dict[str, str]:
+    return dict(_iter_dotenv(path))
 
 
 def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
