@@ -10,9 +10,9 @@ python -m pip install -e .
 
 ## Install a verified CI wheel
 
-Every successful canonical `package` job uploads the exact wheel that passed
-the clean-install smoke test. Its artifact name contains both the package
-version and full source commit SHA:
+Every successful CI run on `main` uploads the exact wheel that passed the
+clean-install smoke test. Its artifact name contains both the package version
+and full source commit SHA:
 
 ```text
 chulkharness-wheel-<version>-<full-commit-sha>
@@ -40,8 +40,7 @@ python -m pip install "$artifact_dir"/chulkharness-*.whl
 
 Pin both the workflow run and full commit SHA rather than selecting the latest
 successful artifact implicitly. CI artifacts are retained for 30 days and are
-intended for commit or pull-request testing, not as permanent releases. Treat
-artifacts built from unreviewed pull requests as untrusted.
+intended for commit testing, not as permanent releases.
 
 Save this as `quickstart.py`:
 

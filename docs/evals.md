@@ -158,16 +158,16 @@ configuration/datasets, and `3` for operational failures. JUnit exports retain
 case durations and represent threshold failures and operational or incomplete
 runs as explicit failing test cases.
 
-The repository's `Deterministic agent quality gate` CI job is a credential-free
-example. Its gating step is intentionally just the ordinary CLI contract:
+The repository's Ubuntu CI workflow includes this credential-free quality gate.
+Its gating step is intentionally just the ordinary CLI contract:
 
 ```bash
 chulk eval run examples/evaluation_suite/app.py:suite \
   --output evaluation-report.xml --format junit --json
 ```
 
-The command's exit code gates the job, while the JUnit file is uploaded with
-`if: always()` so failed quality and operational evidence remains inspectable.
+The command's exit code gates the workflow, and producing the JUnit file checks
+the same export contract that downstream CI consumers can use.
 
 For a tool-driven coding example, `examples/software_engineer_eval/app.py`
 evaluates the public `SoftwareEngineer()` preset against a disposable buggy
