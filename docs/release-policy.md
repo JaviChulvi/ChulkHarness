@@ -82,7 +82,8 @@ are immutable; behavior changes require a new artifact version, and schema
 changes require a documented compatibility reader or migration. See
 [portable authoring](authoring.md#schema-and-migration-policy).
 
-The OS-independent package claim is backed by required CI on Ubuntu for Python
-3.11, 3.12, and 3.13 plus Windows on Python 3.12. The Windows lane runs the
-complete credential-free suite, compile and lint checks, and a clean-wheel
-install/import smoke test. Provider network calls remain outside required CI.
+Required CI intentionally uses one Ubuntu job on Python 3.11, the minimum
+supported version. That job runs the complete credential-free suite against
+PostgreSQL, static and documentation checks, public examples, the deterministic
+evaluation, and a clean-wheel install/import smoke test. Provider network calls
+remain outside required CI.
