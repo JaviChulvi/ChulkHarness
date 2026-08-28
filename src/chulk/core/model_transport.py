@@ -2149,7 +2149,7 @@ def _fallback_context_checkpoint(
         )
         recent.append(f"{role}: {content}")
     checkpoint = _normalize_checkpoint(previous_checkpoint or {"objective": previous_summary or ""})
-    checkpoint["evidence_hints"] = recent + list(checkpoint["evidence_hints"])
+    checkpoint["evidence_hints"] = recent + _checkpoint_entries(checkpoint, "evidence_hints")
     return _normalize_checkpoint(checkpoint)
 
 
@@ -2178,8 +2178,10 @@ def _normalize_checkpoint(value: dict[str, object]) -> dict[str, object]:
             if str(entry).strip()
         ][:6]
     rendered = _render_checkpoint(checkpoint, limit=MAX_SUMMARY_CHARS)
-    while len(rendered) > MAX_SUMMARY_CHARS and checkpoint["evidence_hints"]:
-        checkpoint["evidence_hints"].pop()  # type: ignore[index]
+    evidence_hints = _checkpoint_entries(checkpoint, "evidence_hints")
+    while len(rendered) > MAX_SUMMARY_CHARS and evidence_hints:
+        evidence_hints.pop()
+        checkpoint["evidence_hints"] = evidence_hints
         rendered = _render_checkpoint(checkpoint, limit=MAX_SUMMARY_CHARS)
     return checkpoint
 
@@ -2188,10 +2190,15 @@ def _render_checkpoint(checkpoint: dict[str, object], *, limit: int = MAX_SUMMAR
     normalized = {key: checkpoint.get(key) for key in _CHECKPOINT_KEYS}
     lines = [f"Objective: {normalized['objective']}"]
     for key in _CHECKPOINT_KEYS[1:]:
-        entries = normalized[key] if isinstance(normalized[key], list) else []
+        entries = _checkpoint_entries(checkpoint, key)
         if entries:
             lines.append(f"{key.replace('_', ' ').title()}: " + "; ".join(str(item) for item in entries))
     return _clean_summary("\n".join(lines), limit=limit)
+
+
+def _checkpoint_entries(checkpoint: dict[str, object], key: str) -> list[str]:
+    value = checkpoint.get(key)
+    return [str(entry) for entry in value] if isinstance(value, list) else []
 
 
 def _clean_summary(value: str, *, limit: int = MAX_SUMMARY_CHARS) -> str:
