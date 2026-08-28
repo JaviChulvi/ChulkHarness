@@ -2117,7 +2117,7 @@ def _format_context_summary_request(
 
 def _format_messages_for_summary(messages: list[dict[str, str]]) -> str:
     lines: list[str] = []
-    remaining_chars = MAX_SUMMARY_SOURCE_CHARS
+    remaining_chars = max(0, MAX_SUMMARY_SOURCE_CHARS - max(0, len(messages) - 1))
     for message in reversed(messages):
         if remaining_chars <= 0:
             lines.append("[older-message input truncated]")
@@ -2126,7 +2126,10 @@ def _format_messages_for_summary(messages: list[dict[str, str]]) -> str:
         content = _clean_summary_source(str(message.get("content") or ""))
         line = f"{role}: {content}"
         if len(line) > remaining_chars:
-            line = line[:remaining_chars].rstrip() + "..."
+            if remaining_chars > 3:
+                line = line[: remaining_chars - 3].rstrip() + "..."
+            else:
+                line = line[:remaining_chars]
         lines.append(line)
         remaining_chars -= len(line)
     return "\n".join(reversed(lines))

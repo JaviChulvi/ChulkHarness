@@ -7,6 +7,10 @@ import pytest
 from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
+from chulk.core.model_transport import (
+    _fallback_context_checkpoint,
+    _format_messages_for_summary,
+)
 from chulk.errors import ConfigurationError
 from chulk.llm import (
     FallbackChain,
@@ -891,6 +895,34 @@ def test_agent_rejects_irreducibly_oversized_prompt_before_provider_request(tmp_
     assert exc_info.value.details.failure_kind == "context_budget_exceeded"
     trace_text = trace_logger.path.read_text(encoding="utf-8")
     assert "context_budget_rejected" in trace_text
+
+
+def test_checkpoint_fallback_preserves_newest_compacted_context_first():
+    checkpoint = _fallback_context_checkpoint(
+        {"objective": "old objective", "evidence_hints": ["old evidence"]},
+        None,
+        [
+            {"role": "user", "content": "older context"},
+            {"role": "assistant", "content": "newest context"},
+        ],
+    )
+
+    assert checkpoint["evidence_hints"][:2] == [
+        "assistant: newest context",
+        "user: older context",
+    ]
+
+
+def test_checkpoint_source_limit_keeps_newest_messages():
+    source = _format_messages_for_summary(
+        [
+            {"role": "user", "content": "older " + ("x" * 12_000)},
+            {"role": "assistant", "content": "newest context survives"},
+        ]
+    )
+
+    assert "newest context survives" in source
+    assert len(source) <= 12_000
 
 
 def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
