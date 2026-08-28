@@ -980,7 +980,13 @@ def test_agent_usage_totals_include_charged_failed_fallback_attempts():
 def test_agent_summarizes_omitted_history_before_action_request():
     llm = RecordingLLMClient(
         [
-            "Earlier summary: keep the context compaction decision and update context tests.",
+            json.dumps(
+                {
+                    "objective": "Continue the current context-compaction task.",
+                    "decisions": ["Keep the context compaction decision."],
+                    "next_actions": ["Update context tests."],
+                }
+            ),
             json.dumps({"type": "final_answer", "content": "continued with summary"}),
         ]
     )
@@ -1002,7 +1008,7 @@ def test_agent_summarizes_omitted_history_before_action_request():
     assert response == "continued with summary"
     assert len(llm.requests) == 2
     assert "You update a compact" in llm.requests[0][0]["content"]
-    assert "Earlier summary: keep the context compaction decision" in action_system_prompt
+    assert "Keep the context compaction decision" in action_system_prompt
     assert "old decision" not in json.dumps(action_request)
     assert agent.memory.summary_message_count == 2
     assert isinstance(report, dict)

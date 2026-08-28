@@ -1433,14 +1433,19 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     llm = FakeLLMClient(
         [
             json.dumps({"type": "final_answer", "content": "first answer"}),
-            "Summary: first turn established the compaction approach.",
+                json.dumps(
+                    {
+                        "objective": "Continue the compaction approach.",
+                        "decisions": ["First turn established the compaction approach."],
+                    }
+                ),
             json.dumps({"type": "final_answer", "content": "second answer"}),
         ]
     )
     first_agent = create_agent(config, lambda _config: llm)
 
-    first_agent.run_turn("old context " + ("x" * 2500))
-    first_agent.context_budget = ContextBudget(max_prompt_tokens=1200, response_reserve_tokens=0)
+    first_agent.run_turn("old context " + ("x" * 12_000))
+    first_agent.context_budget = ContextBudget(max_prompt_tokens=8_000, response_reserve_tokens=0)
     first_agent.run_turn("latest question")
 
     resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "resumed"})])
@@ -1450,9 +1455,17 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     resumed_prompt = resumed_llm.requests[0][0]["content"]
     resumed_payload = json.dumps(resumed_llm.requests[0])
 
-    assert "Summary: first turn established the compaction approach." in resumed_prompt
+    assert "First turn established the compaction approach." in resumed_prompt
     assert "old context" not in resumed_payload
     assert resumed_agent.memory.summary_message_count == 2
+    summary = SQLiteSessionStore(config.store_path).load_latest_summary(
+        first_agent.state.conversation_id
+    )
+    assert summary is not None
+    assert summary.metadata["checkpoint_v1"]["version"] == 1
+    assert summary.metadata["checkpoint_v1"]["decisions"] == [
+        "First turn established the compaction approach."
+    ]
 
 
 def test_create_agent_resumes_summary_across_prompt_excluded_display_message(

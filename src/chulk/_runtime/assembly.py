@@ -514,6 +514,12 @@ def assemble_agent(
             conversation_summary=latest_summary.content
             if latest_summary is not None
             else None,
+            conversation_checkpoint=(
+                latest_summary.metadata.get("checkpoint_v1")
+                if latest_summary is not None
+                and isinstance(latest_summary.metadata.get("checkpoint_v1"), dict)
+                else None
+            ),
             summary_message_count=latest_summary.source_message_count
             if latest_summary is not None
             else 0,
@@ -1071,6 +1077,12 @@ async def assemble_async_hosted_agent(
                 conversation_summary=(
                     latest_summary.content
                     if latest_summary is not None
+                    else None
+                ),
+                conversation_checkpoint=(
+                    latest_summary.metadata.get("checkpoint_v1")
+                    if latest_summary is not None
+                    and isinstance(latest_summary.metadata.get("checkpoint_v1"), dict)
                     else None
                 ),
                 summary_message_count=(
