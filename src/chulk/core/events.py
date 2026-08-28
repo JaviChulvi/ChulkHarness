@@ -34,6 +34,7 @@ class TraceEvent:
     SKILL_SELECTION_COMPLETED = "skill_selection_completed"
     LEARNING_PROPOSAL_CHANGED = "learning_proposal_changed"
     CONTEXT_SUMMARY_CREATED = "context_summary_created"
+    CONTEXT_BUDGET_REJECTED = "context_budget_rejected"
     MODEL_REQUEST_STARTED = "model_request_started"
     BUDGET_RESERVED = "budget_reserved"
     BUDGET_COMMITTED = "budget_committed"

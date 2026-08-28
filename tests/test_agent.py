@@ -3,9 +3,11 @@
 import asyncio
 from decimal import Decimal
 import json
+import pytest
 from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
+from chulk.errors import ConfigurationError
 from chulk.llm import (
     FallbackChain,
     LLMActionError,
@@ -867,6 +869,28 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert any(section["name"] == "history" for section in report["sections"])
     assert "context_report" in trace_text
     assert "estimated_tokens" in trace_text
+
+
+def test_agent_rejects_irreducibly_oversized_prompt_before_provider_request(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-budget")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "unused"})])
+    agent = Agent(
+        llm,
+        trace_logger=trace_logger,
+        system_prompt="mandatory " + ("x" * 5000),
+        context_budget=ContextBudget(max_prompt_tokens=100, response_reserve_tokens=0),
+    )
+
+    with pytest.raises(ConfigurationError, match="input token budget") as exc_info:
+        agent.run_turn("latest question")
+
+    report = agent.state.last_context_report
+    assert llm.requests == []
+    assert isinstance(report, dict)
+    assert report["over_budget_tokens"] > 0
+    assert exc_info.value.details.failure_kind == "context_budget_exceeded"
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+    assert "context_budget_rejected" in trace_text
 
 
 def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):

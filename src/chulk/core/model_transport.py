@@ -22,6 +22,7 @@ from chulk.core.reflection import (
 )
 from chulk.core.state import AgentState, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
+from chulk.errors import ConfigurationError, ErrorDetails
 from chulk.llm import (
     LLMActionError,
     LLMActionResult,
@@ -731,6 +732,7 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
+        self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol and not require_plan and self._hosted_mcp_enabled()
@@ -800,6 +802,7 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
+        self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol and not require_plan and self._hosted_mcp_enabled()
@@ -1257,6 +1260,38 @@ class ModelTransport:
                 "empty_summary",
             )
         return clean_summary, False, None
+
+    def _ensure_prompt_within_budget(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+    ) -> None:
+        """Reject an irreducibly oversized prompt before invoking a provider."""
+        context_report = prompt.context_report.to_dict()
+        if context_report["over_budget_tokens"] <= 0:
+            return
+        turn.context_reports.append(context_report)
+        self.state.last_context_report = context_report
+        self.trace(
+            TraceEvent.CONTEXT_BUDGET_REJECTED,
+            {
+                "turn_id": turn.turn_id,
+                "context_report": context_report,
+            },
+        )
+        raise ConfigurationError(
+            "Prompt exceeds the configured input token budget before a provider request.",
+            details=ErrorDetails(
+                failure_kind="context_budget_exceeded",
+                conversation_id=self.state.conversation_id,
+                turn_id=turn.turn_id,
+                extensions={
+                    "input_token_budget": context_report["budget"]["input_token_budget"],
+                    "estimated_tokens": context_report["budget_estimated_tokens"],
+                    "over_budget_tokens": context_report["over_budget_tokens"],
+                },
+            ),
+        )
 
     def _record_model_request(
         self,
