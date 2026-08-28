@@ -3,9 +3,19 @@
 import asyncio
 from decimal import Decimal
 import json
+import pytest
 from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
+from chulk.core.model_transport import (
+    MAX_SUMMARY_CHARS,
+    _fallback_context_checkpoint,
+    _format_messages_for_summary,
+    _normalize_checkpoint,
+    _parse_checkpoint,
+    _render_checkpoint,
+)
+from chulk.errors import ConfigurationError
 from chulk.llm import (
     FallbackChain,
     LLMActionError,
@@ -869,6 +879,107 @@ def test_agent_records_context_report_in_state_and_trace(tmp_path):
     assert "estimated_tokens" in trace_text
 
 
+def test_agent_rejects_irreducibly_oversized_prompt_before_provider_request(tmp_path):
+    trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-budget")
+    llm = RecordingLLMClient([json.dumps({"type": "final_answer", "content": "unused"})])
+    agent = Agent(
+        llm,
+        trace_logger=trace_logger,
+        system_prompt="mandatory " + ("x" * 5000),
+        context_budget=ContextBudget(max_prompt_tokens=100, response_reserve_tokens=0),
+    )
+
+    with pytest.raises(ConfigurationError, match="input token budget") as exc_info:
+        agent.run_turn("latest question")
+
+    report = agent.state.last_context_report
+    assert llm.requests == []
+    assert isinstance(report, dict)
+    assert report["over_budget_tokens"] > 0
+    assert exc_info.value.details.failure_kind == "context_budget_exceeded"
+    trace_text = trace_logger.path.read_text(encoding="utf-8")
+    assert "context_budget_rejected" in trace_text
+
+
+def test_agent_rejects_required_context_before_compaction_provider_request():
+    llm = RecordingLLMClient(
+        [json.dumps({"type": "final_answer", "content": "first turn complete"})]
+    )
+    agent = Agent(
+        llm,
+        system_prompt="mandatory " + ("x" * 5000),
+        context_budget=ContextBudget(max_prompt_tokens=5000, response_reserve_tokens=0),
+    )
+
+    agent.run_turn("old context " + ("x" * 5_000))
+    agent.context_budget = ContextBudget(max_prompt_tokens=100, response_reserve_tokens=0)
+
+    with pytest.raises(ConfigurationError, match="input token budget"):
+        agent.run_turn("latest question")
+
+    assert len(llm.requests) == 1
+
+
+def test_checkpoint_fallback_preserves_newest_compacted_context_first():
+    checkpoint = _fallback_context_checkpoint(
+        {"objective": "old objective", "evidence_hints": ["old evidence"]},
+        None,
+        [
+            {"role": "user", "content": "older context"},
+            {"role": "assistant", "content": "newest context"},
+        ],
+    )
+
+    assert checkpoint["evidence_hints"][:2] == [
+        "assistant: newest context",
+        "user: older context",
+    ]
+
+
+def test_checkpoint_source_limit_keeps_newest_messages():
+    source = _format_messages_for_summary(
+        [
+            {"role": "user", "content": "older " + ("x" * 12_000)},
+            {"role": "assistant", "content": "newest context survives"},
+        ]
+    )
+
+    assert "newest context survives" in source
+    assert len(source) <= 12_000
+
+
+def test_checkpoint_parser_rejects_malformed_json_objects():
+    assert _parse_checkpoint("{}") is None
+    assert _parse_checkpoint(json.dumps({"objective": ["not a string"]})) is None
+    assert _parse_checkpoint(
+        json.dumps({"objective": "Continue", "decisions": "not a list"})
+    ) is None
+
+
+def test_checkpoint_metadata_and_rendered_content_stay_within_global_limit():
+    checkpoint = _normalize_checkpoint(
+        {
+            "objective": "o" * 600,
+            **{
+                key: ["x" * 300 for _ in range(6)]
+                for key in (
+                    "constraints",
+                    "decisions",
+                    "completed",
+                    "blocked",
+                    "next_actions",
+                    "evidence_hints",
+                )
+            },
+        }
+    )
+
+    assert len(json.dumps(checkpoint, sort_keys=True)) <= MAX_SUMMARY_CHARS
+    assert len(_render_checkpoint(checkpoint)) <= MAX_SUMMARY_CHARS
+    assert checkpoint["objective"] == "o" * 600
+    assert checkpoint["next_actions"]
+
+
 def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):
     trace_logger = JSONLTraceLogger(tmp_path / "traces", "context-session")
 
@@ -956,7 +1067,13 @@ def test_agent_usage_totals_include_charged_failed_fallback_attempts():
 def test_agent_summarizes_omitted_history_before_action_request():
     llm = RecordingLLMClient(
         [
-            "Earlier summary: keep the context compaction decision and update context tests.",
+            json.dumps(
+                {
+                    "objective": "Continue the current context-compaction task.",
+                    "decisions": ["Keep the context compaction decision."],
+                    "next_actions": ["Update context tests."],
+                }
+            ),
             json.dumps({"type": "final_answer", "content": "continued with summary"}),
         ]
     )
@@ -978,7 +1095,7 @@ def test_agent_summarizes_omitted_history_before_action_request():
     assert response == "continued with summary"
     assert len(llm.requests) == 2
     assert "You update a compact" in llm.requests[0][0]["content"]
-    assert "Earlier summary: keep the context compaction decision" in action_system_prompt
+    assert "Keep the context compaction decision" in action_system_prompt
     assert "old decision" not in json.dumps(action_request)
     assert agent.memory.summary_message_count == 2
     assert isinstance(report, dict)

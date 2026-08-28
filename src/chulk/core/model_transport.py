@@ -22,6 +22,7 @@ from chulk.core.reflection import (
 )
 from chulk.core.state import AgentState, TurnState
 from chulk.core.trace_format import format_action_trace, format_model_request_trace
+from chulk.errors import ConfigurationError, ErrorDetails
 from chulk.llm import (
     LLMActionError,
     LLMActionResult,
@@ -85,6 +86,14 @@ class FinalAnswerStreamResult:
     status: FinalAnswerDeliveryStatus
     public_delta_count: int
     provider_completed: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ContextSummaryResult:
+    content: str
+    checkpoint: dict[str, object]
+    fallback: bool
     error: str | None = None
 
 
@@ -679,20 +688,22 @@ class ModelTransport:
         """Summarize old raw messages that would otherwise be dropped."""
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
+            self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.consume_pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
-            summary, fallback, error = self._summarize(messages, turn)
+            result = self._summarize(messages, turn)
             current_prompt = self._apply_summary(
                 turn,
                 require_plan=require_plan,
                 pending_messages=pending_messages,
                 omitted_messages=omitted_messages,
-                summary=summary,
-                fallback=fallback,
-                error=error,
+                summary=result.content,
+                checkpoint=result.checkpoint,
+                fallback=result.fallback,
+                error=result.error,
             )
         return current_prompt
 
@@ -706,20 +717,22 @@ class ModelTransport:
         """Summarize old raw messages without blocking the event loop."""
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
+            self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.consume_pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
-            summary, fallback, error = await self._summarize_async(messages, turn)
+            result = await self._summarize_async(messages, turn)
             current_prompt = self._apply_summary(
                 turn,
                 require_plan=require_plan,
                 pending_messages=pending_messages,
                 omitted_messages=omitted_messages,
-                summary=summary,
-                fallback=fallback,
-                error=error,
+                summary=result.content,
+                checkpoint=result.checkpoint,
+                fallback=result.fallback,
+                error=result.error,
             )
         return current_prompt
 
@@ -731,6 +744,7 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
+        self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol and not require_plan and self._hosted_mcp_enabled()
@@ -800,6 +814,7 @@ class ModelTransport:
         require_plan: bool,
     ) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
+        self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == "provider_native"
         hosted_mcp_enabled = (
             native_action_protocol and not require_plan and self._hosted_mcp_enabled()
@@ -966,6 +981,7 @@ class ModelTransport:
         pending_messages: list[dict[str, str]],
         omitted_messages: list[dict[str, str]],
         summary: str,
+        checkpoint: dict[str, object],
         fallback: bool,
         error: str | None,
     ) -> AgentPrompt:
@@ -974,6 +990,7 @@ class ModelTransport:
         self.memory.update_conversation_summary(
             summary,
             summarized_message_count=summarized_count,
+            checkpoint=checkpoint,
         )
         self.state.conversation_summary = self.memory.conversation_summary
         self.trace(
@@ -985,6 +1002,7 @@ class ModelTransport:
                 "summarized_message_count": summarized_count,
                 "fallback": fallback,
                 "error": error,
+                "checkpoint": checkpoint,
             },
         )
         return self.build_prompt(turn, require_plan=require_plan)
@@ -993,7 +1011,7 @@ class ModelTransport:
         self,
         messages: list[dict[str, str]],
         turn: TurnState,
-    ) -> tuple[str, bool, str | None]:
+    ) -> ContextSummaryResult:
         summary_messages, request_index = self._start_summary(messages, turn)
         try:
             response = self._complete_response(summary_messages)
@@ -1012,7 +1030,7 @@ class ModelTransport:
         self,
         messages: list[dict[str, str]],
         turn: TurnState,
-    ) -> tuple[str, bool, str | None]:
+    ) -> ContextSummaryResult:
         summary_messages, request_index = await self._start_summary_async(
             messages,
             turn,
@@ -1050,6 +1068,7 @@ class ModelTransport:
     ) -> tuple[list[dict[str, str]], int]:
         summary_messages = _context_summary_messages(
             previous_summary=self.memory.conversation_summary,
+            previous_checkpoint=self.memory.conversation_checkpoint,
             messages=messages,
         )
         turn.model_request_count += 1
@@ -1086,6 +1105,7 @@ class ModelTransport:
     ) -> tuple[list[dict[str, str]], int]:
         summary_messages = _context_summary_messages(
             previous_summary=self.memory.conversation_summary,
+            previous_checkpoint=self.memory.conversation_checkpoint,
             messages=messages,
         )
         turn.model_request_count += 1
@@ -1135,7 +1155,7 @@ class ModelTransport:
         turn: TurnState,
         request_index: int,
         exc: LLMError,
-    ) -> tuple[str, bool, str]:
+    ) -> ContextSummaryResult:
         self.release_accounting(
             turn,
             request_index=request_index,
@@ -1151,11 +1171,10 @@ class ModelTransport:
                 "error": str(exc),
             },
         )
-        return (
-            _fallback_context_summary(self.memory.conversation_summary, messages),
-            True,
-            str(exc),
+        checkpoint = _fallback_context_checkpoint(
+            self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
         )
+        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, True, str(exc))
 
     async def _summary_failure_async(
         self,
@@ -1163,7 +1182,7 @@ class ModelTransport:
         turn: TurnState,
         request_index: int,
         exc: LLMError,
-    ) -> tuple[str, bool, str]:
+    ) -> ContextSummaryResult:
         await self._release_accounting_async(
             turn,
             request_index=request_index,
@@ -1179,11 +1198,10 @@ class ModelTransport:
                 "error": str(exc),
             },
         )
-        return (
-            _fallback_context_summary(self.memory.conversation_summary, messages),
-            True,
-            str(exc),
+        checkpoint = _fallback_context_checkpoint(
+            self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
         )
+        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, True, str(exc))
 
     def _finish_summary(self, messages, turn, request_index, response):
         raw_summary = response.content
@@ -1208,14 +1226,13 @@ class ModelTransport:
                 "cost": cost,
             },
         )
-        clean_summary = _clean_summary(raw_summary)
-        if not clean_summary:
-            return (
-                _fallback_context_summary(self.memory.conversation_summary, messages),
-                True,
-                "empty_summary",
+        checkpoint = _parse_checkpoint(raw_summary)
+        if checkpoint is None:
+            fallback = _fallback_context_checkpoint(
+                self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
             )
-        return clean_summary, False, None
+            return ContextSummaryResult(_render_checkpoint(fallback), fallback, True, "invalid_checkpoint")
+        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, False)
 
     async def _finish_summary_async(
         self,
@@ -1223,7 +1240,7 @@ class ModelTransport:
         turn: TurnState,
         request_index: int,
         response: LLMResponse,
-    ) -> tuple[str, bool, str | None]:
+    ) -> ContextSummaryResult:
         raw_summary = response.content
         fallback_attempts = getattr(self.llm_client, "last_attempts", None)
         self._record_model_selection_outcome(turn, fallback_attempts)
@@ -1246,17 +1263,52 @@ class ModelTransport:
                 "cost": cost,
             },
         )
-        clean_summary = _clean_summary(raw_summary)
-        if not clean_summary:
-            return (
-                _fallback_context_summary(
-                    self.memory.conversation_summary,
-                    messages,
-                ),
-                True,
-                "empty_summary",
+        checkpoint = _parse_checkpoint(raw_summary)
+        if checkpoint is None:
+            fallback = _fallback_context_checkpoint(
+                self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
             )
-        return clean_summary, False, None
+            return ContextSummaryResult(_render_checkpoint(fallback), fallback, True, "invalid_checkpoint")
+        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, False)
+
+    def _ensure_prompt_within_budget(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+    ) -> None:
+        """Reject an irreducibly oversized prompt before invoking a provider."""
+        context_report = prompt.context_report.to_dict()
+        if context_report["over_budget_tokens"] <= 0:
+            return
+        self._reject_prompt_for_budget(turn, context_report)
+
+    def _reject_prompt_for_budget(
+        self,
+        turn: TurnState,
+        context_report: dict,
+    ) -> None:
+        turn.context_reports.append(context_report)
+        self.state.last_context_report = context_report
+        self.trace(
+            TraceEvent.CONTEXT_BUDGET_REJECTED,
+            {
+                "turn_id": turn.turn_id,
+                "context_report": context_report,
+            },
+        )
+        raise ConfigurationError(
+            "Prompt exceeds the configured input token budget before a provider request.",
+            details=ErrorDetails(
+                failure_kind="context_budget_exceeded",
+                conversation_id=self.state.conversation_id,
+                turn_id=turn.turn_id,
+                extensions={
+                    "input_token_budget": context_report["budget"]["input_token_budget"],
+                    "estimated_tokens": context_report["budget_estimated_tokens"],
+                    "over_budget_tokens": context_report["over_budget_tokens"],
+                },
+            ),
+        )
 
     def _record_model_request(
         self,
@@ -2026,22 +2078,24 @@ def _format_indented_preview(text: str, max_chars: int) -> str:
 def _context_summary_messages(
     *,
     previous_summary: str | None,
+    previous_checkpoint: dict[str, object] | None,
     messages: list[dict[str, str]],
 ) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
-                "You update a compact, task-local conversation summary for an agent harness. "
-                "Preserve decisions, constraints, files or tools used, important results, plan status, "
-                "failed attempts, and next actions. Do not store secrets or API keys. "
-                "Keep the summary concise and useful for continuing the current task."
+                "You update a compact, task-local checkpoint for an agent harness. "
+                "Return only JSON with these keys: objective, constraints, decisions, completed, "
+                "blocked, next_actions, evidence_hints. objective is a string; every other key is "
+                "a list of concise strings. Preserve important decisions and results, but never secrets."
             ),
         },
         {
             "role": "user",
             "content": _format_context_summary_request(
                 previous_summary=previous_summary,
+                previous_checkpoint=previous_checkpoint,
                 messages=messages,
             ),
         },
@@ -2051,17 +2105,20 @@ def _context_summary_messages(
 def _format_context_summary_request(
     *,
     previous_summary: str | None,
+    previous_checkpoint: dict[str, object] | None,
     messages: list[dict[str, str]],
 ) -> str:
     sections: list[str] = []
-    if previous_summary:
+    if previous_checkpoint:
+        sections.extend(["Previous checkpoint JSON:", json.dumps(previous_checkpoint, sort_keys=True), ""])
+    elif previous_summary:
         sections.extend(["Previous compact summary:", previous_summary.strip(), ""])
     sections.extend(
         [
             "New older messages to fold into the compact summary:",
             _format_messages_for_summary(messages),
             "",
-            "Return only the updated compact summary.",
+            "Return only the updated checkpoint JSON.",
         ]
     )
     return "\n".join(sections)
@@ -2069,8 +2126,8 @@ def _format_context_summary_request(
 
 def _format_messages_for_summary(messages: list[dict[str, str]]) -> str:
     lines: list[str] = []
-    remaining_chars = MAX_SUMMARY_SOURCE_CHARS
-    for message in messages:
+    remaining_chars = max(0, MAX_SUMMARY_SOURCE_CHARS - max(0, len(messages) - 1))
+    for message in reversed(messages):
         if remaining_chars <= 0:
             lines.append("[older-message input truncated]")
             break
@@ -2078,35 +2135,121 @@ def _format_messages_for_summary(messages: list[dict[str, str]]) -> str:
         content = _clean_summary_source(str(message.get("content") or ""))
         line = f"{role}: {content}"
         if len(line) > remaining_chars:
-            line = line[:remaining_chars].rstrip() + "..."
+            if remaining_chars > 3:
+                line = line[: remaining_chars - 3].rstrip() + "..."
+            else:
+                line = line[:remaining_chars]
         lines.append(line)
         remaining_chars -= len(line)
-    return "\n".join(lines)
+    return "\n".join(reversed(lines))
 
 
-def _fallback_context_summary(
+def _fallback_context_checkpoint(
+    previous_checkpoint: dict[str, object] | None,
     previous_summary: str | None,
     messages: list[dict[str, str]],
-) -> str:
-    parts = []
-    if previous_summary:
-        parts.append(previous_summary.strip())
-    parts.append("Recent compacted context:")
-    for message in messages[:8]:
+) -> dict[str, object]:
+    recent = []
+    for message in reversed(messages[-8:]):
         role = str(message.get("role") or "message")
         content = _compact_summary_line(
             _clean_summary_source(str(message.get("content") or "")),
             limit=300,
         )
-        parts.append(f"- {role}: {content}")
-    return _clean_summary("\n".join(parts))
+        recent.append(f"{role}: {content}")
+    checkpoint = _normalize_checkpoint(previous_checkpoint or {"objective": previous_summary or ""})
+    checkpoint["evidence_hints"] = recent + _checkpoint_entries(checkpoint, "evidence_hints")
+    return _normalize_checkpoint(checkpoint)
 
 
-def _clean_summary(value: str) -> str:
+_CHECKPOINT_KEYS = (
+    "objective", "constraints", "decisions", "completed", "blocked", "next_actions", "evidence_hints"
+)
+_CHECKPOINT_LIST_KEYS = _CHECKPOINT_KEYS[1:]
+
+
+def _parse_checkpoint(value: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    objective = payload.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        return None
+    if any(
+        key in payload
+        and (
+            not isinstance(payload[key], list)
+            or any(not isinstance(entry, str) for entry in payload[key])
+        )
+        for key in _CHECKPOINT_LIST_KEYS
+    ):
+        return None
+    return _normalize_checkpoint(payload)
+
+
+def _normalize_checkpoint(value: dict[str, object]) -> dict[str, object]:
+    objective = _compact_summary_line(_clean_summary_source(str(value.get("objective") or "")), limit=600)
+    checkpoint: dict[str, object] = {"version": 1, "objective": objective}
+    for key in _CHECKPOINT_LIST_KEYS:
+        raw = value.get(key)
+        entries = raw if isinstance(raw, list) else []
+        checkpoint[key] = [
+            _compact_summary_line(_clean_summary_source(str(entry)), limit=300)
+            for entry in entries
+            if str(entry).strip()
+        ][:6]
+    _bound_checkpoint(checkpoint)
+    return checkpoint
+
+
+def _render_checkpoint(checkpoint: dict[str, object], *, limit: int = MAX_SUMMARY_CHARS) -> str:
+    return _clean_summary(_checkpoint_text(checkpoint), limit=limit)
+
+
+def _checkpoint_text(checkpoint: dict[str, object]) -> str:
+    normalized = {key: checkpoint.get(key) for key in _CHECKPOINT_KEYS}
+    lines = [f"Objective: {normalized['objective']}"]
+    for key in _CHECKPOINT_LIST_KEYS:
+        entries = _checkpoint_entries(checkpoint, key)
+        if entries:
+            lines.append(f"{key.replace('_', ' ').title()}: " + "; ".join(str(item) for item in entries))
+    return "\n".join(lines)
+
+
+def _bound_checkpoint(checkpoint: dict[str, object]) -> None:
+    for key in (
+        "evidence_hints",
+        "completed",
+        "constraints",
+        "decisions",
+        "blocked",
+        "next_actions",
+    ):
+        entries = _checkpoint_entries(checkpoint, key)
+        while entries and _checkpoint_size(checkpoint) > MAX_SUMMARY_CHARS:
+            entries.pop()
+            checkpoint[key] = entries
+
+
+def _checkpoint_size(checkpoint: dict[str, object]) -> int:
+    return len(json.dumps(checkpoint, sort_keys=True))
+
+
+def _checkpoint_entries(checkpoint: dict[str, object], key: str) -> list[str]:
+    value = checkpoint.get(key)
+    return [str(entry) for entry in value] if isinstance(value, list) else []
+
+
+def _clean_summary(value: str, *, limit: int = MAX_SUMMARY_CHARS) -> str:
     clean = _redact_summary_text(" ".join(value.strip().split()))
-    if len(clean) <= MAX_SUMMARY_CHARS:
+    if len(clean) <= limit:
         return clean
-    return clean[:MAX_SUMMARY_CHARS].rstrip() + "..."
+    if limit <= 3:
+        return clean[:limit]
+    return clean[: limit - 3].rstrip() + "..."
 
 
 def _clean_summary_source(value: str) -> str:

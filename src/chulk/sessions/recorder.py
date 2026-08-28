@@ -72,6 +72,7 @@ class SessionRecorder:
                     "turn_id": _payload_turn_id(payload, self.current_turn_id),
                     "summarized_message_count": int(payload.get("summarized_message_count") or 0),
                     "fallback": bool(payload.get("fallback")),
+                    "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
                 },
             )
             return

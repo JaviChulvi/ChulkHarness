@@ -1,5 +1,6 @@
 """Tests for durable conversation sessions."""
 
+import asyncio
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +27,7 @@ from chulk.core.state import (
 from chulk.llm import LLMCapabilities, LLMClient
 from chulk.main import create_agent, main
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
-from chulk.sessions import SQLiteSessionStore, SessionRecorder
+from chulk.sessions import AsyncSessionRecorder, SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, ToolResult
 
@@ -131,6 +132,37 @@ def test_session_recorder_persists_tool_action_before_observation(tmp_path):
     )
     assert "executed_tool_action" not in rendered_history
     assert "Lookup completed." in rendered_history
+
+
+def test_async_session_recorder_persists_checkpoint_metadata(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    recorder = AsyncSessionRecorder(
+        store,
+        "conversation-async-checkpoint",
+        provider="test",
+        model="mock",
+    )
+
+    async def persist() -> None:
+        recorder.callback(
+            TraceEvent.CONTEXT_SUMMARY_CREATED,
+            {
+                "summary": "Objective: Continue work.",
+                "source_message_count": 2,
+                "checkpoint": {
+                    "version": 1,
+                    "objective": "Continue work.",
+                    "decisions": ["Keep the durable checkpoint."],
+                },
+            },
+        )
+        await recorder.flush()
+
+    asyncio.run(persist())
+
+    summary = store.load_latest_summary("conversation-async-checkpoint")
+    assert summary is not None
+    assert summary.metadata["checkpoint_v1"]["objective"] == "Continue work."
 
 
 def test_session_recorders_atomically_dedupe_replayed_tool_observations(
@@ -1433,14 +1465,19 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     llm = FakeLLMClient(
         [
             json.dumps({"type": "final_answer", "content": "first answer"}),
-            "Summary: first turn established the compaction approach.",
+                json.dumps(
+                    {
+                        "objective": "Continue the compaction approach.",
+                        "decisions": ["First turn established the compaction approach."],
+                    }
+                ),
             json.dumps({"type": "final_answer", "content": "second answer"}),
         ]
     )
     first_agent = create_agent(config, lambda _config: llm)
 
-    first_agent.run_turn("old context " + ("x" * 2500))
-    first_agent.context_budget = ContextBudget(max_prompt_tokens=1200, response_reserve_tokens=0)
+    first_agent.run_turn("old context " + ("x" * 12_000))
+    first_agent.context_budget = ContextBudget(max_prompt_tokens=8_000, response_reserve_tokens=0)
     first_agent.run_turn("latest question")
 
     resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "resumed"})])
@@ -1450,9 +1487,17 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     resumed_prompt = resumed_llm.requests[0][0]["content"]
     resumed_payload = json.dumps(resumed_llm.requests[0])
 
-    assert "Summary: first turn established the compaction approach." in resumed_prompt
+    assert "First turn established the compaction approach." in resumed_prompt
     assert "old context" not in resumed_payload
     assert resumed_agent.memory.summary_message_count == 2
+    summary = SQLiteSessionStore(config.store_path).load_latest_summary(
+        first_agent.state.conversation_id
+    )
+    assert summary is not None
+    assert summary.metadata["checkpoint_v1"]["version"] == 1
+    assert summary.metadata["checkpoint_v1"]["decisions"] == [
+        "First turn established the compaction approach."
+    ]
 
 
 def test_create_agent_resumes_summary_across_prompt_excluded_display_message(

@@ -28,6 +28,7 @@ class ConversationMemory:
         self.max_messages = max_messages
         self.messages: list[dict[str, str]] = []
         self.conversation_summary: str | None = None
+        self.conversation_checkpoint: dict[str, object] | None = None
         self.summary_message_count = 0
         self._total_message_count = 0
         self._pending_summary_messages: list[dict[str, str]] = []
@@ -72,6 +73,7 @@ class ConversationMemory:
         messages: list[dict[str, str]],
         *,
         conversation_summary: str | None = None,
+        conversation_checkpoint: dict[str, object] | None = None,
         summary_message_count: int = 0,
     ) -> None:
         """Replace runtime history from a persisted session."""
@@ -81,6 +83,7 @@ class ConversationMemory:
             if str(message.get("role") or "") in {"system", "user", "assistant", "tool", "observation"}
         ]
         self.conversation_summary = conversation_summary.strip() if conversation_summary and conversation_summary.strip() else None
+        self.conversation_checkpoint = dict(conversation_checkpoint) if conversation_checkpoint else None
         self.summary_message_count = max(0, summary_message_count)
         self._total_message_count = self.summary_message_count + len(self.messages)
         self._pending_summary_messages = []
@@ -99,12 +102,19 @@ class ConversationMemory:
         self.messages = [message for message in self.messages if id(message) not in remove_ids]
         return before_count - len(self.messages)
 
-    def update_conversation_summary(self, content: str, *, summarized_message_count: int) -> None:
+    def update_conversation_summary(
+        self,
+        content: str,
+        *,
+        summarized_message_count: int,
+        checkpoint: dict[str, object] | None = None,
+    ) -> None:
         """Store the rolling compact summary and its raw-message coverage."""
         clean_content = content.strip()
         if not clean_content:
             return
         self.conversation_summary = clean_content
+        self.conversation_checkpoint = dict(checkpoint) if checkpoint else None
         self.summary_message_count = min(
             self._total_message_count,
             self.summary_message_count + max(0, summarized_message_count),

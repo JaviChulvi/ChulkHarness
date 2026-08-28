@@ -1358,14 +1358,20 @@ def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_pat
         LLMModelCapabilities(
             provider="openai",
             model=model,
-            context_window_tokens=1200,
+            context_window_tokens=20_000,
             default_response_reserve_tokens=128,
         )
     )
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("CHULK_MODEL", model)
     old_marker = "OLD_CONTEXT_E2E_MARKER"
-    summary_text = "E2E compact summary: old marker established the context compaction path."
+    summary_text = "Objective: E2E compact summary: old marker established the context compaction path. Decisions: Preserve the compaction path."
+    summary_checkpoint = json.dumps(
+        {
+            "objective": "E2E compact summary: old marker established the context compaction path.",
+            "decisions": ["Preserve the compaction path."],
+        }
+    )
 
     class CompactionE2EFakeLLM(LLMClient):
         def __init__(self, action_responses: list[str]) -> None:
@@ -1374,9 +1380,9 @@ def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_pat
             self.summary_requests: list[list[dict[str, str]]] = []
 
         def complete(self, messages: list[dict[str, str]], *, max_output_tokens: int | None = None) -> str:
-            if "You update a compact, task-local conversation summary" in messages[0]["content"]:
+            if "You update a compact, task-local checkpoint" in messages[0]["content"]:
                 self.summary_requests.append(messages)
-                return summary_text
+                return summary_checkpoint
             self.action_requests.append(messages)
             return self.action_responses.pop(0)
 
@@ -1388,8 +1394,8 @@ def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_pat
     )
     inputs = iter(
         [
-            old_marker + " " + ("x" * 5000),
-            "continue after the old context",
+            old_marker + " " + ("x" * 40_000),
+            "continue after the old context " + ("y" * 16_000),
             "/q",
         ]
     )
@@ -1465,8 +1471,7 @@ def test_main_e2e_compacts_context_and_resumes_with_summary(monkeypatch, tmp_pat
     assert "resume saw summary" in resumed_output
     assert summary_text in resumed_request[0]["content"]
     assert old_marker not in resumed_request_payload
-    assert len(resumed_llm.summary_requests) == 1
-    assert old_marker not in json.dumps(resumed_llm.summary_requests[0])
+    assert resumed_llm.summary_requests == []
 
 
 def test_main_memory_persists_across_separate_agent_sessions(monkeypatch, tmp_path, capsys):

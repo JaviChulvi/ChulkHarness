@@ -62,6 +62,25 @@ Timeout and retry behavior remains shared across providers through
 `CHULK_LLM_TIMEOUT_SECONDS` and `CHULK_LLM_MAX_RETRIES`. See the provider guide
 for the exact credential and base-URL precedence.
 
+## Long-running conversation context
+
+Chulk keeps recent raw messages plus a bounded, task-local checkpoint for older
+conversation context. The checkpoint records the objective, constraints,
+decisions, completed and blocked work, next actions, and safe evidence hints.
+It is internal runtime state stored with the conversation summary; durable plan
+state remains separate and authoritative.
+
+Older raw messages stay in the session store. When exact evidence is needed,
+the agent can deliberately use the read-only `session_search` and `session_read`
+tools; Chulk does not automatically retrieve or inject historical matches.
+
+`ContextBudget` reserves the model response allowance from the configured
+context window and accounts for every serialized prompt section, including
+native tool declarations and JSON fallback. Chulk compacts only conversation
+history. If the remaining required prompt still cannot fit, it raises
+`ConfigurationError` before making a provider request. The trace records
+`context_budget_rejected` with the final context report.
+
 ## Configuration diagnostics
 
 Run `chulk doctor` to check the selected primary provider and every configured
