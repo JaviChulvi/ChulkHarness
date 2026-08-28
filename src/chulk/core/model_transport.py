@@ -688,6 +688,7 @@ class ModelTransport:
         """Summarize old raw messages that would otherwise be dropped."""
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
+            self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.consume_pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
@@ -716,6 +717,7 @@ class ModelTransport:
         """Summarize old raw messages without blocking the event loop."""
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
+            self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.consume_pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
@@ -1278,6 +1280,13 @@ class ModelTransport:
         context_report = prompt.context_report.to_dict()
         if context_report["over_budget_tokens"] <= 0:
             return
+        self._reject_prompt_for_budget(turn, context_report)
+
+    def _reject_prompt_for_budget(
+        self,
+        turn: TurnState,
+        context_report: dict,
+    ) -> None:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         self.trace(
@@ -2156,6 +2165,7 @@ def _fallback_context_checkpoint(
 _CHECKPOINT_KEYS = (
     "objective", "constraints", "decisions", "completed", "blocked", "next_actions", "evidence_hints"
 )
+_CHECKPOINT_LIST_KEYS = _CHECKPOINT_KEYS[1:]
 
 
 def _parse_checkpoint(value: str) -> dict[str, object] | None:
@@ -2163,13 +2173,27 @@ def _parse_checkpoint(value: str) -> dict[str, object] | None:
         payload = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return None
-    return _normalize_checkpoint(payload) if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    objective = payload.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        return None
+    if any(
+        key in payload
+        and (
+            not isinstance(payload[key], list)
+            or any(not isinstance(entry, str) for entry in payload[key])
+        )
+        for key in _CHECKPOINT_LIST_KEYS
+    ):
+        return None
+    return _normalize_checkpoint(payload)
 
 
 def _normalize_checkpoint(value: dict[str, object]) -> dict[str, object]:
     objective = _compact_summary_line(_clean_summary_source(str(value.get("objective") or "")), limit=600)
     checkpoint: dict[str, object] = {"version": 1, "objective": objective}
-    for key in _CHECKPOINT_KEYS[1:]:
+    for key in _CHECKPOINT_LIST_KEYS:
         raw = value.get(key)
         entries = raw if isinstance(raw, list) else []
         checkpoint[key] = [
@@ -2177,23 +2201,41 @@ def _normalize_checkpoint(value: dict[str, object]) -> dict[str, object]:
             for entry in entries
             if str(entry).strip()
         ][:6]
-    rendered = _render_checkpoint(checkpoint, limit=MAX_SUMMARY_CHARS)
-    evidence_hints = _checkpoint_entries(checkpoint, "evidence_hints")
-    while len(rendered) > MAX_SUMMARY_CHARS and evidence_hints:
-        evidence_hints.pop()
-        checkpoint["evidence_hints"] = evidence_hints
-        rendered = _render_checkpoint(checkpoint, limit=MAX_SUMMARY_CHARS)
+    _bound_checkpoint(checkpoint)
     return checkpoint
 
 
 def _render_checkpoint(checkpoint: dict[str, object], *, limit: int = MAX_SUMMARY_CHARS) -> str:
+    return _clean_summary(_checkpoint_text(checkpoint), limit=limit)
+
+
+def _checkpoint_text(checkpoint: dict[str, object]) -> str:
     normalized = {key: checkpoint.get(key) for key in _CHECKPOINT_KEYS}
     lines = [f"Objective: {normalized['objective']}"]
-    for key in _CHECKPOINT_KEYS[1:]:
+    for key in _CHECKPOINT_LIST_KEYS:
         entries = _checkpoint_entries(checkpoint, key)
         if entries:
             lines.append(f"{key.replace('_', ' ').title()}: " + "; ".join(str(item) for item in entries))
-    return _clean_summary("\n".join(lines), limit=limit)
+    return "\n".join(lines)
+
+
+def _bound_checkpoint(checkpoint: dict[str, object]) -> None:
+    for key in (
+        "evidence_hints",
+        "completed",
+        "constraints",
+        "decisions",
+        "blocked",
+        "next_actions",
+    ):
+        entries = _checkpoint_entries(checkpoint, key)
+        while entries and _checkpoint_size(checkpoint) > MAX_SUMMARY_CHARS:
+            entries.pop()
+            checkpoint[key] = entries
+
+
+def _checkpoint_size(checkpoint: dict[str, object]) -> int:
+    return len(json.dumps(checkpoint, sort_keys=True))
 
 
 def _checkpoint_entries(checkpoint: dict[str, object], key: str) -> list[str]:
@@ -2205,7 +2247,9 @@ def _clean_summary(value: str, *, limit: int = MAX_SUMMARY_CHARS) -> str:
     clean = _redact_summary_text(" ".join(value.strip().split()))
     if len(clean) <= limit:
         return clean
-    return clean[:limit].rstrip() + "..."
+    if limit <= 3:
+        return clean[:limit]
+    return clean[: limit - 3].rstrip() + "..."
 
 
 def _clean_summary_source(value: str) -> str:

@@ -102,6 +102,7 @@ class AsyncSessionRecorder:
                         payload.get("summarized_message_count") or 0
                     ),
                     "fallback": bool(payload.get("fallback")),
+                    "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
                 },
             )
             return

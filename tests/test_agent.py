@@ -8,8 +8,12 @@ from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, Too
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
 from chulk.core.model_transport import (
+    MAX_SUMMARY_CHARS,
     _fallback_context_checkpoint,
     _format_messages_for_summary,
+    _normalize_checkpoint,
+    _parse_checkpoint,
+    _render_checkpoint,
 )
 from chulk.errors import ConfigurationError
 from chulk.llm import (
@@ -897,6 +901,25 @@ def test_agent_rejects_irreducibly_oversized_prompt_before_provider_request(tmp_
     assert "context_budget_rejected" in trace_text
 
 
+def test_agent_rejects_required_context_before_compaction_provider_request():
+    llm = RecordingLLMClient(
+        [json.dumps({"type": "final_answer", "content": "first turn complete"})]
+    )
+    agent = Agent(
+        llm,
+        system_prompt="mandatory " + ("x" * 5000),
+        context_budget=ContextBudget(max_prompt_tokens=5000, response_reserve_tokens=0),
+    )
+
+    agent.run_turn("old context " + ("x" * 5_000))
+    agent.context_budget = ContextBudget(max_prompt_tokens=100, response_reserve_tokens=0)
+
+    with pytest.raises(ConfigurationError, match="input token budget"):
+        agent.run_turn("latest question")
+
+    assert len(llm.requests) == 1
+
+
 def test_checkpoint_fallback_preserves_newest_compacted_context_first():
     checkpoint = _fallback_context_checkpoint(
         {"objective": "old objective", "evidence_hints": ["old evidence"]},
@@ -923,6 +946,38 @@ def test_checkpoint_source_limit_keeps_newest_messages():
 
     assert "newest context survives" in source
     assert len(source) <= 12_000
+
+
+def test_checkpoint_parser_rejects_malformed_json_objects():
+    assert _parse_checkpoint("{}") is None
+    assert _parse_checkpoint(json.dumps({"objective": ["not a string"]})) is None
+    assert _parse_checkpoint(
+        json.dumps({"objective": "Continue", "decisions": "not a list"})
+    ) is None
+
+
+def test_checkpoint_metadata_and_rendered_content_stay_within_global_limit():
+    checkpoint = _normalize_checkpoint(
+        {
+            "objective": "o" * 600,
+            **{
+                key: ["x" * 300 for _ in range(6)]
+                for key in (
+                    "constraints",
+                    "decisions",
+                    "completed",
+                    "blocked",
+                    "next_actions",
+                    "evidence_hints",
+                )
+            },
+        }
+    )
+
+    assert len(json.dumps(checkpoint, sort_keys=True)) <= MAX_SUMMARY_CHARS
+    assert len(_render_checkpoint(checkpoint)) <= MAX_SUMMARY_CHARS
+    assert checkpoint["objective"] == "o" * 600
+    assert checkpoint["next_actions"]
 
 
 def test_agent_accepts_external_context_and_prompt_metadata(tmp_path):

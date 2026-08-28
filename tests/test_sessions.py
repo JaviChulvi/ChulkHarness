@@ -1,5 +1,6 @@
 """Tests for durable conversation sessions."""
 
+import asyncio
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +27,7 @@ from chulk.core.state import (
 from chulk.llm import LLMCapabilities, LLMClient
 from chulk.main import create_agent, main
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
-from chulk.sessions import SQLiteSessionStore, SessionRecorder
+from chulk.sessions import AsyncSessionRecorder, SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
 from chulk.tools import Tool, ToolExecutionContext, ToolRegistry, ToolResult
 
@@ -131,6 +132,37 @@ def test_session_recorder_persists_tool_action_before_observation(tmp_path):
     )
     assert "executed_tool_action" not in rendered_history
     assert "Lookup completed." in rendered_history
+
+
+def test_async_session_recorder_persists_checkpoint_metadata(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    recorder = AsyncSessionRecorder(
+        store,
+        "conversation-async-checkpoint",
+        provider="test",
+        model="mock",
+    )
+
+    async def persist() -> None:
+        recorder.callback(
+            TraceEvent.CONTEXT_SUMMARY_CREATED,
+            {
+                "summary": "Objective: Continue work.",
+                "source_message_count": 2,
+                "checkpoint": {
+                    "version": 1,
+                    "objective": "Continue work.",
+                    "decisions": ["Keep the durable checkpoint."],
+                },
+            },
+        )
+        await recorder.flush()
+
+    asyncio.run(persist())
+
+    summary = store.load_latest_summary("conversation-async-checkpoint")
+    assert summary is not None
+    assert summary.metadata["checkpoint_v1"]["objective"] == "Continue work."
 
 
 def test_session_recorders_atomically_dedupe_replayed_tool_observations(
