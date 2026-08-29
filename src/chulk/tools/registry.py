@@ -196,7 +196,7 @@ def tool_descriptions_for_prompt(tools: Iterable[object]) -> str:
     descriptions = [
         {
             "name": str(getattr(tool, "name")),
-            "description": str(getattr(tool, "description", "")),
+            "description": tool_description_for_model(tool),
             "arguments": getattr(tool, "args_schema", {}) or {},
             "requires_confirmation": bool(getattr(tool, "requires_confirmation", False)),
             "permission_level": normalize_permission_level(
@@ -216,6 +216,22 @@ def tool_descriptions_for_prompt(tools: Iterable[object]) -> str:
         for tool in tools
     ]
     return json.dumps(descriptions, indent=2, sort_keys=True)
+
+
+def tool_description_for_model(tool: object) -> str:
+    """Return a tool description with any declared output contract appended."""
+    description = str(getattr(tool, "description", ""))
+    output_schema = getattr(tool, "output_schema", None)
+    if output_schema is None:
+        return description
+    schema_json = json.dumps(
+        output_schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"{description}\nOutput schema: {schema_json}"
 
 
 class ToolRegistry:
