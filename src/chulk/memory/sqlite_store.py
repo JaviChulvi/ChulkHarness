@@ -18,6 +18,7 @@ from chulk.memory.models import (
     MemoryExtractionCandidate,
     MemoryProposalRecord,
     MemoryRecord,
+    MemoryRetentionPolicy,
     normalize_memory_namespace,
 )
 from chulk.memory.security import ensure_memory_payload_safe
@@ -538,19 +539,7 @@ class SQLiteMemoryStore:
 
     def archive_memories_older_than(self, days: int) -> int:
         """Archive memories whose updated_at timestamp is older than the cutoff."""
-        if days < 1:
-            raise ValueError("days must be greater than zero")
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE memories
-                SET archived_at = ?, updated_at = ?
-                WHERE namespace = ? AND updated_at < ? AND archived_at IS NULL
-                """,
-                (_utc_now(), _utc_now(), self.namespace, cutoff),
-            )
-        return cursor.rowcount
+        return self.apply_retention(MemoryRetentionPolicy(max_age_days=days))
 
     def decay_importance(self, *, days_since_accessed: int = 90, amount: int = 1) -> int:
         """Lower importance for stale memories."""
@@ -588,6 +577,54 @@ class SQLiteMemoryStore:
                     archived += 1
                 memory = keep
         return archived
+
+    def apply_retention(
+        self,
+        policy: MemoryRetentionPolicy,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Archive active memories exceeding an optional age or count limit."""
+        if not isinstance(policy, MemoryRetentionPolicy):
+            raise TypeError("policy must be a MemoryRetentionPolicy")
+        reference = _retention_reference_time(now)
+        archived_at = reference.isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            archived_count = 0
+            if policy.max_age_days is not None:
+                cutoff = (reference - timedelta(days=policy.max_age_days)).isoformat()
+                cursor = conn.execute(
+                    """
+                    UPDATE memories
+                    SET archived_at = ?, updated_at = ?
+                    WHERE namespace = ? AND archived_at IS NULL AND updated_at < ?
+                    """,
+                    (archived_at, archived_at, self.namespace, cutoff),
+                )
+                archived_count += cursor.rowcount
+            if policy.max_active_items is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE memories
+                    SET archived_at = ?, updated_at = ?
+                    WHERE namespace = ? AND archived_at IS NULL AND id IN (
+                        SELECT id FROM memories
+                        WHERE namespace = ? AND archived_at IS NULL
+                        ORDER BY importance DESC, confidence DESC, updated_at DESC, id DESC
+                        LIMIT -1 OFFSET ?
+                    )
+                    """,
+                    (
+                        archived_at,
+                        archived_at,
+                        self.namespace,
+                        self.namespace,
+                        policy.max_active_items,
+                    ),
+                )
+                archived_count += cursor.rowcount
+            return archived_count
 
     def find_duplicate_memory(self, content: str, *, threshold: float = 0.90) -> MemoryRecord | None:
         """Return a likely duplicate active memory, if one exists."""
@@ -1133,3 +1170,10 @@ def _backfill_memory_fts(conn: sqlite3.Connection) -> None:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _retention_reference_time(now: datetime | None) -> datetime:
+    reference = datetime.now(timezone.utc) if now is None else now
+    if reference.tzinfo is None:
+        raise ValueError("Retention time must be timezone-aware")
+    return reference.astimezone(timezone.utc)

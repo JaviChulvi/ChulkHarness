@@ -310,8 +310,8 @@ These stories are ordered after the maintenance tranche above.
 ### US-N4: Add Memory Isolation And Retention
 
 - [ ] Add user/workspace namespaces and per-thread memory controls.
-- [ ] Add TTL and item-count retention policies without weakening provenance or
-  review modes.
+- [x] Add opt-in archive-first age and item-count retention policies without
+  weakening provenance or review modes.
 - [ ] Add a complete memory/session backup/export command on top of the shared
   SQLite backup primitive.
 - [ ] Add contradiction, freshness, and consolidation behavior only after

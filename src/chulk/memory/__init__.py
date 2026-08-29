@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         MemoryExtractionCandidate,
         MemoryProposalRecord,
         MemoryRecord,
+        MemoryRetentionPolicy,
         normalize_memory_namespace,
     )
     from chulk.memory.policy import MemoryPolicy, MemoryPolicyResult
@@ -32,6 +33,7 @@ __all__ = [
     "MemoryPolicyResult",
     "MemoryProposalRecord",
     "MemoryRecord",
+    "MemoryRetentionPolicy",
     "normalize_memory_namespace",
     "MemorySecretError",
     "SQLiteMemoryStore",

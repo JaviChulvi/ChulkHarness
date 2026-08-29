@@ -66,6 +66,31 @@ The Telegram adapter does not accept a caller-selected namespace. It derives
 `telegram:chat:<chat_id>` for each private chat, including when several users
 share one bot process.
 
+## Archive-first retention
+
+Retention is opt-in and applies only to the local SQLite memory store for the
+configured namespace. Provide a `MemoryRetentionPolicy` through `AgentConfig` to
+archive active memories older than a configured number of days and/or beyond an
+active item limit:
+
+```python
+from chulk import AgentConfig, MemoryRetentionPolicy
+
+config = AgentConfig(
+    memory_retention_policy=MemoryRetentionPolicy(
+        max_age_days=180,
+        max_active_items=500,
+    ),
+)
+```
+
+The policy runs when a local runtime opens its memory store. It archives rather
+than deletes records, leaves proposals and their review evidence untouched, and
+uses the store namespace for isolation. Hosted memory services own their own
+retention; this setting does not claim to enforce policy outside Chulk's local
+SQLite store. Call `SQLiteMemoryStore.apply_retention(..., now=...)` directly
+when a host needs an explicit maintenance time for deterministic operation.
+
 Proposal evidence and accepted memories may contain sensitive user data. Keep
 the runtime database private and do not store secrets merely because a prompt
 asks the agent to remember them.
