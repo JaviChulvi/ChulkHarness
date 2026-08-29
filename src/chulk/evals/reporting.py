@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html import escape
 import json
+import math
 from pathlib import Path
 from typing import Any, Literal
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -31,6 +32,11 @@ class EvalComparison:
     removed_graders: tuple[str, ...] = ()
     grade_score_deltas: Mapping[str, float] = field(default_factory=dict)
     baseline_coverage: float = 1.0
+    current_wins: int = 0
+    baseline_wins: int = 0
+    ties: int = 0
+    discordant_count: int = 0
+    mcnemar_p_value: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +51,11 @@ class EvalComparison:
             "removed_graders": list(self.removed_graders),
             "grade_score_deltas": dict(self.grade_score_deltas),
             "baseline_coverage": self.baseline_coverage,
+            "current_wins": self.current_wins,
+            "baseline_wins": self.baseline_wins,
+            "ties": self.ties,
+            "discordant_count": self.discordant_count,
+            "mcnemar_p_value": self.mcnemar_p_value,
         }
 
 
@@ -67,6 +78,17 @@ def compare_reports(current: Mapping[str, Any], baseline: Mapping[str, Any]) -> 
     matched_grader_ids = set(current_graders) & set(baseline_graders)
     new_grader_ids = set(current_graders) - set(baseline_graders)
     removed_grader_ids = set(baseline_graders) - set(current_graders)
+    current_outcomes = _case_outcomes(current)
+    baseline_outcomes = _case_outcomes(baseline)
+    current_wins = sum(
+        current_outcomes[item] and not baseline_outcomes[item]
+        for item in matched_case_ids
+    )
+    baseline_wins = sum(
+        baseline_outcomes[item] and not current_outcomes[item]
+        for item in matched_case_ids
+    )
+    ties = len(matched_case_ids) - current_wins - baseline_wins
     return EvalComparison(
         str(current.get("id", "")), str(baseline.get("id", "")), deltas,
         tuple(sorted(current_cases[item] for item in matched_case_ids)),
@@ -80,6 +102,11 @@ def compare_reports(current: Mapping[str, Any], baseline: Mapping[str, Any]) -> 
             for item in sorted(matched_grader_ids)
         },
         len(matched_case_ids) / len(baseline_cases) if baseline_cases else 1.0,
+        current_wins,
+        baseline_wins,
+        ties,
+        current_wins + baseline_wins,
+        _exact_two_sided_binomial_p_value(current_wins, baseline_wins),
     )
 
 
@@ -467,6 +494,32 @@ def _case_keys(report: Mapping[str, Any]) -> dict[tuple[str, str], str]:
             f"{target_name}:{case_id}"
         )
     return output
+
+
+def _case_outcomes(report: Mapping[str, Any]) -> dict[tuple[str, str], bool]:
+    cases = report.get("cases")
+    if not isinstance(cases, list):
+        return {}
+    targets = _target_identities(report)
+    output: dict[tuple[str, str], bool] = {}
+    for item in cases:
+        if not isinstance(item, Mapping):
+            continue
+        target_name = str(item.get("target_name") or "")
+        case_id = str(item.get("case_id") or "")
+        output[(targets.get(target_name, target_name), case_id)] = bool(item.get("passed"))
+    return output
+
+
+def _exact_two_sided_binomial_p_value(current_wins: int, baseline_wins: int) -> float:
+    """Return the exact two-sided McNemar/binomial p-value."""
+    discordant = current_wins + baseline_wins
+    if discordant == 0:
+        return 1.0
+    smaller = min(current_wins, baseline_wins)
+    denominator = 2**discordant
+    lower_tail = sum(math.comb(discordant, index) for index in range(smaller + 1)) / denominator
+    return min(1.0, 2.0 * lower_tail)
 
 
 def _grader_scores(

@@ -97,9 +97,13 @@ metered model calls, suites containing an `LLMJudgeGrader` also require
 Only names in `required_graders` affect case pass/fail. Only declared
 `MetricThreshold` values affect the suite quality gate. Other graders are
 informational. Configuration and runtime failures remain operational errors.
-Reports aggregate pass rate, pass@k, grader scores, latency percentiles,
-tokens, cost, and exceptions. Target, provider, model, and tag dimensions also
-record case/trial counts, pass@k, latency, token/cost totals, and error rates.
+Reports aggregate pass rate, pass@k, and pass_all_k (Pass^k: every trial for a
+case succeeds), grader scores, latency percentiles, tokens, cost, and
+exceptions. `pass_rate` remains the existing case-level quality metric;
+`pass_all_k` makes its all-trials-success semantics explicit alongside the
+any-success `pass_at_k` metric. Target, provider, model, and tag dimensions
+also record case/trial counts, pass@k, pass_all_k, latency, token/cost totals,
+and error rates.
 
 ## Safety and fixtures
 
@@ -135,7 +139,11 @@ execution configuration before running new work. Reports have `to_dict()` and
 
 Baselines match only the same suite plus target fingerprint, case id, and
 grader identity/version/configuration fingerprint. Comparisons report new and
-removed cases or graders, per-grader score deltas, and `baseline_coverage`. Declare a
+removed cases or graders, per-grader score deltas, and `baseline_coverage`.
+Matched cases also report paired binary outcomes: current wins, baseline wins,
+ties, the discordant count, and the exact two-sided McNemar/binomial p-value.
+These statistics use each case's serialized `passed` result, so they compare
+the same case identities without changing existing report metrics. Declare a
 `baseline_coverage` threshold when incomplete baseline coverage should fail a
 suite; otherwise coverage changes remain informational.
 
