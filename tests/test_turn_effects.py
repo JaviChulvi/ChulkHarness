@@ -6,9 +6,13 @@ import json
 
 import pytest
 
-from chulk.core.actions import ToolCallAction
+from chulk.core.actions import PlanStepUpdateAction, ToolCallAction
 from chulk.core.events import TraceEvent
-from chulk.core.plan_execution import PlanExecution
+from chulk.core.plan_execution import (
+    PlanExecution,
+    PlanStepVerification,
+    PlanStepVerificationRequest,
+)
 from chulk.core.state import AgentState, Plan, PlanStep, TurnState
 from chulk.core.transitions import ExecuteToolEffect, FinishToolEffect, TransitionOutcome
 from chulk.core.turn_effects import PendingReflection, TurnEffects, _validate_application
@@ -307,3 +311,97 @@ def test_default_plan_revision_feedback_is_domain_neutral() -> None:
     assert "search_files" not in feedback
     assert "modules/files" not in feedback
     assert "available read-only reconnaissance action" in feedback
+
+
+def test_plan_completion_verifier_rejection_keeps_step_in_progress() -> None:
+    state = AgentState()
+    memory = ConversationMemory()
+    requests: list[PlanStepVerificationRequest] = []
+
+    def verifier(request: PlanStepVerificationRequest) -> PlanStepVerification:
+        requests.append(request)
+        return PlanStepVerification(
+            passed=False,
+            evidence="The required test has not passed.",
+        )
+
+    execution = PlanExecution(
+        state=state,
+        memory=memory,
+        trace=lambda _event, _payload: None,
+        verifier=verifier,
+    )
+    turn, step = _active_plan_step(execution)
+
+    result = execution.apply_step_result(
+        turn,
+        PlanStepUpdateAction(
+            type="plan_step_update",
+            step_id=step.id,
+            status="completed",
+            evidence="The model says the work is done.",
+        ),
+    )
+
+    assert result is None
+    assert step.status == "in_progress"
+    assert step.evidence == []
+    assert requests[0].acceptance_criteria == ("The focused test passes.",)
+    assert requests[0].recorded_evidence == ()
+    assert turn.observations[-1].tool_name == "plan_step_verification"
+    assert "required test has not passed" in turn.observations[-1].content
+
+
+@pytest.mark.asyncio
+async def test_async_plan_completion_verifier_records_authoritative_evidence() -> None:
+    state = AgentState()
+    memory = ConversationMemory()
+
+    async def verifier(
+        request: PlanStepVerificationRequest,
+    ) -> PlanStepVerification:
+        assert request.asserted_evidence == "Focused test passed."
+        return PlanStepVerification(
+            passed=True,
+            evidence="pytest tests/test_feature.py passed.",
+        )
+
+    execution = PlanExecution(
+        state=state,
+        memory=memory,
+        trace=lambda _event, _payload: None,
+        async_verifier=verifier,
+    )
+    turn, step = _active_plan_step(execution)
+
+    result = await execution.apply_step_result_async(
+        turn,
+        PlanStepUpdateAction(
+            type="plan_step_update",
+            step_id=step.id,
+            status="completed",
+            evidence="Focused test passed.",
+        ),
+    )
+
+    assert result is None
+    assert step.status == "completed"
+    assert [record.tool_name for record in step.evidence] == [
+        "plan_step_update",
+        "plan_step_verifier",
+    ]
+    assert step.evidence[-1].metadata == {"external_verification": True}
+
+
+def _active_plan_step(execution: PlanExecution) -> tuple[TurnState, PlanStep]:
+    step = PlanStep(
+        id="implementation",
+        title="Implement",
+        description="Implement and verify the behavior.",
+        acceptance_criteria=["The focused test passes."],
+    )
+    plan = Plan(summary="Implement the behavior.", steps=[step])
+    turn = TurnState(user_message="Do the work.", active_plan=plan)
+    turn.approve_plan()
+    execution.start_step(turn, step.id)
+    return turn, step

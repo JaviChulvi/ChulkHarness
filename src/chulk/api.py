@@ -34,6 +34,12 @@ from chulk.authoring import (
 )
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
 from chulk.core import TurnContextSection
+from chulk.core.plan_execution import (
+    AsyncPlanStepVerifier,
+    PlanStepVerification,
+    PlanStepVerificationRequest,
+    PlanStepVerifier,
+)
 from chulk.capabilities import (
     Capabilities,
     FileAccess,
@@ -669,6 +675,7 @@ __all__ = [
     "AsyncAgentDefinitionStore",
     "AsyncInMemoryAgentDefinitionStore",
     "AsyncInMemorySkillPublicationStore",
+    "AsyncPlanStepVerifier",
     "AsyncSkillPublicationManager",
     "AsyncSkillPublicationStore",
     "BudgetDefinition",
@@ -1094,6 +1101,9 @@ __all__ = [
     "PlanStep",
     "PlanStepEvidence",
     "PlanStepStatus",
+    "PlanStepVerification",
+    "PlanStepVerificationRequest",
+    "PlanStepVerifier",
     "PluginAuditFinding",
     "PluginAuditReport",
     "PluginArtifactError",

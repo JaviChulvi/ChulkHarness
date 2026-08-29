@@ -21,6 +21,8 @@ def test_runtime_facade_preserves_create_agent_signature():
         "skill_specs",
         "system_prompt",
         "permission_callback",
+        "plan_step_verifier",
+        "async_plan_step_verifier",
         "mcp_servers",
         "event_sink",
         "redaction_callback",

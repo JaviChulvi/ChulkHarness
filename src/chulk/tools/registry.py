@@ -60,6 +60,18 @@ class ToolFailureKind:
     TIMEOUT = "timeout"
 
 
+NON_RETRYABLE_TOOL_FAILURE_KINDS = frozenset(
+    {
+        ToolFailureKind.INVALID_ARGUMENTS,
+        ToolFailureKind.UNKNOWN_TOOL,
+        ToolFailureKind.ASYNC_REQUIRED,
+        ToolFailureKind.CANCELLED,
+        ToolFailureKind.USER_BLOCKED,
+        ToolFailureKind.FATAL_SAFETY,
+    }
+)
+
+
 DepsT = TypeVar("DepsT")
 
 

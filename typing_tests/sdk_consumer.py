@@ -17,6 +17,7 @@ from chulk import (
     AsyncToolCatalogResolver,
     AsyncLearningProposalService,
     AsyncLearningReviewer,
+    AsyncPlanStepVerifier,
     AsyncPluginService,
     AsyncRuntimeServices,
     AsyncServiceBinding,
@@ -63,6 +64,9 @@ from chulk import (
     PlanStatus,
     PlanStep,
     PlanStepStatus,
+    PlanStepVerification,
+    PlanStepVerificationRequest,
+    PlanStepVerifier,
     ParentRunPolicy,
     ParentRunRecord,
     PluginLifecycleReceipt,
@@ -127,8 +131,11 @@ from chulk.evals import (
     GradeResult,
     Grader,
     MetricThreshold,
+    RubricDimension,
+    RubricJudgeGrader,
     TrialResult,
 )
+from chulk.llm import LLMClient
 from chulk.postgres import (
     AsyncPostgreSQLEvalStore,
     AsyncPostgreSQLApprovalStore,
@@ -193,6 +200,26 @@ class OutputPolicy:
     def reset(self, *, turn_id: str) -> None:
         return None
 
+
+def verify_plan_step(
+    request: PlanStepVerificationRequest,
+) -> PlanStepVerification:
+    return PlanStepVerification(
+        passed=bool(request.acceptance_criteria),
+        evidence="Host checks completed.",
+    )
+
+
+async def verify_plan_step_async(
+    request: PlanStepVerificationRequest,
+) -> PlanStepVerification:
+    return verify_plan_step(request)
+
+
+plan_step_verifier: PlanStepVerifier = verify_plan_step
+async_plan_step_verifier: AsyncPlanStepVerifier = verify_plan_step_async
+
+
 agent = Agent(
     config=config,
     capabilities=Capabilities(files="read", memory=MemoryMode.READ_ONLY),
@@ -200,6 +227,8 @@ agent = Agent(
     skills=[Skills.files],
     final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
     output_policy=OutputPolicy(),
+    plan_step_verifier=plan_step_verifier,
+    async_plan_step_verifier=async_plan_step_verifier,
 )
 
 result: str = agent.run("Calculate 2 + 2")
@@ -477,6 +506,7 @@ def consume_plugin_lifecycle(
 def consume_eval_contract(
     context: EvalContext,
     target: EvalTarget,
+    judge_client: LLMClient,
 ) -> tuple[EvalReport | object, AsyncEvalRunner]:
     case = EvalCase("typed", (EvalTurn("hello"),))
     suite = EvalSuite(
@@ -491,6 +521,24 @@ def consume_eval_contract(
     _ = context.sampling
     target_fingerprint: str = target.fingerprint
     _ = target_fingerprint
+    rubric_judge = RubricJudgeGrader(
+        judge_client,
+        (
+            RubricDimension(
+                "Accuracy",
+                {"excellent": "All facts are correct.", "fail": "Core facts are wrong."},
+            ),
+            RubricDimension(
+                "Hallucination",
+                {
+                    "pass": "Every claim is supported.",
+                    "fail": "Any unsupported claim is present.",
+                },
+                veto=True,
+            ),
+        ),
+    )
+    _ = rubric_judge.grade_pairwise
     if isinstance(report, EvalReport):
         restored = EvalReport.from_dict(report.to_dict())
         status: EvalRunStatus = restored.status

@@ -10,6 +10,7 @@ from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config
 from chulk._sdk.events import EventCallback
 from chulk._sdk.handles import AgentHandle
 from chulk.config import Config
+from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.llm import LLMClient
 from chulk.execution import ExecutionBackend
 from chulk.goals import GoalExecutionContext
@@ -62,6 +63,8 @@ def _build_handle(
     conversation_metadata: dict[str, object] | None = None,
     runtime_metadata: dict[str, object] | None = None,
     permission_callback: PermissionCallback | None = None,
+    plan_step_verifier: PlanStepVerifier | None = None,
+    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
     on_event: EventCallback | None = None,
     mcp: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -108,6 +111,8 @@ def _build_handle(
         skill_specs=selected_skills,
         system_prompt=selected_prompt,
         permission_callback=permission_callback,
+        plan_step_verifier=plan_step_verifier,
+        async_plan_step_verifier=async_plan_step_verifier,
         mcp_servers=tuple(mcp) if mcp is not None else None,
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,

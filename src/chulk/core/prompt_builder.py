@@ -61,6 +61,7 @@ def build_agent_messages(
     native_action_protocol: bool = False,
     native_tool_declarations: list[dict[str, Any]] | None = None,
     context_budget: ContextBudget | None = None,
+    runtime_status: str | None = None,
 ) -> list[dict[str, str]]:
     """Build the model input from prompt, tools, and short-term history."""
     return build_agent_prompt(
@@ -82,6 +83,7 @@ def build_agent_messages(
         native_action_protocol=native_action_protocol,
         native_tool_declarations=native_tool_declarations,
         context_budget=context_budget,
+        runtime_status=runtime_status,
     ).messages
 
 
@@ -105,6 +107,7 @@ def build_agent_prompt(
     native_action_protocol: bool = False,
     native_tool_declarations: list[dict[str, Any]] | None = None,
     context_budget: ContextBudget | None = None,
+    runtime_status: str | None = None,
 ) -> AgentPrompt:
     """Build model input and a context report from prompt, tools, and history."""
     registered_tools = tool_registry.list_tools()
@@ -296,6 +299,15 @@ def build_agent_prompt(
             },
         )
     )
+    if runtime_status:
+        system_parts.append(
+            (
+                "runtime_status",
+                "Current runtime status",
+                runtime_status,
+                {"source": "harness"},
+            )
+        )
     if prompt_profile or locale:
         prompt_metadata_prompt = format_prompt_metadata_for_prompt(
             prompt_profile=prompt_profile,

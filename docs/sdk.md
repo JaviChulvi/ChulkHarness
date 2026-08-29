@@ -69,6 +69,35 @@ containers:
 - `FinalAnswerDelivery` distinguishes a complete answer from safe truncation,
   policy blocking, or failure after partial delivery.
 
+## Verified plan-step completion
+
+Plan-step completion remains model-asserted by default for compatibility. Hosts
+that need deterministic termination can pass `plan_step_verifier` or
+`async_plan_step_verifier`. The callback receives a
+`PlanStepVerificationRequest` containing the step description, acceptance
+criteria, prior evidence, and the model's completion claim. It must return a
+`PlanStepVerification` with a boolean decision and non-empty evidence.
+
+```python
+from chulk import PlanStepVerification
+
+def verify_step(request):
+    passed = run_acceptance_checks(request.acceptance_criteria)
+    return PlanStepVerification(
+        passed=passed,
+        evidence="Focused acceptance checks passed." if passed else "Tests still fail.",
+    )
+
+agent = Agent(..., plan_step_verifier=verify_step)
+```
+
+Only a passing decision marks the step complete, and both the model assertion
+and host verification are retained as step evidence. A rejection keeps the step
+`in_progress` and returns the verifier evidence to the model as recovery
+feedback. Async execution awaits the async callback; when only the sync callback
+is configured, it runs outside the event loop. Calling the synchronous plan
+path with only an async verifier fails explicitly instead of bypassing it.
+
 ## Incremental final answers
 
 Validated-final-answer replay remains the default. Hosted applications can opt
@@ -151,6 +180,11 @@ cancellation and I/O timeouts.
 Incremental final answers use the provider's async iterator directly. OpenAI
 Responses and OpenAI-compatible Chat Completions clients implement native async
 streaming; providers without it retain a one-shot async compatibility stream.
+The shared LLM timeout is reapplied while waiting for every async stream chunk.
+A stalled iterator is closed, active accounting is settled, and partial public
+content terminalizes as `failed_after_partial`; internal delivery evidence and
+the stream failure trace identify `stream_idle_timeout` separately from provider
+errors.
 
 Native async hosted factories are resolved with
 `await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are

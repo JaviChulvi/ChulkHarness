@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -27,6 +28,8 @@ from chulk.evals import (
     NoErrorGrader,
     PlanGrader,
     RegexGrader,
+    RubricDimension,
+    RubricJudgeGrader,
     SkillSelectionGrader,
     StatusGrader,
     TokenBudgetGrader,
@@ -187,7 +190,13 @@ class _JudgeClient(LLMClient):
         del messages, max_output_tokens
         return LLMResponse(
             self.content,
-            usage=LLMUsage(total_tokens=11),
+            usage=LLMUsage(
+                input_tokens=8,
+                output_tokens=3,
+                total_tokens=11,
+                cache_hit_input_tokens=4,
+                cache_miss_input_tokens=4,
+            ),
             cost=LLMCost(Decimal("0.03"), pricing_known=True),
             provider="judge-provider",
             model="judge-model",
@@ -198,6 +207,21 @@ class _FailingJudgeClient(LLMClient):
     def complete_response(self, messages, *, max_output_tokens=None):
         del messages, max_output_tokens
         raise RuntimeError("judge unavailable")
+
+
+class _SequencedJudgeClient(_JudgeClient):
+    def __init__(self, *contents: str) -> None:
+        super().__init__("")
+        self.contents = list(contents)
+        self.messages = []
+
+    def complete_response(self, messages, *, max_output_tokens=None):
+        self.messages.append(messages)
+        self.content = self.contents.pop(0)
+        return super().complete_response(
+            messages,
+            max_output_tokens=max_output_tokens,
+        )
 
 
 def test_llm_judge_is_strict_records_identity_and_supports_pairwise() -> None:
@@ -219,6 +243,102 @@ def test_llm_judge_is_strict_records_identity_and_supports_pairwise() -> None:
         "Be clear.",
     ).grade(case, trial)
     assert malformed.error and "fields must be exactly" in malformed.reason
+    assert malformed.details["judge"] is True
+    assert malformed.details["cost"]["amount"] == "0.03"
+
+
+def test_rubric_judge_weights_dimensions_and_enforces_vetoes() -> None:
+    dimensions = (
+        RubricDimension(
+            "Accuracy",
+            {"excellent": "All facts are correct.", "fail": "Core facts are wrong."},
+            weight=2,
+        ),
+        RubricDimension(
+            "Completeness",
+            {"excellent": "No required facts are missing.", "fail": "Key facts are missing."},
+        ),
+        RubricDimension(
+            "Hallucination",
+            {
+                "pass": "Every claim is supported.",
+                "fail": "Any unsupported claim is present.",
+            },
+            veto=True,
+        ),
+    )
+    response = json.dumps(
+        {
+            "dimensions": [
+                {"name": "Accuracy", "score": 0.9, "reason": "Accurate."},
+                {"name": "Completeness", "score": 0.6, "reason": "One omission."},
+                {"name": "Hallucination", "score": 1, "reason": "Supported."},
+            ],
+            "reason": "Strong overall.",
+        }
+    )
+    grade = RubricJudgeGrader(
+        _JudgeClient(response),
+        dimensions,
+    ).grade(_case(), _trial())
+
+    assert grade.passed
+    assert grade.score == pytest.approx(0.8)
+    assert grade.details["weighted_score_before_veto"] == pytest.approx(0.8)
+    assert grade.details["dimensions"][0]["name"] == "Accuracy"
+    assert grade.details["veto_triggered"] is False
+
+    vetoed_response = json.loads(response)
+    vetoed_response["dimensions"][2] = {
+        "name": "Hallucination",
+        "score": 0,
+        "reason": "Unsupported claim found.",
+    }
+    vetoed = RubricJudgeGrader(
+        _JudgeClient(json.dumps(vetoed_response)),
+        dimensions,
+    ).grade(_case(), _trial())
+
+    assert not vetoed.passed
+    assert vetoed.score == 0.0
+    assert vetoed.details["weighted_score_before_veto"] == pytest.approx(0.8)
+    assert vetoed.details["failed_vetoes"] == ("Hallucination",)
+
+
+@pytest.mark.asyncio
+async def test_rubric_pairwise_judge_swaps_order_and_flags_position_bias() -> None:
+    dimension = RubricDimension(
+        "Quality",
+        {"excellent": "Better answer.", "fail": "Worse answer."},
+    )
+    position_biased = _JudgeClient('{"winner": "A", "reason": "A is better."}')
+    biased_grade = RubricJudgeGrader(
+        position_biased,
+        (dimension,),
+    ).grade_pairwise(_case(), _trial(), _trial(content="baseline"))
+
+    assert not biased_grade.passed
+    assert biased_grade.score == 0.5
+    assert biased_grade.details["position_consistent"] is False
+    assert biased_grade.details["needs_review"] is True
+    assert biased_grade.details["usage"]["total_tokens"] == 22
+    assert biased_grade.details["cost"]["amount"] == "0.06"
+
+    consistent = _SequencedJudgeClient(
+        '{"winner": "A", "reason": "A is better."}',
+        '{"winner": "B", "reason": "B is better."}',
+    )
+    consistent_grade = await RubricJudgeGrader(
+        consistent,
+        (dimension,),
+    ).grade_pairwise_async(_case(), _trial(), _trial(content="baseline"))
+
+    assert consistent_grade.passed
+    assert consistent_grade.details["winner"] == "candidate"
+    first_payload = json.loads(consistent.messages[0][1]["content"])
+    second_payload = json.loads(consistent.messages[1][1]["content"])
+    assert first_payload["answer_a"] == "answer"
+    assert second_payload["answer_a"] == "baseline"
 
 
 def test_judge_provider_failure_is_an_operational_error_and_is_accounted() -> None:
@@ -244,6 +364,9 @@ def test_judge_provider_failure_is_an_operational_error_and_is_accounted() -> No
     assert report.metrics["total_tokens"] == 18
     assert report.metrics["judge_cost"] == pytest.approx(0.03)
     assert report.metrics["total_cost"] == pytest.approx(0.05)
+    assert report.metrics["cache_hit_input_tokens"] == 4
+    assert report.metrics["cache_miss_input_tokens"] == 4
+    assert report.metrics["cache_hit_ratio"] == 0.5
 
     failing = EvalSuite(
         "judge-failure",

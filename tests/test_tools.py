@@ -989,6 +989,78 @@ def test_apply_patch_tool_is_atomic_on_multi_file_failure(tmp_path):
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
 
 
+@pytest.mark.parametrize(
+    ("patch_hunks", "mismatch_type", "hunk_index", "target_line", "reread_lines"),
+    [
+        (
+            "@@ -4,2 +4,2 @@\n stale-line-4\n-line-5\n+LINE-5",
+            "context",
+            1,
+            4,
+            (1, 7),
+        ),
+        (
+            "@@ -1 +1 @@\n-line-1\n+LINE-1\n"
+            "@@ -4 +4 @@\n-stale-line-4\n+LINE-4",
+            "removal",
+            2,
+            4,
+            (1, 7),
+        ),
+        (
+            "@@ -20 +20 @@\n-line-20\n+LINE-20",
+            "location",
+            1,
+            20,
+            (7, 10),
+        ),
+    ],
+)
+def test_apply_patch_localizes_context_failures(
+    tmp_path,
+    patch_hunks,
+    mismatch_type,
+    hunk_index,
+    target_line,
+    reread_lines,
+):
+    lines = [f"line-{line_number}" for line_number in range(1, 11)]
+    (tmp_path / "notes.txt").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+    result = apply_patch_tool(tmp_path).callable(
+        {
+            "patch": f"--- a/notes.txt\n+++ b/notes.txt\n{patch_hunks}"
+        }
+    )
+
+    assert not result.success
+    assert result.error == "patch_context_mismatch"
+    assert result.metadata["path"] == "notes.txt"
+    assert result.metadata["hunk_index"] == hunk_index
+    assert result.metadata["target_line"] == target_line
+    assert result.metadata["mismatch_type"] == mismatch_type
+    assert result.metadata["file_line_count"] == 10
+    assert result.metadata["reread_hint"] == {
+        "path": "notes.txt",
+        "start_line": reread_lines[0],
+        "end_line": reread_lines[1],
+    }
+    assert (
+        f"Patch {mismatch_type} mismatch in notes.txt at hunk {hunk_index}, "
+        f"target line {target_line}."
+    ) in result.observation
+    assert (
+        f"Reread notes.txt lines {reread_lines[0]}-{reread_lines[1]}"
+        in result.observation
+    )
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == (
+        "\n".join(lines) + "\n"
+    )
+
+
 def test_apply_patch_rolls_back_after_second_commit_write_fails(monkeypatch, tmp_path):
     (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")

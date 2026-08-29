@@ -15,6 +15,8 @@ from .graders import (
     NoErrorGrader,
     PlanGrader,
     RegexGrader,
+    RubricDimension,
+    RubricJudgeGrader,
     SkillSelectionGrader,
     StatusGrader,
     TokenBudgetGrader,
@@ -69,6 +71,7 @@ __all__ = [
     "EventSequenceGrader", "ExactAnswerGrader", "FixtureFactory", "GradeResult", "Grader",
     "JSONSchemaGrader", "LLMJudgeGrader", "LatencyGrader", "MemoryRetrievalGrader",
     "MetricThreshold", "NoErrorGrader", "PlanGrader", "RegexGrader",
-    "SkillSelectionGrader", "StatusGrader", "TokenBudgetGrader", "ToolCallGrader",
+    "RubricDimension", "RubricJudgeGrader", "SkillSelectionGrader", "StatusGrader",
+    "TokenBudgetGrader", "ToolCallGrader",
     "SQLiteEvalStore", "StoredEvalSummary", "TrialResult", "compare_reports", "export_report", "run_eval",
 ]

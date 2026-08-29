@@ -20,7 +20,7 @@ from chulk.core.actions import (
     ToolCallAction,
 )
 from chulk.core.planning import format_read_only_planning_tools, plan_looks_like_reconnaissance
-from chulk.core.state import Plan
+from chulk.core.state import Plan, tool_call_fingerprint
 
 
 PLANNING_FINAL_ANSWER_FEEDBACK = (
@@ -71,6 +71,10 @@ class ActionLoopSnapshot:
     active_plan_step_retry_count: int = 0
     active_plan_step_retry_limit: int = 0
     active_plan_step_tool_failure_count: int = 0
+    non_retryable_failure_fingerprint: str | None = None
+    non_retryable_failure_tool_name: str | None = None
+    non_retryable_failure_kind: str | None = None
+    non_retryable_failure_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -374,6 +378,18 @@ def _reduce_tool_call(
             "Planning can only use read-only reconnaissance tools before approval. "
             f"Allowed planning tools: {allowed_tools}. "
             "Return a plan action or retry with one of the allowed tools."
+        )
+
+    if (
+        snapshot.non_retryable_failure_fingerprint
+        == tool_call_fingerprint(action.tool_name, action.arguments)
+    ):
+        return _stop_with_failure(
+            "No-progress guard stopped an unchanged tool call after "
+            f"{snapshot.non_retryable_failure_count} non-retryable failure(s): "
+            f"{snapshot.non_retryable_failure_tool_name} "
+            f"({snapshot.non_retryable_failure_kind}). Change the tool or its "
+            "arguments instead of repeating the rejected call."
         )
 
     if snapshot.tool_call_count >= snapshot.max_tool_calls_per_turn:

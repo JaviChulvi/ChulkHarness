@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 import json
 import re
+from typing import cast
 
 from chulk.core.actions import AgentAction, action_json_schema_for
 from chulk.core.async_cleanup import await_cleanup_after_error
@@ -29,6 +30,7 @@ from chulk.llm import (
     LLMClient,
     LLMError,
     LLMResponse,
+    LLMStreamChunk,
 )
 from chulk.llm.base import call_async_with_supported_kwargs, call_with_supported_kwargs
 from chulk.llm.capabilities import (
@@ -78,6 +80,10 @@ class ProtocolFailure:
     message: str
 
 
+class FinalAnswerStreamIdleTimeout(TimeoutError):
+    """Raised when an async final-answer stream stops producing chunks."""
+
+
 @dataclass(frozen=True)
 class FinalAnswerStreamResult:
     """Permitted public content and terminal delivery evidence."""
@@ -87,6 +93,7 @@ class FinalAnswerStreamResult:
     public_delta_count: int
     provider_completed: bool
     error: str | None = None
+    failure_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,7 @@ class ModelTransport:
     max_reflection_attempts: int
     trace_max_prompt_chars: int
     max_output_tokens: int | None
+    stream_idle_timeout_seconds: float | None = None
     record_accounting_async: AsyncAccountingCallback | None = None
     reserve_accounting_async: AsyncReservationCallback | None = None
     release_accounting_async: AsyncReleaseCallback | None = None
@@ -279,14 +287,24 @@ class ModelTransport:
         )
         await self._flush_async()
         try:
-            stream = call_with_supported_kwargs(
-                self.llm_client.astream_final_answer,
-                messages,
-                max_output_tokens=self.max_output_tokens,
-                public_output_committed=lambda: public_sequence > 0,
-                before_fallback=lambda: self._reset_output_policy_async(policy, turn),
+            stream = cast(
+                AsyncIterator[LLMStreamChunk],
+                call_with_supported_kwargs(
+                    self.llm_client.astream_final_answer,
+                    messages,
+                    max_output_tokens=self.max_output_tokens,
+                    public_output_committed=lambda: public_sequence > 0,
+                    before_fallback=lambda: self._reset_output_policy_async(policy, turn),
+                ),
             )
-            async for chunk in stream:
+            while True:
+                try:
+                    chunk = await _next_stream_chunk(
+                        stream,
+                        timeout_seconds=self.stream_idle_timeout_seconds,
+                    )
+                except StopAsyncIteration:
+                    break
                 if chunk.usage is not None:
                     usage = chunk.usage
                 if chunk.cost is not None:
@@ -334,21 +352,28 @@ class ModelTransport:
                 completed, usage, cost, decision.reason,
             )
         except BaseException as exc:
+            failure_kind = _stream_failure_kind(exc)
             if parts and not isinstance(exc, asyncio.CancelledError):
                 return await self._finish_final_answer_stream_async(
                     turn, request_index, "".join(parts),
                     FinalAnswerDeliveryStatus.FAILED, public_sequence,
-                    False, usage, cost, str(exc),
+                    False, usage, cost, str(exc), failure_kind,
                 )
             await await_cleanup_after_error(
                 self._release_accounting_async(
-                    turn, request_index=request_index, reason="final_answer_stream_failed"
+                    turn,
+                    request_index=request_index,
+                    reason=(
+                        "final_answer_stream_idle_timeout"
+                        if failure_kind == "stream_idle_timeout"
+                        else "final_answer_stream_failed"
+                    ),
                 ),
                 exc,
             )
             self.trace(
                 TraceEvent.MODEL_STREAM_FAILED,
-                {"turn_id": turn.turn_id, "request_index": request_index, "source": "incremental_final_answer", "error": str(exc), "partial": bool(parts)},
+                {"turn_id": turn.turn_id, "request_index": request_index, "source": "incremental_final_answer", "error": str(exc), "failure_kind": failure_kind, "partial": bool(parts)},
             )
             await self._flush_async()
             if parts:
@@ -357,6 +382,7 @@ class ModelTransport:
                     "public_delta_count": public_sequence,
                     "provider_completed": False,
                     "error": "cancelled" if isinstance(exc, asyncio.CancelledError) else str(exc),
+                    "failure_kind": failure_kind,
                     "partial_content": "".join(parts),
                 }
             raise
@@ -613,6 +639,7 @@ class ModelTransport:
         usage: object,
         cost: object,
         error: str | None,
+        failure_kind: str | None = None,
     ) -> FinalAnswerStreamResult:
         usage_snapshot, cost_snapshot = await self._record_accounting_async(
             turn,
@@ -627,7 +654,7 @@ class ModelTransport:
             "source": "incremental_final_answer", "status": status.value,
             "public_delta_count": public_delta_count,
             "provider_completed": provider_completed, "usage": usage_snapshot,
-            "cost": cost_snapshot, "error": error,
+            "cost": cost_snapshot, "error": error, "failure_kind": failure_kind,
         }
         self.trace(
             TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED,
@@ -637,7 +664,8 @@ class ModelTransport:
         await self._flush_async()
         return FinalAnswerStreamResult(
             content=content, status=status, public_delta_count=public_delta_count,
-            provider_completed=provider_completed, error=error
+            provider_completed=provider_completed, error=error,
+            failure_kind=failure_kind,
         )
 
     def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
@@ -676,6 +704,10 @@ class ModelTransport:
                 native_tool_declarations if native_action_protocol else []
             ),
             context_budget=self.context_budget,
+            runtime_status=_format_runtime_status(
+                turn,
+                max_tool_calls_per_turn=self.max_tool_calls_per_turn,
+            ),
         )
 
     def compact_prompt(
@@ -2271,3 +2303,63 @@ def _redact_summary_text(value: str) -> str:
     for pattern in patterns:
         redacted = re.sub(pattern, "[redacted secret]", redacted)
     return redacted
+
+
+async def _next_stream_chunk(
+    stream: AsyncIterator[LLMStreamChunk],
+    *,
+    timeout_seconds: float | None,
+) -> LLMStreamChunk:
+    if timeout_seconds is None:
+        return await anext(stream)
+    try:
+        return await asyncio.wait_for(anext(stream), timeout=timeout_seconds)
+    except TimeoutError as exc:
+        timeout_error = FinalAnswerStreamIdleTimeout(
+            "Final answer stream stalled for "
+            f"{timeout_seconds:g} seconds without a provider chunk."
+        )
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            await await_cleanup_after_error(close(), timeout_error)
+        raise timeout_error from exc
+
+
+def _stream_failure_kind(error: BaseException) -> str | None:
+    if isinstance(error, FinalAnswerStreamIdleTimeout):
+        return "stream_idle_timeout"
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    return None
+
+
+def _format_runtime_status(
+    turn: TurnState,
+    *,
+    max_tool_calls_per_turn: int,
+) -> str:
+    remaining = max(0, max_tool_calls_per_turn - turn.tool_call_count)
+    lines = [
+        "Harness-derived status (authoritative for this request):",
+        f"tool calls: {turn.tool_call_count} used, {remaining} remaining",
+    ]
+    failure_sequence = turn.non_retryable_tool_failure_sequence()
+    if failure_sequence is None:
+        lines.append("unchanged non-retryable failures: 0")
+    else:
+        lines.append(
+            "unchanged non-retryable failures: "
+            f"{failure_sequence.count} for {failure_sequence.tool_name} "
+            f"({failure_sequence.failure_kind}); change the tool or arguments before retrying"
+        )
+    active_step = (
+        turn.active_plan.active_step()
+        if turn.active_plan is not None and turn.plan_approved
+        else None
+    )
+    lines.append(
+        f"active plan step: {active_step.id} - {active_step.title}"
+        if active_step is not None
+        else "active plan step: none"
+    )
+    return "\n".join(lines)

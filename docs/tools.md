@@ -104,6 +104,11 @@ This policy does not sandbox shell commands or custom tools; applications must
 disable or separately constrain those capabilities when file confidentiality is
 required.
 
+When `apply_patch` finds stale context, its failure identifies the file, hunk,
+target line, and whether the mismatch was in the hunk location, context, or
+removal. It also supplies a bounded nearby line range to reread before rebuilding
+the hunk from current text. The diagnostic never includes the file contents.
+
 ## Trace artifact reader
 
 `Tools.read_trace_artifact` is a separate, opt-in read capability for output
@@ -178,6 +183,14 @@ are never retried. Non-idempotent tools are held to one attempt when the policy
 requires idempotency. `RunResult.tool_calls[*].attempts` exposes immutable
 `ToolAttempt` records with timing, permission outcome, failure, and retry
 disposition.
+
+The action loop also stops before executing an unchanged call that already
+ended in a non-retryable cancellation, permission denial, unknown tool,
+invalid arguments, async/sync misuse, or fatal safety failure. A changed tool
+or argument set remains available, while environment failures and timeouts may
+still be retried or polled. Each model request receives a harness-derived late
+status section with the tool calls used and remaining, the current unchanged
+failure sequence, and the active plan step.
 
 Application dependencies injected through `ToolContext` are host-owned, but
 their methods can still produce side effects. Keep secrets out of `metadata`,

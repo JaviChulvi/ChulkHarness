@@ -29,6 +29,7 @@ from chulk._sdk.results import (
 )
 from chulk.config import Config
 from chulk.core import Agent as CoreAgent
+from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.llm import LLMClient
 from chulk.events import AgentEvent, EventName
 from chulk.execution import ExecutionBackend
@@ -114,6 +115,8 @@ class Agent:
         conversation_metadata: dict[str, object] | None = None,
         runtime_metadata: dict[str, object] | None = None,
         permission_callback: PermissionCallback | None = None,
+        plan_step_verifier: PlanStepVerifier | None = None,
+        async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
         on_event: EventCallback | None = None,
         mcp: Iterable[MCPServerConfig] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -160,6 +163,8 @@ class Agent:
                 conversation_metadata=conversation_metadata,
                 runtime_metadata=runtime_metadata,
                 permission_callback=permission_callback,
+                plan_step_verifier=plan_step_verifier,
+                async_plan_step_verifier=async_plan_step_verifier,
                 on_event=on_event,
                 mcp=mcp,
                 redaction_callback=redaction_callback,

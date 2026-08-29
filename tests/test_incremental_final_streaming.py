@@ -247,6 +247,46 @@ async def test_async_stream_uses_native_iterator_and_async_policy(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_async_stream_idle_timeout_closes_provider_and_records_stall(tmp_path) -> None:
+    class StalledLLM(IncrementalLLM):
+        def __init__(self) -> None:
+            super().__init__(("partial",))
+            self.closed = False
+
+        async def astream_final_answer(self, messages, *, max_output_tokens=None):
+            self.async_stream_called = True
+            try:
+                yield LLMStreamChunk(type="text_delta", text="partial")
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+
+    llm = StalledLLM()
+    facade = AsyncAgent(
+        config=AgentConfig(
+            project_root=tmp_path,
+            llm_timeout_seconds=0.05,
+        ),
+        llm=llm,
+        tools=[],
+        skills=[],
+        final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
+    )
+
+    result = await facade.run_result("hello")
+    turn = facade.runtime.state.turns[-1]
+
+    assert llm.closed
+    assert result.content == "partial"
+    assert result.final_answer_delivery.status is FinalAnswerDeliveryStatus.FAILED
+    assert "stalled" in (result.final_answer_delivery.error or "")
+    assert turn.extension_metadata["final_answer_delivery"]["failure_kind"] == (
+        "stream_idle_timeout"
+    )
+    await facade.close()
+
+
+@pytest.mark.asyncio
 async def test_async_hosted_create_awaits_policy_and_honors_failure_mode(
     tmp_path,
 ) -> None:

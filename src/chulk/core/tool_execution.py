@@ -23,7 +23,12 @@ from chulk.tools.permissions import (
     ToolPermissionLevel,
     ToolPermissionPolicy,
 )
-from chulk.tools.registry import ToolExecutionContext, ToolFailureKind, ToolResult
+from chulk.tools.registry import (
+    NON_RETRYABLE_TOOL_FAILURE_KINDS,
+    ToolExecutionContext,
+    ToolFailureKind,
+    ToolResult,
+)
 from chulk.tools.policy import (
     DataClassification,
     ToolAuthorization,
@@ -1657,14 +1662,7 @@ def _permission_denied_result(
 def _should_retry(result, retry_policy, attempt_number: int, max_attempts: int) -> bool:
     if result.success or retry_policy is None or attempt_number >= max_attempts:
         return False
-    if result.failure_kind in {
-        ToolFailureKind.CANCELLED,
-        ToolFailureKind.USER_BLOCKED,
-        ToolFailureKind.FATAL_SAFETY,
-        ToolFailureKind.UNKNOWN_TOOL,
-        ToolFailureKind.INVALID_ARGUMENTS,
-        ToolFailureKind.ASYNC_REQUIRED,
-    }:
+    if result.failure_kind in NON_RETRYABLE_TOOL_FAILURE_KINDS:
         return False
     return result.failure_kind in retry_policy.retryable_failure_kinds
 
