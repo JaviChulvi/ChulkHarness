@@ -1,6 +1,6 @@
 # Chulk Roadmap
 
-Last reconciled: 2026-07-26
+Last reconciled: 2026-08-29
 
 This file is the ordered implementation roadmap for ChulkHarness. It contains
 active user stories and intentionally deferred product directions. Completed
@@ -289,7 +289,7 @@ These stories are ordered after the maintenance tranche above.
 
 ### US-N2: Add A Sandbox And Richer Permission Policy
 
-- [ ] Distinguish fatal safety-policy violations from recoverable tool failures
+- [x] Distinguish fatal safety-policy violations from recoverable tool failures
   and stop the turn immediately when a fatal violation occurs.
 - [ ] Add custom permission profiles, workspace-root allowlists, command prefix
   rules, trusted read-only commands, and durable permission audit records.
