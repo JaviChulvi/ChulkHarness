@@ -179,6 +179,14 @@ requires idempotency. `RunResult.tool_calls[*].attempts` exposes immutable
 `ToolAttempt` records with timing, permission outcome, failure, and retry
 disposition.
 
+The action loop also stops before executing an unchanged call that already
+ended in a non-retryable cancellation, permission denial, unknown tool,
+invalid arguments, async/sync misuse, or fatal safety failure. A changed tool
+or argument set remains available, while environment failures and timeouts may
+still be retried or polled. Each model request receives a harness-derived late
+status section with the tool calls used and remaining, the current unchanged
+failure sequence, and the active plan step.
+
 Application dependencies injected through `ToolContext` are host-owned, but
 their methods can still produce side effects. Keep secrets out of `metadata`,
 enforce tenant scope inside the dependency, and return only the data the model

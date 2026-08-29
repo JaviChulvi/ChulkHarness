@@ -747,6 +747,7 @@ def assemble_agent(
                 model_capabilities.max_output_tokens
                 or model_capabilities.default_response_reserve_tokens
             ),
+            stream_idle_timeout_seconds=config.llm_timeout_seconds,
             event_callback=session_recorder.callback,
             event_sink=event_sink,
             audit_callback=(
@@ -1228,6 +1229,7 @@ async def assemble_async_hosted_agent(
                 model_capabilities.max_output_tokens
                 or model_capabilities.default_response_reserve_tokens
             ),
+            stream_idle_timeout_seconds=config.llm_timeout_seconds,
             event_callback=session_recorder.callback,
             audit_callback=hosted_audit,
             redaction_callback=redaction_callback,

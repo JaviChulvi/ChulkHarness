@@ -151,6 +151,11 @@ cancellation and I/O timeouts.
 Incremental final answers use the provider's async iterator directly. OpenAI
 Responses and OpenAI-compatible Chat Completions clients implement native async
 streaming; providers without it retain a one-shot async compatibility stream.
+The shared LLM timeout is reapplied while waiting for every async stream chunk.
+A stalled iterator is closed, active accounting is settled, and partial public
+content terminalizes as `failed_after_partial`; internal delivery evidence and
+the stream failure trace identify `stream_idle_timeout` separately from provider
+errors.
 
 Native async hosted factories are resolved with
 `await AsyncHostedRuntime.create(...)`. Runtime-owned async resources are

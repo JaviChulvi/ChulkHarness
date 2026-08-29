@@ -94,6 +94,7 @@ class TurnEffects:
     def snapshot(self, turn: TurnState, *, require_plan: bool) -> ActionLoopSnapshot:
         """Capture the immutable control state consumed by the reducer."""
         plan = turn.active_plan
+        failure_sequence = turn.non_retryable_tool_failure_sequence()
         active_step = plan.active_step() if plan is not None and turn.plan_approved else None
         next_step = (
             plan.next_ready_step()
@@ -122,6 +123,18 @@ class TurnEffects:
             active_plan_step_retry_limit=active_step.retry_limit if active_step else 0,
             active_plan_step_tool_failure_count=(
                 active_step.tool_failure_count if active_step else 0
+            ),
+            non_retryable_failure_fingerprint=(
+                failure_sequence.fingerprint if failure_sequence else None
+            ),
+            non_retryable_failure_tool_name=(
+                failure_sequence.tool_name if failure_sequence else None
+            ),
+            non_retryable_failure_kind=(
+                failure_sequence.failure_kind if failure_sequence else None
+            ),
+            non_retryable_failure_count=(
+                failure_sequence.count if failure_sequence else 0
             ),
         )
 
@@ -290,6 +303,8 @@ class TurnEffects:
             "provider_completed": result.provider_completed,
             "error": result.error,
         }
+        if result.failure_kind is not None:
+            delivery["failure_kind"] = result.failure_kind
         turn.extension_metadata["final_answer_delivery"] = delivery
         if content:
             self.memory.add_assistant_message(content)

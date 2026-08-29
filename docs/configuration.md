@@ -62,8 +62,10 @@ export CHULK_LLM_FALLBACK_PROVIDERS=openrouter:vendor/fallback-model,openai:gpt-
 ```
 
 Timeout and retry behavior remains shared across providers through
-`CHULK_LLM_TIMEOUT_SECONDS` and `CHULK_LLM_MAX_RETRIES`. See the provider guide
-for the exact credential and base-URL precedence.
+`CHULK_LLM_TIMEOUT_SECONDS` and `CHULK_LLM_MAX_RETRIES`. The timeout is also the
+per-chunk idle deadline for native async final-answer streams; each received
+chunk resets it. See the provider guide for the exact credential and base-URL
+precedence.
 
 ## Long-running conversation context
 

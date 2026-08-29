@@ -12,7 +12,7 @@ from chulk.core.actions import (
     PlanStepUpdateAction,
     ToolCallAction,
 )
-from chulk.core.state import Plan, PlanStep
+from chulk.core.state import Plan, PlanStep, tool_call_fingerprint
 from chulk.core.transitions import (
     ActionLoopSnapshot,
     ApplyPlanStepUpdateEffect,
@@ -304,6 +304,12 @@ def test_reduce_transition_returns_transport_details_without_mutating_inputs() -
     assert action.arguments == {"path": "README.md"}
 
 
+def test_tool_call_fingerprint_canonicalizes_argument_order() -> None:
+    assert tool_call_fingerprint("lookup", {"b": 2, "a": 1}) == (
+        tool_call_fingerprint("lookup", {"a": 1, "b": 2})
+    )
+
+
 def test_planning_tool_limit_effect_explicitly_requests_one_way_flag_update() -> None:
     snapshot = _snapshot(
         require_plan=True,
@@ -331,6 +337,52 @@ def test_tool_call_limit_is_shared_by_planning_and_execution() -> None:
     assert isinstance(planning_transition.effect, ExecuteToolEffect)
     assert isinstance(execution_transition.effect, FailTurnEffect)
     assert "tool call limit" in execution_transition.effect.message.lower()
+
+
+def test_unchanged_non_retryable_tool_failure_stops_before_execution() -> None:
+    action = _tool_call()
+    transition = reduce_transition(
+        _snapshot(
+            tool_call_count=1,
+            non_retryable_failure_fingerprint=tool_call_fingerprint(
+                action.tool_name,
+                action.arguments,
+            ),
+            non_retryable_failure_tool_name=action.tool_name,
+            non_retryable_failure_kind="invalid_arguments",
+            non_retryable_failure_count=1,
+        ),
+        ModelActionSignal(action=action),
+    )
+
+    assert isinstance(transition.effect, FailTurnEffect)
+    assert transition.outcome is TransitionOutcome.STOP
+    assert "No-progress guard" in transition.effect.message
+
+
+def test_non_retryable_failure_guard_allows_changed_arguments() -> None:
+    transition = reduce_transition(
+        _snapshot(
+            tool_call_count=1,
+            non_retryable_failure_fingerprint=tool_call_fingerprint(
+                "read_file",
+                {"path": "README.md"},
+            ),
+            non_retryable_failure_tool_name="read_file",
+            non_retryable_failure_kind="invalid_arguments",
+            non_retryable_failure_count=1,
+        ),
+        ModelActionSignal(
+            action=ToolCallAction(
+                type="tool_call",
+                tool_name="read_file",
+                arguments={"path": "TODO.md"},
+            )
+        ),
+    )
+
+    assert isinstance(transition.effect, ExecuteToolEffect)
+    assert transition.outcome is TransitionOutcome.AWAIT_RESULT
 
 
 @pytest.mark.parametrize(

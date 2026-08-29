@@ -402,6 +402,33 @@ def test_ordinary_permission_denial_remains_recoverable() -> None:
     assert result["turn"]["tool_calls"][0]["failure_kind"] == "user_blocked"
 
 
+def test_unchanged_non_retryable_failure_stops_sync_and_async_without_reexecution() -> None:
+    result = _assert_driver_parity(
+        [_tool_call("missing_tool"), _tool_call("missing_tool")],
+    )
+
+    assert result["turn"]["status"] == "failed"
+    assert result["turn"]["model_request_count"] == 2
+    assert result["turn"]["tool_call_count"] == 1
+    assert result["turn"]["tool_calls"][0]["failure_kind"] == "unknown_tool"
+    assert result["response"].startswith("No-progress guard stopped")
+
+
+def test_environment_failure_may_be_retried_unchanged_by_the_model() -> None:
+    result = _assert_driver_parity(
+        [
+            _tool_call("unstable_lookup"),
+            _tool_call("unstable_lookup"),
+            _final_answer("Explained the persistent outage."),
+        ],
+        _failure_registry,
+    )
+
+    assert result["turn"]["status"] == "completed"
+    assert result["turn"]["model_request_count"] == 3
+    assert result["turn"]["tool_call_count"] == 2
+
+
 @pytest.mark.parametrize(
     ("responses", "registry_factory", "expected_attempts", "success"),
     [

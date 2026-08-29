@@ -521,6 +521,36 @@ def test_agent_prompt_shows_available_tools():
     assert "at most 4 tool calls" in system_prompt
 
 
+def test_runtime_status_footer_reports_budget_and_last_rejected_call() -> None:
+    client = RecordingLLMClient(
+        [
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "tool_name": "missing_tool",
+                    "arguments": {},
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "Recovered."}),
+        ]
+    )
+    agent = Agent(client, max_tool_calls_per_turn=3)
+
+    assert agent.run_turn("Try the missing tool") == "Recovered."
+
+    system_content = client.requests[1][0]["content"]
+    assert system_content.index("</action_protocol>") < system_content.index(
+        "<runtime_status>"
+    )
+    assert "tool calls: 1 used, 2 remaining" in system_content
+    assert "1 for missing_tool (unknown_tool)" in system_content
+    assert "active plan step: none" in system_content
+    assert any(
+        section["name"] == "runtime_status"
+        for section in agent.state.turns[-1].context_reports[-1]["sections"]
+    )
+
+
 def test_agent_uses_native_action_prompt_and_passes_tool_specs_when_supported(tmp_path):
     llm = NativeActionRecordingLLMClient()
     registry = ToolRegistry()

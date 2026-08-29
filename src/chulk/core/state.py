@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 from uuid import uuid4
 
-from chulk.tools.registry import ToolResult
+from chulk.tools.registry import NON_RETRYABLE_TOOL_FAILURE_KINDS, ToolResult
 from chulk.core.context import TurnContextSection
 from chulk.resources import ApplicationEventIntent, HostResource
 
@@ -291,6 +292,10 @@ class ToolCallRecord:
     failure_kind: str | None = None
     metadata: dict = field(default_factory=dict)
 
+    @property
+    def fingerprint(self) -> str:
+        return tool_call_fingerprint(self.tool_name, self.arguments)
+
     def finish(self, result: ToolResult) -> None:
         self.ended_at = utc_now()
         self.resolved_tool_name = result.tool_name
@@ -314,6 +319,16 @@ class ToolCallRecord:
             "failure_kind": self.failure_kind,
             "metadata": self.metadata,
         }
+
+
+@dataclass(frozen=True)
+class ToolFailureSequence:
+    """Consecutive unchanged tool failures that cannot be retried automatically."""
+
+    tool_name: str
+    fingerprint: str
+    failure_kind: str
+    count: int
 
 
 @dataclass
@@ -416,6 +431,36 @@ class TurnState:
             and self.active_plan.status() in {"approved", "completed"}
         )
 
+    def non_retryable_tool_failure_sequence(self) -> ToolFailureSequence | None:
+        """Return the current unchanged non-retryable failure sequence, if any."""
+        sequence: ToolFailureSequence | None = None
+        for record in reversed(self.tool_calls):
+            if (
+                record.success is not False
+                or record.failure_kind not in NON_RETRYABLE_TOOL_FAILURE_KINDS
+            ):
+                break
+            if sequence is None:
+                sequence = ToolFailureSequence(
+                    tool_name=record.tool_name,
+                    fingerprint=record.fingerprint,
+                    failure_kind=record.failure_kind,
+                    count=1,
+                )
+                continue
+            if (
+                record.fingerprint != sequence.fingerprint
+                or record.failure_kind != sequence.failure_kind
+            ):
+                break
+            sequence = ToolFailureSequence(
+                tool_name=sequence.tool_name,
+                fingerprint=sequence.fingerprint,
+                failure_kind=sequence.failure_kind,
+                count=sequence.count + 1,
+            )
+        return sequence
+
     def reject_plan(self, message: str) -> None:
         if self.active_plan is not None:
             self.active_plan.reject()
@@ -463,6 +508,17 @@ class TurnState:
             "model_usage_totals": self.model_usage_totals,
             "plan_execution_feedback_count": self.plan_execution_feedback_count,
         }
+
+
+def tool_call_fingerprint(tool_name: str, arguments: dict) -> str:
+    """Return a stable identity for one model-requested tool call."""
+    canonical_arguments = json.dumps(
+        arguments,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f"{tool_name}:{canonical_arguments}"
 
 
 @dataclass
