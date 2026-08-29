@@ -34,8 +34,15 @@ CALCULATOR_SCHEMA = {
     "additionalProperties": False,
 }
 
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"count": {"type": "integer"}},
+    "required": ["count"],
+    "additionalProperties": False,
+}
 
-def _calculator_tool() -> Tool:
+
+def _calculator_tool(*, output_schema: dict | None = None) -> Tool:
     return Tool(
         name="calculator",
         description="Evaluate an arithmetic expression safely.",
@@ -44,6 +51,7 @@ def _calculator_tool() -> Tool:
         requires_confirmation=True,
         permission_level="write",
         metadata={"private_marker": "must-not-enter-the-prompt"},
+        output_schema=deepcopy(output_schema),
     )
 
 
@@ -139,6 +147,38 @@ def test_provider_action_tools_deep_copies_source_schema() -> None:
     ]
     declarations[0]["parameters"]["properties"]["expression"]["description"] = "mutated"
     assert tool.args_schema == original_schema
+
+
+def test_output_schema_is_visible_in_native_description_as_compact_json() -> None:
+    declaration = provider_action_tools(
+        [_calculator_tool(output_schema=OUTPUT_SCHEMA)],
+        planning_tools=PlanningToolAvailability(),
+    )[0]
+    compact_schema = json.dumps(
+        OUTPUT_SCHEMA,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert declaration["description"] == (
+        "Evaluate an arithmetic expression safely.\n"
+        f"Output schema: {compact_schema}"
+    )
+
+
+def test_output_schema_is_visible_in_json_fallback_catalog() -> None:
+    messages = with_json_action_prompt(
+        [],
+        tools=[_calculator_tool(output_schema=OUTPUT_SCHEMA)],
+    )
+    root = ET.fromstring(messages[0]["content"])
+    description = root.findtext("tools/available_tools/tool/description")
+
+    assert description is not None
+    assert description.endswith(
+        'Output schema: {"additionalProperties":false,"properties":{"count":{"type":"integer"}},"required":["count"],"type":"object"}'
+    )
 
 
 def test_openai_response_tools_preserves_exact_function_shape() -> None:

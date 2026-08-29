@@ -13,6 +13,7 @@ from chulk.tools.registry import (
     PLAN_STEP_UPDATE_TOOL_NAME,
     PLAN_TOOL_NAME,
     RESERVED_TOOL_NAMES,
+    tool_description_for_model,
     tool_descriptions_for_prompt,
 )
 
@@ -382,7 +383,7 @@ def public_value(value: object) -> Any:
 def _tool_declaration(tool: object) -> dict[str, Any]:
     return {
         "name": str(getattr(tool, "name")),
-        "description": str(getattr(tool, "description", "")),
+        "description": tool_description_for_model(tool),
         "parameters": deepcopy(getattr(tool, "args_schema", {}) or {}),
     }
 

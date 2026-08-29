@@ -36,6 +36,7 @@ from chulk.tools import ToolRegistry
 from chulk.tools.registry import (
     PLAN_STEP_UPDATE_TOOL_NAME,
     PLAN_TOOL_NAME,
+    tool_description_for_model,
     tool_descriptions_for_prompt,
 )
 
@@ -516,7 +517,7 @@ def _registered_native_tool_declarations(
     return [
         {
             "name": str(getattr(tool, "name")),
-            "description": str(getattr(tool, "description", "")),
+            "description": tool_description_for_model(tool),
             "parameters": getattr(tool, "args_schema", {}) or {},
         }
         for tool in tools

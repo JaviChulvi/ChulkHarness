@@ -128,6 +128,8 @@ built-in file-read deny list.
 ## Structured output
 
 Declare an object output schema with `output_schema=` or `ToolOutputPolicy`.
+The model also sees the declared schema in the tool description, whether the
+provider uses Chulk's JSON fallback catalog or native function declarations.
 The successful Python value is normalized and validated before it is accepted.
 Invalid output becomes an `invalid_output` tool failure with field-level issues.
 
