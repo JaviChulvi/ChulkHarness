@@ -131,8 +131,11 @@ from chulk.evals import (
     GradeResult,
     Grader,
     MetricThreshold,
+    RubricDimension,
+    RubricJudgeGrader,
     TrialResult,
 )
+from chulk.llm import LLMClient
 from chulk.postgres import (
     AsyncPostgreSQLEvalStore,
     AsyncPostgreSQLApprovalStore,
@@ -503,6 +506,7 @@ def consume_plugin_lifecycle(
 def consume_eval_contract(
     context: EvalContext,
     target: EvalTarget,
+    judge_client: LLMClient,
 ) -> tuple[EvalReport | object, AsyncEvalRunner]:
     case = EvalCase("typed", (EvalTurn("hello"),))
     suite = EvalSuite(
@@ -517,6 +521,24 @@ def consume_eval_contract(
     _ = context.sampling
     target_fingerprint: str = target.fingerprint
     _ = target_fingerprint
+    rubric_judge = RubricJudgeGrader(
+        judge_client,
+        (
+            RubricDimension(
+                "Accuracy",
+                {"excellent": "All facts are correct.", "fail": "Core facts are wrong."},
+            ),
+            RubricDimension(
+                "Hallucination",
+                {
+                    "pass": "Every claim is supported.",
+                    "fail": "Any unsupported claim is present.",
+                },
+                veto=True,
+            ),
+        ),
+    )
+    _ = rubric_judge.grade_pairwise
     if isinstance(report, EvalReport):
         restored = EvalReport.from_dict(report.to_dict())
         status: EvalRunStatus = restored.status

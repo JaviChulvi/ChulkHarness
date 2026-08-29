@@ -90,9 +90,50 @@ latency, tokens, and cost. `CallableGrader` accepts application checks.
 `LLMJudgeGrader` uses a separate tool-free `LLMClient`, requires strict JSON,
 supports reference and pairwise grading, and records its redacted response,
 judge model/provider, prompt version, usage, and cost. Because judging performs
-metered model calls, suites containing an `LLMJudgeGrader` also require
+metered model calls, suites containing a model judge also require
 `max_total_cost`; unknown judge pricing requires the same explicit
 `allow_unknown_cost` opt-in as live target execution.
+
+`RubricJudgeGrader` is the diagnostic, opt-in alternative. Each
+`RubricDimension` supplies concrete scoring levels and a positive weight. Mark
+a binary dimension `veto=True` when failure must zero the total. The judge
+scores the named items, while Chulk computes the weighted score and applies
+vetoes in deterministic host code.
+
+```python
+from chulk.evals import (
+    RubricDimension,
+    RubricJudgeGrader,
+)
+
+grader = RubricJudgeGrader(
+    judge_client,
+    dimensions=(
+        RubricDimension(
+            "Factual correctness",
+            {
+                "excellent": "Every material claim is supported by the reference.",
+                "fail": "A material claim contradicts or exceeds the reference.",
+            },
+            weight=2,
+        ),
+        RubricDimension(
+            "Hallucination",
+            {
+                "pass": "Every claim is traceable to supplied evidence.",
+                "fail": "Any unsupported factual claim appears.",
+            },
+            veto=True,
+        ),
+    ),
+)
+```
+
+Its pairwise methods always judge twice, with answer order swapped. Only
+order-consistent preferences count as a candidate or baseline win. A
+disagreement becomes a tie with `needs_review=true` in grade details, exposing
+position bias instead of silently averaging it away. Both calls are included
+in judge token and cost accounting.
 
 Only names in `required_graders` affect case pass/fail. Only declared
 `MetricThreshold` values affect the suite quality gate. Other graders are
