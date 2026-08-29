@@ -1,9 +1,13 @@
 """Tests for the SQLite-backed long-term memory store."""
 
+from datetime import datetime, timedelta, timezone
+import sqlite3
+
 import pytest
 
 from chulk.memory import (
     DEFAULT_MEMORY_NAMESPACE,
+    MemoryRetentionPolicy,
     SQLiteMemoryStore,
     normalize_memory_namespace,
     select_memories_for_prompt,
@@ -144,6 +148,102 @@ def test_sqlite_memory_store_deduplicates_archives_restores_and_compacts(tmp_pat
     assert any(memory.archived_at for memory in archived)
     archived_id = next(memory.id for memory in archived if memory.archived_at)
     assert store.restore_memory(archived_id)
+
+
+def test_sqlite_memory_store_applies_archive_only_retention_by_namespace(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "memory.sqlite", namespace="tenant:alpha")
+    old_id = store.save_memory("old memory", importance=1)
+    proposal_id = store.create_memory_proposal(
+        "pending memory",
+        evidence="user asked to remember it",
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+    )
+    created_at = datetime.fromisoformat(store.get_memory(old_id).updated_at)
+
+    retention_time = created_at + timedelta(days=31)
+    archived = store.apply_retention(
+        MemoryRetentionPolicy(max_age_days=30),
+        now=retention_time,
+    )
+
+    assert archived == 1
+    archived_memory = store.get_memory(old_id, include_archived=True)
+    assert archived_memory is not None
+    assert archived_memory.archived_at == retention_time.isoformat()
+    proposal = store.get_memory_proposal(proposal_id)
+    assert proposal is not None
+    assert proposal.status == "pending"
+    assert proposal.evidence == "user asked to remember it"
+
+
+def test_sqlite_memory_store_applies_count_retention_only_in_namespace(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "memory.sqlite", namespace="tenant:alpha")
+    other = SQLiteMemoryStore(tmp_path / "memory.sqlite", namespace="tenant:beta")
+    archive_id = store.save_memory("archive me", importance=1)
+    keep_id = store.save_memory("keep me", importance=9)
+    other_id = other.save_memory("other namespace memory", importance=1)
+
+    assert store.apply_retention(MemoryRetentionPolicy(max_active_items=1)) == 1
+    archived = store.get_memory(archive_id, include_archived=True)
+    assert archived is not None and archived.archived_at is not None
+    retained = store.get_memory(keep_id)
+    assert retained is not None and retained.archived_at is None
+    other_memory = other.get_memory(other_id)
+    assert other_memory is not None and other_memory.archived_at is None
+
+
+def test_combined_retention_counts_only_nonexpired_memories(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    expired_ids = [
+        store.save_memory(f"expired memory record{index:03d}", importance=10)
+        for index in range(20)
+    ]
+    fresh_ids = [
+        store.save_memory(f"fresh memory record{index:03d}", importance=1)
+        for index in range(90)
+    ]
+    latest_fresh = store.get_memory(fresh_ids[-1])
+    assert latest_fresh is not None
+    now = datetime.fromisoformat(latest_fresh.updated_at)
+    expired_at = (now - timedelta(days=31)).isoformat()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.executemany(
+            "UPDATE memories SET updated_at = ? WHERE id = ?",
+            [(expired_at, memory_id) for memory_id in expired_ids],
+        )
+
+    archived = store.apply_retention(
+        MemoryRetentionPolicy(max_age_days=30, max_active_items=100),
+        now=now,
+    )
+
+    assert archived == 20
+    assert all(
+        store.get_memory(memory_id, include_archived=True).archived_at == now.astimezone(timezone.utc).isoformat()
+        for memory_id in expired_ids
+    )
+    assert all(store.get_memory(memory_id) is not None for memory_id in fresh_ids)
+    assert len(store.list_memories(limit=100)) == 90
+
+
+def test_memory_retention_policy_validates_limits_and_clock(tmp_path):
+    with pytest.raises(ValueError, match="at least one limit"):
+        MemoryRetentionPolicy()
+    with pytest.raises(ValueError, match="max_age_days"):
+        MemoryRetentionPolicy(max_age_days=0)
+    with pytest.raises(ValueError, match="max_age_days"):
+        MemoryRetentionPolicy(max_age_days="30")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="max_active_items"):
+        MemoryRetentionPolicy(max_active_items=True)
+
+    store = SQLiteMemoryStore(tmp_path / "memory.sqlite")
+    store.save_memory("memory")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        store.apply_retention(
+            MemoryRetentionPolicy(max_age_days=1),
+            now=datetime(2026, 8, 29),
+        )
 
 
 def test_sqlite_memory_store_extracts_and_imports_exports_markdown(tmp_path):

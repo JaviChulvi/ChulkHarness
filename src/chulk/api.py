@@ -41,6 +41,7 @@ from chulk.capabilities import (
     ToolOutputPolicy,
     ToolRetryPolicy,
 )
+from chulk.memory import MemoryRetentionPolicy
 from chulk.children import (
     DEFAULT_CHILD_LEASE_SECONDS,
     AttemptBoundary,
@@ -1042,6 +1043,7 @@ __all__ = [
     "MCP",
     "MemoryError",
     "MemoryMode",
+    "MemoryRetentionPolicy",
     "MediaPart",
     "MediaReference",
     "MediaInputPart",

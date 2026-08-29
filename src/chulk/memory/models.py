@@ -42,6 +42,26 @@ class MemoryRecord:
     namespace: str = DEFAULT_MEMORY_NAMESPACE
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryRetentionPolicy:
+    """Optional archive-only limits for one memory namespace."""
+
+    max_age_days: int | None = None
+    max_active_items: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_age_days is None and self.max_active_items is None:
+            raise ValueError("Memory retention policy requires at least one limit")
+        for name, value in (
+            ("max_age_days", self.max_age_days),
+            ("max_active_items", self.max_active_items),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"{name} must be greater than zero or None")
+
+
 @dataclass(frozen=True)
 class MemoryExtractionCandidate:
     """A candidate durable memory extracted from a user message."""
@@ -99,5 +119,6 @@ __all__ = [
     "MemoryExtractionCandidate",
     "MemoryProposalRecord",
     "MemoryRecord",
+    "MemoryRetentionPolicy",
     "normalize_memory_namespace",
 ]

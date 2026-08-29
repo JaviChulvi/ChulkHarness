@@ -10,7 +10,7 @@ import pytest
 
 from chulk import Agent, AgentConfig, Capabilities, MemoryMode, MemoryProposalStatus
 from chulk.llm import LLMClient
-from chulk.memory import AsyncMemoryPolicy
+from chulk.memory import AsyncMemoryPolicy, MemoryRetentionPolicy, SQLiteMemoryStore
 
 
 class FakeLLM(LLMClient):
@@ -30,6 +30,30 @@ def _agent(root, mode: str, responses: list[str] | None = None) -> Agent:
         llm=FakeLLM(responses),
         skills=[],
     )
+
+
+def test_sdk_config_applies_opt_in_retention_at_local_runtime_startup(tmp_path):
+    store_path = tmp_path / ".chulk" / "store.sqlite"
+    store = SQLiteMemoryStore(store_path)
+    old_id = store.save_memory("old memory", importance=1)
+    keep_id = store.save_memory("keep memory", importance=9)
+
+    config = AgentConfig(
+        project_root=tmp_path,
+        memory_retention_policy=MemoryRetentionPolicy(max_active_items=1),
+    ).to_config()
+    assert config.memory_retention_policy is not None
+    facade = Agent(
+        config=config,
+        capabilities=Capabilities(files="off", memory="read-only", utilities=False),
+        llm=FakeLLM(),
+        skills=[],
+    )
+
+    retained = facade.runtime.memory_store.get_memory(keep_id)
+    archived = facade.runtime.memory_store.get_memory(old_id, include_archived=True)
+    assert retained is not None and retained.archived_at is None
+    assert archived is not None and archived.archived_at is not None
 
 
 def test_off_mode_disables_tools_retrieval_and_inferred_writes(

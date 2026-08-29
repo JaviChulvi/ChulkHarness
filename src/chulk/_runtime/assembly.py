@@ -271,6 +271,12 @@ def assemble_agent(
             namespace=memory_namespace,
         )
     ) if memory_enabled else None
+    if (
+        resolved_services is None
+        and isinstance(memory_store, SQLiteMemoryStore)
+        and config.memory_retention_policy is not None
+    ):
+        memory_store.apply_retention(config.memory_retention_policy)
     selected_capabilities = capabilities or Capabilities.full()
     if not memory_enabled and selected_capabilities.memory != MemoryMode.OFF:
         raise ValueError(

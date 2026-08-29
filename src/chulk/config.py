@@ -14,6 +14,7 @@ from chulk.llm.capabilities import (
 from chulk.llm.factory import supported_llm_providers
 from chulk.llm.providers.compatible import DEFAULT_OPENROUTER_BASE_URL
 from chulk.mcp import MCPServerConfig, load_mcp_servers
+from chulk.memory.models import MemoryRetentionPolicy
 from chulk.tools.permissions import DEFAULT_PERMISSION_PROFILE, normalize_permission_profile
 
 
@@ -102,6 +103,7 @@ class Config:
     max_reflection_attempts: int = DEFAULT_MAX_REFLECTION_ATTEMPTS
     permission_profile: str = DEFAULT_PERMISSION_PROFILE
     profile_id: str = "default"
+    memory_retention_policy: MemoryRetentionPolicy | None = None
 
 
 def _iter_dotenv(path: Path | None) -> Iterator[tuple[str, str]]:

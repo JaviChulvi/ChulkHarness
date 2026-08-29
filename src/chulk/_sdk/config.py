@@ -21,7 +21,7 @@ from chulk.config import (
     load_config,
 )
 from chulk.mcp import MCPServerConfig, build_mcp_server_config
-from chulk.memory import normalize_memory_namespace
+from chulk.memory import MemoryRetentionPolicy, normalize_memory_namespace
 
 
 SDK_DEFAULT_RUNTIME_DIR = ".chulk"
@@ -88,9 +88,15 @@ class AgentConfig:
     capabilities: Capabilities | None = None
     memory_mode: MemoryMode | str | None = None
     memory_namespace: str | None = None
+    memory_retention_policy: MemoryRetentionPolicy | None = None
     local_context_window_tokens: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        if self.memory_retention_policy is not None and not isinstance(
+            self.memory_retention_policy,
+            MemoryRetentionPolicy,
+        ):
+            raise TypeError("memory_retention_policy must be a MemoryRetentionPolicy")
         if self.mcp_servers is not None:
             object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
         if self.llm_fallback_providers is not None:
@@ -377,6 +383,7 @@ class AgentConfig:
             skills_dirs=_skills_dirs(skills_dir),
             mcp_config_path=config.mcp_config_path,
             permission_profile=permission_profile,
+            memory_retention_policy=self.memory_retention_policy,
         )
         if self.mcp_servers is not None:
             config = replace(config, mcp_servers=tuple(self.mcp_servers))

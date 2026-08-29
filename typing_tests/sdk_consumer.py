@@ -50,6 +50,7 @@ from chulk import (
     MemoryError,
     MemoryMode,
     MemoryProposal,
+    MemoryRetentionPolicy,
     FinalAnswerChunk,
     FinalAnswerDelivery,
     FinalAnswerPolicyDecision,
@@ -173,6 +174,10 @@ config: AgentConfig = AgentConfig.local(
     project_root=Path.cwd(),
     runtime_dir=".chulk",
     permission_profile="read-only",
+    memory_retention_policy=MemoryRetentionPolicy(
+        max_age_days=180,
+        max_active_items=500,
+    ),
 )
 
 

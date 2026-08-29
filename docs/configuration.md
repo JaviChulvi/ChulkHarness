@@ -32,8 +32,11 @@ different ownership classes:
 - `.chulk/store.sqlite`, sidecars, backups, traces, artifacts, and all other
   `.chulk/` contents are sensitive runtime state and must remain ignored.
 
-Applications own cleanup, retention, permissions, backup, and multi-tenant
-isolation for runtime state. Never place real secrets in configuration files,
+Applications own cleanup, permissions, backup, and multi-tenant isolation for
+runtime state. Local memory retention can be opted into with
+`AgentConfig(memory_retention_policy=MemoryRetentionPolicy(...))`; it is
+archive-first, namespace-scoped, and does not control hosted memory services.
+Never place real secrets in configuration files,
 skills, or traces. MCP authorization values belong in environment variables
 named by `authorization_env`.
 

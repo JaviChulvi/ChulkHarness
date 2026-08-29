@@ -22,6 +22,10 @@ single-project compatibility namespace `default`; it is not a safe
 multi-tenant boundary. See [memory](memory.md) for the normalization and
 isolation contract.
 
+For local SQLite memory, `AgentConfig` also accepts an opt-in
+`MemoryRetentionPolicy`; see [memory](memory.md) for its archive-first limits
+and hosted-service boundary.
+
 ```python
 from chulk import Agent, AgentConfig
 from chulk.testing import ScriptedLLMClient
