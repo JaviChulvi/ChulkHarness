@@ -65,6 +65,7 @@ SAFE_ENV_TEMPLATE_SUFFIXES = {".example", ".sample", ".template"}
 SQLITE_SIDECAR_SUFFIXES = {"journal", "shm", "wal"}
 SENSITIVE_BACKUP_SUFFIXES = {".bak", ".backup", ".old", ".orig"}
 MAX_TEXT_FILE_BYTES = 200_000
+PATCH_REREAD_CONTEXT_LINES = 3
 HUNK_HEADER_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 
 
@@ -852,7 +853,19 @@ def _prepare_patch_writes(patches: list[FilePatch], project_root: Path) -> list[
             new_lines = _apply_file_patch(old_lines, patch)
         except PatchError as exc:
             metadata = {"path": relative_path, **exc.metadata}
-            raise PatchError(str(exc), code=exc.code, metadata=metadata) from exc
+            message = str(exc)
+            reread_hint = metadata.get("reread_hint")
+            if exc.code == "patch_context_mismatch" and isinstance(reread_hint, dict):
+                reread_hint = {"path": relative_path, **reread_hint}
+                metadata["reread_hint"] = reread_hint
+                message = (
+                    f"Patch {metadata['mismatch_type']} mismatch in {relative_path} "
+                    f"at hunk {metadata['hunk_index']}, target line "
+                    f"{metadata['target_line']}. Reread {relative_path} lines "
+                    f"{reread_hint['start_line']}-{reread_hint['end_line']} and "
+                    "rebuild this hunk from the current file text."
+                )
+            raise PatchError(message, code=exc.code, metadata=metadata) from exc
 
         new_text = "\n".join(new_lines)
         if new_lines:
@@ -873,27 +886,69 @@ def _prepare_patch_writes(patches: list[FilePatch], project_root: Path) -> list[
 def _apply_file_patch(old_lines: list[str], patch: FilePatch) -> list[str]:
     output: list[str] = []
     cursor = 0
-    for hunk in patch.hunks:
+    for hunk_index, hunk in enumerate(patch.hunks, start=1):
         start_index = 0 if hunk.old_start == 0 else hunk.old_start - 1
         if start_index < cursor or start_index > len(old_lines):
-            raise PatchError("Hunk location is outside the current file.", code="patch_context_mismatch")
+            raise _patch_context_mismatch(
+                mismatch_type="location",
+                hunk_index=hunk_index,
+                target_line=start_index + 1,
+                file_line_count=len(old_lines),
+            )
         output.extend(old_lines[cursor:start_index])
         old_index = start_index
         for line in hunk.lines:
             if line.prefix == " ":
                 if old_index >= len(old_lines) or old_lines[old_index] != line.text:
-                    raise PatchError("Patch context line did not match the current file.", code="patch_context_mismatch")
+                    raise _patch_context_mismatch(
+                        mismatch_type="context",
+                        hunk_index=hunk_index,
+                        target_line=old_index + 1,
+                        file_line_count=len(old_lines),
+                    )
                 output.append(line.text)
                 old_index += 1
             elif line.prefix == "-":
                 if old_index >= len(old_lines) or old_lines[old_index] != line.text:
-                    raise PatchError("Patch removal line did not match the current file.", code="patch_context_mismatch")
+                    raise _patch_context_mismatch(
+                        mismatch_type="removal",
+                        hunk_index=hunk_index,
+                        target_line=old_index + 1,
+                        file_line_count=len(old_lines),
+                    )
                 old_index += 1
             elif line.prefix == "+":
                 output.append(line.text)
         cursor = old_index
     output.extend(old_lines[cursor:])
     return output
+
+
+def _patch_context_mismatch(
+    *,
+    mismatch_type: str,
+    hunk_index: int,
+    target_line: int,
+    file_line_count: int,
+) -> PatchError:
+    anchor_line = min(max(target_line, 1), max(file_line_count, 1))
+    return PatchError(
+        "Patch hunk did not match the current file.",
+        code="patch_context_mismatch",
+        metadata={
+            "hunk_index": hunk_index,
+            "target_line": target_line,
+            "mismatch_type": mismatch_type,
+            "file_line_count": file_line_count,
+            "reread_hint": {
+                "start_line": max(1, anchor_line - PATCH_REREAD_CONTEXT_LINES),
+                "end_line": min(
+                    max(file_line_count, 1),
+                    anchor_line + PATCH_REREAD_CONTEXT_LINES,
+                ),
+            },
+        },
+    )
 
 
 def _parse_patch_path(raw_path: str) -> str | None:
