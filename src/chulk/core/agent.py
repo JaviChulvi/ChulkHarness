@@ -19,7 +19,11 @@ from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
 from chulk.core.model_transport import ModelTransport
-from chulk.core.plan_execution import PlanExecution
+from chulk.core.plan_execution import (
+    AsyncPlanStepVerifier,
+    PlanExecution,
+    PlanStepVerifier,
+)
 from chulk.core.planning import read_only_planning_tool_names
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.state import AgentState, TurnState
@@ -141,6 +145,8 @@ class Agent:
             [PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool
         ]
         | None = None,
+        plan_step_verifier: PlanStepVerifier | None = None,
+        async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
         context_budget: ContextBudget | None = None,
         max_model_output_tokens: int | None = None,
         stream_idle_timeout_seconds: float | None = 60.0,
@@ -315,6 +321,8 @@ class Agent:
             state=self.state,
             memory=self.memory,
             trace=self._trace,
+            verifier=plan_step_verifier,
+            async_verifier=async_plan_step_verifier,
         )
         self._turn_effects = TurnEffects(
             state=self.state,

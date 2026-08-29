@@ -17,6 +17,7 @@ from chulk.capabilities import Capabilities
 from chulk.config import Config
 from chulk.core import Agent
 from chulk.core.events import AgentEvent
+from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.execution import ExecutionBackend
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import (
@@ -86,6 +87,8 @@ def create_agent(
         PermissionDecision | bool,
     ]
     | None = None,
+    plan_step_verifier: PlanStepVerifier | None = None,
+    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
     mcp_servers: Iterable[MCPServerConfig] | None = None,
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -133,6 +136,8 @@ def create_agent(
         skill_specs=skill_specs,
         system_prompt=system_prompt,
         permission_callback=permission_callback,
+        plan_step_verifier=plan_step_verifier,
+        async_plan_step_verifier=async_plan_step_verifier,
         mcp_servers=mcp_servers,
         event_sink=event_sink,
         redaction_callback=redaction_callback,
@@ -192,6 +197,8 @@ async def create_async_hosted_agent(
         PermissionDecision | bool,
     ]
     | None = None,
+    plan_step_verifier: PlanStepVerifier | None = None,
+    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
     mcp_servers: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
@@ -225,6 +232,8 @@ async def create_async_hosted_agent(
         skill_specs=skill_specs,
         system_prompt=system_prompt,
         permission_callback=permission_callback,
+        plan_step_verifier=plan_step_verifier,
+        async_plan_step_verifier=async_plan_step_verifier,
         mcp_servers=mcp_servers,
         redaction_callback=redaction_callback,
         redaction_fail_closed=redaction_fail_closed,

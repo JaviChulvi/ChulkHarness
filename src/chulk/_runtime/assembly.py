@@ -13,6 +13,7 @@ from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
 from chulk.core.events import AgentEvent, TraceEvent
+from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.execution import (
     ExecutionBackend,
@@ -139,6 +140,8 @@ def assemble_agent(
         PermissionDecision | bool,
     ]
     | None = None,
+    plan_step_verifier: PlanStepVerifier | None = None,
+    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
     mcp_servers: Iterable[MCPServerConfig] | None = None,
     event_sink: Callable[[AgentEvent], None] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -742,6 +745,8 @@ def assemble_agent(
             max_reflection_attempts=config.max_reflection_attempts,
             permission_policy=permission_policy_for_profile(config.permission_profile),
             permission_callback=permission_callback,
+            plan_step_verifier=plan_step_verifier,
+            async_plan_step_verifier=async_plan_step_verifier,
             context_budget=context_budget,
             max_model_output_tokens=(
                 model_capabilities.max_output_tokens
@@ -849,6 +854,8 @@ async def assemble_async_hosted_agent(
         PermissionDecision | bool,
     ]
     | None = None,
+    plan_step_verifier: PlanStepVerifier | None = None,
+    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
     mcp_servers: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
@@ -1224,6 +1231,8 @@ async def assemble_async_hosted_agent(
                 config.permission_profile
             ),
             permission_callback=permission_callback,
+            plan_step_verifier=plan_step_verifier,
+            async_plan_step_verifier=async_plan_step_verifier,
             context_budget=context_budget,
             max_model_output_tokens=(
                 model_capabilities.max_output_tokens

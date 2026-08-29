@@ -231,6 +231,21 @@ class TurnEffects:
                 response=streamed_response,
                 pending=None,
             )
+        if isinstance(effect, ApplyPlanStepUpdateEffect):
+            blocked_message = await self.plan.apply_step_result_async(
+                turn,
+                effect.action,
+            )
+            verification_response = (
+                self.block_turn(blocked_message, turn)
+                if blocked_message is not None
+                else None
+            )
+            return _validate_application(
+                outcome=transition.outcome,
+                response=verification_response,
+                pending=None,
+            )
         if not isinstance(effect, FinishToolEffect):
             return self.apply(
                 turn,

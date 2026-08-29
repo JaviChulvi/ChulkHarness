@@ -46,6 +46,8 @@ def test_async_hosted_create_exposes_closed_typed_signature() -> None:
         "conversation_metadata",
         "runtime_metadata",
         "permission_callback",
+        "plan_step_verifier",
+        "async_plan_step_verifier",
         "on_event",
         "mcp",
         "redaction_callback",

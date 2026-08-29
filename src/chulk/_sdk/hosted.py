@@ -35,6 +35,7 @@ from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.hosting.tool_catalog import AsyncToolCatalogResolver
 from chulk.config import Config
 from chulk.capabilities import Capabilities, MemoryMode
+from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.goals import GoalExecutionContext
 from chulk.llm import LLMClient
 from chulk.mcp import MCPServerConfig
@@ -155,6 +156,8 @@ class AsyncHostedRuntime(AsyncAgent):
         conversation_metadata: dict[str, object] | None = None,
         runtime_metadata: dict[str, object] | None = None,
         permission_callback: PermissionCallback | None = None,
+        plan_step_verifier: PlanStepVerifier | None = None,
+        async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
         on_event: EventCallback | None = None,
         mcp: Iterable[MCPServerConfig] | None = None,
         redaction_callback: Callable[[str, str, dict], str] | None = None,
@@ -207,6 +210,8 @@ class AsyncHostedRuntime(AsyncAgent):
                 skill_specs=selected_skills,
                 system_prompt=selected_prompt,
                 permission_callback=permission_callback,
+                plan_step_verifier=plan_step_verifier,
+                async_plan_step_verifier=async_plan_step_verifier,
                 mcp_servers=tuple(mcp) if mcp is not None else None,
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,

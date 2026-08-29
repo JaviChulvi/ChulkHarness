@@ -69,6 +69,35 @@ containers:
 - `FinalAnswerDelivery` distinguishes a complete answer from safe truncation,
   policy blocking, or failure after partial delivery.
 
+## Verified plan-step completion
+
+Plan-step completion remains model-asserted by default for compatibility. Hosts
+that need deterministic termination can pass `plan_step_verifier` or
+`async_plan_step_verifier`. The callback receives a
+`PlanStepVerificationRequest` containing the step description, acceptance
+criteria, prior evidence, and the model's completion claim. It must return a
+`PlanStepVerification` with a boolean decision and non-empty evidence.
+
+```python
+from chulk import PlanStepVerification
+
+def verify_step(request):
+    passed = run_acceptance_checks(request.acceptance_criteria)
+    return PlanStepVerification(
+        passed=passed,
+        evidence="Focused acceptance checks passed." if passed else "Tests still fail.",
+    )
+
+agent = Agent(..., plan_step_verifier=verify_step)
+```
+
+Only a passing decision marks the step complete, and both the model assertion
+and host verification are retained as step evidence. A rejection keeps the step
+`in_progress` and returns the verifier evidence to the model as recovery
+feedback. Async execution awaits the async callback; when only the sync callback
+is configured, it runs outside the event loop. Calling the synchronous plan
+path with only an async verifier fails explicitly instead of bypassing it.
+
 ## Incremental final answers
 
 Validated-final-answer replay remains the default. Hosted applications can opt

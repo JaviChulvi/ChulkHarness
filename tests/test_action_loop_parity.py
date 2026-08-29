@@ -12,6 +12,7 @@ import pytest
 
 from chulk.capabilities import ToolRetryPolicy
 from chulk.core import Agent
+from chulk.core.plan_execution import PlanStepVerification, PlanStepVerificationRequest
 from chulk.llm import LLMClient, LLMError
 from chulk.testing import ScriptedLLMClient, ScriptedResponse
 from chulk.tools import Tool, ToolFailureKind, ToolRegistry
@@ -477,6 +478,27 @@ def test_sync_and_async_plan_creation_and_approval_have_parity() -> None:
     assert result["turn"]["plan_approved"] is True
     assert result["turn"]["active_plan"]["status"] == "completed"
     assert result["turn"]["status"] == "completed"
+
+
+def test_sync_verifier_has_sync_and_async_plan_execution_parity() -> None:
+    def verifier(request: PlanStepVerificationRequest) -> PlanStepVerification:
+        assert request.step_id == "implementation"
+        return PlanStepVerification(
+            passed=True,
+            evidence="Host acceptance check passed.",
+        )
+
+    result = _assert_driver_parity(
+        [_plan(), _complete_plan_step(), _final_answer("Verified work complete.")],
+        planned=True,
+        agent_kwargs={"plan_step_verifier": verifier},
+    )
+
+    evidence = result["turn"]["active_plan"]["steps"][0]["evidence"]
+    assert [record["tool_name"] for record in evidence] == [
+        "plan_step_update",
+        "plan_step_verifier",
+    ]
 
 
 def test_sync_and_async_reflection_revision_have_parity() -> None:

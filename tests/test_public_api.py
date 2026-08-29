@@ -36,6 +36,8 @@ from chulk import (
     PermissionDecisionRecord,
     PermissionRequest,
     PlanResult,
+    PlanStepVerification,
+    PlanStepVerificationRequest,
     RunResult,
     Skills,
     Tool,
@@ -725,6 +727,58 @@ async def test_public_async_agent_approve_awaits_decorated_tool(tmp_path):
     assert calls == ["approved"]
     assert result.tool_calls[0].success is True
     assert result.tool_calls[0].failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_public_async_agent_uses_external_plan_step_verifier(tmp_path):
+    requests: list[PlanStepVerificationRequest] = []
+
+    async def verifier(
+        request: PlanStepVerificationRequest,
+    ) -> PlanStepVerification:
+        requests.append(request)
+        return PlanStepVerification(
+            passed=True,
+            evidence="Host assertion passed.",
+        )
+
+    llm = FakeLLMClient(
+        [
+            _plan_response(_plan_payload("Verify completion externally")),
+            json.dumps(
+                {
+                    "type": "plan_step_update",
+                    "content": None,
+                    "tool_name": None,
+                    "arguments_json": "{}",
+                    "plan_json": "{}",
+                    "step_update_json": json.dumps(
+                        {
+                            "step_id": "1",
+                            "status": "completed",
+                            "evidence": "Model completion claim.",
+                        }
+                    ),
+                }
+            ),
+            json.dumps({"type": "final_answer", "content": "verified"}),
+        ]
+    )
+    handle = AsyncAgent(
+        config=AgentConfig(project_root=tmp_path),
+        llm=llm,
+        tools=[],
+        skills=[],
+        async_plan_step_verifier=verifier,
+    )
+
+    await handle.plan_result("plan verified work")
+    result = await handle.approve_result()
+
+    assert result.status == "completed"
+    assert requests[0].asserted_evidence == "Model completion claim."
+    assert result.plan.steps[0].evidence[-1].tool_name == "plan_step_verifier"
+    assert result.plan.steps[0].evidence[-1].content == "Host assertion passed."
 
 
 def test_public_decorated_async_tool_sync_rejection_closes_coroutine():

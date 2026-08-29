@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from chulk.core.actions import PlanStepUpdateAction
@@ -13,6 +14,58 @@ from chulk.memory import ConversationMemory
 from chulk.tools.registry import ToolResult
 
 
+@dataclass(frozen=True)
+class PlanStepVerificationRequest:
+    """Detached plan-step facts supplied to a host verifier."""
+
+    turn_id: str
+    plan_summary: str
+    step_id: str
+    title: str
+    description: str
+    acceptance_criteria: tuple[str, ...]
+    asserted_evidence: str
+    recorded_evidence: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "turn_id": self.turn_id,
+            "plan_summary": self.plan_summary,
+            "step_id": self.step_id,
+            "title": self.title,
+            "description": self.description,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "asserted_evidence": self.asserted_evidence,
+            "recorded_evidence": list(self.recorded_evidence),
+        }
+
+
+@dataclass(frozen=True)
+class PlanStepVerification:
+    """Authoritative host decision for one model completion assertion."""
+
+    passed: bool
+    evidence: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.passed, bool):
+            raise TypeError("plan step verification passed must be a boolean")
+        clean_evidence = self.evidence.strip()
+        if not clean_evidence:
+            raise ValueError("plan step verification evidence cannot be empty")
+        object.__setattr__(self, "evidence", clean_evidence)
+
+    def to_dict(self) -> dict:
+        return {"passed": self.passed, "evidence": self.evidence}
+
+
+PlanStepVerifier = Callable[[PlanStepVerificationRequest], PlanStepVerification]
+AsyncPlanStepVerifier = Callable[
+    [PlanStepVerificationRequest],
+    Awaitable[PlanStepVerification],
+]
+
+
 @dataclass
 class PlanExecution:
     """Apply plan effects without deciding plan continuation policy."""
@@ -20,6 +73,8 @@ class PlanExecution:
     state: AgentState
     memory: ConversationMemory
     trace: Callable[[str, dict | None], None]
+    verifier: PlanStepVerifier | None = None
+    async_verifier: AsyncPlanStepVerifier | None = None
 
     def present(self, turn: TurnState, plan: Plan) -> str:
         turn.wait_for_plan_approval(plan)
@@ -111,8 +166,72 @@ class PlanExecution:
         step = plan.active_step()
         if step is None or action.step_id != step.id:
             raise RuntimeError("Validated plan step update lost its active step")
+        verification: PlanStepVerification | None = None
+        if action.status == "completed":
+            if self.verifier is not None:
+                verification = _require_verification(
+                    self.verifier(_verification_request(turn, plan, step, action))
+                )
+            elif self.async_verifier is not None:
+                raise RuntimeError(
+                    "async plan step verifier requires asynchronous plan execution"
+                )
+        return self._apply_step_result(turn, step, action, verification)
+
+    async def apply_step_result_async(
+        self,
+        turn: TurnState,
+        action: PlanStepUpdateAction,
+    ) -> str | None:
+        plan = turn.active_plan
+        if plan is None or not turn.plan_approved:
+            raise RuntimeError("Validated plan step update lost its approved plan")
+        step = plan.active_step()
+        if step is None or action.step_id != step.id:
+            raise RuntimeError("Validated plan step update lost its active step")
+        verification: PlanStepVerification | None = None
+        if action.status == "completed":
+            request = _verification_request(turn, plan, step, action)
+            if self.async_verifier is not None:
+                verification = _require_verification(await self.async_verifier(request))
+            elif self.verifier is not None:
+                verification = _require_verification(
+                    await asyncio.to_thread(self.verifier, request)
+                )
+        return self._apply_step_result(turn, step, action, verification)
+
+    def _apply_step_result(
+        self,
+        turn: TurnState,
+        step: PlanStep,
+        action: PlanStepUpdateAction,
+        verification: PlanStepVerification | None,
+    ) -> str | None:
+        if action.status == "completed" and verification is not None:
+            if not verification.passed:
+                self.add_observation(
+                    turn,
+                    tool_name="plan_step_verification",
+                    content=(
+                        f"Plan step verification rejected completion for {step.id}. "
+                        f"{verification.evidence} Continue working against the acceptance "
+                        "criteria before asserting completion again."
+                    ),
+                    output_metadata={
+                        "step_id": step.id,
+                        "asserted_evidence": action.evidence,
+                        "verification": verification.to_dict(),
+                    },
+                )
+                return None
         step.add_evidence(action.evidence, tool_name="plan_step_update")
         if action.status == "completed":
+            if verification is not None:
+                step.add_evidence(
+                    verification.evidence,
+                    tool_name="plan_step_verifier",
+                    metadata={"external_verification": True},
+                )
             step.mark("completed")
             self._trace_step(turn, step, TraceEvent.PLAN_STEP_COMPLETED)
             return None
@@ -312,3 +431,27 @@ def _tool_failure_reason(result: ToolResult) -> str:
 def _blocked_message(step: PlanStep) -> str:
     reason = step.blocked_reason or "Step blocked."
     return f"Plan step blocked: {step.title}. {reason}"
+
+
+def _verification_request(
+    turn: TurnState,
+    plan: Plan,
+    step: PlanStep,
+    action: PlanStepUpdateAction,
+) -> PlanStepVerificationRequest:
+    return PlanStepVerificationRequest(
+        turn_id=turn.turn_id,
+        plan_summary=plan.summary,
+        step_id=step.id,
+        title=step.title,
+        description=step.description,
+        acceptance_criteria=tuple(step.acceptance_criteria),
+        asserted_evidence=action.evidence,
+        recorded_evidence=tuple(record.content for record in step.evidence),
+    )
+
+
+def _require_verification(value: object) -> PlanStepVerification:
+    if not isinstance(value, PlanStepVerification):
+        raise TypeError("plan step verifier must return PlanStepVerification")
+    return value

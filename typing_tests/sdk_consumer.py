@@ -17,6 +17,7 @@ from chulk import (
     AsyncToolCatalogResolver,
     AsyncLearningProposalService,
     AsyncLearningReviewer,
+    AsyncPlanStepVerifier,
     AsyncPluginService,
     AsyncRuntimeServices,
     AsyncServiceBinding,
@@ -63,6 +64,9 @@ from chulk import (
     PlanStatus,
     PlanStep,
     PlanStepStatus,
+    PlanStepVerification,
+    PlanStepVerificationRequest,
+    PlanStepVerifier,
     ParentRunPolicy,
     ParentRunRecord,
     PluginLifecycleReceipt,
@@ -193,6 +197,26 @@ class OutputPolicy:
     def reset(self, *, turn_id: str) -> None:
         return None
 
+
+def verify_plan_step(
+    request: PlanStepVerificationRequest,
+) -> PlanStepVerification:
+    return PlanStepVerification(
+        passed=bool(request.acceptance_criteria),
+        evidence="Host checks completed.",
+    )
+
+
+async def verify_plan_step_async(
+    request: PlanStepVerificationRequest,
+) -> PlanStepVerification:
+    return verify_plan_step(request)
+
+
+plan_step_verifier: PlanStepVerifier = verify_plan_step
+async_plan_step_verifier: AsyncPlanStepVerifier = verify_plan_step_async
+
+
 agent = Agent(
     config=config,
     capabilities=Capabilities(files="read", memory=MemoryMode.READ_ONLY),
@@ -200,6 +224,8 @@ agent = Agent(
     skills=[Skills.files],
     final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL,
     output_policy=OutputPolicy(),
+    plan_step_verifier=plan_step_verifier,
+    async_plan_step_verifier=async_plan_step_verifier,
 )
 
 result: str = agent.run("Calculate 2 + 2")
