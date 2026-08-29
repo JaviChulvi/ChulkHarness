@@ -144,7 +144,14 @@ exceptions. `pass_rate` remains the existing case-level quality metric;
 `pass_all_k` makes its all-trials-success semantics explicit alongside the
 any-success `pass_at_k` metric. Target, provider, model, and tag dimensions
 also record case/trial counts, pass@k, pass_all_k, latency, token/cost totals,
-and error rates.
+and error rates. Reports also expose normalized cache hit, miss, and write input
+tokens plus `cache_hit_ratio`, whose denominator is the sum of those three
+buckets. `passing_case_count`, `cost_per_passing_case`, and
+`tokens_per_passing_case` make efficiency conditional on actual success and
+include both agent and judge calls. When no case passes, the per-passing-case
+metrics equal total spend and total tokens instead of emitting infinity;
+`passing_case_count=0` makes that convention explicit. The same metrics are
+available for target, provider, model, and tag groups.
 
 ## Safety and fixtures
 

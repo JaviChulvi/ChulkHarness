@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import json
 from pathlib import Path
 import threading
@@ -35,7 +36,7 @@ from chulk.evals import (
     export_report,
 )
 from chulk.testing import ScriptedLLMClient
-from chulk.results import Observation, RunResult, RunStatus, ToolCall
+from chulk.results import Cost, Observation, RunResult, RunStatus, ToolCall, Usage
 from chulk.tools import Tool, ToolPermissionLevel
 
 
@@ -523,6 +524,68 @@ def test_metrics_are_grouped_by_target_provider_model_and_tag() -> None:
     assert metrics["model.model-1.pass_all_k"] == 1.0
     assert metrics["tag.smoke.pass_rate"] == 1.0
     assert metrics["tag.smoke.trial_count"] == 1.0
+
+
+def test_metrics_report_cache_and_success_adjusted_efficiency() -> None:
+    class MeteredAgent:
+        def __init__(self, case_id: str) -> None:
+            self.case_id = case_id
+
+        def run_result(self, _message, **_kwargs):
+            return RunResult(
+                "expected" if self.case_id == "pass" else "wrong",
+                RunStatus.COMPLETED,
+                None,
+                "conversation",
+                None,
+                usage=Usage(
+                    input_tokens=100,
+                    output_tokens=20,
+                    total_tokens=120,
+                    cache_hit_input_tokens=60,
+                    cache_miss_input_tokens=30,
+                    cache_write_input_tokens=10,
+                ),
+                cost=Cost(Decimal("1.00"), pricing_known=True),
+            )
+
+        def close(self):
+            return None
+
+    def suite(*case_ids: str) -> EvalSuite:
+        cases = tuple(
+            EvalCase(
+                case_id,
+                (EvalTurn("Answer"),),
+                EvalReference(answer="expected"),
+            )
+            for case_id in case_ids
+        )
+        return EvalSuite(
+            "efficiency",
+            EvalDataset(cases),
+            (EvalTarget("sdk", lambda context: MeteredAgent(context.case_id)),),
+            (ExactAnswerGrader(),),
+            required_graders=("answer.exact",),
+        )
+
+    metrics = EvalRunner().run(suite("pass", "fail")).metrics
+
+    assert metrics["passing_case_count"] == 1.0
+    assert metrics["total_tokens"] == 240.0
+    assert metrics["tokens_per_passing_case"] == 240.0
+    assert metrics["total_cost"] == 2.0
+    assert metrics["cost_per_passing_case"] == 2.0
+    assert metrics["cache_hit_input_tokens"] == 120.0
+    assert metrics["cache_miss_input_tokens"] == 60.0
+    assert metrics["cache_write_input_tokens"] == 20.0
+    assert metrics["cache_hit_ratio"] == pytest.approx(0.6)
+    assert metrics["target.sdk.cache_hit_ratio"] == pytest.approx(0.6)
+
+    no_success = EvalRunner().run(suite("fail")).metrics
+    assert no_success["passing_case_count"] == 0.0
+    assert no_success["tokens_per_passing_case"] == no_success["total_tokens"]
+    assert no_success["cost_per_passing_case"] == no_success["total_cost"]
 
 
 def test_compare_reports_includes_paired_case_outcomes() -> None:

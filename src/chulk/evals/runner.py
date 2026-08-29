@@ -37,6 +37,7 @@ from chulk.core import Agent as CoreAgent
 from chulk.events import AgentEvent, SerializedEventPayload
 from chulk.hosting import ExecutionScope
 from chulk.llm.usage import (
+    LLMUsage,
     aggregate_cost,
     aggregate_usage,
     cost_from_dict,
@@ -1205,6 +1206,8 @@ def _build_report(
     )
     judge_tokens = sum(_trial_judge_tokens(trial) for trial in trials)
     judge_cost = sum(_trial_judge_cost(trial) for trial in trials)
+    total_tokens = float(agent_tokens + judge_tokens)
+    total_cost = sum(_trial_cost(trial)[0] for trial in trials)
     metrics: dict[str, float] = {
         "case_count": float(len(cases)),
         "trial_count": float(len(trials)),
@@ -1214,12 +1217,20 @@ def _build_report(
         "mean_latency_seconds": sum(trial.duration_seconds for trial in trials) / len(trials) if trials else 0.0,
         "agent_tokens": float(agent_tokens),
         "judge_tokens": float(judge_tokens),
-        "total_tokens": float(agent_tokens + judge_tokens),
+        "total_tokens": total_tokens,
         "judge_cost": judge_cost,
-        "total_cost": sum(_trial_cost(trial)[0] for trial in trials),
+        "total_cost": total_cost,
         "exception_count": float(sum(trial.exception is not None for trial in trials)),
         "error_rate": sum(trial.exception is not None for trial in trials) / len(trials) if trials else 0.0,
     }
+    metrics.update(
+        _efficiency_metrics(
+            cases,
+            trials,
+            total_tokens=total_tokens,
+            total_cost=total_cost,
+        )
+    )
     durations = sorted(trial.duration_seconds for trial in trials)
     metrics["p50_latency_seconds"] = _percentile(durations, 0.50)
     metrics["p95_latency_seconds"] = _percentile(durations, 0.95)
@@ -1296,6 +1307,8 @@ def _add_group_metrics(
         if turn.result.usage is not None
     )
     judge_tokens = sum(_trial_judge_tokens(trial) for trial in trials)
+    total_tokens = float(agent_tokens + judge_tokens)
+    total_cost = sum(_trial_cost(trial)[0] for trial in trials)
     exceptions = sum(trial.exception is not None for trial in trials)
     values = {
         "case_count": float(len(cases)),
@@ -1317,12 +1330,64 @@ def _add_group_metrics(
         ),
         "p50_latency_seconds": _percentile(durations, 0.50),
         "p95_latency_seconds": _percentile(durations, 0.95),
-        "total_tokens": float(agent_tokens + judge_tokens),
-        "total_cost": sum(_trial_cost(trial)[0] for trial in trials),
+        "total_tokens": total_tokens,
+        "total_cost": total_cost,
         "exception_count": float(exceptions),
         "error_rate": exceptions / len(trials) if trials else 0.0,
     }
+    values.update(
+        _efficiency_metrics(
+            cases,
+            trials,
+            total_tokens=total_tokens,
+            total_cost=total_cost,
+        )
+    )
     metrics.update({f"{prefix}.{name}": value for name, value in values.items()})
+
+
+def _efficiency_metrics(
+    cases: list[CaseResult],
+    trials: list[TrialResult],
+    *,
+    total_tokens: float,
+    total_cost: float,
+) -> dict[str, float]:
+    usage = _aggregate_eval_usage(trials)
+    cache_hit_tokens = usage.cache_hit_input_tokens if usage is not None else 0
+    cache_miss_tokens = usage.cache_miss_input_tokens if usage is not None else 0
+    cache_write_tokens = usage.cache_write_input_tokens if usage is not None else 0
+    cache_input_tokens = cache_hit_tokens + cache_miss_tokens + cache_write_tokens
+    passing_case_count = sum(case.passed for case in cases)
+    passing_divisor = max(passing_case_count, 1)
+    return {
+        "passing_case_count": float(passing_case_count),
+        "cost_per_passing_case": total_cost / passing_divisor,
+        "tokens_per_passing_case": total_tokens / passing_divisor,
+        "cache_hit_input_tokens": float(cache_hit_tokens),
+        "cache_miss_input_tokens": float(cache_miss_tokens),
+        "cache_write_input_tokens": float(cache_write_tokens),
+        "cache_hit_ratio": (
+            cache_hit_tokens / cache_input_tokens if cache_input_tokens else 0.0
+        ),
+    }
+
+
+def _aggregate_eval_usage(trials: list[TrialResult]) -> LLMUsage | None:
+    usages: list[LLMUsage | None] = []
+    for trial in trials:
+        usages.extend(
+            usage_from_dict(turn.result.usage.to_dict())
+            for turn in trial.turns
+            if turn.result.usage is not None
+        )
+        usages.extend(
+            usage_from_dict(dict(usage))
+            for grade in trial.grades
+            if grade.details.get("judge")
+            and isinstance((usage := grade.details.get("usage")), Mapping)
+        )
+    return aggregate_usage(usages, source="eval_report")
 
 
 def _percentile(values: list[float], quantile: float) -> float:
