@@ -135,6 +135,7 @@ def test_runner_executes_multiturn_public_agent_and_quality_gate() -> None:
     assert isinstance(report, EvalReport)
     assert report.passed is True
     assert report.metrics["pass_rate"] == 1.0
+    assert report.metrics["pass_all_k"] == 1.0
     assert len(report.cases[0].trials[0].turns) == 2
     assert report.cases[0].trials[0].turns[0].events
 
@@ -509,6 +510,7 @@ def test_metrics_are_grouped_by_target_provider_model_and_tag() -> None:
     assert metrics["target.sdk.case_count"] == 1.0
     assert metrics["target.sdk.trial_count"] == 1.0
     assert metrics["target.sdk.pass_at_k"] == 1.0
+    assert metrics["target.sdk.pass_all_k"] == 1.0
     assert metrics["target.sdk.p95_latency_seconds"] >= 0.0
     assert metrics["target.sdk.total_tokens"] == metrics["total_tokens"]
     assert metrics["target.sdk.total_cost"] == metrics["total_cost"]
@@ -518,8 +520,42 @@ def test_metrics_are_grouped_by_target_provider_model_and_tag() -> None:
     assert metrics["provider.fake.case_count"] == 1.0
     assert metrics["model.model-1.pass_rate"] == 1.0
     assert metrics["model.model-1.pass_at_k"] == 1.0
+    assert metrics["model.model-1.pass_all_k"] == 1.0
     assert metrics["tag.smoke.pass_rate"] == 1.0
     assert metrics["tag.smoke.trial_count"] == 1.0
+
+
+def test_compare_reports_includes_paired_case_outcomes() -> None:
+    def report(report_id: str, outcomes: dict[str, bool]) -> dict[str, object]:
+        return {
+            "id": report_id,
+            "suite_name": "paired",
+            "metrics": {"pass_rate": sum(outcomes.values()) / len(outcomes)},
+            "metadata": {"targets": [{"name": "agent", "fingerprint": "target-v1"}]},
+            "cases": [
+                {
+                    "target_name": "agent",
+                    "case_id": case_id,
+                    "passed": passed,
+                    "trials": [],
+                }
+                for case_id, passed in outcomes.items()
+            ],
+        }
+
+    comparison = compare_reports(
+        report("current", {"one": True, "two": True, "three": True, "four": False}),
+        report("baseline", {"one": False, "two": False, "three": False, "four": False}),
+    )
+
+    assert comparison.current_wins == 3
+    assert comparison.baseline_wins == 0
+    assert comparison.ties == 1
+    assert comparison.discordant_count == 3
+    assert comparison.mcnemar_p_value == pytest.approx(0.25)
+    payload = comparison.to_dict()
+    assert payload["current_wins"] == 3
+    assert payload["mcnemar_p_value"] == pytest.approx(0.25)
 
 
 def test_sync_runner_honors_explicit_bounded_concurrency() -> None:

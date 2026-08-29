@@ -1210,6 +1210,7 @@ def _build_report(
         "trial_count": float(len(trials)),
         "pass_rate": sum(case.passed for case in cases) / len(cases) if cases else 1.0,
         "pass_at_k": sum(any(_trial_required_passed(suite, trial) for trial in case.trials) for case in cases) / len(cases) if cases else 1.0,
+        "pass_all_k": sum(case.passed for case in cases) / len(cases) if cases else 1.0,
         "mean_latency_seconds": sum(trial.duration_seconds for trial in trials) / len(trials) if trials else 0.0,
         "agent_tokens": float(agent_tokens),
         "judge_tokens": float(judge_tokens),
@@ -1307,6 +1308,9 @@ def _add_group_metrics(
             / len(cases)
             if cases
             else 1.0
+        ),
+        "pass_all_k": (
+            sum(case.passed for case in cases) / len(cases) if cases else 1.0
         ),
         "mean_latency_seconds": (
             sum(durations) / len(durations) if durations else 0.0

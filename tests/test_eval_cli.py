@@ -103,6 +103,12 @@ def test_eval_cli_list_show_baseline_compare_and_export(tmp_path: Path) -> None:
     assert run_eval_command("list", store=store, json_output=True, output_func=output.append) == 0
     assert run_eval_command("baseline-set", store=store, suite_name="starter", report_id="run-1", output_func=output.append) == 0
     assert run_eval_command("compare", store=store, report_id="run-1", json_output=True, output_func=output.append) == 0
+    comparison_payload = json.loads(output[-1])
+    assert comparison_payload["current_wins"] == 0
+    assert comparison_payload["baseline_wins"] == 0
+    assert comparison_payload["ties"] == 0
+    assert comparison_payload["discordant_count"] == 0
+    assert comparison_payload["mcnemar_p_value"] == 1.0
     assert run_eval_command("show", store=store, report_id="run-1", output_func=output.append) == 0
     assert '"metadata"' in output[-1]
     assert run_eval_command("export", store=store, report_id="run-1", output_path=tmp_path / "report.html", output_func=output.append) == 0
