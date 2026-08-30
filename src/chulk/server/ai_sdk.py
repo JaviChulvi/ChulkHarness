@@ -16,6 +16,7 @@ def ai_sdk_ui_chunks(events: Iterable[AgentEvent]) -> Iterator[dict[str, Any]]:
     """
     started = False
     text_id: str | None = None
+    text_started = False
     for event in events:
         if event.name == EventName.RUN_STARTED.value:
             started = True
@@ -27,13 +28,16 @@ def ai_sdk_ui_chunks(events: Iterable[AgentEvent]) -> Iterator[dict[str, Any]]:
                 text_id = f"chulk-{event.turn_id or event.event_id}"
                 yield {"type": "start", "messageId": event.turn_id or event.event_id}
                 yield {"type": "start-step"}
+            if not text_started:
+                yield {"type": "text-start", "id": text_id}
+                text_started = True
             yield {"type": "text-delta", "id": text_id, "delta": event.to_dict()["payload"].get("text", "")}
         elif event.name in {EventName.TOOL_CALL_STARTED.value, EventName.TOOL_CALL_COMPLETED.value, EventName.TOOL_CALL_FAILED.value}:
             yield _data_chunk("tool", event)
         elif event.name in {EventName.APPROVAL_REQUESTED.value, EventName.PERMISSION_REQUESTED.value}:
             yield _data_chunk("approval", event)
         elif event.name == EventName.RUN_COMPLETED.value:
-            if text_id is not None:
+            if text_started:
                 yield {"type": "text-end", "id": text_id}
             if started:
                 yield {"type": "finish-step"}

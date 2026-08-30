@@ -114,14 +114,14 @@ class Agent:
 
         source = AgentDirectory.load(path)
         tools = tuple(kwargs.get("tools") or ())
-        kwargs["tools"] = tools
-        available = {str(getattr(tool, "name", "")) for tool in tools}
-        missing = set(source.tools) - available
+        available = {str(getattr(tool, "name", "")): tool for tool in tools}
+        missing = set(source.tools) - set(available)
         if missing:
             raise ValueError(
                 "Agent.from_directory requires the declared tools: "
                 + ", ".join(sorted(missing))
             )
+        kwargs["tools"] = tuple(available[name] for name in source.tools)
         if "system_prompt" in kwargs:
             raise ValueError("Agent.from_directory owns system_prompt through instructions.md")
         return cls(system_prompt=source.instructions, **kwargs)

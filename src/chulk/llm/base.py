@@ -192,14 +192,18 @@ class MiddlewareLLMClient:
 
     def complete_action_request(self, request: "ModelRequest", **kwargs: Any) -> LLMActionResult:
         prepared = self._prepare(request)
-        result = self.client.complete_action_request(prepared, **kwargs)
+        result = call_with_supported_kwargs(
+            self.client.complete_action_request, prepared, **kwargs
+        )
         return self._observe(prepared, result)
 
     async def acomplete_action_request(
         self, request: "ModelRequest", **kwargs: Any
     ) -> LLMActionResult:
         prepared = self._prepare(request)
-        result = await self.client.acomplete_action_request(prepared, **kwargs)
+        result = await call_async_with_supported_kwargs(
+            self.client.acomplete_action_request, prepared, **kwargs
+        )
         return self._observe(prepared, result)
 
     def _prepare(self, request: "ModelRequest") -> "ModelRequest":

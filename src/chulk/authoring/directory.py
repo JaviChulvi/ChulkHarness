@@ -8,7 +8,7 @@ import tomllib
 from typing import Any
 
 from chulk.authoring.compiler import AgentCompiler, CompiledAgentPackage, CompilerRequest
-from chulk.authoring.models import BudgetDefinition, TriggerDefinition
+from chulk.authoring.models import BudgetDefinition, TriggerDefinition, _identifier
 from chulk.hosting import ExecutionScope
 
 
@@ -130,6 +130,7 @@ class AgentDirectory:
 def initialize_agent_directory(path: Path | str, *, agent_id: str) -> tuple[Path, ...]:
     """Create a minimal agent directory without replacing user files."""
     root = Path(path).expanduser().resolve()
+    agent_id = _identifier(agent_id, "agent id")
     root.mkdir(parents=True, exist_ok=True)
     files = {
         root / "agent.toml": _manifest(agent_id),

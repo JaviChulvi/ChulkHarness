@@ -9,6 +9,7 @@ from chulk import (
     AgentCompiler,
     AgentConfig,
     AgentDirectory,
+    AsyncAgent,
     ArtifactCatalog,
     ExecutionScope,
     PromptCatalog,
@@ -24,6 +25,12 @@ from chulk.main import main
 @Tool(policy=ToolPolicy(effect=ToolEffect.READ))
 def catalog_lookup(item: str) -> str:
     """Read one catalog item."""
+    return item
+
+
+@Tool(policy=ToolPolicy(effect=ToolEffect.READ))
+def extra_lookup(item: str) -> str:
+    """A local tool not declared by the agent directory."""
     return item
 
 
@@ -112,10 +119,26 @@ def test_local_agent_directory_requires_declared_tools(tmp_path):
         path,
         config=AgentConfig(project_root=tmp_path),
         llm=ScriptedLLMClient([{"type": "final_answer", "content": "done"}]),
-        tools=[catalog_lookup],
+        tools=[catalog_lookup, extra_lookup],
         skills=[],
     ) as agent:
+        assert [tool.name for tool in agent.tool_registry.list_tools()] == ["catalog_lookup"]
         assert agent.run("Hello") == "done"
+
+
+@pytest.mark.asyncio
+async def test_async_local_agent_directory_excludes_undeclared_tools(tmp_path):
+    path = tmp_path / "support"
+    _write_agent(path)
+
+    async with AsyncAgent.from_directory(
+        path,
+        config=AgentConfig(project_root=tmp_path),
+        llm=ScriptedLLMClient([{"type": "final_answer", "content": "done"}]),
+        tools=[catalog_lookup, extra_lookup],
+        skills=[],
+    ) as agent:
+        assert [tool.name for tool in agent.tool_registry.list_tools()] == ["catalog_lookup"]
 
 
 def test_agent_directory_cli_initializes_and_checks_without_runtime_config(tmp_path):
@@ -130,3 +153,14 @@ def test_agent_directory_cli_initializes_and_checks_without_runtime_config(tmp_p
         ["agent", "check", str(path), "--json"], output_func=output.append
     ) == 0
     assert '"status": "valid"' in output[-1]
+
+
+def test_agent_directory_cli_rejects_invalid_agent_id_before_writing(tmp_path):
+    path = tmp_path / "support"
+    output: list[str] = []
+
+    assert main(
+        ["agent", "init", str(path), "--id", 'bad"id', "--json"],
+        output_func=output.append,
+    ) == 2
+    assert not path.exists()
