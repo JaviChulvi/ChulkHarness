@@ -9,29 +9,23 @@ from typing import Any, cast
 
 from chulk._version import __version__
 from chulk.capabilities import Capabilities, MemoryMode
-from chulk.config import Config
 from chulk.core import Agent, AgentState
 from chulk.core.context import ContextBudget
-from chulk.core.events import AgentEvent, TraceEvent
-from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
+from chulk.core.events import TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.execution import (
-    ExecutionBackend,
     ExecutionContextLifecycle,
     HostExecutionBackend,
 )
-from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import (
     AsyncExternalTranscriptSessionRuntimeServices,
     AsyncRuntimeServices,
-    AsyncTranscriptResolver,
     DisabledHostedService,
     ExecutionScope,
     ExternalTranscriptSessionRuntimeServices,
     RuntimeServices,
     SessionRuntimeServices,
     SkillRuntimeServices,
-    TranscriptResolver,
 )
 from chulk.hosting.async_utils import call_async_service, close_async_resource
 from chulk.hosting.services import ResolvedRuntimeServices
@@ -39,10 +33,6 @@ from chulk.hosting.sinks import (
     BufferedAsyncAuditSink,
     BufferedAsyncEventSink,
     BufferedAsyncTraceSink,
-)
-from chulk.hosting.tool_catalog import (
-    AsyncToolCatalogResolver,
-    ToolCatalogResolver,
 )
 from chulk.llm import LLMClient
 from chulk.llm.lifecycle import close_resources
@@ -66,22 +56,16 @@ from chulk.sessions import (
 from chulk.skills import (
     LearningProposalService,
     LearningReviewCoordinator,
-    LearningReviewPolicy,
-    LearningReviewQuota,
     RestrictedLearningReviewer,
     SQLiteSkillLifecycleStore,
     SkillLifecycleManager,
     SkillRegistry,
 )
 from chulk.tools import (
-    ShellExecutionPolicy,
     Tool,
     ToolExecutionContext,
 )
 from chulk.tools.permissions import (
-    PermissionDecision,
-    PermissionDecisionRecord,
-    PermissionRequest,
     permission_policy_for_profile,
 )
 from chulk.tools.policy import ToolPolicyHooks
@@ -93,13 +77,8 @@ from chulk.usage import (
     SQLiteUsageStore,
     UsageDimensions,
 )
-from chulk.streaming import (
-    AsyncIncrementalOutputPolicy,
-    FinalAnswerStreamingMode,
-    IncrementalOutputPolicy,
-    OutputPolicyFailureMode,
-)
 from chulk._runtime.request import (
+    AgentAssemblyRequest,
     client_model_capabilities,
     default_llm_client_factory,
 )
@@ -126,57 +105,8 @@ from chulk._runtime.tools import (
 
 
 def assemble_agent(
-    config: Config,
-    llm_client_factory: Callable[[Config], LLMClient] | None = None,
+    request: AgentAssemblyRequest,
     *,
-    conversation_id: str | None = None,
-    conversation_metadata: dict[str, object] | None = None,
-    llm_client: LLMClient | None = None,
-    tool_specs: Iterable[object] | None = None,
-    skill_specs: object | Iterable[object] | None = None,
-    system_prompt: str | None = None,
-    permission_callback: Callable[
-        [PermissionRequest, PermissionDecisionRecord],
-        PermissionDecision | bool,
-    ]
-    | None = None,
-    plan_step_verifier: PlanStepVerifier | None = None,
-    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
-    mcp_servers: Iterable[MCPServerConfig] | None = None,
-    event_sink: Callable[[AgentEvent], None] | None = None,
-    redaction_callback: Callable[[str, str, dict], str] | None = None,
-    redaction_fail_closed: bool = False,
-    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
-    output_policy: IncrementalOutputPolicy | None = None,
-    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
-    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
-    capabilities: Capabilities | None = None,
-    deps: object | None = None,
-    shell_execution_policy: ShellExecutionPolicy | None = None,
-    require_shell_containment: bool = False,
-    execution_backend: ExecutionBackend | None = None,
-    memory_namespace: str | None = None,
-    profile_id: str | None = None,
-    allowed_skill_names: Iterable[str] | None = None,
-    runtime_metadata: dict | None = None,
-    run_budget: RunBudget | None = None,
-    additional_run_budgets: Iterable[RunBudget] = (),
-    usage_dimensions: UsageDimensions | None = None,
-    learning_review_policy: LearningReviewPolicy | None = None,
-    learning_review_quota: LearningReviewQuota | None = None,
-    automatic_learning_approval: bool = False,
-    plugin_registry: LocalPluginRegistry | None = None,
-    goal_execution: GoalExecutionContext | None = None,
-    content_store: ContentStore | None = None,
-    media_processors: MediaProcessorRegistry | None = None,
-    services: RuntimeServices | None = None,
-    execution_scope: ExecutionScope | None = None,
-    transcript_resolver: TranscriptResolver | None = None,
-    async_transcript_resolver: AsyncTranscriptResolver | None = None,
-    transcript_timeout_seconds: float | None = None,
-    tool_catalog_resolver: ToolCatalogResolver | None = None,
-    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
-    tool_catalog_timeout_seconds: float | None = None,
     agent_factory: Callable[..., Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
@@ -184,8 +114,52 @@ def assemble_agent(
     unresolved_tool_handler: Callable[..., None] = block_unresolved_tool_intent,
 ) -> Agent:
     """Create the configured Chulk agent runtime."""
-    if llm_client is not None and llm_client_factory is not None:
-        raise ValueError("Pass either llm_client or llm_client_factory, not both")
+    config = request.config
+    llm_client_factory = request.llm_client_factory
+    conversation_id = request.conversation_id
+    conversation_metadata = request.conversation_metadata
+    llm_client = request.llm_client
+    tool_specs = request.tool_specs
+    skill_specs = request.skill_specs
+    system_prompt = request.system_prompt
+    permission_callback = request.permission_callback
+    plan_step_verifier = request.plan_step_verifier
+    async_plan_step_verifier = request.async_plan_step_verifier
+    mcp_servers = request.mcp_servers
+    event_sink = request.event_sink
+    redaction_callback = request.redaction_callback
+    redaction_fail_closed = request.redaction_fail_closed
+    final_answer_streaming = request.final_answer_streaming
+    output_policy = request.output_policy
+    async_output_policy = request.async_output_policy
+    output_policy_failure_mode = request.output_policy_failure_mode
+    capabilities = request.capabilities
+    deps = request.deps
+    shell_execution_policy = request.shell_execution_policy
+    require_shell_containment = request.require_shell_containment
+    execution_backend = request.execution_backend
+    memory_namespace = request.memory_namespace
+    profile_id = request.profile_id
+    allowed_skill_names = request.allowed_skill_names
+    runtime_metadata = request.runtime_metadata
+    run_budget = request.run_budget
+    additional_run_budgets = request.additional_run_budgets
+    usage_dimensions = request.usage_dimensions
+    learning_review_policy = request.learning_review_policy
+    learning_review_quota = request.learning_review_quota
+    automatic_learning_approval = request.automatic_learning_approval
+    plugin_registry = request.plugin_registry
+    goal_execution = request.goal_execution
+    content_store = request.content_store
+    media_processors = request.media_processors
+    services = cast(RuntimeServices | None, request.services)
+    execution_scope = request.execution_scope
+    transcript_resolver = request.transcript_resolver
+    async_transcript_resolver = request.async_transcript_resolver
+    transcript_timeout_seconds = request.transcript_timeout_seconds
+    tool_catalog_resolver = request.tool_catalog_resolver
+    async_tool_catalog_resolver = request.async_tool_catalog_resolver
+    tool_catalog_timeout_seconds = request.tool_catalog_timeout_seconds
     service_resolution = resolve_runtime_services(
         services,
         execution_scope,
@@ -838,48 +812,47 @@ def assemble_agent(
 
 
 async def assemble_async_hosted_agent(
-    config: Config,
+    request: AgentAssemblyRequest,
     *,
-    services: AsyncRuntimeServices,
-    execution_scope: ExecutionScope,
-    conversation_id: str | None = None,
-    conversation_metadata: dict[str, object] | None = None,
-    runtime_metadata: dict | None = None,
-    llm_client: LLMClient | None = None,
-    tool_specs: Iterable[object] | None = None,
-    skill_specs: object | Iterable[object] | None = None,
-    system_prompt: str | None = None,
-    permission_callback: Callable[
-        [PermissionRequest, PermissionDecisionRecord],
-        PermissionDecision | bool,
-    ]
-    | None = None,
-    plan_step_verifier: PlanStepVerifier | None = None,
-    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
-    mcp_servers: Iterable[MCPServerConfig] | None = None,
-    redaction_callback: Callable[[str, str, dict], str] | None = None,
-    redaction_fail_closed: bool = False,
-    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
-    output_policy: IncrementalOutputPolicy | None = None,
-    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
-    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
-    capabilities: Capabilities | None = None,
-    deps: object | None = None,
-    shell_execution_policy: ShellExecutionPolicy | None = None,
-    require_shell_containment: bool = False,
-    run_budget: RunBudget | None = None,
-    usage_dimensions: UsageDimensions | None = None,
-    goal_execution: GoalExecutionContext | None = None,
-    profile_id: str | None = None,
-    async_transcript_resolver: AsyncTranscriptResolver | None = None,
-    transcript_timeout_seconds: float | None = None,
-    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
-    tool_catalog_timeout_seconds: float | None = None,
     agent_factory: Callable[..., Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
     """Assemble a hosted agent without invoking async services synchronously."""
+    config = request.config
+    services = cast(AsyncRuntimeServices, request.services)
+    execution_scope = request.execution_scope
+    conversation_id = request.conversation_id
+    conversation_metadata = request.conversation_metadata
+    runtime_metadata = request.runtime_metadata
+    llm_client = request.llm_client
+    tool_specs = request.tool_specs
+    skill_specs = request.skill_specs
+    system_prompt = request.system_prompt
+    permission_callback = request.permission_callback
+    plan_step_verifier = request.plan_step_verifier
+    async_plan_step_verifier = request.async_plan_step_verifier
+    mcp_servers = request.mcp_servers
+    redaction_callback = request.redaction_callback
+    redaction_fail_closed = request.redaction_fail_closed
+    final_answer_streaming = request.final_answer_streaming
+    output_policy = request.output_policy
+    async_output_policy = request.async_output_policy
+    output_policy_failure_mode = request.output_policy_failure_mode
+    capabilities = request.capabilities
+    deps = request.deps
+    shell_execution_policy = request.shell_execution_policy
+    require_shell_containment = request.require_shell_containment
+    run_budget = request.run_budget
+    usage_dimensions = request.usage_dimensions
+    goal_execution = request.goal_execution
+    profile_id = request.profile_id
+    async_transcript_resolver = request.async_transcript_resolver
+    transcript_timeout_seconds = request.transcript_timeout_seconds
+    async_tool_catalog_resolver = request.async_tool_catalog_resolver
+    tool_catalog_timeout_seconds = request.tool_catalog_timeout_seconds
+    if services is None or execution_scope is None:
+        raise ValueError("hosted runtime requires services and an ExecutionScope")
     if tool_specs is None:
         raise ValueError("hosted runtime requires an explicit tools collection")
     if skill_specs is None:
