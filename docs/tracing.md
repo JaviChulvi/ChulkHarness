@@ -11,6 +11,10 @@ output, or credentials are absent. Restrict access, set retention, and scrub
 before sharing. Truncated tool-output artifacts beside a trace require the same
 handling.
 
+The shared baseline redactor runs before internal events reach session,
+callback, audit, hosted, and trace sinks. Optional host redactors are additional
+policy; their output passes through the baseline again before fan-out.
+
 Trace directories and artifact directories are created owner-only (`0700`) on
 POSIX; JSONL traces, full-output artifacts, and HTML exports are owner-only
 (`0600`). Existing modes are repaired when a sensitive file is opened for

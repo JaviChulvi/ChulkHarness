@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from chulk.redaction import redact_data
+
 
 @dataclass(frozen=True)
 class AgentEvent:
@@ -114,10 +116,13 @@ class RuntimeEventDispatcher:
         self.audit_callback = None
 
     def _redact_payload(self, event_type: str, payload: dict) -> dict:
+        baseline = redact_data(payload)
+        if not isinstance(baseline, dict):
+            raise TypeError("redacted event payload must remain an object")
         if self.redaction_callback is None:
-            return payload
+            return baseline
 
-        redacted_any = False
+        redacted_any = baseline != payload
         error: str | None = None
 
         def redact_value(value: object, path: str) -> object:
@@ -145,14 +150,18 @@ class RuntimeEventDispatcher:
                 ]
             return value
 
-        redacted_payload = redact_value(payload, "payload")
+        redacted_payload = redact_value(baseline, "payload")
         if not isinstance(redacted_payload, dict):
-            return payload
+            return baseline
+        final_payload = redact_data(redacted_payload)
+        if not isinstance(final_payload, dict):
+            return baseline
+        redacted_any = redacted_any or final_payload != redacted_payload
         if redacted_any:
-            redacted_payload["_redacted"] = True
+            final_payload["_redacted"] = True
         if error is not None:
-            redacted_payload["_redaction_error"] = error
-        return redacted_payload
+            final_payload["_redaction_error"] = error
+        return final_payload
 
 
 class TraceEvent:
