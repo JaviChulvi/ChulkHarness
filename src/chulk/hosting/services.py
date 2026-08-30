@@ -837,36 +837,7 @@ class RuntimeServices:
         return cls(**cast(dict[str, ServiceBinding[Any]], bindings))
 
     def resolve(self, scope: ExecutionScope) -> "ResolvedRuntimeServices":
-        values: dict[str, Any] = {}
-        owned: list[object] = []
-        owned_ids: set[int] = set()
-        try:
-            for name in _SERVICE_NAMES:
-                binding = getattr(self, name)
-                if not isinstance(binding, ServiceBinding):
-                    raise TypeError(
-                        f"hosted service {name} must be a ServiceBinding"
-                    )
-                try:
-                    resource = binding.resolve(scope)
-                except Exception as exc:
-                    raise ValueError(
-                        f"hosted service {name} could not be resolved "
-                        f"({type(exc).__name__})"
-                    ) from exc
-                values[name] = resource
-                if (
-                    binding.ownership is ResourceOwnership.RUNTIME
-                    and id(resource) not in owned_ids
-                ):
-                    owned.append(resource)
-                    owned_ids.add(id(resource))
-        except Exception:
-            for resource in reversed(owned):
-                close = getattr(resource, "close", None)
-                if callable(close):
-                    close()
-            raise
+        values, owned = _resolve_service_bindings(self, scope)
         return ResolvedRuntimeServices(
             **values,
             manifest=self.manifest,
@@ -938,46 +909,7 @@ class AsyncRuntimeServices:
         self,
         scope: ExecutionScope,
     ) -> "ResolvedRuntimeServices":
-        values: dict[str, Any] = {}
-        owned: list[object] = []
-        owned_ids: set[int] = set()
-        try:
-            for name in _SERVICE_NAMES:
-                binding = getattr(self, name)
-                try:
-                    if isinstance(binding, AsyncServiceBinding):
-                        resource = await binding.resolve(scope)
-                    elif isinstance(binding, ServiceBinding):
-                        resource = await _resolve_sync_binding_async(
-                            binding,
-                            scope,
-                            owned_ids=owned_ids,
-                        )
-                    else:
-                        raise TypeError(
-                            f"hosted service {name} must be a service binding"
-                        )
-                except Exception as exc:
-                    raise ValueError(
-                        f"hosted service {name} could not be resolved "
-                        f"({type(exc).__name__})"
-                    ) from exc
-                values[name] = resource
-                if (
-                    binding.ownership is ResourceOwnership.RUNTIME
-                    and id(resource) not in owned_ids
-                ):
-                    owned.append(resource)
-                    owned_ids.add(id(resource))
-        except BaseException as exc:
-            try:
-                await _aclose_resources(reversed(owned))
-            except BaseException as cleanup_error:
-                exc.add_note(
-                    "async service resolution cleanup also failed with "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
-                )
-            raise
+        values, owned = await _resolve_service_bindings_async(self, scope)
         return ResolvedRuntimeServices(
             **values,
             manifest=self.manifest,
@@ -1068,6 +1000,91 @@ class ResolvedRuntimeServices:
                         break
         if failure is not None:
             raise failure
+
+
+def _resolve_service_bindings(
+    services: RuntimeServices,
+    scope: ExecutionScope,
+) -> tuple[dict[str, Any], tuple[object, ...]]:
+    """Resolve a sync bundle while preserving runtime ownership semantics."""
+    values: dict[str, Any] = {}
+    owned: list[object] = []
+    owned_ids: set[int] = set()
+    try:
+        for name in _SERVICE_NAMES:
+            binding = getattr(services, name)
+            if not isinstance(binding, ServiceBinding):
+                raise TypeError(f"hosted service {name} must be a ServiceBinding")
+            try:
+                resource = binding.resolve(scope)
+            except Exception as exc:
+                raise ValueError(
+                    f"hosted service {name} could not be resolved "
+                    f"({type(exc).__name__})"
+                ) from exc
+            values[name] = resource
+            _track_runtime_owned_resource(binding, resource, owned, owned_ids)
+    except Exception:
+        for resource in reversed(owned):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
+        raise
+    return values, tuple(owned)
+
+
+async def _resolve_service_bindings_async(
+    services: AsyncRuntimeServices,
+    scope: ExecutionScope,
+) -> tuple[dict[str, Any], tuple[object, ...]]:
+    """Resolve an async bundle with the same ownership tracking as sync."""
+    values: dict[str, Any] = {}
+    owned: list[object] = []
+    owned_ids: set[int] = set()
+    try:
+        for name in _SERVICE_NAMES:
+            binding = getattr(services, name)
+            try:
+                if isinstance(binding, AsyncServiceBinding):
+                    resource = await binding.resolve(scope)
+                elif isinstance(binding, ServiceBinding):
+                    resource = await _resolve_sync_binding_async(
+                        binding,
+                        scope,
+                        owned_ids=owned_ids,
+                    )
+                else:
+                    raise TypeError(
+                        f"hosted service {name} must be a service binding"
+                    )
+            except Exception as exc:
+                raise ValueError(
+                    f"hosted service {name} could not be resolved "
+                    f"({type(exc).__name__})"
+                ) from exc
+            values[name] = resource
+            _track_runtime_owned_resource(binding, resource, owned, owned_ids)
+    except BaseException as exc:
+        try:
+            await _aclose_resources(reversed(owned))
+        except BaseException as cleanup_error:
+            exc.add_note(
+                "async service resolution cleanup also failed with "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        raise
+    return values, tuple(owned)
+
+
+def _track_runtime_owned_resource(
+    binding: ServiceBinding[Any] | AsyncServiceBinding[Any],
+    resource: object,
+    owned: list[object],
+    owned_ids: set[int],
+) -> None:
+    if binding.ownership is ResourceOwnership.RUNTIME and id(resource) not in owned_ids:
+        owned.append(resource)
+        owned_ids.add(id(resource))
 
 
 async def _aclose_resources(resources: Any) -> None:
