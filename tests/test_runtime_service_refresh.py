@@ -1,121 +1,100 @@
-"""Compatibility tests for mutable Agent runtime configuration."""
+"""Owner API tests for intentionally replaceable runtime services."""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from chulk.core import Agent
-from chulk.core.context import ContextBudget
-from chulk.core.state import AgentState
-from chulk.memory import ConversationMemory
+from chulk.core.actions import FinalAnswerAction
+from chulk.core.events import TraceEvent
+from chulk.core.state import TurnState
+from chulk.llm.capabilities import LLMCapabilities
 from chulk.testing import ScriptedLLMClient
-from chulk.tools import ToolRegistry
+from chulk.tools import Tool, ToolRegistry
 from chulk.tools.permissions import ToolPermissionPolicy
+from tests.core_agent import build_core_agent as Agent
 
 
-def test_agent_refreshes_service_captured_runtime_configuration() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [None, RuntimeError("failed"), asyncio.CancelledError()],
+)
+def test_model_client_override_restores_after_every_exit(failure: BaseException | None) -> None:
+    original = ScriptedLLMClient([])
+    replacement = ScriptedLLMClient([])
+    agent = Agent(original)
+
+    if failure is None:
+        with agent._model_transport.override_client(replacement):
+            assert agent._model_transport.llm_client is replacement
+    else:
+        with pytest.raises(type(failure)):
+            with agent._model_transport.override_client(replacement):
+                raise failure
+
+    assert agent._model_transport.llm_client is original
+
+
+def test_catalog_updates_model_and_execution_registry_together() -> None:
     agent = Agent(ScriptedLLMClient([]))
-    llm = ScriptedLLMClient([])
-    state = AgentState()
-    memory = ConversationMemory()
-    registry = ToolRegistry()
-    permission_policy = ToolPermissionPolicy()
-    context_budget = ContextBudget(max_prompt_tokens=1234, response_reserve_tokens=12)
-
-    agent.llm_client = llm
-    agent.state = state
-    agent.memory = memory
-    agent.tool_registry = registry
-    agent.permission_policy = permission_policy
-    agent.system_prompt = "replacement system prompt"
-    agent.context_budget = context_budget
-    agent.max_skill_content_chars = 111
-    agent.max_tool_calls_per_turn = 7
-    agent.max_json_repair_attempts = 4
-    agent.max_reflection_attempts = 2
-    agent.trace_max_prompt_chars = 2222
-    agent.max_observation_chars = 333
-    agent.max_tool_stdout_chars = 444
-    agent.max_tool_stderr_chars = 555
-
-    agent._refresh_action_runtime()
-
-    assert agent._model_transport.llm_client is llm
-    assert agent._model_transport.state is state
-    assert agent._model_transport.memory is memory
-    assert agent._model_transport.tool_registry is registry
-    assert agent._model_transport.system_prompt == "replacement system prompt"
-    assert agent._model_transport.context_budget is context_budget
-    assert agent._model_transport.max_json_repair_attempts == 4
-    assert agent._tool_executor.registry is registry
-    assert agent._tool_executor.permission_policy is permission_policy
-    assert agent._plan_execution.state is state
-    assert agent._turn_effects.state is state
-    assert agent._turn_effects.max_tool_calls_per_turn == 7
-    assert agent._turn_effects.max_reflection_attempts == 2
-    assert agent._turn_effects.max_observation_chars == 333
-    assert agent._turn_effects.max_tool_stdout_chars == 444
-    assert agent._turn_effects.max_tool_stderr_chars == 555
-
-
-def test_replaced_state_and_memory_are_used_when_turn_setup_fails() -> None:
-    events: list[tuple[str, dict]] = []
-    fail_turn_start = True
-
-    def capture(event_type: str, payload: dict) -> None:
-        nonlocal fail_turn_start
-        if event_type == "turn_started" and fail_turn_start:
-            fail_turn_start = False
-            raise RuntimeError("turn-start failure")
-        events.append((event_type, payload))
-
-    agent = Agent(ScriptedLLMClient([]), event_callback=capture)
-    state = AgentState()
-    memory = ConversationMemory()
-    agent.state = state
-    agent.memory = memory
-
-    with pytest.raises(RuntimeError, match="turn-start failure"):
-        agent.run_turn("Trigger setup failure")
-
-    finished = next(payload for event, payload in events if event == "turn_finished")
-    assert state.turns[-1].status == "failed"
-    assert len(memory.messages) == 1
-    assert finished["agent_state"]["turn_count"] == 1
-    assert finished["agent_state"]["message_count"] == 1
-    assert finished["agent_state"]["error_count"] == 1
-    assert finished["agent_state"]["final_answer"].endswith("turn-start failure")
-
-
-def test_reject_plan_snapshots_replaced_memory() -> None:
-    events: list[tuple[str, dict]] = []
-    agent = Agent(
-        ScriptedLLMClient(
-            [
-                {
-                    "type": "plan",
-                    "plan": {
-                        "summary": "Implement the change.",
-                        "steps": [
-                            {
-                                "id": "implementation",
-                                "title": "Implement",
-                                "description": "Implement and verify the change.",
-                            }
-                        ],
-                    },
-                }
-            ]
-        ),
-        event_callback=lambda event, payload: events.append((event, payload)),
+    replacement = ToolRegistry()
+    replacement.register(
+        Tool(
+            name="inspect_repo",
+            description="Inspect the repository.",
+            args_schema={"type": "object"},
+            callable=lambda _arguments: None,
+        )
     )
-    agent.run_planned_turn("Create a plan")
-    replacement_memory = ConversationMemory()
-    agent.memory = replacement_memory
-    events.clear()
 
-    assert agent.reject_plan() == "Plan rejected. No tools were run."
+    agent.catalog.set_registry(replacement)
 
-    finished = next(payload for event, payload in events if event == "turn_finished")
-    assert len(replacement_memory.messages) == 1
-    assert finished["agent_state"]["message_count"] == 1
+    assert agent.catalog.active_registry is replacement
+    assert agent._model_transport.tool_registry is replacement
+    assert agent._tool_executor.registry is replacement
+    snapshot = agent._turn_effects.snapshot(
+        TurnState(user_message="inspect"),
+        require_plan=True,
+    )
+    assert snapshot.planning_tool_names == frozenset({"inspect_repo"})
+
+
+def test_model_client_override_updates_client_dependent_effects() -> None:
+    class StreamingScriptedLLMClient(ScriptedLLMClient):
+        capabilities = LLMCapabilities(supports_streaming=True)
+
+    events: list[str] = []
+    replacement = StreamingScriptedLLMClient(
+        [FinalAnswerAction(type="final_answer", content="streamed")]
+    )
+    agent = Agent(
+        ScriptedLLMClient([]),
+        event_callback=lambda event, _payload: events.append(event),
+    )
+
+    with agent._model_transport.override_client(replacement):
+        assert agent.run_turn("hello") == "streamed"
+
+    assert TraceEvent.MODEL_STREAM_STARTED in events
+
+
+def test_event_capture_and_permission_replacement_are_owned() -> None:
+    base_events: list[str] = []
+    captured_events: list[str] = []
+    agent = Agent(
+        ScriptedLLMClient([]),
+        event_callback=lambda event, _payload: base_events.append(event),
+    )
+    replacement_policy = ToolPermissionPolicy(name="evaluation")
+
+    agent._tool_executor.set_permission_policy(replacement_policy)
+    with agent.events.capture(
+        lambda event, _payload: captured_events.append(event)
+    ):
+        agent.events.emit("captured")
+    agent.events.emit("base-only")
+
+    assert agent._tool_executor.permission_policy is replacement_policy
+    assert captured_events == ["captured"]
+    assert base_events == ["captured", "base-only"]

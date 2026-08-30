@@ -34,6 +34,7 @@ from chulk._sdk.results import (
     usage_snapshot,
 )
 from chulk.core import Agent as CoreAgent
+from chulk.core.action_runtime import AgentRuntimeComponents
 from chulk.events import AgentEvent, SerializedEventPayload
 from chulk.hosting import ExecutionScope
 from chulk.llm.usage import (
@@ -298,8 +299,6 @@ class EvalRunner:
         instance = agent
         runtime: Any | None = None
         owned = agent is None
-        original_client = None
-        original_callback = None
         turn_count = 0
         answer = None
         execution_exception = None
@@ -307,26 +306,21 @@ class EvalRunner:
         events: list[str] = []
         try:
             if instance is None:
-                instance = (self.agent_factory or CoreAgent)(client)
+                instance = (
+                    self.agent_factory(client)
+                    if self.agent_factory is not None
+                    else CoreAgent(AgentRuntimeComponents(llm_client=client))
+                )
             runtime = _runtime_from_agent(instance)
             turn_count = len(runtime.state.turns)
-            original_client = runtime.llm_client
-            original_callback = runtime.event_callback
-            runtime.llm_client = client
-
-            def capture(event_type: str, payload: dict[str, Any]) -> None:
-                events.append(event_type)
-                if callable(original_callback):
-                    original_callback(event_type, payload)
-
-            runtime.event_callback = capture
-            answer = _run_legacy_agent(instance, scenario.user_message)
+            with runtime._model_transport.override_client(client):
+                with runtime.events.capture(
+                    lambda event_type, _payload: events.append(event_type)
+                ):
+                    answer = _run_legacy_agent(instance, scenario.user_message)
         except Exception as exc:
             execution_exception = exc
         finally:
-            if runtime is not None:
-                runtime.event_callback = original_callback
-                runtime.llm_client = original_client
             if owned and instance is not None:
                 close = getattr(instance, "close", None)
                 if callable(close):
@@ -1058,7 +1052,9 @@ def _replace_context_deps(context: EvalContext, deps: object) -> EvalContext:
 
 
 def _validate_agent_safety(agent: object, suite: EvalSuite) -> None:
-    registry = getattr(agent, "tool_registry", None)
+    runtime = getattr(agent, "runtime", agent)
+    catalog = getattr(runtime, "catalog", None)
+    registry = getattr(catalog, "active_registry", None)
     if registry is None or not callable(getattr(registry, "list_tools", None)):
         return
     tools = registry.list_tools()
@@ -1066,13 +1062,13 @@ def _validate_agent_safety(agent: object, suite: EvalSuite) -> None:
         tool.normalized_permission_level() is not ToolPermissionLevel.READ
         for tool in tools
     )
-    runtime = getattr(agent, "runtime", agent)
-    if not hasattr(runtime, "permission_policy"):
+    executor = getattr(runtime, "_tool_executor", None)
+    if executor is None:
         if has_side_effects:
             raise TypeError("eval agent cannot apply the required tool permission policy")
         return
-    runtime.permission_policy = _EvalToolPermissionPolicy(
-        suite.safety.allowed_tool_names
+    executor.set_permission_policy(
+        _EvalToolPermissionPolicy(suite.safety.allowed_tool_names)
     )
 
 
@@ -1780,7 +1776,11 @@ def _merge_exceptions(exception: str | None, cleanup_errors: list[str]) -> str |
 
 def _runtime_from_agent(agent: object) -> Any:
     runtime = getattr(agent, "runtime", agent)
-    missing = [name for name in ("state", "llm_client", "event_callback") if not hasattr(runtime, name)]
+    missing = [
+        name
+        for name in ("state", "events", "_model_transport")
+        if not hasattr(runtime, name)
+    ]
     if missing:
         raise TypeError(f"Eval agent runtime is missing: {', '.join(missing)}")
     return runtime

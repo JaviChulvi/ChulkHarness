@@ -119,6 +119,191 @@ class ResolvedToolCatalog:
         }
 
 
+class ToolCatalogRuntime:
+    """Own the active registry and request-scoped catalog consistency."""
+
+    def __init__(
+        self,
+        *,
+        registry: ToolRegistry,
+        state: Any,
+        execution_scope: ExecutionScope | None,
+        resolver: ToolCatalogResolver | None = None,
+        async_resolver: AsyncToolCatalogResolver | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError("tool catalog timeout_seconds must be greater than zero")
+        self.registry = registry
+        self.state = state
+        self.execution_scope = execution_scope
+        self.resolver = resolver
+        self.async_resolver = async_resolver
+        self.timeout_seconds = timeout_seconds
+        self._registry_consumers: list[Callable[[ToolRegistry], None]] = []
+
+    @property
+    def dynamic(self) -> bool:
+        return self.resolver is not None or self.async_resolver is not None
+
+    @property
+    def active_registry(self) -> ToolRegistry:
+        return self.registry
+
+    def add_registry_consumer(
+        self,
+        consumer: Callable[[ToolRegistry], None],
+    ) -> None:
+        self._registry_consumers.append(consumer)
+        consumer(self.registry)
+
+    def set_registry(self, registry: ToolRegistry) -> None:
+        self.registry = registry
+        for consumer in self._registry_consumers:
+            consumer(registry)
+
+    def resolve(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ResolvedToolCatalog | None:
+        if self.async_resolver is not None:
+            raise ToolCatalogResolutionError(
+                "async tool catalog resolver requires an async hosted run"
+            )
+        if self.resolver is None:
+            return None
+        return resolve_tool_catalog(
+            self.resolver,
+            self._request(
+                user_message,
+                turn_id=turn_id,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+            ),
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    async def resolve_async(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ResolvedToolCatalog | None:
+        if self.async_resolver is None:
+            if self.resolver is not None:
+                raise ToolCatalogResolutionError(
+                    "native async runs require async_tool_catalog_resolver"
+                )
+            return None
+        return await resolve_tool_catalog_async(
+            self.async_resolver,
+            self._request(
+                user_message,
+                turn_id=turn_id,
+                prompt_profile=prompt_profile,
+                locale=locale,
+                extension_metadata=extension_metadata,
+            ),
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    def activate(
+        self,
+        catalog: ResolvedToolCatalog | None,
+        extension_metadata: dict | None,
+    ) -> dict:
+        metadata = deepcopy(extension_metadata or {})
+        if catalog is None:
+            return metadata
+        self.set_registry(catalog.create_registry())
+        metadata["tool_catalog"] = catalog.to_dict()
+        return metadata
+
+    def revalidate(self, turn: Any) -> None:
+        recorded = turn.extension_metadata.get("tool_catalog")
+        if not isinstance(recorded, dict):
+            return
+        catalog = self.resolve(
+            turn.user_message,
+            turn_id=turn.turn_id,
+            prompt_profile=turn.prompt_profile,
+            locale=turn.locale,
+            extension_metadata=turn.extension_metadata,
+        )
+        self._assert_and_activate(recorded, catalog)
+
+    async def revalidate_async(self, turn: Any) -> None:
+        recorded = turn.extension_metadata.get("tool_catalog")
+        if not isinstance(recorded, dict):
+            return
+        catalog = await self.resolve_async(
+            turn.user_message,
+            turn_id=turn.turn_id,
+            prompt_profile=turn.prompt_profile,
+            locale=turn.locale,
+            extension_metadata=turn.extension_metadata,
+        )
+        self._assert_and_activate(recorded, catalog)
+
+    def _request(
+        self,
+        user_message: str,
+        *,
+        turn_id: str,
+        prompt_profile: str | None,
+        locale: str | None,
+        extension_metadata: dict | None,
+    ) -> ToolCatalogRequest:
+        if self.execution_scope is None:
+            raise ToolCatalogResolutionError(
+                "request-scoped tool catalogs require an execution scope"
+            )
+        extensions = deepcopy(extension_metadata or {})
+        extensions.pop("tool_catalog", None)
+        metadata = {
+            "prompt_profile": prompt_profile,
+            "locale": locale,
+            "extensions": extensions,
+        }
+        try:
+            encoded = json.dumps(metadata, sort_keys=True, default=str)
+        except (TypeError, ValueError) as exc:
+            raise ToolCatalogResolutionError(
+                "tool catalog turn metadata is not serializable"
+            ) from exc
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise ToolCatalogResolutionError(
+                "tool catalog turn metadata exceeds 16384 bytes"
+            )
+        return ToolCatalogRequest.for_turn(
+            self.execution_scope,
+            conversation_id=self.state.conversation_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            metadata=metadata,
+        )
+
+    def _assert_and_activate(
+        self,
+        recorded: dict,
+        catalog: ResolvedToolCatalog | None,
+    ) -> None:
+        if catalog is None or recorded.get("digest") != catalog.digest:
+            raise ToolCatalogResolutionError(
+                "tool catalog changed since the turn was submitted"
+            )
+        self.set_registry(catalog.create_registry())
+
+
 if TYPE_CHECKING:
     ToolCatalogValue: TypeAlias = ResolvedToolCatalog | Iterable[Tool]
 else:

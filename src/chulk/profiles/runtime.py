@@ -71,6 +71,7 @@ class ProfileRuntimeFactory:
 
     def create_agent(self, profile_id: str | None = None, **kwargs: Any):
         """Create an agent after applying host-owned profile restrictions."""
+        from chulk._runtime.request import AgentAssemblyRequest
         from chulk.runtime import create_agent
 
         resolved = self.resolve(profile_id)
@@ -109,7 +110,7 @@ class ProfileRuntimeFactory:
                 ) from exc
             kwargs["execution_backend"] = backend_factory(profile, resolved.config)
         kwargs["profile_id"] = profile.id
-        return create_agent(resolved.config, **kwargs)
+        return create_agent(AgentAssemblyRequest(config=resolved.config, **kwargs))
 
 
 def profile_control_path(config: Config) -> Path:

@@ -10,8 +10,9 @@ from typing import Any, cast
 from chulk._version import __version__
 from chulk.capabilities import Capabilities, MemoryMode
 from chulk.core import Agent, AgentState
+from chulk.core.action_runtime import AgentRuntimeComponents
 from chulk.core.context import ContextBudget
-from chulk.core.events import TraceEvent
+from chulk.core.events import RuntimeEventDispatcher, TraceEvent
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.execution import (
     ExecutionContextLifecycle,
@@ -82,6 +83,7 @@ from chulk._runtime.request import (
     client_model_capabilities,
     default_llm_client_factory,
 )
+from chulk.core.resource_lifecycle import RuntimeResourceLifecycle
 from chulk._runtime.services import resolve_runtime_services
 from chulk._runtime.sessions import (
     block_unresolved_tool_intent,
@@ -107,7 +109,7 @@ from chulk._runtime.tools import (
 def assemble_agent(
     request: AgentAssemblyRequest,
     *,
-    agent_factory: Callable[..., Agent],
+    agent_factory: Callable[[AgentRuntimeComponents], Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
     mcp_provider_path: Callable[..., str],
@@ -185,9 +187,7 @@ def assemble_agent(
         llm_client_factory = default_llm_client_factory
     effective_profile_id = profile_id or config.profile_id
     goal_snapshot = (
-        goal_execution.assert_boundary()
-        if goal_execution is not None
-        else None
+        goal_execution.assert_boundary() if goal_execution is not None else None
     )
     if goal_snapshot is not None and goal_snapshot.profile_id != effective_profile_id:
         raise ValueError("goal execution profile does not match runtime profile")
@@ -203,19 +203,22 @@ def assemble_agent(
         and usage_dimensions.goal_id not in {None, goal_snapshot.id}
     ):
         raise ValueError("usage dimensions do not match the claimed goal")
-    plugins_enabled = (
-        resolved_services is None
-        or resolved_services.is_enabled("plugins")
+    plugins_enabled = resolved_services is None or resolved_services.is_enabled(
+        "plugins"
     )
     selected_plugin_registry = (
-        resolved_services.plugins
-        if resolved_services is not None and plugins_enabled
-        else plugin_registry
-        or LocalPluginRegistry(
-            config.runtime_dir,
-            profile_id=effective_profile_id,
+        (
+            resolved_services.plugins
+            if resolved_services is not None and plugins_enabled
+            else plugin_registry
+            or LocalPluginRegistry(
+                config.runtime_dir,
+                profile_id=effective_profile_id,
+            )
         )
-    ) if plugins_enabled else None
+        if plugins_enabled
+        else None
+    )
     if selected_plugin_registry is not None:
         plugin_profile_id = getattr(
             selected_plugin_registry,
@@ -236,18 +239,19 @@ def assemble_agent(
             "conversation metadata profile_id does not match the runtime profile"
         )
     effective_conversation_metadata["profile_id"] = effective_profile_id
-    memory_enabled = (
-        resolved_services is None
-        or resolved_services.is_enabled("memory")
-    )
+    memory_enabled = resolved_services is None or resolved_services.is_enabled("memory")
     memory_store = (
-        resolved_services.memory
-        if resolved_services is not None and memory_enabled
-        else SQLiteMemoryStore(
-            config.store_path,
-            namespace=memory_namespace,
+        (
+            resolved_services.memory
+            if resolved_services is not None and memory_enabled
+            else SQLiteMemoryStore(
+                config.store_path,
+                namespace=memory_namespace,
+            )
         )
-    ) if memory_enabled else None
+        if memory_enabled
+        else None
+    )
     if (
         resolved_services is None
         and isinstance(memory_store, SQLiteMemoryStore)
@@ -256,9 +260,7 @@ def assemble_agent(
         memory_store.apply_retention(config.memory_retention_policy)
     selected_capabilities = capabilities or Capabilities.full()
     if not memory_enabled and selected_capabilities.memory != MemoryMode.OFF:
-        raise ValueError(
-            "memory capability requires the hosted memory service"
-        )
+        raise ValueError("memory capability requires the hosted memory service")
     memory_policy = (
         MemoryPolicy(memory_store, selected_capabilities.memory)
         if memory_store is not None
@@ -278,16 +280,13 @@ def assemble_agent(
                 "ExternalTranscriptSessionRuntimeServices"
             )
         if external_sessions and transcript_resolver is None:
-            raise ValueError(
-                "external transcript sessions require transcript_resolver"
-            )
+            raise ValueError("external transcript sessions require transcript_resolver")
         if external_sessions and async_transcript_resolver is not None:
             raise ValueError(
                 "synchronous hosted runs cannot use async_transcript_resolver"
             )
         if not external_sessions and (
-            transcript_resolver is not None
-            or async_transcript_resolver is not None
+            transcript_resolver is not None or async_transcript_resolver is not None
         ):
             raise ValueError(
                 "transcript resolvers require external transcript sessions"
@@ -299,18 +298,14 @@ def assemble_agent(
         ):
             raise TypeError("hosted skills service must be SkillRuntimeServices")
         if not skills_enabled and skill_specs:
-            raise ValueError(
-                "skill specifications require the hosted skills service"
-            )
+            raise ValueError("skill specifications require the hosted skills service")
         if external_sessions:
             external_service = cast(
                 ExternalTranscriptSessionRuntimeServices,
                 resolved_services.sessions,
             )
             session_store = external_service.journal
-            session_search_service = DisabledHostedService(
-                "external_transcript_search"
-            )
+            session_search_service = DisabledHostedService("external_transcript_search")
         else:
             session_service = cast(
                 SessionRuntimeServices,
@@ -324,19 +319,13 @@ def assemble_agent(
             else None
         )
         selected_media_processors = (
-            resolved_services.media
-            if resolved_services.is_enabled("media")
-            else None
+            resolved_services.media if resolved_services.is_enabled("media") else None
         )
-        skill_registry = (
-            resolved_services.skills.registry if skills_enabled else None
-        )
+        skill_registry = resolved_services.skills.registry if skills_enabled else None
         skill_lifecycle_store = (
             resolved_services.skills.lifecycle_store if skills_enabled else None
         )
-        skill_lifecycle = (
-            resolved_services.skills.lifecycle if skills_enabled else None
-        )
+        skill_lifecycle = resolved_services.skills.lifecycle if skills_enabled else None
         learning_proposals = (
             resolved_services.skills.learning_proposals if skills_enabled else None
         )
@@ -387,9 +376,7 @@ def assemble_agent(
             config.traces_dir,
             state.conversation_id,
             defer_until_event=(
-                TraceEvent.TURN_STARTED
-                if conversation_id is None
-                else None
+                TraceEvent.TURN_STARTED if conversation_id is None else None
             ),
         )
         skill_lifecycle_store = SQLiteSkillLifecycleStore(
@@ -604,9 +591,7 @@ def assemble_agent(
             ),
             trace_path=trace_logger.path,
             boundary_callback=(
-                goal_execution.assert_boundary
-                if goal_execution is not None
-                else None
+                goal_execution.assert_boundary if goal_execution is not None else None
             ),
         )
     )
@@ -699,122 +684,128 @@ def assemble_agent(
         owned_resources.extend(resolved_services.owned_resources)
     if backend_is_owned:
         owned_resources.append(selected_execution_backend)
+    runtime_events = RuntimeEventDispatcher(
+        trace_logger=trace_logger,
+        event_callback=session_recorder.callback,
+        event_sink=event_sink,
+        audit_callback=hosted_audit if resolved_services is not None else None,
+        public_event_sink=(
+            resolved_services.events if resolved_services is not None else None
+        ),
+        redaction_callback=redaction_callback,
+        redaction_fail_closed=redaction_fail_closed,
+    )
+    if learning_proposals is not None:
+        learning_proposals.set_event_callback(runtime_events.emit)
     try:
         agent = agent_factory(
-            client,
-            state=state,
-            memory=conversation_memory,
-            memory_store=memory_store,
-            memory_policy=memory_policy,
-            skill_registry=skill_registry,
-            trace_logger=trace_logger,
-            tool_registry=tool_registry,
-            max_tool_calls_per_turn=config.max_tool_calls_per_turn,
-            max_skills_per_turn=config.max_skills_per_turn,
-            max_skill_content_chars=config.max_skill_content_chars,
-            trace_max_prompt_chars=config.trace_max_prompt_chars,
-            max_observation_chars=config.max_observation_chars,
-            max_tool_stdout_chars=config.max_tool_stdout_chars,
-            max_tool_stderr_chars=config.max_tool_stderr_chars,
-            max_reflection_attempts=config.max_reflection_attempts,
-            permission_policy=permission_policy_for_profile(config.permission_profile),
-            permission_callback=permission_callback,
-            plan_step_verifier=plan_step_verifier,
-            async_plan_step_verifier=async_plan_step_verifier,
-            context_budget=context_budget,
-            max_model_output_tokens=(
-                model_capabilities.max_output_tokens
-                or model_capabilities.default_response_reserve_tokens
-            ),
-            stream_idle_timeout_seconds=config.llm_timeout_seconds,
-            event_callback=session_recorder.callback,
-            event_sink=event_sink,
-            audit_callback=(
-                hosted_audit if resolved_services is not None else None
-            ),
-            redaction_callback=redaction_callback,
-            redaction_fail_closed=redaction_fail_closed,
-            final_answer_streaming=final_answer_streaming,
-            output_policy=output_policy,
-            async_output_policy=async_output_policy,
-            output_policy_failure_mode=output_policy_failure_mode,
-            transcript_resolver=transcript_resolver,
-            async_transcript_resolver=async_transcript_resolver,
-            transcript_timeout_seconds=transcript_timeout_seconds,
-            pinned_skill_names=skill_resolution.pinned_skill_names,
-            system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
-            mcp_servers=active_mcp_servers,
-            mcp_bridge_tool_names=mcp_bridge_tool_names,
-            owned_resources=owned_resources,
-            default_tool_context=ToolExecutionContext(deps=deps)
-            if deps is not None
-            else None,
-            runtime_metadata=effective_runtime_metadata,
-            tool_context_lifecycle=execution_lifecycle,
-            profile_id=effective_profile_id,
-            usage_accounting=usage_accounting,
-            skill_lifecycle_store=skill_lifecycle_store,
-            skill_lifecycle=skill_lifecycle,
-            learning_proposals=learning_proposals,
-            learning_reviewer=learning_reviewer,
-            plugin_registry=(
-                selected_plugin_registry
-                if selected_plugin_registry is not None
-                else resolved_services.plugins
-                if resolved_services is not None
-                else None
-            ),
-            plugin_audit_report=plugin_audit_report,
-            goal_execution=goal_execution,
-            content_store=selected_content_store,
-            media_processors=selected_media_processors,
-            execution_scope=execution_scope,
-            tool_policy_hooks=(
-                cast(ToolPolicyHooks, resolved_services.tool_policy)
-                if resolved_services is not None
-                else None
-            ),
-            tool_catalog_resolver=tool_catalog_resolver,
-            async_tool_catalog_resolver=async_tool_catalog_resolver,
-            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
-            close_trace_logger=resolved_services is None,
+            AgentRuntimeComponents(
+                llm_client=client,
+                state=state,
+                memory=conversation_memory,
+                memory_store=memory_store,
+                memory_policy=memory_policy,
+                skill_registry=skill_registry,
+                trace_logger=trace_logger,
+                tool_registry=tool_registry,
+                max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+                max_skills_per_turn=config.max_skills_per_turn,
+                max_skill_content_chars=config.max_skill_content_chars,
+                trace_max_prompt_chars=config.trace_max_prompt_chars,
+                max_observation_chars=config.max_observation_chars,
+                max_tool_stdout_chars=config.max_tool_stdout_chars,
+                max_tool_stderr_chars=config.max_tool_stderr_chars,
+                max_reflection_attempts=config.max_reflection_attempts,
+                permission_policy=permission_policy_for_profile(
+                    config.permission_profile
+                ),
+                permission_callback=permission_callback,
+                plan_step_verifier=plan_step_verifier,
+                async_plan_step_verifier=async_plan_step_verifier,
+                context_budget=context_budget,
+                max_model_output_tokens=(
+                    model_capabilities.max_output_tokens
+                    or model_capabilities.default_response_reserve_tokens
+                ),
+                stream_idle_timeout_seconds=config.llm_timeout_seconds,
+                event_dispatcher=runtime_events,
+                final_answer_streaming=final_answer_streaming,
+                output_policy=output_policy,
+                async_output_policy=async_output_policy,
+                output_policy_failure_mode=output_policy_failure_mode,
+                transcript_resolver=transcript_resolver,
+                async_transcript_resolver=async_transcript_resolver,
+                transcript_timeout_seconds=transcript_timeout_seconds,
+                pinned_skill_names=skill_resolution.pinned_skill_names,
+                system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
+                mcp_servers=active_mcp_servers,
+                mcp_bridge_tool_names=mcp_bridge_tool_names,
+                owned_resources=owned_resources,
+                default_tool_context=ToolExecutionContext(deps=deps)
+                if deps is not None
+                else None,
+                runtime_metadata=effective_runtime_metadata,
+                tool_context_lifecycle=execution_lifecycle,
+                profile_id=effective_profile_id,
+                usage_accounting=usage_accounting,
+                skill_lifecycle_store=skill_lifecycle_store,
+                skill_lifecycle=skill_lifecycle,
+                learning_proposals=learning_proposals,
+                learning_reviewer=learning_reviewer,
+                plugin_registry=(
+                    selected_plugin_registry
+                    if selected_plugin_registry is not None
+                    else resolved_services.plugins
+                    if resolved_services is not None
+                    else None
+                ),
+                plugin_audit_report=plugin_audit_report,
+                goal_execution=goal_execution,
+                content_store=selected_content_store,
+                media_processors=selected_media_processors,
+                execution_scope=execution_scope,
+                tool_policy_hooks=(
+                    cast(ToolPolicyHooks, resolved_services.tool_policy)
+                    if resolved_services is not None
+                    else None
+                ),
+                tool_catalog_resolver=tool_catalog_resolver,
+                async_tool_catalog_resolver=async_tool_catalog_resolver,
+                tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+                close_trace_logger=resolved_services is None,
+                session_store=session_store,
+                session_recorder=session_recorder,
+                session_search_service=session_search_service,
+                run_store=(
+                    resolved_services.runs if resolved_services is not None else None
+                ),
+                approval_store=(
+                    resolved_services.approvals
+                    if resolved_services is not None
+                    else None
+                ),
+                hosted_service_manifest=(
+                    resolved_services.manifest
+                    if resolved_services is not None
+                    else None
+                ),
+                resource_lifecycle=RuntimeResourceLifecycle(
+                    trace_logger=trace_logger,
+                ),
+                resolved_services=resolved_services,
+            )
         )
     except Exception:
         for resource in reversed(owned_resources):
             close_resources((resource,))
         raise
-    agent.session_store = session_store
-    agent.session_recorder = session_recorder
-    agent.session_search_service = session_search_service
-    agent.run_store = (
-        resolved_services.runs
-        if resolved_services is not None
-        else None
-    )
-    agent.approval_store = (
-        resolved_services.approvals
-        if resolved_services is not None
-        else None
-    )
-    agent.public_event_sink = (
-        resolved_services.events
-        if resolved_services is not None
-        else None
-    )
-    agent.hosted_service_manifest = (
-        resolved_services.manifest
-        if resolved_services is not None
-        else None
-    )
-    if learning_proposals is not None:
-        learning_proposals.event_callback = agent._trace
     return agent
 
 
 async def assemble_async_hosted_agent(
     request: AgentAssemblyRequest,
     *,
-    agent_factory: Callable[..., Agent],
+    agent_factory: Callable[[AgentRuntimeComponents], Agent],
     bridge_tool_factory: Callable[[Iterable[MCPServerConfig]], Iterable[Tool]],
     mcp_bridge_required: MCPBridgeRequired,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
@@ -858,10 +849,10 @@ async def assemble_async_hosted_agent(
     if skill_specs is None:
         raise ValueError("hosted runtime requires an explicit skills collection")
     requested_conversation_id = conversation_id or execution_scope.conversation_id
-    if (
-        conversation_id is not None
-        and execution_scope.conversation_id not in {None, conversation_id}
-    ):
+    if conversation_id is not None and execution_scope.conversation_id not in {
+        None,
+        conversation_id,
+    }:
         raise ValueError(
             "execution scope conversation_id does not match conversation_id"
         )
@@ -870,9 +861,7 @@ async def assemble_async_hosted_agent(
         hosted_state = AgentState()
         requested_conversation_id = hosted_state.conversation_id
     execution_scope = execution_scope.with_conversation(requested_conversation_id)
-    load_conversation_id = (
-        requested_conversation_id if hosted_state is None else None
-    )
+    load_conversation_id = requested_conversation_id if hosted_state is None else None
     resolved = await services.resolve_async(execution_scope)
     session_store: Any
     session_recorder: Any
@@ -903,33 +892,25 @@ async def assemble_async_hosted_agent(
             )
         effective_profile_id = profile_id or config.profile_id
         goal_snapshot = (
-            goal_execution.assert_boundary()
-            if goal_execution is not None
-            else None
+            goal_execution.assert_boundary() if goal_execution is not None else None
         )
         if (
             goal_snapshot is not None
             and goal_snapshot.profile_id != effective_profile_id
         ):
-            raise ValueError(
-                "goal execution profile does not match runtime profile"
-            )
+            raise ValueError("goal execution profile does not match runtime profile")
         if (
             goal_snapshot is not None
             and run_budget is not None
             and run_budget != goal_snapshot.budget
         ):
-            raise ValueError(
-                "run_budget does not match the claimed goal budget"
-            )
+            raise ValueError("run_budget does not match the claimed goal budget")
         if (
             goal_snapshot is not None
             and usage_dimensions is not None
             and usage_dimensions.goal_id not in {None, goal_snapshot.id}
         ):
-            raise ValueError(
-                "usage dimensions do not match the claimed goal"
-            )
+            raise ValueError("usage dimensions do not match the claimed goal")
 
         plugins_enabled = resolved.is_enabled("plugins")
         plugin_registry = resolved.plugins if plugins_enabled else None
@@ -957,8 +938,7 @@ async def assemble_async_hosted_agent(
             and metadata_profile_id != effective_profile_id
         ):
             raise ValueError(
-                "conversation metadata profile_id does not match the "
-                "runtime profile"
+                "conversation metadata profile_id does not match the runtime profile"
             )
         effective_metadata["profile_id"] = effective_profile_id
         effective_metadata["execution_scope"] = execution_scope.to_dict()
@@ -970,9 +950,7 @@ async def assemble_async_hosted_agent(
                 resolved.sessions,
             )
             session_store = external_service.journal
-            session_search_service = DisabledHostedService(
-                "external_transcript_search"
-            )
+            session_search_service = DisabledHostedService("external_transcript_search")
         else:
             session_service = cast(SessionRuntimeServices, resolved.sessions)
             session_store = session_service.store
@@ -982,23 +960,15 @@ async def assemble_async_hosted_agent(
             resolved.skills,
             SkillRuntimeServices,
         ):
-            raise TypeError(
-                "hosted skills service must be SkillRuntimeServices"
-            )
+            raise TypeError("hosted skills service must be SkillRuntimeServices")
         if not skills_enabled and skill_specs:
-            raise ValueError(
-                "skill specifications require the hosted skills service"
-            )
-        skill_registry = (
-            resolved.skills.registry if skills_enabled else None
-        )
+            raise ValueError("skill specifications require the hosted skills service")
+        skill_registry = resolved.skills.registry if skills_enabled else None
         memory_enabled = resolved.is_enabled("memory")
         memory_store = resolved.memory if memory_enabled else None
         selected_capabilities = capabilities or Capabilities.full()
         if not memory_enabled and selected_capabilities.memory != MemoryMode.OFF:
-            raise ValueError(
-                "memory capability requires the hosted memory service"
-            )
+            raise ValueError("memory capability requires the hosted memory service")
         memory_policy = (
             AsyncMemoryPolicy(
                 memory_store,
@@ -1043,9 +1013,7 @@ async def assemble_async_hosted_agent(
             )
             trace_logger.log("skill_config_warning", warning_payload)
 
-        conversation_memory = ConversationMemory(
-            max_messages=config.history_limit
-        )
+        conversation_memory = ConversationMemory(max_messages=config.history_limit)
         if load_conversation_id is not None and not external_sessions:
             latest_summary = await call_async_service(
                 session_store,
@@ -1062,9 +1030,7 @@ async def assemble_async_hosted_agent(
             conversation_memory.replace(
                 recent_messages,
                 conversation_summary=(
-                    latest_summary.content
-                    if latest_summary is not None
-                    else None
+                    latest_summary.content if latest_summary is not None else None
                 ),
                 conversation_checkpoint=(
                     latest_summary.metadata.get("checkpoint_v1")
@@ -1104,18 +1070,14 @@ async def assemble_async_hosted_agent(
 
         client_is_owned = llm_client is None
         client = (
-            llm_client
-            if llm_client is not None
-            else default_llm_client_factory(config)
+            llm_client if llm_client is not None else default_llm_client_factory(config)
         )
         if hasattr(client, "bind_config"):
             client = client.bind_config(config)  # type: ignore[assignment, attr-defined]
         selection_result = getattr(client, "selection_result", None)
         effective_runtime_metadata = dict(runtime_metadata or {})
         if selection_result is not None and hasattr(selection_result, "to_dict"):
-            effective_runtime_metadata["model_selection"] = (
-                selection_result.to_dict()
-            )
+            effective_runtime_metadata["model_selection"] = selection_result.to_dict()
         model_capabilities = client_model_capabilities(client, config)
         context_budget = ContextBudget(
             max_prompt_tokens=model_capabilities.context_window_tokens,
@@ -1126,14 +1088,10 @@ async def assemble_async_hosted_agent(
         )
 
         configured_mcp_servers = (
-            tuple(mcp_servers)
-            if mcp_servers is not None
-            else config.mcp_servers
+            tuple(mcp_servers) if mcp_servers is not None else config.mcp_servers
         )
         active_mcp_servers = (
-            configured_mcp_servers
-            if selected_capabilities.external_services
-            else ()
+            configured_mcp_servers if selected_capabilities.external_services else ()
         )
         execution_lifecycle = ExecutionContextLifecycle(resolved.execution)
         tool_registry, mcp_bridge_tool_names = create_tool_registry(
@@ -1160,9 +1118,7 @@ async def assemble_async_hosted_agent(
             mcp_bridge_required=mcp_bridge_required,
             async_services=True,
         )
-        available_tool_names = {
-            tool.name for tool in tool_registry.list_tools()
-        }
+        available_tool_names = {tool.name for tool in tool_registry.list_tools()}
         skill_capabilities = skill_capability_names(selected_capabilities)
         if available_tool_names:
             skill_capabilities.add("tools")
@@ -1183,125 +1139,141 @@ async def assemble_async_hosted_agent(
                 scope=execution_scope,
             )
 
-        agent = agent_factory(
-            client,
-            state=state,
-            memory=conversation_memory,
-            memory_store=None,
-            memory_policy=None,
-            skill_registry=cast(SkillRegistry | None, skill_registry),
-            trace_logger=cast(JSONLTraceLogger, trace_logger),
-            tool_registry=tool_registry,
-            max_tool_calls_per_turn=config.max_tool_calls_per_turn,
-            max_skills_per_turn=config.max_skills_per_turn,
-            max_skill_content_chars=config.max_skill_content_chars,
-            trace_max_prompt_chars=config.trace_max_prompt_chars,
-            max_observation_chars=config.max_observation_chars,
-            max_tool_stdout_chars=config.max_tool_stdout_chars,
-            max_tool_stderr_chars=config.max_tool_stderr_chars,
-            max_reflection_attempts=config.max_reflection_attempts,
-            permission_policy=permission_policy_for_profile(
-                config.permission_profile
-            ),
-            permission_callback=permission_callback,
-            plan_step_verifier=plan_step_verifier,
-            async_plan_step_verifier=async_plan_step_verifier,
-            context_budget=context_budget,
-            max_model_output_tokens=(
-                model_capabilities.max_output_tokens
-                or model_capabilities.default_response_reserve_tokens
-            ),
-            stream_idle_timeout_seconds=config.llm_timeout_seconds,
+        runtime_events = RuntimeEventDispatcher(
+            trace_logger=trace_logger,
             event_callback=session_recorder.callback,
             audit_callback=hosted_audit,
+            public_event_sink=event_sink,
             redaction_callback=redaction_callback,
             redaction_fail_closed=redaction_fail_closed,
-            final_answer_streaming=final_answer_streaming,
-            output_policy=output_policy,
-            async_output_policy=async_output_policy,
-            output_policy_failure_mode=output_policy_failure_mode,
-            async_transcript_resolver=async_transcript_resolver,
-            transcript_timeout_seconds=transcript_timeout_seconds,
-            pinned_skill_names=skill_resolution.pinned_skill_names,
-            system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
-            mcp_servers=active_mcp_servers,
-            mcp_bridge_tool_names=mcp_bridge_tool_names,
-            owned_resources=owned_resources,
-            default_tool_context=(
-                ToolExecutionContext(deps=deps)
-                if deps is not None
-                else None
-            ),
-            runtime_metadata=effective_runtime_metadata,
-            tool_context_lifecycle=execution_lifecycle,
-            profile_id=effective_profile_id,
-            usage_accounting=None,
-            skill_lifecycle_store=(
-                resolved.skills.lifecycle_store if skills_enabled else None
-            ),
-            skill_lifecycle=(
-                resolved.skills.lifecycle if skills_enabled else None
-            ),
-            learning_proposals=(
-                resolved.skills.learning_proposals if skills_enabled else None
-            ),
-            learning_reviewer=(
-                resolved.skills.learning_reviewer if skills_enabled else None
-            ),
-            plugin_registry=cast(
-                LocalPluginRegistry,
-                plugin_registry if plugin_registry is not None else resolved.plugins,
-            ),
-            plugin_audit_report=plugin_audit_report,
-            goal_execution=goal_execution,
-            content_store=(
-                cast(ContentStore, resolved.content)
-                if resolved.is_enabled("content")
-                else None
-            ),
-            media_processors=(
-                cast(MediaProcessorRegistry, resolved.media)
-                if resolved.is_enabled("media")
-                else None
-            ),
-            execution_scope=execution_scope,
-            tool_policy_hooks=cast(ToolPolicyHooks, resolved.tool_policy),
-            async_tool_catalog_resolver=async_tool_catalog_resolver,
-            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
-            close_trace_logger=False,
-            restore_plan_context=False,
         )
-        agent.memory_store = cast(SQLiteMemoryStore | None, memory_store)
-        agent.memory_policy = cast(MemoryPolicy | None, memory_policy)
-        agent.async_memory_store = memory_store
-        agent.async_memory_policy = memory_policy
-        agent.async_skill_registry = skill_registry
-        agent.async_usage_accounting = resolved.usage
-        agent.async_artifact_store = (
-            resolved.artifacts if resolved.is_enabled("artifacts") else None
+        agent = agent_factory(
+            AgentRuntimeComponents(
+                llm_client=client,
+                state=state,
+                memory=conversation_memory,
+                memory_store=cast(SQLiteMemoryStore | None, memory_store),
+                memory_policy=cast(MemoryPolicy | None, memory_policy),
+                skill_registry=cast(SkillRegistry | None, skill_registry),
+                trace_logger=cast(JSONLTraceLogger, trace_logger),
+                tool_registry=tool_registry,
+                max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+                max_skills_per_turn=config.max_skills_per_turn,
+                max_skill_content_chars=config.max_skill_content_chars,
+                trace_max_prompt_chars=config.trace_max_prompt_chars,
+                max_observation_chars=config.max_observation_chars,
+                max_tool_stdout_chars=config.max_tool_stdout_chars,
+                max_tool_stderr_chars=config.max_tool_stderr_chars,
+                max_reflection_attempts=config.max_reflection_attempts,
+                permission_policy=permission_policy_for_profile(
+                    config.permission_profile
+                ),
+                permission_callback=permission_callback,
+                plan_step_verifier=plan_step_verifier,
+                async_plan_step_verifier=async_plan_step_verifier,
+                context_budget=context_budget,
+                max_model_output_tokens=(
+                    model_capabilities.max_output_tokens
+                    or model_capabilities.default_response_reserve_tokens
+                ),
+                stream_idle_timeout_seconds=config.llm_timeout_seconds,
+                event_dispatcher=runtime_events,
+                final_answer_streaming=final_answer_streaming,
+                output_policy=output_policy,
+                async_output_policy=async_output_policy,
+                output_policy_failure_mode=output_policy_failure_mode,
+                async_transcript_resolver=async_transcript_resolver,
+                transcript_timeout_seconds=transcript_timeout_seconds,
+                pinned_skill_names=skill_resolution.pinned_skill_names,
+                system_prompt=system_prompt or BASE_SYSTEM_PROMPT,
+                mcp_servers=active_mcp_servers,
+                mcp_bridge_tool_names=mcp_bridge_tool_names,
+                owned_resources=owned_resources,
+                default_tool_context=(
+                    ToolExecutionContext(deps=deps) if deps is not None else None
+                ),
+                runtime_metadata=effective_runtime_metadata,
+                tool_context_lifecycle=execution_lifecycle,
+                profile_id=effective_profile_id,
+                usage_accounting=None,
+                skill_lifecycle_store=(
+                    resolved.skills.lifecycle_store if skills_enabled else None
+                ),
+                skill_lifecycle=(resolved.skills.lifecycle if skills_enabled else None),
+                learning_proposals=(
+                    resolved.skills.learning_proposals if skills_enabled else None
+                ),
+                learning_reviewer=(
+                    resolved.skills.learning_reviewer if skills_enabled else None
+                ),
+                plugin_registry=cast(
+                    LocalPluginRegistry,
+                    plugin_registry
+                    if plugin_registry is not None
+                    else resolved.plugins,
+                ),
+                plugin_audit_report=plugin_audit_report,
+                goal_execution=goal_execution,
+                content_store=(
+                    cast(ContentStore, resolved.content)
+                    if resolved.is_enabled("content")
+                    else None
+                ),
+                media_processors=(
+                    cast(MediaProcessorRegistry, resolved.media)
+                    if resolved.is_enabled("media")
+                    else None
+                ),
+                execution_scope=execution_scope,
+                tool_policy_hooks=cast(ToolPolicyHooks, resolved.tool_policy),
+                async_tool_catalog_resolver=async_tool_catalog_resolver,
+                tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+                close_trace_logger=False,
+                restore_plan_context=False,
+                async_memory_store=memory_store,
+                async_memory_policy=memory_policy,
+                async_skill_registry=skill_registry,
+                async_usage_accounting=resolved.usage,
+                async_artifact_store=(
+                    resolved.artifacts if resolved.is_enabled("artifacts") else None
+                ),
+                async_content_store=(
+                    resolved.content if resolved.is_enabled("content") else None
+                ),
+                async_media_processors=(
+                    resolved.media if resolved.is_enabled("media") else None
+                ),
+                async_flushables=(
+                    trace_logger,
+                    session_recorder,
+                    audit_sink,
+                    event_sink,
+                ),
+                session_store=session_store,
+                session_recorder=session_recorder,
+                session_search_service=session_search_service,
+                run_store=resolved.runs,
+                approval_store=resolved.approvals,
+                hosted_service_manifest=resolved.manifest,
+                resource_lifecycle=RuntimeResourceLifecycle(
+                    trace_logger=trace_logger,
+                    async_artifact_store=(
+                        resolved.artifacts
+                        if resolved.is_enabled("artifacts")
+                        else None
+                    ),
+                    async_flushables=(
+                        trace_logger,
+                        session_recorder,
+                        audit_sink,
+                        event_sink,
+                    ),
+                ),
+                resolved_services=resolved,
+            )
         )
-        agent.async_content_store = (
-            resolved.content if resolved.is_enabled("content") else None
-        )
-        agent.async_media_processors = (
-            resolved.media if resolved.is_enabled("media") else None
-        )
-        agent.async_flushables = (
-            trace_logger,
-            session_recorder,
-            audit_sink,
-            event_sink,
-        )
-        agent.session_store = session_store
-        agent.session_recorder = session_recorder
-        agent.session_search_service = session_search_service
-        agent.run_store = resolved.runs
-        agent.approval_store = resolved.approvals
-        agent.public_event_sink = event_sink
-        agent.hosted_service_manifest = resolved.manifest
-        agent._refresh_action_runtime()
         await agent.restore_plan_turn_context_async()
-        await agent._flush_async_services()
+        await agent.resources.flush()
         return agent, resolved
     except BaseException as exc:
         cleanup_resources: list[object] = []

@@ -88,7 +88,7 @@ def test_run_dependencies_override_agent_dependencies(tmp_path):
     facade.run("identify tenant", deps=Dependencies("override"))
 
     assert received == ["override"]
-    assert facade.runtime._tool_contexts == {}
+    assert facade.runtime.tool_contexts._contexts == {}
 
 
 def test_request_dependencies_are_released_when_a_turn_raises(tmp_path):
@@ -106,7 +106,7 @@ def test_request_dependencies_are_released_when_a_turn_raises(tmp_path):
     with pytest.raises(ProviderError):
         facade.run("fail", deps=Dependencies("sensitive"))
 
-    assert facade.runtime._tool_contexts == {}
+    assert facade.runtime.tool_contexts._contexts == {}
 
 
 def test_missing_dependencies_fail_before_side_effects(tmp_path):
@@ -173,4 +173,4 @@ async def test_async_tools_receive_typed_dependencies(tmp_path):
 
     assert result.tool_calls[0].success is True
     assert received == ["async-tenant"]
-    assert facade.runtime._tool_contexts == {}
+    assert facade.runtime.tool_contexts._contexts == {}

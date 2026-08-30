@@ -331,15 +331,17 @@ class ConversationDispatcher:
             return existing
         path = self._store_path(profile_id)
         journal = PublicEventJournal(path, profile_id=profile_id)
+        services = agent.resolved_services
         if (
             agent.execution_scope is not None
-            and agent.run_store is not None
-            and agent.approval_store is not None
+            and services is not None
+            and services.runs is not None
+            and services.approvals is not None
         ):
             broker: PermissionBroker | DurablePermissionBroker = (
                 DurablePermissionBroker(
-                    agent.approval_store,
-                    agent.run_store,
+                    services.approvals,
+                    services.runs,
                     scope=agent.execution_scope,
                 )
             )
@@ -351,7 +353,7 @@ class ConversationDispatcher:
                 turn_id=lambda: agent.state.current_turn_id,
                 journal=journal,
             )
-        agent.permission_callback = broker.callback
+        agent._tool_executor.set_permission_callback(broker.callback)
 
         def publish(event: AgentEvent) -> None:
             if event.name in {
@@ -778,7 +780,7 @@ class ConversationDispatcher:
 
     @staticmethod
     def _conversation_snapshot(agent: CoreAgent) -> dict[str, Any]:
-        store = agent.session_store
+        store = agent._components.session_store
         conversation = store.get_conversation(agent.state.conversation_id)
         return {
             "id": conversation.id,

@@ -152,7 +152,7 @@ def test_durable_hosted_execution_records_effect_before_tool_call(
     hub = InMemoryServiceHub()
     observed: list[str] = []
     agent = _agent(tmp_path, hub, lambda arguments: observed.append("tool") or "ok")
-    runs = agent.runtime.run_store
+    runs = agent.runtime.resolved_services.runs
 
     outcome = DurableHostedExecutor(agent, runs).execute(
         "update ticket 42",
@@ -217,7 +217,7 @@ def test_mutating_tool_failure_becomes_unknown_and_requires_reconciliation(
         raise ConnectionError("connection closed after dispatch")
 
     agent = _agent(tmp_path, hub, fail)
-    runs = agent.runtime.run_store
+    runs = agent.runtime.resolved_services.runs
 
     outcome = DurableHostedExecutor(agent, runs).execute(
         "update ticket 42",
@@ -256,7 +256,7 @@ def test_policy_ask_pauses_worker_and_consumed_approval_resumes_effect(
             or {"token": "runtime-only"}
         ),
     )
-    runs = agent.runtime.run_store
+    runs = agent.runtime.resolved_services.runs
 
     paused = DurableHostedExecutor(agent, runs).execute(
         "update ticket 42",
@@ -277,7 +277,7 @@ def test_policy_ask_pauses_worker_and_consumed_approval_resumes_effect(
 
     approval = paused.approval.approval
     service = DurableApprovalService(
-        agent.runtime.approval_store,
+        agent.runtime.resolved_services.approvals,
         runs,
     )
     service.decide(
@@ -325,7 +325,7 @@ def test_policy_ask_pauses_worker_and_consumed_approval_resumes_effect(
     assert completed.run.status is DurableRunStatus.COMPLETED
     assert calls == ["tool"]
     assert credential_resolutions == ["resolved"]
-    assert restarted.runtime.approval_store.get(
+    assert restarted.runtime.resolved_services.approvals.get(
         restarted.execution_scope,
         approval.id,
     ).status.value == "consumed"
@@ -351,7 +351,7 @@ async def test_async_hosted_execution_uses_async_run_services(tmp_path) -> None:
 
     outcome = await AsyncDurableHostedExecutor(
         agent,
-        agent.runtime.run_store,
+        agent.runtime.resolved_services.runs,
     ).execute(
         "update ticket 42",
         _submission(),
@@ -360,7 +360,7 @@ async def test_async_hosted_execution_uses_async_run_services(tmp_path) -> None:
     )
 
     assert outcome.run.status is DurableRunStatus.COMPLETED
-    effects = await agent.runtime.run_store.effects(
+    effects = await agent.runtime.resolved_services.runs.effects(
         agent.execution_scope,
         agent.execution_scope.run_id,
     )
@@ -398,7 +398,7 @@ async def test_async_durable_cancellation_quarantines_effect_and_blocks_replay(
     )
     executor = AsyncDurableHostedExecutor(
         agent,
-        agent.runtime.run_store,
+        agent.runtime.resolved_services.runs,
     )
     task = asyncio.create_task(
         executor.execute(
@@ -414,15 +414,15 @@ async def test_async_durable_cancellation_quarantines_effect_and_blocks_replay(
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    run = await agent.runtime.run_store.get(
+    run = await agent.runtime.resolved_services.runs.get(
         agent.execution_scope,
         agent.execution_scope.run_id,
     )
-    effects = await agent.runtime.run_store.effects(
+    effects = await agent.runtime.resolved_services.runs.effects(
         agent.execution_scope,
         agent.execution_scope.run_id,
     )
-    attempts = await agent.runtime.run_store.attempts(
+    attempts = await agent.runtime.resolved_services.runs.attempts(
         agent.execution_scope,
         agent.execution_scope.run_id,
         step_id="agent",
@@ -478,7 +478,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
         ),
         execution_scope=_scope(),
     )
-    runs = agent.runtime.run_store
+    runs = agent.runtime.resolved_services.runs
     paused = await AsyncDurableHostedExecutor(agent, runs).execute(
         "update ticket 42",
         _submission(),
@@ -491,7 +491,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
     assert credential_resolutions == []
 
     service = AsyncDurableApprovalService(
-        agent.runtime.approval_store,
+        agent.runtime.resolved_services.approvals,
         runs,
     )
     await service.decide(
@@ -542,7 +542,7 @@ async def test_async_policy_ask_resumes_in_another_runtime(tmp_path) -> None:
     )
     completed = await AsyncDurableHostedExecutor(
         restarted,
-        restarted.runtime.run_store,
+        restarted.runtime.resolved_services.runs,
     ).execute(
         "update ticket 42",
         _submission(),

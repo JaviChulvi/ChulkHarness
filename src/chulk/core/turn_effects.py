@@ -71,7 +71,7 @@ class TurnEffects:
 
     state: AgentState
     memory: ConversationMemory
-    llm_client: LLMClient
+    get_llm_client: Callable[[], LLMClient]
     plan: PlanExecution
     trace: Callable[[str, dict | None], None]
     redact_text: Callable[[str, str, dict], tuple[str, dict]]
@@ -860,8 +860,9 @@ class TurnEffects:
         )
 
     def _streaming_enabled(self) -> bool:
+        client = self.get_llm_client()
         provider = (
-            getattr(self.llm_client, "last_success_provider", None) or self.llm_client
+            getattr(client, "last_success_provider", None) or client
         )
         capabilities = getattr(provider, "capabilities", None)
         return bool(getattr(capabilities, "supports_streaming", False))

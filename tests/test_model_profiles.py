@@ -11,7 +11,8 @@ import pytest
 
 from chulk._sdk.results import run_result_from_runtime
 from chulk.config import load_config
-from chulk.core import Agent, TraceEvent
+from chulk.core import TraceEvent
+from tests.core_agent import build_core_agent as Agent
 from chulk.llm import LLMClient, LLMError, LLMResponse
 from chulk.llm.base import classify_provider_exception
 from chulk.model_profiles import (

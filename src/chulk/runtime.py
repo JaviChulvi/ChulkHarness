@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -14,24 +14,8 @@ from chulk._runtime.request import AgentAssemblyRequest
 from chulk._runtime.skills import SkillSpecResolution as SkillSpecResolution
 from chulk._runtime.tools import RuntimeToolContext as RuntimeToolContext
 from chulk._version import __version__ as __version__
-from chulk.capabilities import Capabilities
 from chulk.config import Config
 from chulk.core import Agent
-from chulk.core.events import AgentEvent
-from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
-from chulk.execution import ExecutionBackend
-from chulk.goals.runtime import GoalExecutionContext
-from chulk.hosting import (
-    AsyncRuntimeServices,
-    AsyncTranscriptResolver,
-    ExecutionScope,
-    RuntimeServices,
-    TranscriptResolver,
-)
-from chulk.hosting.tool_catalog import (
-    AsyncToolCatalogResolver,
-    ToolCatalogResolver,
-)
 from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.llm import LLMClient, provider_capabilities
 from chulk.llm.capabilities import (
@@ -39,23 +23,7 @@ from chulk.llm.capabilities import (
     client_supports_hosted_mcp_tools,
     client_supports_native_tool_calling,
 )
-from chulk.mcp import MCPServerConfig, create_mcp_bridge_tools
-from chulk.media import ContentStore, MediaProcessorRegistry
-from chulk.plugins import LocalPluginRegistry
-from chulk.skills import LearningReviewPolicy, LearningReviewQuota
-from chulk.tools import ShellExecutionPolicy
-from chulk.tools.permissions import (
-    PermissionDecision,
-    PermissionDecisionRecord,
-    PermissionRequest,
-)
-from chulk.usage import RunBudget, UsageDimensions
-from chulk.streaming import (
-    AsyncIncrementalOutputPolicy,
-    FinalAnswerStreamingMode,
-    IncrementalOutputPolicy,
-    OutputPolicyFailureMode,
-)
+from chulk.mcp import create_mcp_bridge_tools
 
 
 class LLMClientFactory(Protocol):
@@ -73,109 +41,10 @@ class MCPRoute:
     bridge_required: bool
 
 
-def create_agent(
-    config: Config,
-    llm_client_factory: Callable[[Config], LLMClient] | None = None,
-    *,
-    conversation_id: str | None = None,
-    conversation_metadata: dict[str, object] | None = None,
-    llm_client: LLMClient | None = None,
-    tool_specs: Iterable[object] | None = None,
-    skill_specs: object | Iterable[object] | None = None,
-    system_prompt: str | None = None,
-    permission_callback: Callable[
-        [PermissionRequest, PermissionDecisionRecord],
-        PermissionDecision | bool,
-    ]
-    | None = None,
-    plan_step_verifier: PlanStepVerifier | None = None,
-    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
-    mcp_servers: Iterable[MCPServerConfig] | None = None,
-    event_sink: Callable[[AgentEvent], None] | None = None,
-    redaction_callback: Callable[[str, str, dict], str] | None = None,
-    redaction_fail_closed: bool = False,
-    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
-    output_policy: IncrementalOutputPolicy | None = None,
-    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
-    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
-    capabilities: Capabilities | None = None,
-    deps: object | None = None,
-    shell_execution_policy: ShellExecutionPolicy | None = None,
-    require_shell_containment: bool = False,
-    execution_backend: ExecutionBackend | None = None,
-    memory_namespace: str | None = None,
-    profile_id: str | None = None,
-    allowed_skill_names: Iterable[str] | None = None,
-    runtime_metadata: dict | None = None,
-    run_budget: RunBudget | None = None,
-    additional_run_budgets: Iterable[RunBudget] = (),
-    usage_dimensions: UsageDimensions | None = None,
-    learning_review_policy: LearningReviewPolicy | None = None,
-    learning_review_quota: LearningReviewQuota | None = None,
-    automatic_learning_approval: bool = False,
-    plugin_registry: LocalPluginRegistry | None = None,
-    goal_execution: GoalExecutionContext | None = None,
-    content_store: ContentStore | None = None,
-    media_processors: MediaProcessorRegistry | None = None,
-    services: RuntimeServices | None = None,
-    execution_scope: ExecutionScope | None = None,
-    transcript_resolver: TranscriptResolver | None = None,
-    async_transcript_resolver: AsyncTranscriptResolver | None = None,
-    transcript_timeout_seconds: float | None = None,
-    tool_catalog_resolver: ToolCatalogResolver | None = None,
-    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
-    tool_catalog_timeout_seconds: float | None = None,
-) -> Agent:
-    """Create the configured Chulk agent runtime."""
+def create_agent(request: AgentAssemblyRequest) -> Agent:
+    """Create one configured runtime from normalized internal input."""
     return assemble_agent(
-        AgentAssemblyRequest(
-            config=config,
-            llm_client_factory=llm_client_factory,
-            conversation_id=conversation_id,
-            conversation_metadata=conversation_metadata,
-            llm_client=llm_client,
-            tool_specs=tool_specs,
-            skill_specs=skill_specs,
-            system_prompt=system_prompt,
-            permission_callback=permission_callback,
-            plan_step_verifier=plan_step_verifier,
-            async_plan_step_verifier=async_plan_step_verifier,
-            mcp_servers=mcp_servers,
-            event_sink=event_sink,
-            redaction_callback=redaction_callback,
-            redaction_fail_closed=redaction_fail_closed,
-            final_answer_streaming=final_answer_streaming,
-            output_policy=output_policy,
-            async_output_policy=async_output_policy,
-            output_policy_failure_mode=output_policy_failure_mode,
-            capabilities=capabilities,
-            deps=deps,
-            shell_execution_policy=shell_execution_policy,
-            require_shell_containment=require_shell_containment,
-            execution_backend=execution_backend,
-            memory_namespace=memory_namespace,
-            profile_id=profile_id,
-            allowed_skill_names=allowed_skill_names,
-            runtime_metadata=runtime_metadata,
-            run_budget=run_budget,
-            additional_run_budgets=additional_run_budgets,
-            usage_dimensions=usage_dimensions,
-            learning_review_policy=learning_review_policy,
-            learning_review_quota=learning_review_quota,
-            automatic_learning_approval=automatic_learning_approval,
-            plugin_registry=plugin_registry,
-            goal_execution=goal_execution,
-            content_store=content_store,
-            media_processors=media_processors,
-            services=services,
-            execution_scope=execution_scope,
-            transcript_resolver=transcript_resolver,
-            async_transcript_resolver=async_transcript_resolver,
-            transcript_timeout_seconds=transcript_timeout_seconds,
-            tool_catalog_resolver=tool_catalog_resolver,
-            async_tool_catalog_resolver=async_tool_catalog_resolver,
-            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
-        ),
+        request,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,
@@ -184,80 +53,11 @@ def create_agent(
 
 
 async def create_async_hosted_agent(
-    config: Config,
-    *,
-    services: AsyncRuntimeServices,
-    execution_scope: ExecutionScope,
-    conversation_id: str | None = None,
-    conversation_metadata: dict[str, object] | None = None,
-    runtime_metadata: dict | None = None,
-    llm_client: LLMClient | None = None,
-    tool_specs: Iterable[object] | None = None,
-    skill_specs: object | Iterable[object] | None = None,
-    system_prompt: str | None = None,
-    permission_callback: Callable[
-        [PermissionRequest, PermissionDecisionRecord],
-        PermissionDecision | bool,
-    ]
-    | None = None,
-    plan_step_verifier: PlanStepVerifier | None = None,
-    async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
-    mcp_servers: Iterable[MCPServerConfig] | None = None,
-    redaction_callback: Callable[[str, str, dict], str] | None = None,
-    redaction_fail_closed: bool = False,
-    final_answer_streaming: FinalAnswerStreamingMode | str = FinalAnswerStreamingMode.VALIDATED,
-    output_policy: IncrementalOutputPolicy | None = None,
-    async_output_policy: AsyncIncrementalOutputPolicy | None = None,
-    output_policy_failure_mode: OutputPolicyFailureMode | str = OutputPolicyFailureMode.CLOSED,
-    capabilities: Capabilities | None = None,
-    deps: object | None = None,
-    shell_execution_policy: ShellExecutionPolicy | None = None,
-    require_shell_containment: bool = False,
-    run_budget: RunBudget | None = None,
-    usage_dimensions: UsageDimensions | None = None,
-    goal_execution: GoalExecutionContext | None = None,
-    profile_id: str | None = None,
-    async_transcript_resolver: AsyncTranscriptResolver | None = None,
-    transcript_timeout_seconds: float | None = None,
-    async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
-    tool_catalog_timeout_seconds: float | None = None,
+    request: AgentAssemblyRequest,
 ) -> tuple[Agent, ResolvedRuntimeServices]:
-    """Create a hosted agent through native async service contracts."""
+    """Create a native-async hosted runtime from normalized internal input."""
     return await assemble_async_hosted_agent(
-        AgentAssemblyRequest(
-            config=config,
-            services=services,
-            execution_scope=execution_scope,
-            conversation_id=conversation_id,
-            conversation_metadata=conversation_metadata,
-            runtime_metadata=runtime_metadata,
-            llm_client=llm_client,
-            tool_specs=tool_specs,
-            skill_specs=skill_specs,
-            system_prompt=system_prompt,
-            permission_callback=permission_callback,
-            plan_step_verifier=plan_step_verifier,
-            async_plan_step_verifier=async_plan_step_verifier,
-            mcp_servers=mcp_servers,
-            redaction_callback=redaction_callback,
-            redaction_fail_closed=redaction_fail_closed,
-            final_answer_streaming=final_answer_streaming,
-            output_policy=output_policy,
-            async_output_policy=async_output_policy,
-            output_policy_failure_mode=output_policy_failure_mode,
-            capabilities=capabilities,
-            deps=deps,
-            shell_execution_policy=shell_execution_policy,
-            require_shell_containment=require_shell_containment,
-            run_budget=run_budget,
-            usage_dimensions=usage_dimensions,
-            goal_execution=goal_execution,
-            profile_id=profile_id,
-            async_transcript_resolver=async_transcript_resolver,
-            transcript_timeout_seconds=transcript_timeout_seconds,
-            async_tool_catalog_resolver=async_tool_catalog_resolver,
-            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
-        ),
+        request,
         agent_factory=Agent,
         bridge_tool_factory=create_mcp_bridge_tools,
         mcp_bridge_required=_mcp_bridge_required,

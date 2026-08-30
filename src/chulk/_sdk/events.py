@@ -41,12 +41,11 @@ class EventDispatcher:
 
     def __init__(self, runtime: CoreAgent, *, on_event: EventCallback | None = None) -> None:
         self.runtime = runtime
-        self._base_event_callback = runtime.event_callback
+        self._base_event_callback = runtime.events.set_event_callback(self.dispatch)
         self._on_event = on_event
         self.active_on_event: EventCallback | None = None
         self.active_on_delta: DeltaCallback | None = None
         self._previous_event_ids: dict[str, str] = {}
-        runtime.event_callback = self.dispatch
 
     def dispatch(self, event_type: str, payload: dict) -> None:
         if self._base_event_callback is not None:
@@ -60,7 +59,7 @@ class EventDispatcher:
             if previous is not None and event.causation_id is None:
                 event = replace(event, causation_id=previous)
             self._previous_event_ids[correlation_id] = event.event_id
-        public_sink = getattr(self.runtime, "public_event_sink", None)
+        public_sink = self.runtime.events.public_event_sink
         if public_sink is not None:
             public_sink.emit(event)
         if self._on_event is not None:

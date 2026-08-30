@@ -477,7 +477,7 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
     effects = _ReplayTurnEffects(
         state=state,
         memory=memory,
-        llm_client=_OfflineLLMClient(),
+        get_llm_client=_OfflineLLMClient,
         plan=plan,
         trace=trace,
         redact_text=lambda _event, text, _metadata: (text, {"redacted": False}),

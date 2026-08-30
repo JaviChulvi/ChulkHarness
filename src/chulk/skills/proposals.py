@@ -67,6 +67,12 @@ class LearningProposalService:
                 "in the same SQLite database"
             )
 
+    def set_event_callback(
+        self,
+        callback: Callable[[str, dict[str, Any]], None] | None,
+    ) -> None:
+        self.event_callback = callback
+
     def create(
         self,
         draft: LearningProposalDraft,

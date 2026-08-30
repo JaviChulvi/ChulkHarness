@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Callable
 
+from chulk._runtime.request import AgentAssemblyRequest
 from chulk.capabilities import Capabilities, MemoryMode
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config
 from chulk._sdk.events import EventCallback
@@ -102,7 +103,8 @@ def _build_handle(
     selected_skills = skills if skills is not None else (preset.skills if preset is not None else None)
     selected_prompt = system_prompt or (preset.system_prompt if preset is not None else None)
     runtime = create_runtime_agent(
-        runtime_config,
+        AgentAssemblyRequest(
+            config=runtime_config,
         conversation_id=conversation_id,
         conversation_metadata=conversation_metadata,
         runtime_metadata=runtime_metadata,
@@ -142,7 +144,8 @@ def _build_handle(
         transcript_timeout_seconds=transcript_timeout_seconds,
         tool_catalog_resolver=tool_catalog_resolver,
         async_tool_catalog_resolver=async_tool_catalog_resolver,
-        tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+            tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+        )
     )
     return AgentHandle(runtime, on_event=on_event)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,6 +14,145 @@ class AgentEvent:
 
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+class RuntimeEventDispatcher:
+    """Own trace callbacks, redaction, and the hosted public-event sink."""
+
+    def __init__(
+        self,
+        *,
+        trace_logger: Any = None,
+        event_callback: Callable[[str, dict], None] | None = None,
+        event_sink: Callable[[AgentEvent], None] | None = None,
+        audit_callback: Callable[[str, dict], None] | None = None,
+        public_event_sink: Any = None,
+        redaction_callback: Callable[[str, str, dict], str] | None = None,
+        redaction_fail_closed: bool = False,
+    ) -> None:
+        self.trace_logger = trace_logger
+        self.event_callback = event_callback
+        self.event_sink = event_sink
+        self.audit_callback = audit_callback
+        self.public_event_sink = public_event_sink
+        self.redaction_callback = redaction_callback
+        self.redaction_fail_closed = redaction_fail_closed
+
+    def emit(self, event_type: str, payload: dict | None = None) -> None:
+        safe_payload = self._redact_payload(event_type, dict(payload or {}))
+        if self.trace_logger is not None:
+            self.trace_logger.log(event_type, safe_payload)
+        if self.event_callback is not None:
+            self.event_callback(event_type, safe_payload)
+        if self.audit_callback is not None:
+            self.audit_callback(event_type, safe_payload)
+        if self.event_sink is not None:
+            self.event_sink(AgentEvent(event_type, safe_payload))
+
+    def redact_text(
+        self,
+        event_type: str,
+        text: str,
+        metadata: dict,
+    ) -> tuple[str, dict]:
+        callback = self.redaction_callback
+        if callback is None:
+            return text, {"redacted": False}
+        try:
+            redacted = callback(event_type, text, metadata)
+        except Exception as exc:
+            if self.redaction_fail_closed:
+                return "[redaction failed]", {
+                    "redacted": True,
+                    "redaction_error": str(exc),
+                    "fail_closed": True,
+                }
+            return text, {
+                "redacted": False,
+                "redaction_error": str(exc),
+                "fail_closed": False,
+            }
+        if not isinstance(redacted, str):
+            redacted = str(redacted)
+        return redacted, {"redacted": redacted != text}
+
+    @contextmanager
+    def capture(
+        self,
+        callback: Callable[[str, dict], None],
+    ) -> Iterator[None]:
+        """Temporarily chain one trace callback and restore it reliably."""
+        previous = self.event_callback
+
+        def dispatch(event_type: str, payload: dict) -> None:
+            callback(event_type, payload)
+            if previous is not None:
+                previous(event_type, payload)
+
+        self.event_callback = dispatch
+        try:
+            yield
+        finally:
+            self.event_callback = previous
+
+    def set_event_callback(
+        self,
+        callback: Callable[[str, dict], None] | None,
+    ) -> Callable[[str, dict], None] | None:
+        previous = self.event_callback
+        self.event_callback = callback
+        return previous
+
+    def set_public_sink(self, sink: Any) -> Any:
+        previous = self.public_event_sink
+        self.public_event_sink = sink
+        return previous
+
+    def clear_callbacks(self) -> None:
+        self.event_callback = None
+        self.event_sink = None
+        self.audit_callback = None
+
+    def _redact_payload(self, event_type: str, payload: dict) -> dict:
+        if self.redaction_callback is None:
+            return payload
+
+        redacted_any = False
+        error: str | None = None
+
+        def redact_value(value: object, path: str) -> object:
+            nonlocal redacted_any, error
+            if isinstance(value, str):
+                redacted, metadata = self.redact_text(
+                    event_type,
+                    value,
+                    {"path": path},
+                )
+                redacted_any = redacted_any or bool(metadata.get("redacted"))
+                if metadata.get("redaction_error"):
+                    error = str(metadata["redaction_error"])
+                    redacted_any = redacted_any or bool(metadata.get("fail_closed"))
+                return redacted
+            if isinstance(value, dict):
+                return {
+                    key: redact_value(item, f"{path}.{key}")
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [
+                    redact_value(item, f"{path}[{index}]")
+                    for index, item in enumerate(value)
+                ]
+            return value
+
+        redacted_payload = redact_value(payload, "payload")
+        if not isinstance(redacted_payload, dict):
+            return payload
+        if redacted_any:
+            redacted_payload["_redacted"] = True
+        if error is not None:
+            redacted_payload["_redaction_error"] = error
+        return redacted_payload
 
 
 class TraceEvent:

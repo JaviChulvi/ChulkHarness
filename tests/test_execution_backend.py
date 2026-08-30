@@ -179,7 +179,7 @@ def test_runtime_routes_default_tools_through_one_turn_scoped_session(tmp_path):
     assert len(backend.sessions) == 2
     assert backend.sessions[0].workspace.workspace_id != backend.sessions[1].workspace.workspace_id
     assert all(session.closed for session in backend.sessions)
-    assert facade.runtime._tool_contexts == {}
+    assert facade.runtime.tool_contexts._contexts == {}
     trace_events = [
         json.loads(line)
         for line in facade.trace_path.read_text(encoding="utf-8").splitlines()
@@ -210,7 +210,7 @@ async def test_async_runtime_closes_turn_session_through_async_lifecycle(tmp_pat
     assert result.tool_calls[0].success is True
     assert len(backend.sessions) == 1
     assert backend.sessions[0].closed is True
-    assert facade.runtime._tool_contexts == {}
+    assert facade.runtime.tool_contexts._contexts == {}
 
 
 def test_direct_shell_behavior_matches_host_session(tmp_path):

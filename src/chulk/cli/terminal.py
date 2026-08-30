@@ -77,7 +77,7 @@ class TerminalUI:
         primary = f"ChulkHarness CLI · {_provider_text(config)} · {config.permission_profile}"
         secondary = (
             f"{_short_path(config.project_root)} · session {_short_id(agent.state.conversation_id)} · "
-            f"{len(agent.tool_registry.list_tools())} tools · mcp {_mcp_status_text(config, agent)}"
+            f"{len(_active_tool_registry(agent).list_tools())} tools · mcp {_mcp_status_text(config, agent)}"
         )
         lines = _wrap_text(primary, self.width)
         lines.extend(_wrap_text(secondary, self.width))
@@ -128,7 +128,7 @@ class TerminalUI:
             f"  permissions {config.permission_profile}",
             f"  memory    {_short_path(config.store_path)}",
             f"  trace     {_short_path(trace_path) if trace_path else 'disabled'}",
-            f"  tools     {len(agent.tool_registry.list_tools())}",
+            f"  tools     {len(_active_tool_registry(agent).list_tools())}",
             f"  mcp       {_mcp_status_text(config, agent)}",
             f"  turns     {len(agent.state.turns)}",
             f"  plan      {_plan_status_text(agent)}",
@@ -186,7 +186,7 @@ class TerminalUI:
     def tools(self, agent: Agent) -> str:
         """Return registered tool names and descriptions."""
         lines = [self.heading("Tools")]
-        for tool in agent.tool_registry.list_tools():
+        for tool in _active_tool_registry(agent).list_tools():
             lines.append(f"  {self.accent(tool.name):<24} {tool.description}")
         return "\n".join(lines)
 
@@ -194,7 +194,9 @@ class TerminalUI:
         """Return configured MCP server and bridge status."""
         lines = [self.heading("MCP")]
         lines.append(f"  config    {_short_path(config.mcp_config_path)}")
-        lines.append(f"  path      {_mcp_provider_path(config, llm_client=agent.llm_client)}")
+        lines.append(
+            f"  path      {_mcp_provider_path(config, llm_client=agent._model_transport.llm_client)}"
+        )
         if not config.mcp_servers:
             lines.append("  servers   none")
             return "\n".join(lines)
@@ -345,7 +347,8 @@ class TerminalUI:
     def bye(self, agent: Agent | None = None) -> str:
         if agent is None:
             return self.muted("bye")
-        recorder = getattr(agent, "session_recorder", None)
+        components = getattr(agent, "_components", None)
+        recorder = getattr(components, "session_recorder", None)
         if recorder is not None and not bool(getattr(recorder, "persisted", False)):
             return self.muted("bye")
         command = f"/resume {agent.state.conversation_id}"
@@ -422,7 +425,7 @@ def _mcp_status_text(config: Config, agent: Agent) -> str:
     bridge_suffix = f", {bridge_count} bridge tool(s)" if bridge_count else ""
     return (
         f"{count} server(s), "
-        f"{_mcp_provider_path(config, llm_client=agent.llm_client)}{bridge_suffix}"
+        f"{_mcp_provider_path(config, llm_client=agent._model_transport.llm_client)}{bridge_suffix}"
     )
 
 
@@ -860,6 +863,13 @@ def _provider_text(config: Config) -> str:
         return primary
     fallback = " -> ".join(f"{item.provider} / {item.model}" for item in config.llm_fallback_providers)
     return f"{primary} -> {fallback}"
+
+
+def _active_tool_registry(agent):
+    catalog = getattr(agent, "catalog", None)
+    if catalog is not None:
+        return catalog.active_registry
+    return agent.tool_registry
 
 
 def _compact(text: str, limit: int = 96) -> str:

@@ -429,7 +429,7 @@ def test_public_sdk_exposes_profile_bound_session_search_and_trusted_read(
         tools=[],
         skills=[],
     )
-    store = agent.runtime.session_store
+    store = agent.runtime._components.session_store
     _conversation(store, "prior", profile_id="default")
     _message(store, "prior", "normal", "sdk searchable evidence")
     _message(
@@ -478,7 +478,7 @@ async def test_async_sdk_session_search_matches_sync_semantics(
         tools=[],
         skills=[],
     )
-    store = agent.runtime.session_store
+    store = agent.runtime._components.session_store
     _conversation(store, "prior", profile_id="default")
     _message(store, "prior", "normal", "async searchable evidence")
 

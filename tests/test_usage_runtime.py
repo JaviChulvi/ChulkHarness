@@ -17,7 +17,7 @@ from chulk.goals import (
 from chulk.llm import FallbackChain, LLMActionError, LLMClient, LLMError
 from chulk.llm.pricing import estimate_cost
 from chulk.llm.usage import LLMUsage
-from chulk.runtime import create_agent
+from tests.core_agent import create_runtime_agent as create_agent
 from chulk.testing import ScriptedLLMClient
 from chulk.tools import Tool, ToolResult
 from chulk.usage import (
@@ -176,8 +176,8 @@ def test_shared_goal_reservation_prevents_parallel_children_overspending(
             child_task_id="child-a",
         ),
     )
-    assert holder.usage_accounting is not None
-    held = holder.usage_accounting.reserve_model_request(
+    assert holder._model_accounting.usage_accounting is not None
+    held = holder._model_accounting.usage_accounting.reserve_model_request(
         turn_id="held-turn",
         request_index=1,
         messages=[{"role": "user", "content": "hold allowance"}],
@@ -203,7 +203,7 @@ def test_shared_goal_reservation_prevents_parallel_children_overspending(
 
     assert exc_info.value.scope is BudgetScope.GOAL
     assert blocked_client.remaining == 1
-    assert holder.usage_accounting.release_model_request(
+    assert holder._model_accounting.usage_accounting.release_model_request(
         turn_id="held-turn",
         request_index=1,
     ) is not None
@@ -235,8 +235,8 @@ def test_shared_tool_hold_reconciles_if_secondary_commit_is_interrupted(
             child_task_id="child-tool-recovery",
         ),
     )
-    assert agent.usage_accounting is not None
-    agent.usage_accounting.reserve_tool_call(
+    assert agent._model_accounting.usage_accounting is not None
+    agent._model_accounting.usage_accounting.reserve_tool_call(
         turn_id="tool-turn",
         tool_call_index=1,
         attempt=1,
@@ -254,7 +254,7 @@ def test_shared_tool_hold_reconciles_if_secondary_commit_is_interrupted(
 
     monkeypatch.setattr(SQLiteUsageStore, "commit", interrupt_constraint)
     with pytest.raises(RuntimeError, match="shared commit"):
-        agent.usage_accounting.commit_tool_call(
+        agent._model_accounting.usage_accounting.commit_tool_call(
             turn_id="tool-turn",
             tool_call_index=1,
             attempt=1,

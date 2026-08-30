@@ -41,8 +41,9 @@ from chulk import (
     DataClassification,
 )
 from chulk.core.state import AgentState, TurnState
-from chulk.core.agent import Agent as CoreAgent
+from tests.core_agent import build_core_agent as CoreAgent
 from chulk._sdk.config import coerce_config
+from chulk._runtime.request import AgentAssemblyRequest
 from chulk.hosting.async_utils import call_async_service
 from chulk.hosting.reference import InMemoryServiceHub
 from chulk.hosting.services import (
@@ -405,7 +406,7 @@ async def test_async_hosted_create_forwards_output_streaming_options(
     original = create_async_hosted_agent
 
     async def capture(*args, **kwargs):
-        forwarded.append(kwargs.copy())
+        forwarded.append(args[0])
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -447,7 +448,7 @@ async def test_async_hosted_create_forwards_output_streaming_options(
     await defaults.close()
 
     assert {
-        name: forwarded[0][name]
+        name: getattr(forwarded[0], name)
         for name in (
             "final_answer_streaming",
             "output_policy",
@@ -460,10 +461,10 @@ async def test_async_hosted_create_forwards_output_streaming_options(
         "async_output_policy": async_output_policy,
         "output_policy_failure_mode": OutputPolicyFailureMode.OPEN,
     }
-    assert forwarded[1]["final_answer_streaming"] is FinalAnswerStreamingMode.VALIDATED
-    assert forwarded[1]["output_policy"] is None
-    assert forwarded[1]["async_output_policy"] is None
-    assert forwarded[1]["output_policy_failure_mode"] is OutputPolicyFailureMode.CLOSED
+    assert forwarded[1].final_answer_streaming is FinalAnswerStreamingMode.VALIDATED
+    assert forwarded[1].output_policy is None
+    assert forwarded[1].async_output_policy is None
+    assert forwarded[1].output_policy_failure_mode is OutputPolicyFailureMode.CLOSED
 
 
 def test_async_hosted_create_rejects_unknown_options_before_construction() -> None:
@@ -483,17 +484,18 @@ async def test_async_hosted_create_forwards_every_factory_option(
     original = create_async_hosted_agent
     captured: dict[str, object] = {}
 
-    async def capture(config, **kwargs):
-        captured["config"] = config
-        captured.update(kwargs)
+    async def capture(request):
+        captured["request"] = request
         return await original(
-            config,
-            services=kwargs["services"],
-            execution_scope=kwargs["execution_scope"],
-            llm_client=FakeLLM([_final("unused")]),
-            tool_specs=[],
-            skill_specs=[],
-            capabilities=Capabilities.none(),
+            AgentAssemblyRequest(
+                config=request.config,
+                services=request.services,
+                execution_scope=request.execution_scope,
+                llm_client=FakeLLM([_final("unused")]),
+                tool_specs=[],
+                skill_specs=[],
+                capabilities=Capabilities.none(),
+            )
         )
 
     monkeypatch.setattr(
@@ -564,9 +566,10 @@ async def test_async_hosted_create_forwards_every_factory_option(
     )
     await runtime.close()
 
-    assert captured["services"] is services
-    assert captured["execution_scope"] is scope
-    assert all(captured[name] is value for name, value in values.items())
+    request = captured["request"]
+    assert request.services is services
+    assert request.execution_scope is scope
+    assert all(getattr(request, name) is value for name, value in values.items())
 
 
 def test_hosted_construction_fails_before_resolving_services_without_scope(
@@ -796,11 +799,13 @@ async def test_async_hosted_construction_closes_owned_resources_on_failure(
 
     with pytest.raises(RuntimeError, match="client bind failed") as error:
         await create_async_hosted_agent(
-            coerce_config(AgentConfig(project_root=tmp_path)),
+            AgentAssemblyRequest(
+            config=coerce_config(AgentConfig(project_root=tmp_path)),
             services=AsyncRuntimeServices(**fields),
             execution_scope=_scope(),
             tool_specs=[],
             skill_specs=[],
+            )
         )
 
     assert closed == ["client", "resource"]
@@ -1422,7 +1427,7 @@ async def test_async_hosted_shell_binding_preserves_host_safety_options(
         require_shell_containment=True,
     )
 
-    result = await agent.runtime.tool_registry.run_async(
+    result = await agent.runtime.catalog.active_registry.run_async(
         "run_cmd",
         {"command": "printf must-not-run"},
     )
@@ -1523,8 +1528,8 @@ async def test_direct_async_hosted_sync_compatibility_keeps_management_calls(
     assert trace is not None
     artifact = trace.write_artifact("compatibility", "artifact body")
 
-    assert agent.usage_ledger is agent.runtime.usage_accounting
-    assert agent.session_search is agent.runtime.session_search_service
+    assert agent.usage_ledger is agent.runtime._model_accounting.usage_accounting
+    assert agent.session_search is agent.runtime.resolved_services.sessions.search
     assert await agent.list_memory_proposals() == ()
     assert await agent.list_learning_proposals() == ()
     assert await agent.list_governed_skills() == ()
@@ -2311,30 +2316,30 @@ async def test_async_hosted_management_fails_closed_without_services(
             await operation()
 
     core = agent.runtime
-    memory_policy = core.async_memory_policy
-    core.async_memory_policy = None
+    memory_policy = core.memory_context.async_policy
+    core.memory_context.async_policy = None
     assert await agent.list_memory_proposals() == ()
     with pytest.raises(Exception, match="Memory is not configured"):
         await agent.approve_memory_proposal("missing")
     with pytest.raises(Exception, match="Memory is not configured"):
         await agent.reject_memory_proposal("missing")
-    core.async_memory_policy = memory_policy
+    core.memory_context.async_policy = memory_policy
 
     class LifecycleStore:
         async def record_usage(self, **_kwargs):
             raise AssertionError("invalid versions must not be recorded")
 
-    core.skill_lifecycle_store = LifecycleStore()
+    core.skill_context.lifecycle_store = LifecycleStore()
     with pytest.raises(KeyError, match="does not exist"):
-        await core.confirm_skill_success_async(turn_id="missing")
+        await core.skill_context.confirm_success_async(turn_id="missing")
     incomplete = TurnState(user_message="incomplete")
     core.state.turns.append(incomplete)
     with pytest.raises(ValueError, match="completed host run"):
-        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+        await core.skill_context.confirm_success_async(turn_id=incomplete.turn_id)
     incomplete.complete("done")
     incomplete.extension_metadata["loaded_skill_versions"] = "invalid"
     assert (
-        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+        await core.skill_context.confirm_success_async(turn_id=incomplete.turn_id)
         == ()
     )
     incomplete.extension_metadata["loaded_skill_versions"] = [
@@ -2342,7 +2347,7 @@ async def test_async_hosted_management_fails_closed_without_services(
         {"name": 1},
     ]
     assert (
-        await core.confirm_skill_success_async(turn_id=incomplete.turn_id)
+        await core.skill_context.confirm_success_async(turn_id=incomplete.turn_id)
         == ()
     )
 
@@ -2353,16 +2358,16 @@ async def test_async_hosted_management_fails_closed_without_services(
                 rationale="nothing to learn",
             )
 
-    core.learning_reviewer = Reviewer()
-    core.async_skill_registry = None
+    core.learning.reviewer = Reviewer()
+    core.learning.async_registry = None
     with pytest.raises(KeyError, match="does not exist"):
-        await core.review_learning_async(turn_id="missing")
+        await core.learning.review_async(turn_id="missing")
     unfinished = TurnState(user_message="unfinished")
     core.state.turns.append(unfinished)
     with pytest.raises(ValueError, match="finished turn"):
-        await core.review_learning_async(turn_id=unfinished.turn_id)
+        await core.learning.review_async(turn_id=unfinished.turn_id)
     unfinished.complete("done")
-    outcome = await core.review_learning_async(turn_id=unfinished.turn_id)
+    outcome = await core.learning.review_async(turn_id=unfinished.turn_id)
     assert outcome.skipped
     with pytest.raises(Exception, match="proposals are not configured"):
         await agent.review_learning(turn_id=unfinished.turn_id)
@@ -2394,7 +2399,7 @@ async def test_async_hosted_close_preserves_first_failure_and_finishes_cleanup(
             closed.append("owned")
             raise RuntimeError("owned close failed")
 
-    monkeypatch.setattr(agent.runtime, "_flush_async_services", fail_flush)
+    monkeypatch.setattr(agent.runtime.resources, "flush", fail_flush)
     agent._async_owned_services = Owned()
 
     with pytest.raises(Exception, match="flush failed") as error:
@@ -2437,8 +2442,8 @@ async def test_async_hosted_close_can_retry_after_cancellation(
             self.closed.append(current)
 
     lifecycle = Lifecycle()
-    agent.runtime.tool_context_lifecycle = lifecycle
-    agent.runtime._tool_contexts["cancelled-close"] = context
+    agent.runtime.tool_contexts.lifecycle = lifecycle
+    agent.runtime.tool_contexts._contexts["cancelled-close"] = context
     close_task = asyncio.create_task(agent.close())
     await asyncio.wait_for(entered.wait(), timeout=1)
 
@@ -2454,7 +2459,7 @@ async def test_async_hosted_close_can_retry_after_cancellation(
 
     assert lifecycle.calls == 2
     assert lifecycle.closed == [context]
-    assert agent.runtime._tool_contexts == {}
+    assert agent.runtime.tool_contexts._contexts == {}
     assert agent._async_owned_services is None
     assert agent.closed
 
@@ -2494,7 +2499,7 @@ async def test_async_hosted_cancelled_flush_does_not_close_pending_journal(
             self.closed = True
 
     journal = Journal()
-    agent.runtime.async_flushables = (journal,)
+    agent.runtime.resources.async_flushables = (journal,)
     agent.runtime._owned_resources.append(journal)
     close_task = asyncio.create_task(agent.close())
     await asyncio.wait_for(entered.wait(), timeout=1)
@@ -2700,8 +2705,8 @@ async def test_async_hosted_close_waits_for_active_serialized_operation(
         flushes.append("flush")
 
     monkeypatch.setattr(
-        agent.runtime,
-        "_flush_async_services",
+        agent.runtime.resources,
+        "flush",
         tracked_flush,
     )
     active_task = asyncio.create_task(
@@ -2803,7 +2808,7 @@ async def test_async_hosted_flush_attempts_every_journal(
             if self.error is not None:
                 raise RuntimeError(self.error)
 
-    agent.runtime.async_flushables = (
+    agent.runtime.resources.async_flushables = (
         Journal("traces", error="trace flush failed"),
         Journal("sessions"),
         Journal("audit", error="audit flush failed"),
@@ -2811,7 +2816,7 @@ async def test_async_hosted_flush_attempts_every_journal(
     )
 
     with pytest.raises(RuntimeError, match="trace flush failed") as error:
-        await agent.runtime._flush_async_services()
+        await agent.runtime.resources.flush()
 
     assert calls == ["traces", "sessions", "audit", "events"]
     assert any(
@@ -2819,7 +2824,7 @@ async def test_async_hosted_flush_attempts_every_journal(
         for note in getattr(error.value, "__notes__", ())
     )
 
-    agent.runtime.async_flushables = ()
+    agent.runtime.resources.async_flushables = ()
     await agent.close()
 
 
@@ -2842,7 +2847,7 @@ async def test_async_hosted_predispatch_flush_failure_releases_reservation(
         async def flush(self) -> None:
             raise RuntimeError("journal unavailable")
 
-    agent.runtime.async_flushables = (FailingJournal(),)
+    agent.runtime.resources.async_flushables = (FailingJournal(),)
 
     with pytest.raises(Exception, match="journal unavailable"):
         await agent.run("fail before model dispatch")
@@ -2851,7 +2856,7 @@ async def test_async_hosted_predispatch_flush_failure_releases_reservation(
     assert hub.active_usage_reservations(agent.execution_scope) == ()
     assert agent.state.turns[-1].status == "failed"
 
-    agent.runtime.async_flushables = ()
+    agent.runtime.resources.async_flushables = ()
     await agent.close()
 
 
@@ -3232,7 +3237,7 @@ async def test_async_hosted_preparation_failure_closes_open_execution_context(
         await agent.run("fail after opening the execution context")
 
     assert execution.session.closed
-    assert agent.runtime._tool_contexts == {}
+    assert agent.runtime.tool_contexts._contexts == {}
     await agent.close()
 
 
@@ -3505,7 +3510,7 @@ def test_hosted_tool_catalog_is_resolved_per_turn_and_exposed(
         first_result.turn_id,
         second_result.turn_id,
     ]
-    assert [tool.name for tool in runtime.tool_registry.list_tools()] == [
+    assert [tool.name for tool in runtime.runtime.catalog.active_registry.list_tools()] == [
         "second_lookup"
     ]
     first_prompt = json.dumps(llm.requests[0])
@@ -3595,7 +3600,7 @@ def test_plan_resume_rejects_changed_tool_catalog() -> None:
     selected[:] = [_catalog_tool("second_lookup")]
 
     with pytest.raises(ToolCatalogResolutionError, match="changed"):
-        runtime._revalidate_tool_catalog(turn)
+        runtime.catalog.revalidate(turn)
 
     assert llm.requests == []
     runtime.close()

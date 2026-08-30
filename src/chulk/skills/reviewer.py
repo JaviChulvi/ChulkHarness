@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 import json
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from chulk.skills.lifecycle_models import LearningProposalKind
 from chulk.skills.lifecycle_store import SQLiteSkillLifecycleStore
@@ -101,17 +101,10 @@ class LearningReviewQuota:
         for field_name in ("max_cost_per_day", "max_cost_per_review"):
             value = getattr(self, field_name)
             if value is not None and (
-                not isinstance(value, Decimal)
-                or not value.is_finite()
-                or value < 0
+                not isinstance(value, Decimal) or not value.is_finite() or value < 0
             ):
-                raise ValueError(
-                    f"{field_name} must be a finite non-negative Decimal"
-                )
-        if (
-            self.max_cost_per_day is not None
-            and self.max_cost_per_review is None
-        ):
+                raise ValueError(f"{field_name} must be a finite non-negative Decimal")
+        if self.max_cost_per_day is not None and self.max_cost_per_review is None:
             raise ValueError(
                 "max_cost_per_review is required for fail-closed cost quotas"
             )
@@ -171,8 +164,7 @@ class RestrictedLearningReviewer:
             rationale=rationale,
             usage=response.usage,
             cost=response.cost,
-            reviewer_model=response.model
-            or getattr(self._llm, "model", None),
+            reviewer_model=response.model or getattr(self._llm, "model", None),
         )
 
 
@@ -205,12 +197,16 @@ class LearningReviewCoordinator:
                 rationale="learning review trigger is disabled",
             )
 
-        period_start = datetime.now(timezone.utc).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        ).isoformat()
+        period_start = (
+            datetime.now(timezone.utc)
+            .replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            .isoformat()
+        )
         try:
             used = self.lifecycle_store.review_usage_since(
                 period_start,
@@ -223,13 +219,10 @@ class LearningReviewCoordinator:
             self.quota.max_proposals_per_day - used.proposal_count,
         )
         if proposal_capacity < 1:
-            raise LearningReviewQuotaExceeded(
-                "daily learning proposal quota exceeded"
-            )
+            raise LearningReviewQuotaExceeded("daily learning proposal quota exceeded")
         messages = _review_messages(context, max_proposals=proposal_capacity)
         reserved_tokens = (
-            _estimate_message_tokens(messages)
-            + self.quota.max_output_tokens
+            _estimate_message_tokens(messages) + self.quota.max_output_tokens
         )
         reserved_cost = self.quota.max_cost_per_review or Decimal(0)
         try:
@@ -277,10 +270,7 @@ class LearningReviewCoordinator:
                 raise LearningReviewQuotaExceeded(
                     "learning reviewer exceeded its reserved token budget"
                 )
-            if (
-                self.quota.max_cost_per_day is not None
-                and actual_cost > reserved_cost
-            ):
+            if self.quota.max_cost_per_day is not None and actual_cost > reserved_cost:
                 raise LearningReviewQuotaExceeded(
                     "learning reviewer exceeded its reserved cost budget"
                 )
@@ -289,16 +279,13 @@ class LearningReviewCoordinator:
                 reviewer_model=result.reviewer_model,
                 cost=(
                     str(result.cost.amount)
-                    if result.cost is not None
-                    and result.cost.amount is not None
+                    if result.cost is not None and result.cost.amount is not None
                     else None
                 ),
                 reviewer_metadata={
                     "review_run_id": run_id,
                     "reviewer_usage": (
-                        result.usage.to_dict()
-                        if result.usage is not None
-                        else None
+                        result.usage.to_dict() if result.usage is not None else None
                     ),
                 },
                 review_run_id=run_id,
@@ -341,6 +328,131 @@ class LearningReviewCoordinator:
                 error=str(exc),
             )
             raise
+
+
+class LearningRuntime:
+    """Build bounded turn evidence and invoke the configured learning reviewer."""
+
+    def __init__(
+        self,
+        *,
+        state: Any,
+        reviewer: Any = None,
+        registry: Any = None,
+        async_registry: Any = None,
+        trace_logger: Any = None,
+        proposals: Any = None,
+    ) -> None:
+        self.state = state
+        self.reviewer = reviewer
+        self.registry = registry
+        self.async_registry = async_registry
+        self.trace_logger = trace_logger
+        self.proposals = proposals
+
+    def review(
+        self,
+        *,
+        trigger: LearningReviewTrigger | str = LearningReviewTrigger.MANUAL,
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReviewOutcome:
+        if self.reviewer is None:
+            raise RuntimeError("learning reviewer is not configured")
+        turn = self._turn(turn_id)
+        manifests = tuple(
+            skill.manifest.to_dict()
+            for skill in (
+                self.registry.list_visible_skills() if self.registry is not None else ()
+            )
+            if skill.manifest is not None
+        )
+        return cast(
+            LearningReviewOutcome,
+            self.reviewer.review(
+                self._context(
+                    turn,
+                    manifests,
+                    trigger=trigger,
+                    host_confirmed_success=host_confirmed_success,
+                )
+            ),
+        )
+
+    async def review_async(
+        self,
+        *,
+        trigger: LearningReviewTrigger | str = LearningReviewTrigger.MANUAL,
+        turn_id: str | None = None,
+        host_confirmed_success: bool = False,
+    ) -> LearningReviewOutcome:
+        from chulk.hosting.async_utils import call_async_service
+
+        if self.reviewer is None:
+            raise RuntimeError("learning reviewer is not configured")
+        turn = self._turn(turn_id)
+        visible_skills = (
+            await call_async_service(
+                self.async_registry,
+                "list_visible_skills",
+            )
+            if self.async_registry is not None
+            else ()
+        )
+        manifests = tuple(
+            skill.manifest.to_dict()
+            for skill in visible_skills
+            if skill.manifest is not None
+        )
+        return cast(
+            LearningReviewOutcome,
+            await call_async_service(
+                self.reviewer,
+                "review",
+                self._context(
+                    turn,
+                    manifests,
+                    trigger=trigger,
+                    host_confirmed_success=host_confirmed_success,
+                ),
+            ),
+        )
+
+    def _turn(self, turn_id: str | None) -> Any:
+        turn = next(
+            (
+                item
+                for item in reversed(self.state.turns)
+                if turn_id is None or item.turn_id == turn_id
+            ),
+            None,
+        )
+        if turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if turn.final_answer is None:
+            raise ValueError("learning review requires a finished turn")
+        return turn
+
+    def _context(
+        self,
+        turn: Any,
+        manifests: tuple[dict[str, Any], ...],
+        *,
+        trigger: LearningReviewTrigger | str,
+        host_confirmed_success: bool,
+    ) -> LearningReviewContext:
+        return LearningReviewContext(
+            trigger=LearningReviewTrigger(trigger),
+            user_message=turn.user_message,
+            assistant_response=turn.final_answer,
+            turn_id=turn.turn_id,
+            source_trace=(
+                str(self.trace_logger.path) if self.trace_logger is not None else None
+            ),
+            tool_call_count=turn.tool_call_count,
+            host_confirmed_success=host_confirmed_success,
+            current_skill_manifests=manifests,
+        )
 
 
 def _review_messages(
@@ -409,9 +521,7 @@ def _parse_review_response(
         raise LearningReviewError("propose requires a non-empty proposals list")
     if len(raw_proposals) > max_proposals:
         raise LearningReviewError("reviewer exceeded the proposal count limit")
-    drafts = tuple(
-        _parse_draft(item, context=context) for item in raw_proposals
-    )
+    drafts = tuple(_parse_draft(item, context=context) for item in raw_proposals)
     return drafts, rationale
 
 
@@ -501,10 +611,7 @@ def _optional_string(value: object, limit: int) -> str | None:
 def _string_tuple(value: object, label: str, limit: int) -> tuple[str, ...]:
     if not isinstance(value, list) or len(value) > limit:
         raise LearningReviewError(f"{label} must be a bounded list")
-    return tuple(
-        _required_string(item, label, 1_000)
-        for item in value
-    )
+    return tuple(_required_string(item, label, 1_000) for item in value)
 
 
 def _bounded(value: str, limit: int) -> str:

@@ -73,6 +73,7 @@ from chulk.profiles import (
 )
 from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
 from chulk.plugins import LocalPluginRegistry
+from chulk._runtime.request import AgentAssemblyRequest
 from chulk.runtime import create_agent
 from chulk.sessions import (
     AmbiguousSessionError,
@@ -195,8 +196,9 @@ def create_cli_agent(
         )
     if llm_client_factory is not None:
         return create_agent(
-            config,
-            llm_client_factory,
+            AgentAssemblyRequest(
+                config=config,
+                llm_client_factory=llm_client_factory,
             conversation_id=conversation_id,
             tool_specs=preset.tools,
             skill_specs=preset.skills,
@@ -210,10 +212,12 @@ def create_cli_agent(
             usage_dimensions=UsageDimensions(
                 profile_id=profile.id if profile is not None else config.profile_id,
                 channel=usage_channel,
-            ),
+                ),
+            )
         )
     return create_agent(
-        config,
+        AgentAssemblyRequest(
+            config=config,
         conversation_id=conversation_id,
         llm_client=create_cli_llm(config),
         tool_specs=preset.tools,
@@ -228,7 +232,8 @@ def create_cli_agent(
         usage_dimensions=UsageDimensions(
             profile_id=profile.id if profile is not None else config.profile_id,
             channel=usage_channel,
-        ),
+            ),
+        )
     )
 
 
@@ -405,16 +410,16 @@ def run_chat_loop(
         config=config,
         agent=agent,
         settings=progress_settings,
-        previous_callback=agent.event_callback,
+        previous_callback=agent.events.event_callback,
     )
-    agent.event_callback = progress_reporter.callback
+    agent.events.set_event_callback(progress_reporter.callback)
     permission_callback = _make_cli_permission_callback(
         terminal,
         input_func=input_func,
         output_func=output_func,
         before_prompt=progress_reporter.close,
     )
-    agent.permission_callback = permission_callback
+    agent._tool_executor.set_permission_callback(permission_callback)
     session_store = (
         SQLiteSessionStore(config.store_path) if config is not None else None
     )
@@ -433,9 +438,9 @@ def run_chat_loop(
         progress_reporter.close()
         previous_agent = command_context.agent
         progress_reporter.agent = next_agent
-        progress_reporter.previous_callback = next_agent.event_callback
-        next_agent.event_callback = progress_reporter.callback
-        next_agent.permission_callback = permission_callback
+        progress_reporter.previous_callback = next_agent.events.event_callback
+        next_agent.events.set_event_callback(progress_reporter.callback)
+        next_agent._tool_executor.set_permission_callback(permission_callback)
         command_context.agent = next_agent
         if next_config is not None:
             config = next_config
@@ -1050,10 +1055,12 @@ def main(
             conversation_id=conversation_id,
             requested_profile_id=selection_state["override"],
         )
-        agent.permission_callback = _make_cli_permission_callback(
-            terminal,
-            input_func=input_func,
-            output_func=output_func,
+        agent._tool_executor.set_permission_callback(
+            _make_cli_permission_callback(
+                terminal,
+                input_func=input_func,
+                output_func=output_func,
+            )
         )
     except (SessionNotFoundError, AmbiguousSessionError) as exc:
         error_func(terminal.error(f"session error: {exc}"))

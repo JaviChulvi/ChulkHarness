@@ -6,7 +6,8 @@ import pytest
 
 from chulk import Agent as PublicAgent
 from chulk import AgentConfig
-from chulk.core import Agent, TraceEvent
+from chulk.core import TraceEvent
+from tests.core_agent import build_core_agent as Agent
 from chulk.core.actions import FinalAnswerAction, ToolCallAction
 from chulk.evals import EvalExpectations, EvalRunner, EvalScenario, run_eval
 from chulk.testing import ScriptedLLMClient
@@ -109,7 +110,7 @@ def test_eval_existing_agent_restores_injected_client_and_callback() -> None:
 
     result.assert_passed()
     assert agent.llm_client is original_client
-    assert agent.event_callback is callback
+    assert agent.events.event_callback is callback
     assert agent.closed is False
     assert original_client.remaining == 1
     assert TraceEvent.FINAL_ANSWER in callback_events

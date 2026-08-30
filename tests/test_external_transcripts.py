@@ -13,12 +13,14 @@ from chulk import (
     AgentConfig,
     AsyncExternalTranscriptSessionRuntimeServices,
     AsyncHostedRuntime,
+    AsyncRuntimeServices,
     AsyncServiceBinding,
     ChulkError,
     ExecutionScope,
     ExternalTranscriptSessionRuntimeServices,
     ExternalTranscriptSnapshot,
     HostedRuntime,
+    HostedServiceDisabledError,
     ServiceBinding,
     TranscriptMessage,
     TranscriptConflictError,
@@ -130,6 +132,38 @@ def _async_services(
             AsyncExternalTranscriptSessionRuntimeServices(journal, sink)
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_compatible_async_runtime_preserves_disabled_session_search(
+    tmp_path: Path,
+) -> None:
+    journal = InMemoryExecutionJournal()
+    sink = InMemoryTranscriptProjectionSink()
+    sync_services = _sync_services(journal, sink)
+    services = AsyncRuntimeServices(
+        **{
+            name: getattr(sync_services, name)
+            for name in sync_services.__dataclass_fields__
+        }
+    )
+    runtime = AsyncHostedRuntime(
+        config=AgentConfig(project_root=tmp_path),
+        llm=RecordingLLM(),
+        tools=[],
+        skills=[],
+        services=services,
+        execution_scope=_scope(),
+        conversation_id="conversation-1",
+        transcript_resolver=lambda _request: _snapshot(),
+    )
+
+    try:
+        with pytest.raises(HostedServiceDisabledError) as error:
+            await runtime.search_sessions("prior message")
+        assert error.value.details.invalid_field == "external_transcript_search"
+    finally:
+        await runtime.close()
 
 
 def test_external_transcript_is_authoritative_and_not_duplicated(

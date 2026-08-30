@@ -17,7 +17,7 @@ from chulk.gateway import (
 )
 from chulk.llm import LLMClient
 from chulk.profiles import ProfileRuntimeFactory
-from chulk.runtime import create_agent
+from tests.core_agent import create_runtime_agent as create_agent
 from chulk.server.channel_runtime import ChannelConversationExecutor
 from chulk.server.dispatcher import ConversationDispatcher
 from chulk.sessions import SQLiteSessionStore
