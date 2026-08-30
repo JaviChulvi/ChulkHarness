@@ -105,6 +105,7 @@ class FakeBrowserBackend:
     info = BrowserBackendInfo(
         name="fake-isolated",
         isolation=BrowserIsolation.EPHEMERAL_LOCAL,
+        enforces_network_policy=True,
     )
 
     def __init__(self) -> None:
@@ -269,3 +270,33 @@ def test_browser_tools_split_read_and_confirmation_gated_material_actions(
     assert "never instructions" in inspected.observation
 
     assert PlaywrightBrowserBackend().info.supports_downloads is False
+
+
+def test_playwright_backend_fails_closed_when_private_networks_are_blocked(
+    tmp_path: Path,
+) -> None:
+    store = ContentStore(
+        tmp_path / "browser.sqlite",
+        tmp_path / "content",
+        profile_id="profile-a",
+    )
+
+    with pytest.raises(ResearchPolicyError, match="connection layer") as raised:
+        BrowserController(PlaywrightBrowserBackend(), store)
+
+    assert raised.value.code == "browser_network_policy_unenforced"
+
+
+def test_host_can_explicitly_allow_playwright_without_private_network_protection(
+    tmp_path: Path,
+) -> None:
+    store = ContentStore(
+        tmp_path / "browser.sqlite",
+        tmp_path / "content",
+        profile_id="profile-a",
+    )
+    policy = BrowserPolicy(domains=DomainPolicy(block_private_networks=False))
+
+    controller = BrowserController(PlaywrightBrowserBackend(), store, policy=policy)
+
+    assert controller.backend.info.name == "playwright-chromium"

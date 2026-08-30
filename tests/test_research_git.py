@@ -71,13 +71,13 @@ def test_git_service_applies_patch_creates_branch_and_commits_explicit_paths(
 ) -> None:
     root = _repository(tmp_path)
     service = GitService(root)
-    patch = """diff --git a/tracked.txt b/tracked.txt
---- a/tracked.txt
-+++ b/tracked.txt
+    patch = r'''diff --git "a/\164racked.txt" "b/\164racked.txt"
+--- "a/\164racked.txt"
++++ "b/\164racked.txt"
 @@ -1 +1,2 @@
  one
 +two
-"""
+'''
 
     applied = service.apply_patch(patch)
     branch = service.create_branch("feature/research")
@@ -106,6 +106,16 @@ def test_git_service_denies_sensitive_submodule_binary_push_and_repository_escap
         )
     with pytest.raises(GitPolicyError, match="disabled"):
         service.push(remote="origin", branch="main")
+    quoted_sensitive_patch = r'''diff --git "a/\056env" "b/\056env"
+--- "a/\056env"
++++ "b/\056env"
+@@ -0,0 +1 @@
++API_KEY=attacker
+'''
+    with pytest.raises(GitPolicyError, match="sensitive") as raised:
+        service.apply_patch(quoted_sensitive_patch)
+    assert raised.value.code == "git_sensitive_path_denied"
+    assert not (root / ".env").exists()
 
     (root / ".env").write_text("API_KEY=top-secret\n", encoding="utf-8")
     _git(root, "add", ".env")
