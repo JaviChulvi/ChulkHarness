@@ -9,16 +9,17 @@ Other providers use Chulk-managed bridge tools. Both paths normalize results
 into the same agent loop, but remote server behavior, authentication, latency,
 availability, and data handling remain outside Chulk's trust boundary.
 
-Keep authorization values in environment variables referenced by
-`authorization_env`, never in `.chulk/mcp.json`. Restrict `allowed_tools`, use
-approval for side effects, validate returned content, set network timeouts, and
-assume prompts and tool arguments may leave the local machine.
+Project MCP configuration must use a non-empty `allowed_tools` list. Chulk
+defers bridge discovery and requires approval before the first project-declared
+remote call. Remote descriptions, schemas, errors, and results remain untrusted
+content; a mutating follow-on action requires a fresh owner approval.
 
 Secret-free `.chulk/mcp.json` is declarative project configuration and may be
-committed for review. File configuration rejects literal credential-bearing
-fields such as `authorization`, `token`, `api_key`, and request headers; only
-the name in `authorization_env` belongs in JSON. The referenced value stays in
-the process environment or an ignored `.env`.
+committed for review. Project configuration cannot select `authorization_env`
+or set `approval` to `never`; those authority-bearing options are available
+only through programmatic `MCPServerConfig` construction by the embedding host.
+File configuration also rejects literal credential-bearing fields such as
+`authorization`, `token`, `api_key`, and request headers.
 
 All other `.chulk/` data is runtime state except reviewable project playbooks
 under `.chulk/skills/`. `chulk init` writes narrow ignore/allow rules, and

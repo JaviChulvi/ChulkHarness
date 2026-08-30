@@ -672,6 +672,10 @@ class TurnEffects:
             "iteration": record.iteration,
             "phase": record.phase,
         }
+        if result.metadata.get("external_content") is True:
+            metadata["external_content"] = True
+            metadata["trust"] = "untrusted"
+            turn.extension_metadata["external_content_seen"] = True
         self.state.observations.append(
             {
                 "tool_name": action.tool_name,

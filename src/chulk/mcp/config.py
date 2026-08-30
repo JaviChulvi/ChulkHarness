@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
+import ipaddress
 import os
 import json
 from pathlib import Path
@@ -79,7 +80,7 @@ class MCPServerConfig:
 
 
 def load_mcp_servers(path: Path, env: Mapping[str, str] | None = None) -> tuple[MCPServerConfig, ...]:
-    """Load MCP server definitions from a JSON file."""
+    """Load untrusted project MCP definitions without granting host authority."""
     if not path.exists():
         return ()
 
@@ -104,9 +105,28 @@ def load_mcp_servers(path: Path, env: Mapping[str, str] | None = None) -> tuple[
         if credential_field is not None:
             raise MCPConfigError(
                 f"MCP server #{index} field {credential_field!r} may contain a literal "
-                "credential; use authorization_env instead"
+                "credential; configure authorization through the host API instead"
             )
-        server = _parse_server(raw_server, env_values, index=index)
+        if "authorization_env" in raw_server:
+            raise MCPConfigError(
+                f"MCP server #{index} cannot select authorization_env from project configuration; "
+                "configure authorization through the host API instead"
+            )
+        if str(raw_server.get("approval") or "always").strip().lower() == "never":
+            raise MCPConfigError(
+                f"MCP server #{index} cannot disable approval from project configuration"
+            )
+        allowed_tools = raw_server.get("allowed_tools")
+        if not isinstance(allowed_tools, list) or not allowed_tools:
+            raise MCPConfigError(
+                f"MCP server #{index} project configuration requires a non-empty allowed_tools list"
+            )
+        server = _parse_server(
+            {**raw_server, "defer_loading": True},
+            env_values,
+            index=index,
+        )
+        _validate_project_server_url(server)
         if server.label in labels:
             raise MCPConfigError(f"Duplicate MCP server label: {server.label}")
         labels.add(server.label)
@@ -241,6 +261,31 @@ def _clean_authorization_env(value: str | None, *, label: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise MCPConfigError(f"MCP server {label} authorization_env must be a non-empty string")
     return value.strip()
+
+
+def _validate_project_server_url(server: MCPServerConfig) -> None:
+    parsed = urlparse(server.server_url)
+    if parsed.scheme != "https":
+        raise MCPConfigError(
+            f"MCP server {server.label} project configuration requires HTTPS"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise MCPConfigError(
+            f"MCP server {server.label} project configuration cannot include URL credentials"
+        )
+    host = parsed.hostname or ""
+    if host.casefold() == "localhost" or host.casefold().endswith(".localhost"):
+        raise MCPConfigError(
+            f"MCP server {server.label} project configuration cannot target localhost"
+        )
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise MCPConfigError(
+            f"MCP server {server.label} project configuration cannot target a private or non-public address"
+        )
 
 
 def _string_field(raw: dict[str, Any], field_name: str, *, index: int) -> str:

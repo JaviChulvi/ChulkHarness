@@ -744,7 +744,7 @@ def test_doctor_rejects_literal_mcp_credentials(tmp_path):
     assert report.ok is False
     assert report.checks[0].name == "configuration"
     assert report.checks[0].status == "fail"
-    assert "authorization_env" in report.checks[0].detail
+    assert "host API" in report.checks[0].detail
 
 
 def test_trace_inspect_and_export_are_machine_readable_and_escape_html(tmp_path, capsys):

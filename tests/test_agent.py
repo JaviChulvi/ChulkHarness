@@ -6,7 +6,12 @@ import json
 import pytest
 from chulk.core import AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
 from tests.core_agent import build_core_agent as Agent
-from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
+from chulk.core.actions import (
+    FinalAnswerAction,
+    PlanAction,
+    PlanStepUpdateAction,
+    ToolCallAction,
+)
 from chulk.core.context import ContextBudget
 from chulk.core.model_transport import (
     MAX_SUMMARY_CHARS,
@@ -43,7 +48,12 @@ from chulk.tools import (
     shell_tool,
     write_file_tool,
 )
-from chulk.tools.permissions import PermissionDecision, ToolPermissionLevel, ToolPermissionPolicy
+from chulk.tools.permissions import (
+    PermissionDecision,
+    ToolPermissionLevel,
+    ToolPermissionPolicy,
+    permission_policy_for_profile,
+)
 from chulk.tools.registry import ToolResult
 from chulk.tracing import JSONLTraceLogger
 
@@ -599,8 +609,9 @@ def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(t
         authorization="secret-token",
     )
     trace_logger = JSONLTraceLogger(tmp_path / "traces", "hosted-mcp-context")
+    llm = HostedNativeClient()
     agent = Agent(
-        HostedNativeClient(),
+        llm,
         mcp_servers=(server,),
         trace_logger=trace_logger,
     )
@@ -614,6 +625,8 @@ def test_hosted_mcp_is_visible_in_native_context_without_tracing_authorization(t
     assert native_section["metadata"]["tool_names"] == ["mcp:docs"]
     assert native_section["item_count"] == 1
     assert report["request_overhead_estimated_tokens"] > 0
+    assert '<external_tool_content trust="untrusted">' in llm.requests[0][0]["content"]
+    assert "mcp:docs" in llm.requests[0][0]["content"]
     trace_text = trace_logger.path.read_text(encoding="utf-8")
     assert '"name": "mcp:docs"' in trace_text
     assert "secret-token" not in trace_text
@@ -1500,6 +1513,116 @@ def test_agent_denied_mcp_bridge_permission_does_not_call_server(tmp_path):
     assert agent.state.turns[0].tool_calls[0].error == "permission_denied"
     assert any(event["type"] == TraceEvent.TOOL_PERMISSION_REQUESTED for event in events)
     assert any(event["type"] == TraceEvent.TOOL_PERMISSION_DECIDED for event in events)
+
+
+def test_external_mcp_result_forces_fresh_approval_for_followup_write(tmp_path):
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "mcp_docs_search_docs", "arguments": {"query": "MCP"}}),
+            json.dumps({"type": "tool_call", "tool_name": "write_file", "arguments": {"path": "injected.txt", "content": "changed"}}),
+            json.dumps({"type": "final_answer", "content": "The follow-up write required approval."}),
+        ]
+    )
+    registry = ToolRegistry()
+    bridge_tool = create_mcp_bridge_tools(
+        [MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")],
+        client_factory=lambda _server: RecordingMCPClient(),
+    )[0]
+    registry.register(bridge_tool)
+    registry.register(write_file_tool(tmp_path))
+    agent = Agent(
+        llm,
+        tool_registry=registry,
+        permission_policy=permission_policy_for_profile("full-access"),
+    )
+
+    response = agent.run_turn("search docs")
+
+    assert response == "The follow-up write required approval."
+    assert not (tmp_path / "injected.txt").exists()
+    write_record = agent.state.turns[0].tool_calls[1]
+    assert write_record.error == "permission_denied"
+    assert write_record.metadata["permission_decision"]["decision"] == "deny"
+
+
+def test_external_mcp_result_requires_approval_in_a_later_turn(tmp_path):
+    llm = RecordingLLMClient(
+        [
+            json.dumps({"type": "tool_call", "tool_name": "mcp_docs_search_docs", "arguments": {"query": "MCP"}}),
+            json.dumps({"type": "final_answer", "content": "Found remote instructions."}),
+            json.dumps({"type": "tool_call", "tool_name": "write_file", "arguments": {"path": "injected.txt", "content": "changed"}}),
+            json.dumps({"type": "final_answer", "content": "The later write required approval."}),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        create_mcp_bridge_tools(
+            [MCPServerConfig(label="docs", transport="streamable_http", server_url="https://mcp.example.com")],
+            client_factory=lambda _server: RecordingMCPClient(),
+        )[0]
+    )
+    registry.register(write_file_tool(tmp_path))
+    agent = Agent(
+        llm,
+        tool_registry=registry,
+        permission_policy=permission_policy_for_profile("full-access"),
+    )
+
+    assert agent.run_turn("search docs") == "Found remote instructions."
+    assert agent.run_turn("continue") == "The later write required approval."
+
+    assert not (tmp_path / "injected.txt").exists()
+    write_record = agent.state.turns[1].tool_calls[0]
+    assert write_record.error == "permission_denied"
+    assert write_record.metadata["permission_decision"]["decision"] == "deny"
+
+
+def test_hosted_mcp_result_forces_fresh_approval_for_followup_write(tmp_path):
+    class HostedMCPResultClient(LLMClient):
+        capabilities = LLMCapabilities(supports_native_tool_calling=True)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_action(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMActionResult(
+                    action=ToolCallAction(
+                        type="tool_call",
+                        tool_name="write_file",
+                        arguments={"path": "injected.txt", "content": "changed"},
+                    ),
+                    raw_response="hosted MCP output and follow-up write",
+                    metadata={
+                        "action_transport": "provider_native",
+                        "provider_mcp_output": [{"server_label": "docs"}],
+                    },
+                )
+            return LLMActionResult(
+                action=FinalAnswerAction(
+                    type="final_answer",
+                    content="The hosted follow-up write required approval.",
+                ),
+                raw_response="hosted follow-up denied",
+                metadata={"action_transport": "provider_native"},
+            )
+
+    registry = ToolRegistry()
+    registry.register(write_file_tool(tmp_path))
+    agent = Agent(
+        HostedMCPResultClient(),
+        tool_registry=registry,
+        permission_policy=permission_policy_for_profile("full-access"),
+    )
+
+    response = agent.run_turn("search docs")
+
+    assert response == "The hosted follow-up write required approval."
+    assert not (tmp_path / "injected.txt").exists()
+    write_record = agent.state.turns[0].tool_calls[0]
+    assert write_record.error == "permission_denied"
+    assert write_record.metadata["permission_decision"]["decision"] == "deny"
 
 
 def test_agent_runs_confirmation_tool_when_permission_callback_allows(tmp_path):

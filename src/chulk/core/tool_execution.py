@@ -143,6 +143,7 @@ class ToolExecutor:
     ] | None
     trace: Callable[[str, dict | None], None]
     get_context: Callable[[TurnState], ToolExecutionContext | None]
+    external_content_seen: Callable[[], bool] = lambda: False
     usage_accounting: ModelUsageAccounting | None = None
     goal_execution: GoalExecutionPort | None = None
     durable_effects: DurableEffectPort | None = None
@@ -1328,11 +1329,29 @@ class ToolExecutor:
         if tool is None:
             return None, None
         request = self.permission_policy.request_for_tool(tool, arguments)
+        force_external_approval = _external_followup_requires_approval(
+            turn,
+            request,
+            external_content_seen=self.external_content_seen(),
+        )
+        if force_external_approval:
+            request = replace(
+                request,
+                requires_confirmation=True,
+                reason="untrusted external content requires fresh user approval",
+            )
         self.trace(
             TraceEvent.TOOL_PERMISSION_REQUESTED,
             {"turn_id": turn.turn_id, "request": request.to_dict()},
         )
         record = self.permission_policy.decide(request)
+        if force_external_approval and record.decision == PermissionDecision.ALLOW:
+            record = replace(
+                record,
+                decision=PermissionDecision.ASK,
+                reason="untrusted external content requires fresh user approval",
+                requires_confirmation=True,
+            )
         if record.decision == PermissionDecision.ASK:
             if self.durable_approvals is not None:
                 if context is None:
@@ -1430,11 +1449,29 @@ class ToolExecutor:
         if tool is None:
             return None, None
         request = self.permission_policy.request_for_tool(tool, arguments)
+        force_external_approval = _external_followup_requires_approval(
+            turn,
+            request,
+            external_content_seen=self.external_content_seen(),
+        )
+        if force_external_approval:
+            request = replace(
+                request,
+                requires_confirmation=True,
+                reason="untrusted external content requires fresh user approval",
+            )
         self.trace(
             TraceEvent.TOOL_PERMISSION_REQUESTED,
             {"turn_id": turn.turn_id, "request": request.to_dict()},
         )
         record = self.permission_policy.decide(request)
+        if force_external_approval and record.decision == PermissionDecision.ALLOW:
+            record = replace(
+                record,
+                decision=PermissionDecision.ASK,
+                reason="untrusted external content requires fresh user approval",
+                requires_confirmation=True,
+            )
         if record.decision == PermissionDecision.ASK:
             if self.durable_approvals is not None:
                 if context is None:
@@ -1507,6 +1544,24 @@ class ToolExecutor:
             tool_policy=request.tool_policy,
             arguments_digest=request.arguments_digest,
         )
+
+
+def _external_followup_requires_approval(
+    turn: TurnState,
+    request: PermissionRequest,
+    *,
+    external_content_seen: bool,
+) -> bool:
+    if request.permission_level == ToolPermissionLevel.READ:
+        return False
+    if external_content_seen:
+        return True
+    if turn.extension_metadata.get("external_content_seen") is True:
+        return True
+    return any(
+        observation.output_metadata.get("external_content") is True
+        for observation in turn.observations
+    )
 
 
 def _parallel_safe(tool: Any) -> bool:

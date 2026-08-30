@@ -180,7 +180,7 @@ def test_main_help_is_grouped_and_registry_backed(monkeypatch, tmp_path, capsys)
     assert "/verbose on|off" not in output
 
 
-def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatch, tmp_path, capsys):
+def test_main_mcp_command_shows_project_server_without_host_credentials(monkeypatch, tmp_path, capsys):
     mcp_dir = tmp_path / ".chulk"
     mcp_dir.mkdir()
     (mcp_dir / "mcp.json").write_text(
@@ -192,7 +192,6 @@ def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatc
                         "transport": "streamable_http",
                         "server_url": "https://mcp.example.com",
                         "allowed_tools": ["search_docs"],
-                        "authorization_env": "DOCS_MCP_TOKEN",
                     }
                 ]
             }
@@ -200,7 +199,6 @@ def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatc
         encoding="utf-8",
     )
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("DOCS_MCP_TOKEN", "super-secret-token")
     inputs = iter(["/mcp", "/q"])
 
     class HostedMCPFakeLLM(FakeLLMClient):
@@ -221,9 +219,7 @@ def test_main_mcp_command_shows_configured_servers_with_redacted_auth(monkeypatc
     assert "MCP" in output
     assert "docs" in output
     assert "path      hosted" in output
-    assert "DOCS_MCP_TOKEN:set" in output
     assert "search_docs" in output
-    assert "super-secret-token" not in output
 
 
 def test_main_shows_live_progress_while_agent_works(monkeypatch, tmp_path, capsys):
