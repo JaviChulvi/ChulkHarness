@@ -3,6 +3,7 @@
 from chulk.authoring import (
     AGENT_DEFINITION_SCHEMA_VERSION,
     AgentCompiler,
+    AgentDirectory,
     AgentDefinition,
     AgentDefinitionRecord,
     AgentDefinitionRuntime,
@@ -31,6 +32,7 @@ from chulk.authoring import (
     WorkflowEffect,
     WorkflowGraph,
     WorkflowStep,
+    initialize_agent_directory,
 )
 from chulk._sdk.config import AgentConfig, AgentPreset, MCP
 from chulk.core import TurnContextSection
@@ -667,6 +669,7 @@ from chulk.usage import (
 __all__ = [
     "AGENT_DEFINITION_SCHEMA_VERSION",
     "AgentCompiler",
+    "AgentDirectory",
     "AgentDefinition",
     "AgentDefinitionRecord",
     "AgentDefinitionRuntime",
@@ -706,6 +709,7 @@ __all__ = [
     "WorkflowEffect",
     "WorkflowGraph",
     "WorkflowStep",
+    "initialize_agent_directory",
     "ApprovalConflictError",
     "ApprovalDecision",
     "ApprovalLifecyclePayload",

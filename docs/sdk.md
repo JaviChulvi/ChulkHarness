@@ -15,6 +15,13 @@ Applications that store, review, and publish agent behavior independently from
 deployment paths should use `AgentDefinition`, `AgentCompiler`, and
 `AgentDefinitionRuntime`. See [portable authoring](authoring.md).
 
+For a local application that keeps its prompt and declared tool names together,
+`Agent.from_directory(...)` and `AsyncAgent.from_directory(...)` load
+`agent.toml` plus `instructions.md`. Pass the declared tool objects explicitly;
+the normal SDK capability and permission checks remain in force. This local
+shortcut has no publication authority. Hosted applications should compile and
+publish the same directory through `AgentDirectory`.
+
 When several logical users or workspaces share a `store_path`, set
 `AgentConfig(memory_namespace="tenant:workspace-key")` (or pass
 `memory_namespace` directly to `Agent`). Omitting it preserves the

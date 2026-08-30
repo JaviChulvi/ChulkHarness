@@ -661,6 +661,13 @@ class PromptCatalog:
             raise PublicationError("revoked prompts cannot start new runs")
         return published.content
 
+    def reference(self, name: str, version: str) -> VersionedReference:
+        """Return one exact published prompt reference for declarative authoring."""
+        try:
+            return self._prompts[(name, version)].reference
+        except KeyError as exc:
+            raise KeyError(f"prompt {name!r}@{version!r} is not published") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class PublishedArtifact:
@@ -715,6 +722,13 @@ class ArtifactCatalog:
         if artifact.availability is ArtifactAvailability.REVOKED:
             raise PublicationError("revoked artifacts cannot start new runs")
         return dict(artifact.payload)
+
+    def reference(self, name: str, version: str) -> VersionedReference:
+        """Return one exact published artifact reference for declarative authoring."""
+        try:
+            return self._artifacts[(name, version)].reference
+        except KeyError as exc:
+            raise KeyError(f"artifact {name!r}@{version!r} is not published") from exc
 
 
 def validate_definition_catalogs(

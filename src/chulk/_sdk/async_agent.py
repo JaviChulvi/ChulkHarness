@@ -66,6 +66,25 @@ T = TypeVar("T")
 class AsyncAgent:
     """Public asynchronous facade backed by Chulk's compatibility runtime."""
 
+    @classmethod
+    def from_directory(cls, path: Path | str, **kwargs: Any) -> "AsyncAgent":
+        """Create a local async SDK agent from an agent directory."""
+        from chulk.authoring.directory import AgentDirectory
+
+        source = AgentDirectory.load(path)
+        tools = tuple(kwargs.get("tools") or ())
+        kwargs["tools"] = tools
+        available = {str(getattr(tool, "name", "")) for tool in tools}
+        missing = set(source.tools) - available
+        if missing:
+            raise ValueError(
+                "AsyncAgent.from_directory requires the declared tools: "
+                + ", ".join(sorted(missing))
+            )
+        if "system_prompt" in kwargs:
+            raise ValueError("AsyncAgent.from_directory owns system_prompt through instructions.md")
+        return cls(system_prompt=source.instructions, **kwargs)
+
     def __init__(self, **kwargs: Any) -> None:
         self._agent = Agent(**kwargs)
         self._handle = AsyncAgentHandle(self._agent._handle)

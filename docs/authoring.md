@@ -39,6 +39,36 @@ the skill through `SkillPublicationManager`, then saves and publishes the
 definition through an `AgentDefinitionStore`. A publication report is accepted
 only when its `artifact_digest` matches the exact artifact under review.
 
+## Filesystem-first source
+
+For reviewable local authoring, keep an agent in one small directory:
+
+```text
+.chulk/agents/support/
+  agent.toml
+  instructions.md
+```
+
+`agent.toml` names the agent, exact prompt/model/approval versions, and trusted
+tool names. `instructions.md` must exactly equal that published prompt. The
+directory does not execute Python, contain credentials, or create tool
+implementations; `AgentDirectory.compile(...)` resolves the named catalog
+entries and calls the existing `AgentCompiler`.
+
+```bash
+chulk agent init .chulk/agents/support --id support-agent
+chulk agent check .chulk/agents/support
+```
+
+`check` parses only the local source. Full compilation needs the host-owned
+catalogs and an `ExecutionScope`, so it remains programmatic and reviewable:
+
+```python
+source = AgentDirectory.load(".chulk/agents/support")
+package = source.compile(compiler, caller_scope=scope)
+assert package.publishable
+```
+
 ```python
 from chulk import (
     AgentCompiler,
