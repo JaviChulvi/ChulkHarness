@@ -7,6 +7,8 @@ import inspect
 from pathlib import Path
 
 import chulk.runtime as runtime_module
+import pytest
+from chulk._runtime.request import AgentAssemblyRequest
 
 
 def test_runtime_facade_preserves_create_agent_signature():
@@ -66,6 +68,7 @@ def test_runtime_facade_passes_compatibility_seams_to_assembly(monkeypatch):
     assembled_agent = object()
 
     def fake_assemble(*args, **kwargs):
+        captured["request"] = args[0]
         captured.update(kwargs)
         return assembled_agent
 
@@ -84,6 +87,18 @@ def test_runtime_facade_passes_compatibility_seams_to_assembly(monkeypatch):
     assert captured["mcp_bridge_required"] is bridge_required
     assert captured["mcp_provider_path"] is provider_path
     assert "unresolved_tool_handler" not in captured
+    request = captured["request"]
+    assert isinstance(request, AgentAssemblyRequest)
+    assert request.config is not None
+
+
+def test_assembly_request_rejects_conflicting_model_injections():
+    with pytest.raises(ValueError, match="either llm_client or llm_client_factory"):
+        AgentAssemblyRequest(
+            config=object(),  # type: ignore[arg-type]
+            llm_client=object(),  # type: ignore[arg-type]
+            llm_client_factory=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_runtime_implementation_does_not_import_compatibility_facade():
