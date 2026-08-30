@@ -9,6 +9,9 @@ from chulk.llm.base import (
     LLMErrorClassification,
     LLMErrorCode,
     LLMStreamChunk,
+    MiddlewareLLMClient,
+    ModelMiddleware,
+    wrap_model_client,
 )
 from chulk.llm.capabilities import LLMCapabilities, LLMModelCapabilities, resolve_model_capabilities
 from chulk.llm.factory import (
@@ -59,6 +62,8 @@ __all__ = [
     "LLM_PROVIDER_REGISTRY",
     "LLMResponse",
     "LLMStreamChunk",
+    "MiddlewareLLMClient",
+    "ModelMiddleware",
     "LLMUsage",
     "LocalOpenAICompatibleClient",
     "MoonshotChatCompletionsClient",
@@ -70,4 +75,5 @@ __all__ = [
     "provider_connection_from_config",
     "resolve_model_capabilities",
     "supported_llm_providers",
+    "wrap_model_client",
 ]

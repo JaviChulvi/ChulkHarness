@@ -30,6 +30,8 @@ if TYPE_CHECKING:
         LLM_PROVIDER_REGISTRY,
         LLMResponse,
         LLMStreamChunk,
+        MiddlewareLLMClient,
+        ModelMiddleware,
         LLMUsage,
         LocalOpenAICompatibleClient,
         MoonshotChatCompletionsClient,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         provider_connection_from_config,
         resolve_model_capabilities,
         supported_llm_providers,
+        wrap_model_client,
     )
     from chulk.llm.capabilities import conservative_model_capabilities
     from chulk.llm.public import (
@@ -89,6 +92,8 @@ __all__ = [
     "LLM_PROVIDER_REGISTRY",
     "LLMResponse",
     "LLMStreamChunk",
+    "MiddlewareLLMClient",
+    "ModelMiddleware",
     "LLMUsage",
     "LocalOpenAICompatibleClient",
     "LocalProvider",
@@ -107,6 +112,7 @@ __all__ = [
     "provider_connection_from_config",
     "resolve_model_capabilities",
     "supported_llm_providers",
+    "wrap_model_client",
 ]
 
 
