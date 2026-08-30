@@ -312,7 +312,7 @@ class AsyncHostedRuntime(AsyncAgent):
     def session_search(self) -> Any:
         """Return the native async session-search service for this runtime."""
         if self._uses_sync_compatibility():
-            service = self.runtime.resolved_services.sessions.search
+            service = self.runtime._components.session_search_service
             if service is None:
                 raise RuntimeError("Session search is not configured")
             return service

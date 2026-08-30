@@ -73,7 +73,7 @@ def test_finished_tool_adds_bounded_redacted_action_before_observation() -> None
     effects = TurnEffects(
         state=state,
         memory=memory,
-        llm_client=ScriptedLLMClient([]),
+        get_llm_client=lambda: ScriptedLLMClient([]),
         plan=PlanExecution(state=state, memory=memory, trace=trace),
         trace=trace,
         redact_text=redact,
@@ -154,7 +154,7 @@ def test_planned_tool_observation_checkpoint_includes_step_evidence() -> None:
     effects = TurnEffects(
         state=state,
         memory=memory,
-        llm_client=ScriptedLLMClient([]),
+        get_llm_client=lambda: ScriptedLLMClient([]),
         plan=PlanExecution(state=state, memory=memory, trace=trace),
         trace=trace,
         redact_text=lambda _event, text, _metadata: (text, {"redacted": False}),
@@ -214,7 +214,7 @@ def test_terminal_tool_outcome_blocks_step_before_observation_checkpoint() -> No
     effects = TurnEffects(
         state=state,
         memory=memory,
-        llm_client=ScriptedLLMClient([]),
+        get_llm_client=lambda: ScriptedLLMClient([]),
         plan=PlanExecution(state=state, memory=memory, trace=trace),
         trace=trace,
         redact_text=lambda _event, text, _metadata: (text, {"redacted": False}),

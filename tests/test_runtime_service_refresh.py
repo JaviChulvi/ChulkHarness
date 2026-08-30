@@ -6,8 +6,12 @@ import asyncio
 
 import pytest
 
+from chulk.core.actions import FinalAnswerAction
+from chulk.core.events import TraceEvent
+from chulk.core.state import TurnState
+from chulk.llm.capabilities import LLMCapabilities
 from chulk.testing import ScriptedLLMClient
-from chulk.tools import ToolRegistry
+from chulk.tools import Tool, ToolRegistry
 from chulk.tools.permissions import ToolPermissionPolicy
 from tests.core_agent import build_core_agent as Agent
 
@@ -35,12 +39,44 @@ def test_model_client_override_restores_after_every_exit(failure: BaseException 
 def test_catalog_updates_model_and_execution_registry_together() -> None:
     agent = Agent(ScriptedLLMClient([]))
     replacement = ToolRegistry()
+    replacement.register(
+        Tool(
+            name="inspect_repo",
+            description="Inspect the repository.",
+            args_schema={"type": "object"},
+            callable=lambda _arguments: None,
+        )
+    )
 
     agent.catalog.set_registry(replacement)
 
     assert agent.catalog.active_registry is replacement
     assert agent._model_transport.tool_registry is replacement
     assert agent._tool_executor.registry is replacement
+    snapshot = agent._turn_effects.snapshot(
+        TurnState(user_message="inspect"),
+        require_plan=True,
+    )
+    assert snapshot.planning_tool_names == frozenset({"inspect_repo"})
+
+
+def test_model_client_override_updates_client_dependent_effects() -> None:
+    class StreamingScriptedLLMClient(ScriptedLLMClient):
+        capabilities = LLMCapabilities(supports_streaming=True)
+
+    events: list[str] = []
+    replacement = StreamingScriptedLLMClient(
+        [FinalAnswerAction(type="final_answer", content="streamed")]
+    )
+    agent = Agent(
+        ScriptedLLMClient([]),
+        event_callback=lambda event, _payload: events.append(event),
+    )
+
+    with agent._model_transport.override_client(replacement):
+        assert agent.run_turn("hello") == "streamed"
+
+    assert TraceEvent.MODEL_STREAM_STARTED in events
 
 
 def test_event_capture_and_permission_replacement_are_owned() -> None:

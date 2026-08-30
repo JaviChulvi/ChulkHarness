@@ -298,13 +298,13 @@ class Agent:
         self._turn_effects = TurnEffects(
             state=self.state,
             memory=self.memory,
-            llm_client=self.llm_client,
+            get_llm_client=lambda: self._model_transport.llm_client,
             plan=self._plan_execution,
             trace=self.events.emit,
             redact_text=self.events.redact_text,
             artifact_writer=self.resources.write_artifact,
             planning_tool_names=lambda: read_only_planning_tool_names(
-                resolved_tool_registry.list_tools()
+                self.catalog.active_registry.list_tools()
             ),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
             max_reflection_attempts=self.max_reflection_attempts,
