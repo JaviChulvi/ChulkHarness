@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -98,9 +99,7 @@ KEYWORD_STOPWORDS = {
     "when",
     "with",
 }
-_EXACT_SKILL_NAME_PATTERN = re.compile(
-    r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$"
-)
+_EXACT_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
 
 
 @dataclass
@@ -236,7 +235,9 @@ class SkillRegistry:
         if clean_name in self._skills and not replace:
             raise ValueError(f"Skill already registered: {clean_name}")
         skill.name = clean_name
-        skill.keywords = _normalize_keywords([skill.name, *skill.keywords, *DEFAULT_SKILL_KEYWORDS.get(skill.name, [])])
+        skill.keywords = _normalize_keywords(
+            [skill.name, *skill.keywords, *DEFAULT_SKILL_KEYWORDS.get(skill.name, [])]
+        )
         self._skills[clean_name] = skill
 
     def register_path(self, path: Path | str) -> Skill:
@@ -252,7 +253,9 @@ class SkillRegistry:
         """Register all skills under a directory of skill folders."""
         return self._register_directory(skills_dir, replace=False)
 
-    def _register_directory(self, skills_dir: Path | str, *, replace: bool) -> list[Skill]:
+    def _register_directory(
+        self, skills_dir: Path | str, *, replace: bool
+    ) -> list[Skill]:
         root = Path(skills_dir)
         registered: list[Skill] = []
         if not root.exists():
@@ -270,7 +273,9 @@ class SkillRegistry:
     def restrict_to(self, names: Iterable[str]) -> None:
         """Keep only registered skill metadata with the given names."""
         allowed_names = {_normalize_skill_name(name) for name in names}
-        self._skills = {name: skill for name, skill in self._skills.items() if name in allowed_names}
+        self._skills = {
+            name: skill for name, skill in self._skills.items() if name in allowed_names
+        }
 
     def list_skills(self) -> list[Skill]:
         """Return registered skill metadata sorted by name."""
@@ -279,9 +284,7 @@ class SkillRegistry:
     def list_visible_skills(self) -> list[Skill]:
         """Return skills that satisfy the configured platform and capabilities."""
         return [
-            skill
-            for skill in self.list_skills()
-            if self.skill_visibility(skill)[0]
+            skill for skill in self.list_skills() if self.skill_visibility(skill)[0]
         ]
 
     def get_skill(self, name: str, *, visible_only: bool = False) -> Skill | None:
@@ -306,9 +309,7 @@ class SkillRegistry:
         ):
             return False, f"platform_unavailable:{self._platform}"
         if self._available_tools is not None:
-            missing_tools = sorted(
-                set(manifest.required_tools) - self._available_tools
-            )
+            missing_tools = sorted(set(manifest.required_tools) - self._available_tools)
             if missing_tools:
                 return False, f"missing_tools:{','.join(missing_tools)}"
         if self._capabilities is not None:
@@ -327,7 +328,9 @@ class SkillRegistry:
                 return False, f"forbidden_capabilities:{','.join(forbidden)}"
         return True, "compatible"
 
-    def select_skills(self, user_request: str, *, limit: int | None = None) -> list[SkillSelection]:
+    def select_skills(
+        self, user_request: str, *, limit: int | None = None
+    ) -> list[SkillSelection]:
         """Select relevant skills using deterministic keyword matching."""
         return list(self.route_skills(user_request, limit=limit).selections)
 
@@ -470,9 +473,7 @@ class SkillRegistry:
             if (
                 skill.name not in selected_names
                 and skill.name not in candidate_names
-                and not any(
-                    decision.skill_name == skill.name for decision in decisions
-                )
+                and not any(decision.skill_name == skill.name for decision in decisions)
             ):
                 decisions.append(
                     self._decision(
@@ -635,6 +636,344 @@ class SkillRegistry:
         if limit < 1:
             raise ValueError("limit must be greater than zero")
         return min(limit, self.max_skills)
+
+
+class SkillContextService:
+    """Own per-turn skill selection and governed usage evidence."""
+
+    def __init__(
+        self,
+        *,
+        state: Any,
+        registry: SkillRegistry | None,
+        lifecycle_store: Any = None,
+        lifecycle: Any = None,
+        async_registry: Any = None,
+        pinned_names: Iterable[str] = (),
+        limit: int = DEFAULT_MAX_SKILLS,
+        trace: Callable[[str, dict], None],
+    ) -> None:
+        self.state = state
+        self.registry = registry
+        self.lifecycle_store = lifecycle_store
+        self.lifecycle = lifecycle
+        self.async_registry = async_registry
+        self.pinned_names = tuple(pinned_names)
+        self.limit = limit
+        self.trace = trace
+        self.selections: list[SkillSelection] = []
+
+    def select(self, user_message: str) -> None:
+        self._clear()
+        if self.registry is None:
+            return
+        self._started(user_message)
+        self.selections = self.registry.load_selected_skills(
+            user_message,
+            pinned_names=self.pinned_names,
+            limit=self.limit,
+        )
+        self._completed(self.registry.last_routing_result)
+        self._record_usage()
+
+    async def select_async(self, user_message: str) -> None:
+        from chulk.hosting.async_utils import call_async_service
+
+        self._clear()
+        if self.async_registry is None:
+            await asyncio.to_thread(self.select, user_message)
+            return
+        self._started(user_message)
+        self.selections = list(
+            await call_async_service(
+                self.async_registry,
+                "load_selected_skills",
+                user_message,
+                pinned_names=self.pinned_names,
+                limit=self.limit,
+            )
+        )
+        self._completed(getattr(self.async_registry, "last_routing_result"))
+        await self._record_usage_async()
+
+    def confirm_success(self, turn_id: str | None = None) -> tuple[Any, ...]:
+        turn = self._success_turn(turn_id)
+        return tuple(
+            self.lifecycle_store.record_usage(
+                name=item["name"],
+                scope=item["scope"],
+                version=item["version"],
+                digest=item["digest"],
+                kind="success",
+                source_event_id=f"{turn.turn_id}:host-success",
+                host_confirmed=True,
+            )
+            for item in self._loaded_versions(turn)
+        )
+
+    async def confirm_success_async(
+        self,
+        turn_id: str | None = None,
+    ) -> tuple[Any, ...]:
+        from chulk.hosting.async_utils import call_async_service
+
+        turn = self._success_turn(turn_id)
+        return tuple(
+            [
+                await call_async_service(
+                    self.lifecycle_store,
+                    "record_usage",
+                    name=item["name"],
+                    scope=item["scope"],
+                    version=item["version"],
+                    digest=item["digest"],
+                    kind="success",
+                    source_event_id=f"{turn.turn_id}:host-success",
+                    host_confirmed=True,
+                )
+                for item in self._loaded_versions(turn)
+            ]
+        )
+
+    def restore(self, turn: Any) -> None:
+        if self.registry is None:
+            return
+        restored: list[SkillSelection] = []
+        for name in turn.loaded_skill_names:
+            skill = self.registry.get_skill(name, visible_only=True)
+            if skill is None:
+                continue
+            self.registry.load_content(skill.name)
+            restored.append(
+                SkillSelection(
+                    skill=skill,
+                    score=10_000,
+                    matched_keywords=["restored_pending_plan"],
+                )
+            )
+        self.selections = restored
+
+    async def restore_async(self, turn: Any) -> None:
+        from chulk.hosting.async_utils import call_async_service
+
+        if self.async_registry is None:
+            await asyncio.to_thread(self.restore, turn)
+            return
+        restored: list[SkillSelection] = []
+        for name in turn.loaded_skill_names:
+            skill = await call_async_service(
+                self.async_registry,
+                "get_skill",
+                name,
+                visible_only=True,
+            )
+            if skill is None:
+                continue
+            loaded_content = await call_async_service(
+                self.async_registry,
+                "load_content",
+                skill.name,
+            )
+            if getattr(skill, "loaded_content", None) is None:
+                skill.loaded_content = loaded_content
+            restored.append(
+                SkillSelection(
+                    skill=skill,
+                    score=10_000,
+                    matched_keywords=["restored_pending_plan"],
+                )
+            )
+        self.selections = restored
+
+    def _clear(self) -> None:
+        self.selections = []
+        self.state.loaded_skill_names = []
+
+    def _started(self, query: str) -> None:
+        self.trace(
+            "skill_selection_started",
+            {"turn_id": self.state.current_turn_id, "query": query},
+        )
+
+    def _completed(self, routing_result: Any) -> None:
+        self.state.loaded_skill_names = [
+            selection.skill.name for selection in self.selections
+        ]
+        self.trace(
+            "skill_selection_completed",
+            {
+                "turn_id": self.state.current_turn_id,
+                "explicit_skill_names": list(routing_result.explicit_skill_names),
+                "loaded_skill_names": self.state.loaded_skill_names,
+                "skills": [_selection_evidence(item) for item in self.selections],
+                "decisions": [item.to_dict() for item in routing_result.decisions],
+            },
+        )
+
+    def _record_usage(self) -> None:
+        if self.lifecycle_store is None or not self.state.turns:
+            return
+        turn = self.state.turns[-1]
+        versions: list[dict[str, str]] = []
+        for selection in self.selections:
+            scope = self._scope(selection)
+            if (
+                selection.skill.manifest is None
+                or selection.skill.digest is None
+                or scope is None
+            ):
+                continue
+            try:
+                matched = self.lifecycle_store.get_skill(
+                    selection.skill.name, scope=scope
+                )
+                if matched.digest != selection.skill.digest:
+                    continue
+                self.lifecycle_store.record_usage(
+                    name=matched.name,
+                    version=matched.version,
+                    digest=matched.digest,
+                    kind="use",
+                    source_event_id=turn.turn_id,
+                    scope=matched.scope,
+                )
+            except (KeyError, OSError, ValueError) as exc:
+                self._usage_failed(turn, selection, scope, exc)
+                continue
+            versions.append(_skill_version(matched))
+        if versions:
+            turn.extension_metadata["loaded_skill_versions"] = versions
+
+    async def _record_usage_async(self) -> None:
+        from chulk.hosting.async_utils import call_async_service
+
+        if self.lifecycle_store is None or not self.state.turns:
+            return
+        turn = self.state.turns[-1]
+        versions: list[dict[str, str]] = []
+        for selection in self.selections:
+            scope = self._scope(selection)
+            if (
+                selection.skill.manifest is None
+                or selection.skill.digest is None
+                or scope is None
+            ):
+                continue
+            try:
+                matched = await call_async_service(
+                    self.lifecycle_store,
+                    "get_skill",
+                    selection.skill.name,
+                    scope=scope,
+                )
+                if matched.digest != selection.skill.digest:
+                    continue
+                await call_async_service(
+                    self.lifecycle_store,
+                    "record_usage",
+                    name=matched.name,
+                    version=matched.version,
+                    digest=matched.digest,
+                    kind="use",
+                    source_event_id=turn.turn_id,
+                    scope=matched.scope,
+                )
+            except (KeyError, OSError, ValueError) as exc:
+                self._usage_failed(turn, selection, scope, exc)
+                continue
+            versions.append(_skill_version(matched))
+        if versions:
+            turn.extension_metadata["loaded_skill_versions"] = versions
+
+    def _scope(self, selection: SkillSelection) -> str | None:
+        metadata_scope = selection.skill.metadata.get("scope")
+        if metadata_scope in {"project", "profile"}:
+            return str(metadata_scope)
+        root = selection.skill.root
+        if root is None or self.lifecycle is None:
+            return None
+        parent = root.resolve().parent
+        for scope, attribute in (
+            ("project", "project_skills_dir"),
+            ("profile", "profile_skills_dir"),
+        ):
+            directory = getattr(self.lifecycle, attribute, None)
+            if directory is not None and parent == directory:
+                return scope
+        return None
+
+    def _usage_failed(
+        self,
+        turn: Any,
+        selection: SkillSelection,
+        scope: str,
+        exc: Exception,
+    ) -> None:
+        self.trace(
+            "skill_usage_record_failed",
+            {
+                "turn_id": turn.turn_id,
+                "skill_name": selection.skill.name,
+                "scope": scope,
+                "error_type": type(exc).__name__,
+            },
+        )
+
+    def _success_turn(self, turn_id: str | None) -> Any:
+        if self.lifecycle_store is None:
+            raise RuntimeError("skill lifecycle is not configured")
+        turn = next(
+            (
+                item
+                for item in reversed(self.state.turns)
+                if turn_id is None or item.turn_id == turn_id
+            ),
+            None,
+        )
+        if turn is None:
+            raise KeyError(f"turn {turn_id!r} does not exist")
+        if turn.status != "completed":
+            raise ValueError("skill success requires a completed host run")
+        return turn
+
+    @staticmethod
+    def _loaded_versions(turn: Any) -> list[dict[str, str]]:
+        values = turn.extension_metadata.get("loaded_skill_versions", [])
+        if not isinstance(values, list):
+            return []
+        required = ("name", "scope", "version", "digest")
+        return [
+            item
+            for item in values
+            if isinstance(item, dict)
+            and all(isinstance(item.get(key), str) for key in required)
+        ]
+
+
+def _selection_evidence(selection: SkillSelection) -> dict[str, Any]:
+    manifest = selection.skill.manifest
+    return {
+        "name": selection.skill.name,
+        "path": str(selection.skill.path),
+        "score": selection.score,
+        "matched_keywords": selection.matched_keywords,
+        "reason": selection.reason,
+        "stage": selection.stage,
+        "version": manifest.version if manifest is not None else None,
+        "source": manifest.source if manifest is not None else None,
+        "trust": manifest.trust if manifest is not None else None,
+        "digest": selection.skill.digest,
+        "loaded_resources": list(selection.skill.loaded_resources),
+    }
+
+
+def _skill_version(record: Any) -> dict[str, str]:
+    return {
+        "name": record.name,
+        "scope": record.scope,
+        "version": record.version,
+        "digest": record.digest,
+    }
 
 
 def _skill_from_markdown(path: Path) -> Skill:

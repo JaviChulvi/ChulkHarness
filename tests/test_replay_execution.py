@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from chulk.capabilities import ToolRetryPolicy
-from chulk.core import Agent
+from tests.core_agent import build_core_agent as Agent
 from chulk.llm import LLMClient
 from chulk.main import main
 from chulk.testing import ScriptedLLMClient

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import re
@@ -34,6 +35,7 @@ from chulk.llm import (
 )
 from chulk.llm.base import call_async_with_supported_kwargs, call_with_supported_kwargs
 from chulk.llm.capabilities import (
+    client_requires_mcp_bridge,
     client_supports_hosted_mcp_tools,
     client_supports_native_tool_calling,
 )
@@ -124,6 +126,7 @@ class ModelTransport:
     release_accounting: ReleaseCallback
     resolve_mcp_approval: Callable[[dict, TurnState], bool]
     mcp_servers: tuple[MCPServerConfig, ...]
+    mcp_bridge_tool_names: tuple[str, ...]
     max_skill_content_chars: int
     max_tool_calls_per_turn: int
     max_json_repair_attempts: int
@@ -139,6 +142,33 @@ class ModelTransport:
     output_policy: IncrementalOutputPolicy | None = None
     async_output_policy: AsyncIncrementalOutputPolicy | None = None
     output_policy_failure_mode: OutputPolicyFailureMode = OutputPolicyFailureMode.CLOSED
+
+    def set_tool_registry(self, registry: ToolRegistry) -> None:
+        """Use the catalog owner's current registry."""
+        self.tool_registry = registry
+
+    @contextmanager
+    def override_client(self, client: LLMClient) -> Iterator[None]:
+        """Temporarily replace the model client after validating MCP routing."""
+        self._validate_client(client)
+        previous = self.llm_client
+        self.llm_client = client
+        try:
+            yield
+        finally:
+            self.llm_client = previous
+
+    def _validate_client(self, client: LLMClient) -> None:
+        if not self.mcp_servers or not client_requires_mcp_bridge(client):
+            return
+        registered = {tool.name for tool in self.tool_registry.list_tools()}
+        bridge_names = set(self.mcp_bridge_tool_names)
+        if bridge_names and bridge_names.issubset(registered):
+            return
+        raise RuntimeError(
+            "The current LLM client requires MCP bridge tools, but this agent was "
+            "not assembled with them. Rebuild the agent for the replacement client."
+        )
 
     def stream_final_answer(
         self, draft: str, turn: TurnState

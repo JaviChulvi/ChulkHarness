@@ -4,7 +4,8 @@ import asyncio
 from decimal import Decimal
 import json
 import pytest
-from chulk.core import Agent, AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
+from chulk.core import AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TraceEvent, TurnContextSection, TurnState
+from tests.core_agent import build_core_agent as Agent
 from chulk.core.actions import FinalAnswerAction, PlanAction, PlanStepUpdateAction
 from chulk.core.context import ContextBudget
 from chulk.core.model_transport import (
@@ -942,7 +943,10 @@ def test_agent_rejects_required_context_before_compaction_provider_request():
     )
 
     agent.run_turn("old context " + ("x" * 5_000))
-    agent.context_budget = ContextBudget(max_prompt_tokens=100, response_reserve_tokens=0)
+    agent._model_transport.context_budget = ContextBudget(
+        max_prompt_tokens=100,
+        response_reserve_tokens=0,
+    )
 
     with pytest.raises(ConfigurationError, match="input token budget"):
         agent.run_turn("latest question")
@@ -1320,7 +1324,7 @@ required_capabilities: [network]
         skill_registry=skill_registry,
     )
 
-    assert agent._selected_skills == []
+    assert agent.skill_context.selections == []
     assert skill_registry.get_skill("network").loaded_content is None
 
 

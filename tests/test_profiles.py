@@ -20,7 +20,7 @@ from chulk.profiles import (
     ProfileRuntimeFactory,
     SQLiteProfileStore,
 )
-from chulk.runtime import create_agent
+from tests.core_agent import create_runtime_agent as create_agent
 
 
 class ProfileLLM(LLMClient):
@@ -183,7 +183,9 @@ def test_profile_runtime_records_owned_sessions_and_emits_profile_events(tmp_pat
     )
     try:
         assert agent.run_turn("hello") == "profile response"
-        conversation = agent.session_store.get_conversation(agent.state.conversation_id)
+        conversation = agent._components.session_store.get_conversation(
+            agent.state.conversation_id
+        )
         event = project_event(
             agent,
             TraceEvent.TURN_STARTED,
@@ -195,9 +197,9 @@ def test_profile_runtime_records_owned_sessions_and_emits_profile_events(tmp_pat
     assert stored.profile.store_path.exists()
     assert not base_config.store_path.exists()
     assert conversation.metadata["profile_id"] == "work"
-    assert agent.memory_store.namespace == "profile:work"
+    assert agent.memory_context.store.namespace == "profile:work"
     assert agent.system_prompt == "Profile-owned instructions."
-    assert agent.skill_registry.list_skills() == []
+    assert agent.skill_context.registry.list_skills() == []
     assert event is not None
     assert event.profile_id == "work"
 

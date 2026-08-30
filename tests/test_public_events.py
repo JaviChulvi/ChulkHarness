@@ -196,7 +196,7 @@ def test_projection_excludes_unknown_internal_events(tmp_path):
 def test_learning_proposal_changes_emit_typed_content_free_events(tmp_path):
     events: list[AgentEvent] = []
     facade = _agent(tmp_path, on_event=events.append)
-    service = facade.runtime.learning_proposals
+    service = facade.runtime.learning.proposals
     assert service is not None
 
     proposal = service.create(

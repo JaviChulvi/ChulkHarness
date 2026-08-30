@@ -155,6 +155,24 @@ class ToolExecutor:
     async_usage_accounting: object | None = None
     flush_async: Callable[[], Awaitable[None]] | None = None
 
+    def set_registry(self, registry: ToolRegistry) -> None:
+        """Use the catalog owner's current registry."""
+        self.registry = registry
+
+    def set_permission_policy(self, policy: ToolPermissionPolicy) -> None:
+        """Replace the permission policy at its execution owner."""
+        self.permission_policy = policy
+
+    def set_permission_callback(
+        self,
+        callback: Callable[
+            [PermissionRequest, PermissionDecisionRecord],
+            PermissionDecision | bool,
+        ]
+        | None,
+    ) -> None:
+        self.permission_callback = callback
+
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
         tool = self._registered_tool(tool_name)

@@ -62,6 +62,7 @@ from chulk.streaming import (
     OutputPolicyFailureMode,
 )
 from chulk.runtime import create_async_hosted_agent
+from chulk._runtime.request import AgentAssemblyRequest
 from chulk.sessions import SessionSearchPage, SessionWindow
 from chulk.skills import (
     LearningProposalStatus,
@@ -104,7 +105,7 @@ class HostedRuntime(Agent):
     @property
     def service_manifest(self) -> HostedServiceManifest:
         """Return the resolved hosted capability and service manifest."""
-        return cast(HostedServiceManifest, self.runtime.hosted_service_manifest)
+        return cast(HostedServiceManifest, self.runtime.resolved_services.manifest)
 
 
 class AsyncHostedRuntime(AsyncAgent):
@@ -133,9 +134,9 @@ class AsyncHostedRuntime(AsyncAgent):
         )
         from chulk.hosting.sinks import BufferedAsyncEventSink
 
-        sink = self.runtime.public_event_sink
+        sink = self.runtime.events.public_event_sink
         event_buffer = BufferedAsyncEventSink(sink)
-        self.runtime.public_event_sink = event_buffer
+        self.runtime.events.set_public_sink(event_buffer)
         self.runtime.async_event_buffer = event_buffer
         self._async_owned_services: ResolvedRuntimeServices | None = None
         self._async_host_flushables: tuple[object, ...] = ()
@@ -199,7 +200,8 @@ class AsyncHostedRuntime(AsyncAgent):
             selected_prompt = preset.system_prompt
         try:
             core, resolved = await create_async_hosted_agent(
-                coerce_config(config),
+                AgentAssemblyRequest(
+                    config=coerce_config(config),
                 services=services,
                 execution_scope=execution_scope,
                 conversation_id=conversation_id,
@@ -229,7 +231,8 @@ class AsyncHostedRuntime(AsyncAgent):
                 async_transcript_resolver=async_transcript_resolver,
                 transcript_timeout_seconds=transcript_timeout_seconds,
                 async_tool_catalog_resolver=async_tool_catalog_resolver,
-                tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+                    tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
+                )
             )
         except Exception as exc:
             mapped = map_public_error(
@@ -288,7 +291,7 @@ class AsyncHostedRuntime(AsyncAgent):
         if self._uses_sync_compatibility():
             return cast(
                 HostedServiceManifest,
-                self.runtime.hosted_service_manifest,
+                self.runtime.resolved_services.manifest,
             )
         return self._resolved_async_services().manifest
 
@@ -299,7 +302,7 @@ class AsyncHostedRuntime(AsyncAgent):
     def usage_ledger(self) -> Any:
         """Return the native async usage service bound to this runtime."""
         if self._uses_sync_compatibility():
-            service = self.runtime.usage_accounting
+            service = self.runtime._model_accounting.usage_accounting
             if service is None:
                 raise RuntimeError("Usage accounting is not configured")
             return service
@@ -309,7 +312,7 @@ class AsyncHostedRuntime(AsyncAgent):
     def session_search(self) -> Any:
         """Return the native async session-search service for this runtime."""
         if self._uses_sync_compatibility():
-            service = self.runtime.session_search_service
+            service = self.runtime.resolved_services.sessions.search
             if service is None:
                 raise RuntimeError("Session search is not configured")
             return service
@@ -413,7 +416,7 @@ class AsyncHostedRuntime(AsyncAgent):
             )
 
         async def operation() -> tuple[MemoryProposal, ...]:
-            policy = self.runtime.async_memory_policy
+            policy = self.runtime.memory_context.async_policy
             if policy is None:
                 return ()
             return tuple(
@@ -437,7 +440,7 @@ class AsyncHostedRuntime(AsyncAgent):
             )
 
         async def operation() -> MemoryProposal:
-            policy = self.runtime.async_memory_policy
+            policy = self.runtime.memory_context.async_policy
             if policy is None:
                 raise RuntimeError("Memory is not configured")
             return memory_proposal_snapshot(await policy.approve(proposal_id))
@@ -458,7 +461,7 @@ class AsyncHostedRuntime(AsyncAgent):
             )
 
         async def operation() -> MemoryProposal:
-            policy = self.runtime.async_memory_policy
+            policy = self.runtime.memory_context.async_policy
             if policy is None:
                 raise RuntimeError("Memory is not configured")
             return memory_proposal_snapshot(await policy.reject(proposal_id))
@@ -578,7 +581,7 @@ class AsyncHostedRuntime(AsyncAgent):
             )
 
         async def operation() -> LearningReview:
-            outcome = await self.runtime.review_learning_async(
+            outcome = await self.runtime.learning.review_async(
                 trigger=trigger,
                 turn_id=turn_id,
                 host_confirmed_success=host_confirmed_success,
@@ -774,7 +777,7 @@ class AsyncHostedRuntime(AsyncAgent):
             )
 
         async def operation() -> tuple[GovernedSkill, ...]:
-            records = await self.runtime.confirm_skill_success_async(
+            records = await self.runtime.skill_context.confirm_success_async(
                 turn_id=turn_id
             )
             return tuple(
@@ -1124,7 +1127,7 @@ class AsyncHostedRuntime(AsyncAgent):
             owned = self._async_owned_services
             failure: BaseException | None = None
             operations: list[Callable[[], Awaitable[object]]] = [
-                self.runtime._flush_async_services,
+                self.runtime.resources.flush,
                 self._handle.close,
             ]
             if owned is not None:

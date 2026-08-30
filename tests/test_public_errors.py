@@ -128,7 +128,7 @@ def test_memory_proposal_operations_map_store_failures(
     arguments,
 ):
     facade = _agent(tmp_path)
-    policy = facade.runtime.memory_policy
+    policy = facade.runtime.memory_context.policy
     assert policy is not None
     internal = sqlite3.OperationalError("database is locked")
     monkeypatch.setattr(policy, policy_method, lambda *args: _raise(internal))

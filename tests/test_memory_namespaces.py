@@ -233,7 +233,7 @@ def test_scoped_tools_and_prompt_selection_use_the_bound_store(tmp_path) -> None
         capabilities=Capabilities.read_only().with_memory(MemoryMode.READ_ONLY),
     ) as agent:
         assert agent.run("Explain namespace isolation") == "Scoped answer."
-        assert agent.runtime.memory_store.namespace == "tenant:alpha"
+        assert agent.runtime.memory_context.store.namespace == "tenant:alpha"
 
     prompt = llm.call_log[0]["messages"][0]["content"]
     assert alpha_id in agent.state.loaded_memory_ids

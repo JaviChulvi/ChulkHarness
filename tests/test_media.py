@@ -9,7 +9,7 @@ import pytest
 from chulk import Agent as SDKAgent
 from chulk import UserInput as PublicUserInput
 from chulk.config import load_config
-from chulk.core import Agent
+from tests.core_agent import build_core_agent as Agent
 from chulk.core.actions import FinalAnswerAction
 from chulk.llm import LLMActionResult, LLMClient
 from chulk.media import (

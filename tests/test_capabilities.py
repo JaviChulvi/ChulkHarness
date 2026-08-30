@@ -100,8 +100,8 @@ def test_capabilities_do_not_bypass_permission_policy(tmp_path):
     assert "run_cmd" in {tool.name for tool in facade.tool_registry.list_tools()}
     assert result.tool_calls[0].success is False
     assert result.tool_calls[0].failure_kind == "user_blocked"
-    decision = facade.runtime.permission_policy.decide(
-        facade.runtime.permission_policy.request_for_tool(
+    decision = facade.runtime._tool_executor.permission_policy.decide(
+        facade.runtime._tool_executor.permission_policy.request_for_tool(
             facade.tool_registry.get("run_cmd"),
             {"command": "printf unsafe"},
         )

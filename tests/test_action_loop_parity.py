@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from chulk.capabilities import ToolRetryPolicy
-from chulk.core import Agent
+from tests.core_agent import build_core_agent as Agent
 from chulk.core.plan_execution import PlanStepVerification, PlanStepVerificationRequest
 from chulk.llm import LLMClient, LLMError
 from chulk.testing import ScriptedLLMClient, ScriptedResponse

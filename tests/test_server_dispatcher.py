@@ -13,7 +13,7 @@ import pytest
 from chulk.config import load_config
 from chulk.llm import LLMClient
 from chulk.profiles import ProfileRuntimeFactory, SQLiteProfileStore
-from chulk.runtime import create_agent
+from tests.core_agent import create_runtime_agent as create_agent
 from chulk.server import ConversationDispatcher
 
 

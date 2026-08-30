@@ -11,56 +11,9 @@ import pytest
 from chulk._runtime.request import AgentAssemblyRequest
 
 
-def test_runtime_facade_preserves_create_agent_signature():
+def test_runtime_facade_accepts_one_assembly_request():
     assert runtime_module.create_agent.__module__ == "chulk.runtime"
-    assert list(inspect.signature(runtime_module.create_agent).parameters) == [
-        "config",
-        "llm_client_factory",
-        "conversation_id",
-        "conversation_metadata",
-        "llm_client",
-        "tool_specs",
-        "skill_specs",
-        "system_prompt",
-        "permission_callback",
-        "plan_step_verifier",
-        "async_plan_step_verifier",
-        "mcp_servers",
-        "event_sink",
-        "redaction_callback",
-        "redaction_fail_closed",
-        "final_answer_streaming",
-        "output_policy",
-        "async_output_policy",
-        "output_policy_failure_mode",
-        "capabilities",
-        "deps",
-        "shell_execution_policy",
-        "require_shell_containment",
-        "execution_backend",
-        "memory_namespace",
-        "profile_id",
-        "allowed_skill_names",
-        "runtime_metadata",
-        "run_budget",
-        "additional_run_budgets",
-        "usage_dimensions",
-        "learning_review_policy",
-        "learning_review_quota",
-        "automatic_learning_approval",
-        "plugin_registry",
-        "goal_execution",
-        "content_store",
-        "media_processors",
-        "services",
-        "execution_scope",
-        "transcript_resolver",
-        "async_transcript_resolver",
-        "transcript_timeout_seconds",
-        "tool_catalog_resolver",
-        "async_tool_catalog_resolver",
-        "tool_catalog_timeout_seconds",
-    ]
+    assert list(inspect.signature(runtime_module.create_agent).parameters) == ["request"]
 
 
 def test_runtime_facade_passes_compatibility_seams_to_assembly(monkeypatch):
@@ -81,15 +34,14 @@ def test_runtime_facade_passes_compatibility_seams_to_assembly(monkeypatch):
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", bridge_factory)
     monkeypatch.setattr(runtime_module, "_mcp_bridge_required", bridge_required)
     monkeypatch.setattr(runtime_module, "_mcp_provider_path", provider_path)
-    assert runtime_module.create_agent(object()) is assembled_agent  # type: ignore[arg-type]
+    request = AgentAssemblyRequest(config=object())  # type: ignore[arg-type]
+    assert runtime_module.create_agent(request) is assembled_agent
     assert captured["agent_factory"] is agent_factory
     assert captured["bridge_tool_factory"] is bridge_factory
     assert captured["mcp_bridge_required"] is bridge_required
     assert captured["mcp_provider_path"] is provider_path
     assert "unresolved_tool_handler" not in captured
-    request = captured["request"]
-    assert isinstance(request, AgentAssemblyRequest)
-    assert request.config is not None
+    assert captured["request"] is request
 
 
 def test_assembly_request_rejects_conflicting_model_injections():

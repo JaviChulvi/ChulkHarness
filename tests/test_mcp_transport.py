@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
+import pytest
+
 from chulk import runtime as runtime_module
 from chulk.cli import terminal as terminal_module
 from chulk.config import load_config
@@ -13,6 +15,7 @@ from chulk.core.state import Plan, PlanStep
 from chulk.llm import LLMActionResult, LLMCapabilities, LLMClient
 from chulk.mcp import MCPServerConfig
 from chulk.tools import Tool, ToolPermissionLevel, ToolResult
+from tests.core_agent import create_runtime_agent
 
 
 class RecordingNativeBridgeClient(LLMClient):
@@ -136,7 +139,7 @@ def test_non_hosted_native_client_uses_bridge_without_hosted_options_sync(
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", _bridge_tools)
     client = RecordingNativeBridgeClient()
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=client,
         tool_specs=[],
@@ -159,7 +162,7 @@ def test_non_hosted_native_client_uses_bridge_without_hosted_options_async(
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", _bridge_tools)
     client = RecordingNativeBridgeClient()
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=client,
         tool_specs=[],
@@ -182,7 +185,7 @@ def test_single_injected_json_client_uses_its_capabilities_for_mcp_route(
     monkeypatch.setattr(runtime_module, "create_mcp_bridge_tools", _bridge_tools)
     client = RecordingJSONBridgeClient()
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=client,
         tool_specs=[],
@@ -221,7 +224,7 @@ def test_hosted_mcp_is_not_exposed_before_plan_approval(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     client = RecordingHostedPlanningClient()
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=client,
         tool_specs=[],
@@ -251,7 +254,7 @@ def test_tuple_aggregate_uses_the_same_hosted_route_at_runtime_and_dispatch(
     config = _config(monkeypatch, tmp_path)
     client = TupleHostedClient()
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=client,
         tool_specs=[],
@@ -274,21 +277,20 @@ def test_replacing_hosted_client_with_bridge_client_fails_closed(
 ):
     config = _config(monkeypatch, tmp_path)
     server = _server()
-    agent = runtime_module.create_agent(
+    agent = create_runtime_agent(
         config,
         llm_client=RecordingHostedPlanningClient(),
         tool_specs=[],
         mcp_servers=(server,),
     )
     replacement = RecordingJSONBridgeClient()
-    agent.llm_client = replacement
 
-    try:
-        agent.run_turn("search remotely")
-    except RuntimeError as exc:
-        assert "Rebuild the agent for the replacement client" in str(exc)
-    else:
-        raise AssertionError("Expected an incompatible MCP client replacement to fail")
+    with pytest.raises(
+        RuntimeError,
+        match="Rebuild the agent for the replacement client",
+    ):
+        with agent._model_transport.override_client(replacement):
+            raise AssertionError("override should fail before entering")
 
     assert replacement.calls == []
 

@@ -13,7 +13,7 @@ import pytest
 from chulk import AgentHandle
 from chulk.config import load_config
 from chulk.cli.terminal import TerminalUI
-from chulk.core import Agent as CoreAgent
+from tests.core_agent import build_core_agent as CoreAgent, create_runtime_agent as create_agent
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import TraceEvent
 from chulk.core.state import (
@@ -25,7 +25,7 @@ from chulk.core.state import (
     TurnState,
 )
 from chulk.llm import LLMCapabilities, LLMClient
-from chulk.main import create_agent, main
+from chulk.main import main
 from chulk.memory import ConversationMemory, MemoryPolicy, SQLiteMemoryStore
 from chulk.sessions import AsyncSessionRecorder, SQLiteSessionStore, SessionRecorder
 from chulk.skills import SkillRegistry
@@ -463,14 +463,14 @@ def test_final_answer_checkpoint_survives_crash_before_turn_finished(
             [json.dumps({"type": "final_answer", "content": "durable final"})]
         ),
     )
-    recorder_callback = agent.session_recorder.callback
+    recorder_callback = agent._components.session_recorder.callback
 
     def crash_before_turn_finished(event_type, payload):
         if event_type == TraceEvent.TURN_FINISHED:
             raise RuntimeError("simulated crash before turn snapshot")
         recorder_callback(event_type, payload)
 
-    agent.event_callback = crash_before_turn_finished
+    agent.events.set_event_callback(crash_before_turn_finished)
 
     with pytest.raises(RuntimeError, match="simulated crash"):
         agent.run_turn("finish once")
@@ -1477,7 +1477,10 @@ def test_create_agent_resumes_conversation_summary_without_covered_raw_messages(
     first_agent = create_agent(config, lambda _config: llm)
 
     first_agent.run_turn("old context " + ("x" * 12_000))
-    first_agent.context_budget = ContextBudget(max_prompt_tokens=8_000, response_reserve_tokens=0)
+    first_agent._model_transport.context_budget = ContextBudget(
+        max_prompt_tokens=8_000,
+        response_reserve_tokens=0,
+    )
     first_agent.run_turn("latest question")
 
     resumed_llm = FakeLLMClient([json.dumps({"type": "final_answer", "content": "resumed"})])
@@ -1612,7 +1615,10 @@ def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch,
     events = [json.loads(line) for line in agent.trace_logger.path.read_text(encoding="utf-8").splitlines()]
     assert calls == [["docs"]]
     assert agent.mcp_bridge_tool_names == ["mcp_docs_search_docs"]
-    assert agent.tool_registry.get("mcp_docs_search_docs").requires_confirmation is True
+    assert (
+        agent.catalog.active_registry.get("mcp_docs_search_docs").requires_confirmation
+        is True
+    )
     assert [event["type"] for event in events[:4]] == [
         "session_started",
         "mcp_config_loaded",

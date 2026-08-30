@@ -227,7 +227,7 @@ class DurableHostedExecutor:
 
         scope = _scope(self.agent)
         created = self.runs.submit(scope, submission, actor="host")
-        sink = getattr(self.agent.runtime, "public_event_sink", None)
+        sink = self.agent.runtime.events.public_event_sink
         publisher = (
             RunEventPublisher(self.runs, sink, scope=scope)
             if sink is not None
@@ -275,7 +275,7 @@ class DurableHostedExecutor:
         )
         runtime = self.agent.runtime
         approvals = DurableApprovalCoordinator(
-            DurableApprovalService(runtime.approval_store, self.runs),
+            DurableApprovalService(runtime.resolved_services.approvals, self.runs),
             coordinator,
             scope=scope,
             claim=claim,
@@ -528,7 +528,7 @@ class AsyncDurableHostedExecutor:
 
         scope = _scope(self.agent)
         created = await self.runs.submit(scope, submission, actor="host")
-        sink = getattr(self.agent.runtime, "public_event_sink", None)
+        sink = self.agent.runtime.events.public_event_sink
         publisher = (
             AsyncRunEventPublisher(self.runs, sink, scope=scope)
             if sink is not None
@@ -576,7 +576,7 @@ class AsyncDurableHostedExecutor:
         )
         approvals = AsyncDurableApprovalCoordinator(
             AsyncDurableApprovalService(
-                self.agent.runtime.approval_store,
+                self.agent.runtime.resolved_services.approvals,
                 self.runs,
             ),
             coordinator,

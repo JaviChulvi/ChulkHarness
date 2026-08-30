@@ -51,7 +51,7 @@ def run_exec_command(
 
     try:
         agent = agent_factory()
-        agent.permission_callback = deny_approval
+        agent._tool_executor.set_permission_callback(deny_approval)
         response = agent.run_turn(message)
     except (ValueError, LLMConfigurationError) as exc:
         return _emit_error(

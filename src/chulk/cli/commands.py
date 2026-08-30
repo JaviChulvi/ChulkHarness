@@ -211,7 +211,7 @@ def _display(arguments: str, context: CLICommandContext) -> None:
 
 
 def _learning(arguments: str, context: CLICommandContext) -> None:
-    service = context.agent.learning_proposals
+    service = context.agent.learning.proposals
     if service is None:
         context.output_func(
             context.terminal.warning("learning proposals are unavailable")
@@ -236,7 +236,7 @@ def _learning(arguments: str, context: CLICommandContext) -> None:
             context.output_func("\n".join(lines) if lines else "No pending proposals.")
             return
         if action == "review":
-            outcome = context.agent.review_learning(
+            outcome = context.agent.learning.review(
                 turn_id=proposal_id or None,
             )
             if outcome.proposal_ids:
@@ -278,9 +278,9 @@ def _learning(arguments: str, context: CLICommandContext) -> None:
 
 
 def _skills(arguments: str, context: CLICommandContext) -> None:
-    store = context.agent.skill_lifecycle_store
-    lifecycle = context.agent.skill_lifecycle
-    proposals = context.agent.learning_proposals
+    store = context.agent.skill_context.lifecycle_store
+    lifecycle = context.agent.skill_context.lifecycle
+    proposals = context.agent.learning.proposals
     if store is None or lifecycle is None or proposals is None:
         context.output_func(
             context.terminal.warning("skill lifecycle is unavailable")
@@ -511,12 +511,13 @@ def handle_cli_command(command: str, context: CLICommandContext) -> bool:
 
     if raw_command.startswith("/"):
         explicit_names = explicit_skill_names(raw_command)
-        if explicit_names and context.agent.skill_registry is not None:
+        registry = context.agent.skill_context.registry
+        if explicit_names and registry is not None:
             if all(
-                context.agent.skill_registry.get_skill(name) is not None
+                registry.get_skill(name) is not None
                 for name in explicit_names
             ):
-                routing = context.agent.skill_registry.route_skills(
+                routing = registry.route_skills(
                     raw_command,
                     pinned_names=context.agent.pinned_skill_names,
                     limit=context.agent.max_skills_per_turn,

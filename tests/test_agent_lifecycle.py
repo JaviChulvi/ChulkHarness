@@ -16,10 +16,11 @@ from chulk import (
     ConfigurationError,
     ProviderError,
 )
-from chulk.core import Agent as CoreAgent, TraceEvent
+from chulk.core import TraceEvent
 from chulk.llm import LLMClient, LLMError
 from chulk.tracing import JSONLTraceLogger
 import chulk.runtime as runtime_module
+from tests.core_agent import build_core_agent as CoreAgent, create_runtime_agent
 
 
 class FakeLLMClient(LLMClient):
@@ -230,7 +231,7 @@ def test_runtime_construction_failure_closes_factory_owned_client(tmp_path, monk
     config = AgentConfig(project_root=tmp_path).to_config()
 
     with pytest.raises(RuntimeError, match="construction failed"):
-        runtime_module.create_agent(config, llm_client_factory=lambda _: client)
+        create_runtime_agent(config, llm_client_factory=lambda _: client)
 
     assert client.close_count == 1
 
@@ -245,7 +246,7 @@ def test_runtime_construction_failure_closes_async_factory_transport(tmp_path, m
     config = AgentConfig(project_root=tmp_path).to_config()
 
     with pytest.raises(RuntimeError, match="construction failed"):
-        runtime_module.create_agent(config, llm_client_factory=lambda _: client)
+        create_runtime_agent(config, llm_client_factory=lambda _: client)
 
     assert client.close_count == 1
 
@@ -265,7 +266,7 @@ def test_provider_failure_terminalizes_and_persists_turn_before_reraising(tmp_pa
     assert turn.status == "failed"
     assert turn.ended_at is not None
     assert turn.errors == ["Turn failed with LLMError: provider unavailable"]
-    restored = facade.runtime.session_store.load_turns(facade.conversation_id)[-1]
+    restored = facade.runtime._components.session_store.load_turns(facade.conversation_id)[-1]
     assert restored.status == "failed"
     assert restored.ended_at == turn.ended_at
     trace_types = [
@@ -385,7 +386,7 @@ async def test_async_cancellation_terminalizes_and_persists_turn(tmp_path):
     assert turn.status == "cancelled"
     assert turn.ended_at is not None
     assert turn.errors == ["Turn cancelled."]
-    restored = facade.runtime.session_store.load_turns(facade.conversation_id)[-1]
+    restored = facade.runtime._components.session_store.load_turns(facade.conversation_id)[-1]
     assert restored.status == "cancelled"
     trace_types = [
         json.loads(line)["type"]

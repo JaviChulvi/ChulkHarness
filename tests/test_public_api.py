@@ -20,6 +20,7 @@ from typing import Annotated, Literal, get_type_hints
 import pytest
 
 import chulk.runtime as runtime_module
+from chulk._runtime.request import AgentAssemblyRequest
 from chulk import (
     Agent,
     AgentConfig,
@@ -177,7 +178,7 @@ Review carefully.
     )
 
     result = facade.run_result("/review inspect this")
-    used = facade.runtime.skill_lifecycle_store.get_skill("review")
+    used = facade.runtime.skill_context.lifecycle_store.get_skill("review")
 
     assert used.use_count == 1
     assert used.success_count == 0
@@ -231,7 +232,7 @@ def test_public_learning_review_uses_restricted_proposal_flow(tmp_path):
     assert review.proposals[0].kind == "memory_create"
     assert review.proposals[0].status == "pending"
     assert facade.get_learning_proposal(review.proposals[0].id) == review.proposals[0]
-    assert facade.runtime.memory_store.list_memories() == []
+    assert facade.runtime.memory_context.store.list_memories() == []
     assert len(client.requests) == 2
     assert "no authority" in client.requests[1][0]["content"]
 
@@ -269,7 +270,7 @@ def test_public_learning_auto_approval_requires_constructor_opt_in(tmp_path):
     review = facade.review_learning(turn_id=result.turn_id)
 
     assert review.proposals[0].status == "approved"
-    assert len(facade.runtime.memory_store.list_memories()) == 1
+    assert len(facade.runtime.memory_context.store.list_memories()) == 1
 
 
 def test_lowercase_factories_return_public_facades(tmp_path):
@@ -309,7 +310,7 @@ def test_public_package_contract_uses_one_version_and_distinct_names():
 def test_runtime_create_agent_type_hints_resolve():
     hints = get_type_hints(runtime_module.create_agent)
 
-    assert "event_sink" in hints
+    assert hints["request"] is AgentAssemblyRequest
 
 
 @pytest.mark.parametrize("method_name", ["complete_action", "acomplete_action"])
@@ -331,8 +332,8 @@ def test_public_chat_agent_disables_default_tools_and_skills(tmp_path):
     system_prompt = llm.requests[0][0]["content"]
 
     assert result.content == "chat only"
-    assert handle.runtime.tool_registry.list_tools() == []
-    assert handle.runtime.skill_registry.list_skills() == []
+    assert handle.runtime.catalog.active_registry.list_tools() == []
+    assert handle.runtime.skill_context.registry.list_skills() == []
     assert "<available_tools>" not in system_prompt
     assert "<tool>" not in system_prompt
     assert "Available tools are callable actions for this turn." not in system_prompt
@@ -353,7 +354,7 @@ async def test_public_async_chat_agent_disables_default_tools_and_skills(tmp_pat
     result = await handle.run_result("hello")
 
     assert result.content == "async chat"
-    assert handle.runtime.tool_registry.list_tools() == []
+    assert handle.runtime.catalog.active_registry.list_tools() == []
 
 
 def test_public_agent_preset_chat_disables_default_tools_and_skills(tmp_path):
@@ -1200,10 +1201,10 @@ def test_public_agent_config_supports_programmatic_values_and_env_fallback(monke
     response = handle.run("hello")
 
     assert response == "configured"
-    assert handle.runtime.memory_store.db_path == tmp_path / "custom.sqlite"
+    assert handle.runtime.memory_context.store.db_path == tmp_path / "custom.sqlite"
     assert handle.trace_path.parent == tmp_path / "custom-traces"
-    assert handle.runtime.skill_registry.skills_dir == tmp_path / "custom-skills"
-    assert handle.runtime.permission_policy.name == "read-only"
+    assert handle.runtime.skill_context.registry.skills_dir == tmp_path / "custom-skills"
+    assert handle.runtime._tool_executor.permission_policy.name == "read-only"
     assert handle.runtime.context_budget.max_prompt_tokens == 65_536
 
 
@@ -1250,9 +1251,9 @@ def test_public_agent_default_config_uses_cwd_runtime_and_read_only(monkeypatch,
 
     assert response == "default sdk"
     assert handle.runtime.state.conversation_id
-    assert handle.runtime.memory_store.db_path == tmp_path / ".chulk" / "store.sqlite"
+    assert handle.runtime.memory_context.store.db_path == tmp_path / ".chulk" / "store.sqlite"
     assert handle.trace_path.parent == tmp_path / ".chulk" / "traces"
-    assert handle.runtime.permission_policy.name == "read-only"
+    assert handle.runtime._tool_executor.permission_policy.name == "read-only"
 
 
 def test_public_agent_default_config_uses_project_root_env_override(monkeypatch, tmp_path):
@@ -1273,9 +1274,9 @@ def test_public_agent_default_config_uses_project_root_env_override(monkeypatch,
     response = handle.run("hello")
 
     assert response == "env project"
-    assert handle.runtime.memory_store.db_path == project_root / ".chulk" / "store.sqlite"
+    assert handle.runtime.memory_context.store.db_path == project_root / ".chulk" / "store.sqlite"
     assert handle.trace_path.parent == project_root / ".chulk" / "traces"
-    assert handle.runtime.skill_registry.skills_dir == project_root / ".chulk" / "skills"
+    assert handle.runtime.skill_context.registry.skills_dir == project_root / ".chulk" / "skills"
 
 
 def test_public_agent_config_uses_project_root_from_cwd_dotenv(monkeypatch, tmp_path):
@@ -1325,7 +1326,7 @@ def test_public_agent_default_config_uses_runtime_dir_env_override(monkeypatch, 
     response = handle.run("hello")
 
     assert response == "env runtime"
-    assert handle.runtime.memory_store.db_path == tmp_path / "env-runtime" / "store.sqlite"
+    assert handle.runtime.memory_context.store.db_path == tmp_path / "env-runtime" / "store.sqlite"
     assert handle.trace_path.parent == tmp_path / "env-runtime" / "traces"
 
 
@@ -1796,7 +1797,7 @@ def test_wheel_install_exposes_sdk_defaults_and_bundled_skills(tmp_path):
         assert result.content == "wheel ok"
         assert Path(result.trace_path).parent == runtime_dir / "traces"
         assert (runtime_dir / "store.sqlite").exists()
-        assert handle.runtime.permission_policy.name == "read-only"
+        assert handle.runtime._tool_executor.permission_policy.name == "read-only"
 
         registry = SkillRegistry(runtime_dir / "skills", skills_dirs=(bundled_skills_dir(), runtime_dir / "skills"))
         registry.load_metadata()

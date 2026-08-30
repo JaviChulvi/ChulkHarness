@@ -68,11 +68,11 @@ class AgentHandle:
 
     @property
     def tool_registry(self):
-        return self.runtime.tool_registry
+        return self.runtime.catalog.active_registry
 
     @property
     def skill_registry(self):
-        return self.runtime.skill_registry
+        return self.runtime.skill_context.registry
 
     def run(
         self,

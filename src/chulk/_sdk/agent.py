@@ -297,7 +297,7 @@ class Agent:
     def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         """Return pending manual-memory proposals as immutable snapshots."""
         def operation() -> tuple[MemoryProposal, ...]:
-            policy = self.runtime.memory_policy
+            policy = self.runtime.memory_context.policy
             if policy is None:
                 return ()
             return tuple(memory_proposal_snapshot(item) for item in policy.list_pending())
@@ -312,7 +312,7 @@ class Agent:
     ) -> tuple[LearningProposal, ...]:
         """Return the unified memory and skill review queue."""
         def operation() -> tuple[LearningProposal, ...]:
-            service = self.runtime.learning_proposals
+            service = self.runtime.learning.proposals
             if service is None:
                 return ()
             normalized = (
@@ -331,7 +331,7 @@ class Agent:
     ) -> LearningProposal:
         """Return one proposal from the unified review queue."""
         def operation() -> LearningProposal:
-            service = self.runtime.learning_proposals
+            service = self.runtime.learning.proposals
             if service is None:
                 raise RuntimeError("learning proposals are not configured")
             return learning_proposal_snapshot(service.get(proposal_id))
@@ -346,7 +346,7 @@ class Agent:
     ) -> LearningProposal:
         """Apply one explicitly approved learning proposal."""
         def operation() -> LearningProposal:
-            service = self.runtime.learning_proposals
+            service = self.runtime.learning.proposals
             if service is None:
                 raise RuntimeError("learning proposals are not configured")
             return learning_proposal_snapshot(
@@ -367,12 +367,12 @@ class Agent:
     ) -> LearningReview:
         """Run the restricted reviewer against one finished turn."""
         def operation() -> LearningReview:
-            outcome = self.runtime.review_learning(
+            outcome = self.runtime.learning.review(
                 trigger=trigger,
                 turn_id=turn_id,
                 host_confirmed_success=host_confirmed_success,
             )
-            service = self.runtime.learning_proposals
+            service = self.runtime.learning.proposals
             assert service is not None
             return LearningReview(
                 skipped=outcome.skipped,
@@ -394,7 +394,7 @@ class Agent:
     ) -> LearningProposal:
         """Reject one learning proposal without applying it."""
         def operation() -> LearningProposal:
-            service = self.runtime.learning_proposals
+            service = self.runtime.learning.proposals
             if service is None:
                 raise RuntimeError("learning proposals are not configured")
             return learning_proposal_snapshot(
@@ -413,7 +413,7 @@ class Agent:
     ) -> tuple[GovernedSkill, ...]:
         """List governed skills and record an explicit host view."""
         def operation() -> tuple[GovernedSkill, ...]:
-            store = self.runtime.skill_lifecycle_store
+            store = self.runtime.skill_context.lifecycle_store
             if store is None:
                 return ()
             event_id = f"sdk-view:{uuid4()}"
@@ -442,7 +442,7 @@ class Agent:
     ) -> GovernedSkill:
         """Restore one immutable skill revision through the host boundary."""
         def operation() -> GovernedSkill:
-            lifecycle = self.runtime.skill_lifecycle
+            lifecycle = self.runtime.skill_context.lifecycle
             if lifecycle is None:
                 raise RuntimeError("skill lifecycle is not configured")
             if scope not in {"project", "profile"}:
@@ -466,7 +466,7 @@ class Agent:
     ) -> tuple[GovernedSkillRevision, ...]:
         """List immutable revision identities available for rollback."""
         def operation() -> tuple[GovernedSkillRevision, ...]:
-            store = self.runtime.skill_lifecycle_store
+            store = self.runtime.skill_context.lifecycle_store
             if store is None:
                 return ()
             return tuple(
@@ -490,7 +490,7 @@ class Agent:
             "confirm_skill_success",
             lambda: tuple(
                 governed_skill_snapshot(item)
-                for item in self.runtime.confirm_skill_success(turn_id=turn_id)
+                for item in self.runtime.skill_context.confirm_success(turn_id=turn_id)
             ),
         )
 
@@ -687,7 +687,7 @@ class Agent:
     @property
     def usage_ledger(self) -> UsageLedger:
         """Return a query facade bound to this runtime's profile database."""
-        accounting = self.runtime.usage_accounting
+        accounting = self.runtime._model_accounting.usage_accounting
         if accounting is None:  # pragma: no cover - runtime assembly always supplies it
             raise RuntimeError("Usage accounting is not configured")
         return UsageLedger(
@@ -716,7 +716,7 @@ class Agent:
     @property
     def session_search(self) -> SessionSearchService:
         """Return the exact-search service bound to this runtime profile."""
-        service = getattr(self.runtime, "session_search_service", None)
+        service = self.runtime._components.session_search_service
         if not isinstance(service, SessionSearchService):
             raise RuntimeError("Session search is not configured")
         return service
@@ -785,7 +785,7 @@ class Agent:
     def approve_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         """Approve one pending memory proposal."""
         def operation() -> MemoryProposal:
-            policy = self.runtime.memory_policy
+            policy = self.runtime.memory_context.policy
             if policy is None:
                 raise RuntimeError("Memory is not configured")
             return memory_proposal_snapshot(policy.approve(proposal_id))
@@ -795,7 +795,7 @@ class Agent:
     def reject_memory_proposal(self, proposal_id: str) -> MemoryProposal:
         """Reject one pending memory proposal."""
         def operation() -> MemoryProposal:
-            policy = self.runtime.memory_policy
+            policy = self.runtime.memory_context.policy
             if policy is None:
                 raise RuntimeError("Memory is not configured")
             return memory_proposal_snapshot(policy.reject(proposal_id))
