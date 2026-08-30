@@ -18,6 +18,7 @@ from chulk.core.action_runtime import ActionLoopRuntime, AgentTurnCancelled
 from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.context import ContextBudget, TurnContextSection
 from chulk.core.events import AgentEvent, TraceEvent
+from chulk.core.model_accounting import ModelAccounting
 from chulk.core.model_transport import ModelTransport
 from chulk.core.plan_execution import (
     AsyncPlanStepVerifier,
@@ -33,12 +34,6 @@ from chulk.core.turn_effects import TurnEffects
 from chulk.llm import LLMCost, LLMClient, LLMUsage
 from chulk.llm.capabilities import client_requires_mcp_bridge
 from chulk.llm.lifecycle import aclose_resources, close_resources
-from chulk.llm.usage import (
-    aggregate_cost,
-    aggregate_usage,
-    cost_from_dict,
-    usage_from_dict,
-)
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.hosting import ExecutionScope
 from chulk.hosting.async_utils import call_async_service
@@ -103,7 +98,7 @@ from chulk.tools.policy import ToolPolicyHooks
 from chulk.tracing import JSONLTraceLogger
 from chulk.redaction import redact_text
 from chulk.resources import HostResource, deduplicate_resources
-from chulk.usage import BudgetExceededError, ModelUsageAccounting
+from chulk.usage import ModelUsageAccounting
 from chulk.streaming import (
     AsyncIncrementalOutputPolicy,
     FinalAnswerStreamingMode,
@@ -297,6 +292,11 @@ class Agent:
         self.async_content_store: object | None = None
         self.async_media_processors: object | None = None
         self.async_flushables: tuple[object, ...] = ()
+        self._model_accounting = ModelAccounting(
+            state=self.state,
+            trace=self._trace,
+            usage_accounting=self.usage_accounting,
+        )
         self._profile_memories: list[MemoryRecord] = []
         self._relevant_memories: list[MemoryRecord] = []
         self._selected_skills: list[SkillSelection] = []
@@ -1811,6 +1811,9 @@ class Agent:
     def _refresh_action_runtime(self) -> None:
         """Reflect mutable public runtime configuration in focused services."""
         self._validate_mcp_route()
+        self._model_accounting.state = self.state
+        self._model_accounting.usage_accounting = self.usage_accounting
+        self._model_accounting.async_usage_accounting = self.async_usage_accounting
         model = self._model_transport
         model.llm_client = self.llm_client
         model.state = self.state
@@ -2703,48 +2706,14 @@ class Agent:
         fallback_attempts: object = None,
         purpose: str = "agent_action",
     ) -> tuple[dict | None, dict | None]:
-        usage_payload = usage.to_dict() if usage is not None else None
-        cost_payload = cost.to_dict() if cost is not None else None
-        attempt_payloads = _fallback_attempt_payloads(fallback_attempts)
-        if self.usage_accounting is not None:
-            entries = self.usage_accounting.commit_model_request(
-                turn_id=turn.turn_id,
-                request_index=request_index,
-                purpose=purpose,
-                usage=usage,
-                cost=cost,
-                fallback_attempts=fallback_attempts,
-            )
-            self._trace(
-                TraceEvent.BUDGET_COMMITTED,
-                {
-                    "turn_id": turn.turn_id,
-                    "request_index": request_index,
-                    "resource_kind": "model",
-                    "entry_ids": [entry.id for entry in entries],
-                    "source_event_ids": [
-                        entry.source_event_id for entry in entries
-                    ],
-                },
-            )
-        if usage_payload is None and cost_payload is None and not attempt_payloads:
-            return None, None
-
-        report = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "purpose": purpose,
-            "usage": usage_payload,
-            "cost": cost_payload,
-        }
-        if attempt_payloads:
-            report["fallback_attempts"] = attempt_payloads
-        turn.model_usage_reports.append(report)
-        turn.model_usage_totals = _aggregate_model_usage_reports(
-            turn.model_usage_reports
+        return self._model_accounting.record(
+            turn,
+            request_index=request_index,
+            usage=usage,
+            cost=cost,
+            fallback_attempts=fallback_attempts,
+            purpose=purpose,
         )
-        self.state.last_usage_report = turn.model_usage_totals
-        return usage_payload, cost_payload
 
     async def _record_model_accounting_async(
         self,
@@ -2756,59 +2725,14 @@ class Agent:
         fallback_attempts: object = None,
         purpose: str = "agent_action",
     ) -> tuple[dict | None, dict | None]:
-        service = self.async_usage_accounting
-        if service is None:
-            return await asyncio.to_thread(
-                self._record_model_accounting,
-                turn,
-                request_index=request_index,
-                usage=usage,
-                cost=cost,
-                fallback_attempts=fallback_attempts,
-                purpose=purpose,
-            )
-        usage_payload = usage.to_dict() if usage is not None else None
-        cost_payload = cost.to_dict() if cost is not None else None
-        attempt_payloads = _fallback_attempt_payloads(fallback_attempts)
-        entries = await call_async_service(
-            service,
-            "commit_model_request",
-            turn_id=turn.turn_id,
+        return await self._model_accounting.record_async(
+            turn,
             request_index=request_index,
-            purpose=purpose,
             usage=usage,
             cost=cost,
             fallback_attempts=fallback_attempts,
+            purpose=purpose,
         )
-        self._trace(
-            TraceEvent.BUDGET_COMMITTED,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "resource_kind": "model",
-                "entry_ids": [entry.id for entry in entries],
-                "source_event_ids": [
-                    entry.source_event_id for entry in entries
-                ],
-            },
-        )
-        if usage_payload is None and cost_payload is None and not attempt_payloads:
-            return None, None
-        report = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "purpose": purpose,
-            "usage": usage_payload,
-            "cost": cost_payload,
-        }
-        if attempt_payloads:
-            report["fallback_attempts"] = attempt_payloads
-        turn.model_usage_reports.append(report)
-        turn.model_usage_totals = _aggregate_model_usage_reports(
-            turn.model_usage_reports
-        )
-        self.state.last_usage_report = turn.model_usage_totals
-        return usage_payload, cost_payload
 
     def _reserve_model_accounting(
         self,
@@ -2819,49 +2743,13 @@ class Agent:
         purpose: str,
         repair_attempts: int = 0,
     ) -> dict | None:
-        if self.usage_accounting is None:
-            return None
-        try:
-            reservation = self.usage_accounting.reserve_model_request(
-                turn_id=turn.turn_id,
-                request_index=request_index,
-                messages=messages,
-                purpose=purpose,
-                repair_attempts=repair_attempts,
-            )
-        except BudgetExceededError as exc:
-            payload = {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "resource_kind": "model",
-                "scope": exc.scope.value,
-                "dimension": exc.dimension,
-                "limit": exc.limit,
-                "committed": exc.committed,
-                "reserved": exc.reserved,
-                "requested": exc.requested,
-                "message": str(exc),
-            }
-            turn.extension_metadata["budget_exhausted"] = payload
-            self._trace(TraceEvent.BUDGET_EXHAUSTED, payload)
-            raise
-        payload = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "resource_kind": "model",
-            "reservation_id": reservation.id,
-            "scope": reservation.budget.scope.value,
-            "reserved_model_calls": reservation.reserved_model_calls,
-            "reserved_tokens": reservation.reserved_tokens,
-            "reserved_cost": reservation.reserved_cost.to_dict(),
-            "expires_at": (
-                reservation.expires_at.isoformat()
-                if reservation.expires_at is not None
-                else None
-            ),
-        }
-        self._trace(TraceEvent.BUDGET_RESERVED, payload)
-        return payload
+        return self._model_accounting.reserve(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose=purpose,
+            repair_attempts=repair_attempts,
+        )
 
     async def _reserve_model_accounting_async(
         self,
@@ -2872,59 +2760,13 @@ class Agent:
         purpose: str,
         repair_attempts: int = 0,
     ) -> dict | None:
-        service = self.async_usage_accounting
-        if service is None:
-            return await asyncio.to_thread(
-                self._reserve_model_accounting,
-                turn,
-                request_index=request_index,
-                messages=messages,
-                purpose=purpose,
-                repair_attempts=repair_attempts,
-            )
-        try:
-            reservation = await call_async_service(
-                service,
-                "reserve_model_request",
-                turn_id=turn.turn_id,
-                request_index=request_index,
-                messages=messages,
-                purpose=purpose,
-                repair_attempts=repair_attempts,
-            )
-        except BudgetExceededError as exc:
-            payload = {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "resource_kind": "model",
-                "scope": exc.scope.value,
-                "dimension": exc.dimension,
-                "limit": exc.limit,
-                "committed": exc.committed,
-                "reserved": exc.reserved,
-                "requested": exc.requested,
-                "message": str(exc),
-            }
-            turn.extension_metadata["budget_exhausted"] = payload
-            self._trace(TraceEvent.BUDGET_EXHAUSTED, payload)
-            raise
-        payload = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "resource_kind": "model",
-            "reservation_id": reservation.id,
-            "scope": reservation.budget.scope.value,
-            "reserved_model_calls": reservation.reserved_model_calls,
-            "reserved_tokens": reservation.reserved_tokens,
-            "reserved_cost": reservation.reserved_cost.to_dict(),
-            "expires_at": (
-                reservation.expires_at.isoformat()
-                if reservation.expires_at is not None
-                else None
-            ),
-        }
-        self._trace(TraceEvent.BUDGET_RESERVED, payload)
-        return payload
+        return await self._model_accounting.reserve_async(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose=purpose,
+            repair_attempts=repair_attempts,
+        )
 
     def _release_model_accounting(
         self,
@@ -2933,23 +2775,11 @@ class Agent:
         request_index: int,
         reason: str,
     ) -> dict | None:
-        if self.usage_accounting is None:
-            return None
-        reservation = self.usage_accounting.release_model_request(
-            turn_id=turn.turn_id,
+        return self._model_accounting.release(
+            turn,
             request_index=request_index,
+            reason=reason,
         )
-        if reservation is None:
-            return None
-        payload = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "resource_kind": "model",
-            "reservation_id": reservation.id,
-            "reason": reason,
-        }
-        self._trace(TraceEvent.BUDGET_RELEASED, payload)
-        return payload
 
     async def _release_model_accounting_async(
         self,
@@ -2958,31 +2788,11 @@ class Agent:
         request_index: int,
         reason: str,
     ) -> dict | None:
-        service = self.async_usage_accounting
-        if service is None:
-            return await asyncio.to_thread(
-                self._release_model_accounting,
-                turn,
-                request_index=request_index,
-                reason=reason,
-            )
-        reservation = await call_async_service(
-            service,
-            "release_model_request",
-            turn_id=turn.turn_id,
+        return await self._model_accounting.release_async(
+            turn,
             request_index=request_index,
+            reason=reason,
         )
-        if reservation is None:
-            return None
-        payload = {
-            "turn_id": turn.turn_id,
-            "request_index": request_index,
-            "resource_kind": "model",
-            "reservation_id": reservation.id,
-            "reason": reason,
-        }
-        self._trace(TraceEvent.BUDGET_RELEASED, payload)
-        return payload
 
     def _trace(self, event_type: str, payload: dict | None = None) -> None:
         payload = dict(payload or {})
@@ -3197,55 +3007,6 @@ class Agent:
             self._flush_async_services(),
             original,
         )
-
-
-def _fallback_attempt_payloads(fallback_attempts: object) -> list[dict]:
-    if not fallback_attempts:
-        return []
-    payloads: list[dict] = []
-    if not isinstance(fallback_attempts, list):
-        return payloads
-    for attempt in fallback_attempts:
-        if hasattr(attempt, "to_dict"):
-            payload = attempt.to_dict()
-        elif isinstance(attempt, dict):
-            payload = dict(attempt)
-        else:
-            payload = {"attempt": str(attempt)}
-        payloads.append(payload)
-    return payloads
-
-
-def _aggregate_model_usage_reports(reports: list[dict]) -> dict:
-    request_usages: list[LLMUsage | None] = []
-    request_costs: list[LLMCost | None] = []
-    failed_attempt_usages: list[LLMUsage | None] = []
-    failed_attempt_costs: list[LLMCost | None] = []
-    for report in reports:
-        if not isinstance(report, dict):
-            continue
-        request_usages.append(usage_from_dict(report.get("usage")))
-        request_costs.append(cost_from_dict(report.get("cost")))
-        attempts = report.get("fallback_attempts")
-        if not isinstance(attempts, list):
-            continue
-        for attempt in attempts:
-            if not isinstance(attempt, dict) or attempt.get("success") is not False:
-                continue
-            failed_attempt_usages.append(usage_from_dict(attempt.get("usage")))
-            failed_attempt_costs.append(cost_from_dict(attempt.get("cost")))
-
-    usage = aggregate_usage(
-        [*request_usages, *failed_attempt_usages], source="turn_total"
-    )
-    cost = aggregate_cost([*request_costs, *failed_attempt_costs])
-    return {
-        "request_count": len(
-            [report for report in reports if isinstance(report, dict)]
-        ),
-        "usage": usage.to_dict() if usage is not None else None,
-        "cost": cost.to_dict() if cost is not None else None,
-    }
 
 
 def _coerce_turn_context_sections(
