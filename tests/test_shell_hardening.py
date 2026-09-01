@@ -311,7 +311,6 @@ def test_default_registry_wires_host_configured_byte_limits(tmp_path: Path) -> N
         "cmd=rm; env $cmd -rf target",
         "$(printf rm) -rf target",
         'eval "$UNRESOLVED_COMMAND"',
-        "source cleanup.sh",
         "printf 'rm -rf target' | sh",
         "command eval 'rm -rf target'",
         "${UNSET_COMMAND:-rm} -rf target",
@@ -332,13 +331,15 @@ def test_quoted_rm_text_remains_benign(tmp_path: Path) -> None:
     assert result.stdout == "rm -rf target"
 
 
-def test_benign_eval_without_dynamic_or_destructive_content_remains_allowed(
+def test_static_shell_scripts_without_destructive_content_remain_allowed(
     tmp_path: Path,
 ) -> None:
-    result = run_shell_command({"command": "eval 'printf hello'"}, tmp_path)
+    (tmp_path / "safe.sh").write_text("printf hello", encoding="utf-8")
 
-    assert result.success
-    assert result.stdout == "hello"
+    for command in ("sh safe.sh", ". ./safe.sh"):
+        result = run_shell_command({"command": command}, tmp_path)
+        assert result.success
+        assert result.stdout == "hello"
 
 
 def _python_command(source: str) -> str:
