@@ -12,6 +12,12 @@ guardrails. Direct local execution does not claim containment, and
 `require_shell_containment=True` fails before process creation unless the host
 policy explicitly asserts that it applied containment.
 
+Browser backends used with private-network blocking must enforce the domain
+policy at the actual connection layer. The local Playwright backend cannot bind
+its DNS preflight to Chromium's peer, so it fails closed under the default
+policy; a host must supply an enforcing backend or explicitly disable private
+network blocking.
+
 Hard safety failures use the `fatal_safety` tool failure kind. Built-in
 destructive/out-of-root shell blocks, missing required containment, and a host
 policy denial explicitly marked `fatal=True` record the tool observation and

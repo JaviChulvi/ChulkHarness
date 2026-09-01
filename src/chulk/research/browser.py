@@ -93,6 +93,7 @@ class BrowserBackendInfo:
     isolation: BrowserIsolation
     supports_downloads: bool = True
     supports_uploads: bool = True
+    enforces_network_policy: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +212,14 @@ class BrowserController:
             raise ResearchPolicyError(
                 "Browser backend isolation is not approved by host policy",
                 code="browser_isolation_denied",
+            )
+        if (
+            self.policy.domains.block_private_networks
+            and not backend.info.enforces_network_policy
+        ):
+            raise ResearchPolicyError(
+                "Browser backend does not enforce network policy at the connection layer",
+                code="browser_network_policy_unenforced",
             )
         self._sessions: dict[str, _OwnedBrowserSession] = {}
         self._lock = threading.RLock()
@@ -642,6 +651,7 @@ class PlaywrightBrowserBackend:
             name="playwright-chromium",
             isolation=BrowserIsolation.EPHEMERAL_LOCAL,
             supports_downloads=self.download_fetcher is not None,
+            enforces_network_policy=False,
         )
 
     def open_session(

@@ -19,7 +19,6 @@ from chulk.tools.registry import Tool, ToolFailureKind, ToolResult
 
 _SAFE_REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
-_PATCH_PATH = re.compile(r"^(?:diff --git a/(.+?) b/(.+)|--- (?:a/)?(.+)|\+\+\+ (?:b/)?(.+))$")
 _SECRET_NAMES = frozenset(
     {
         ".env",
@@ -579,16 +578,49 @@ class GitService:
                 "Binary Git patches are denied",
                 code="git_binary_patch_denied",
             )
-        paths: set[str] = set()
-        for line in patch.splitlines():
-            match = _PATCH_PATH.match(line)
-            if match is None:
-                continue
-            for value in match.groups():
-                if value and value != "/dev/null":
-                    paths.add(self._validate_path(value.split("\t", 1)[0]))
+        parsed = self._run_raw(
+            ("apply", "--numstat", "-z", "-"),
+            input_text=patch,
+            max_chars=self.policy.max_patch_chars,
+        )
+        if parsed.truncated:
+            raise GitPolicyError(
+                "Decoded Git patch path list exceeds the validation limit",
+                code="git_patch_paths_too_large",
+            )
+        paths = self._validate_patch_paths(parsed.stdout)
         if not paths:
             raise ValueError("patch does not contain a recognized file path")
+        return paths
+
+    def _validate_patch_paths(self, numstat: str) -> set[str]:
+        entries = numstat.split("\x00")
+        paths: set[str] = set()
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if not entry:
+                index += 1
+                continue
+            fields = entry.split("\t", 2)
+            if len(fields) != 3:
+                raise GitPolicyError(
+                    "Git returned an invalid decoded patch path list",
+                    code="git_patch_paths_invalid",
+                )
+            path = fields[2]
+            if path:
+                paths.add(self._validate_path(path))
+                index += 1
+                continue
+            if index + 2 >= len(entries):
+                raise GitPolicyError(
+                    "Git returned an incomplete decoded rename path list",
+                    code="git_patch_paths_invalid",
+                )
+            paths.add(self._validate_path(entries[index + 1]))
+            paths.add(self._validate_path(entries[index + 2]))
+            index += 3
         return paths
 
     def _submodule_paths(self) -> tuple[str, ...]:
