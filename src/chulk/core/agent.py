@@ -280,6 +280,10 @@ class Agent:
             permission_callback=permission_callback,
             trace=self.events.emit,
             get_context=self.tool_contexts.get,
+            external_content_seen=lambda: any(
+                turn.extension_metadata.get("external_content_seen") is True
+                for turn in self.state.turns
+            ),
             usage_accounting=usage_accounting,
             goal_execution=self.goal_execution,
             execution_scope=self.execution_scope,

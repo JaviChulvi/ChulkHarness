@@ -1584,7 +1584,17 @@ def test_create_agent_requires_model_token_capabilities(monkeypatch, tmp_path):
 def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch, tmp_path):
     (tmp_path / ".chulk").mkdir()
     (tmp_path / ".chulk" / "mcp.json").write_text(
-        json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example.com",
+                        "allowed_tools": ["search_docs"],
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))
@@ -1632,7 +1642,17 @@ def test_create_agent_registers_mcp_bridge_tools_for_local_provider(monkeypatch,
 def test_create_agent_uses_hosted_mcp_without_bridge_for_openai_only(monkeypatch, tmp_path):
     (tmp_path / ".chulk").mkdir()
     (tmp_path / ".chulk" / "mcp.json").write_text(
-        json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example.com",
+                        "allowed_tools": ["search_docs"],
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("CHULK_PROJECT_ROOT", str(tmp_path))

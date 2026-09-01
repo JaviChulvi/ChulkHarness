@@ -279,6 +279,11 @@ def build_agent_prompt(
         for tool in action_tools
         if bool(getattr(tool, "metadata", {}).get("external_content"))
     ]
+    external_tool_names.extend(
+        str(declaration.get("name"))
+        for declaration in safe_native_tool_declarations
+        if declaration.get("type") == "mcp" and declaration.get("name")
+    )
     if external_tool_names:
         system_parts.append(
             (

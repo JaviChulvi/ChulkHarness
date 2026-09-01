@@ -1711,7 +1711,17 @@ def test_public_mcp_empty_list_disables_configured_servers(monkeypatch, tmp_path
     mcp_dir = runtime_dir
     mcp_dir.mkdir()
     (mcp_dir / "mcp.json").write_text(
-        json.dumps({"servers": [{"label": "docs", "server_url": "https://mcp.example.com"}]}),
+        json.dumps(
+            {
+                "servers": [
+                    {
+                        "label": "docs",
+                        "server_url": "https://mcp.example.com",
+                        "allowed_tools": ["search_docs"],
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 

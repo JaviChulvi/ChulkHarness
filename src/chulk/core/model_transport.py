@@ -1554,6 +1554,8 @@ class ModelTransport:
         result: LLMActionResult,
     ) -> AgentAction:
         action = result.action
+        if result.metadata.get("provider_mcp_output"):
+            turn.extension_metadata["external_content_seen"] = True
         self.state.json_repair_attempts += result.repair_attempts
         self.state.errors.extend(
             f"JSON repair attempt: {error}" for error in result.errors
@@ -1607,6 +1609,8 @@ class ModelTransport:
         result: LLMActionResult,
     ) -> AgentAction:
         action = result.action
+        if result.metadata.get("provider_mcp_output"):
+            turn.extension_metadata["external_content_seen"] = True
         self.state.json_repair_attempts += result.repair_attempts
         self.state.errors.extend(
             f"JSON repair attempt: {error}" for error in result.errors

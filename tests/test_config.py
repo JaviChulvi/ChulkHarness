@@ -130,7 +130,6 @@ def test_load_config_reads_mcp_config_from_default_path(tmp_path):
                         "server_url": "https://mcp.example.com",
                         "server_description": "Docs server",
                         "allowed_tools": ["search"],
-                        "authorization_env": "DOCS_MCP_TOKEN",
                     }
                 ]
             }
@@ -141,7 +140,6 @@ def test_load_config_reads_mcp_config_from_default_path(tmp_path):
     config = load_config(
         {
             "CHULK_PROJECT_ROOT": str(tmp_path),
-            "DOCS_MCP_TOKEN": "secret-token",
         }
     )
 
@@ -150,7 +148,8 @@ def test_load_config_reads_mcp_config_from_default_path(tmp_path):
     server = config.mcp_servers[0]
     assert server.label == "docs"
     assert server.allowed_tools == ("search",)
-    assert server.authorization == "secret-token"
+    assert server.authorization is None
+    assert server.defer_loading is True
 
 
 def test_load_config_resolves_relative_runtime_dir_against_project_root(monkeypatch, tmp_path):
