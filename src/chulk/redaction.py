@@ -10,30 +10,54 @@ from typing import Any
 
 REDACTED = "[redacted]"
 _SECRET_KEY_MARKERS = (
+    "access_key",
+    "accesskey",
     "api_key",
     "apikey",
     "authorization",
     "cookie",
     "credential",
+    "passwd",
     "password",
+    "private_key",
+    "privatekey",
+    "pwd",
     "secret",
+    "ssh_key",
+    "sshkey",
+)
+_SECRET_LABEL = (
+    r"(?:api[_ -]?key|access[_ -]?key|authorization|cookie|credential|password|"
+    r"passwd|pwd|private[_ -]?key|secret|ssh[_ -]?key|token|apikey|accesskey|"
+    r"privatekey|sshkey)"
+)
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?P<label>(?:[A-Z0-9]+ )*PRIVATE KEY)-----.*?"
+    r"(?:-----END (?P=label)-----|\Z)",
+    re.DOTALL,
+)
+_URL_CREDENTIAL_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@"
 )
 
 
 def redact_text(text: str) -> str:
     """Return free-form text with common credential shapes removed."""
+    redacted = _PEM_PRIVATE_KEY_RE.sub(REDACTED, text)
+    redacted = _URL_CREDENTIAL_RE.sub(rf"\1{REDACTED}@", redacted)
     redacted = re.sub(
         r"(?i)\bbearer\s+[a-z0-9._~+/=-]+",
         f"Bearer {REDACTED}",
-        text,
+        redacted,
     )
     redacted = re.sub(
-        r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|authorization|cookie|credential|password|secret|token)[a-z0-9_-]*)"
+        rf"(?i)\b([a-z0-9_-]*{_SECRET_LABEL}[a-z0-9_-]*)"
         r"\s*([:=])\s*['\"]?[^'\"\s,;}]+",
         lambda match: f"{match.group(1)}{match.group(2)} {REDACTED}",
         redacted,
     )
     redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", REDACTED, redacted)
+    redacted = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", REDACTED, redacted)
     return redacted
 
 
@@ -57,7 +81,8 @@ def redact_data(value: Any) -> Any:
 
 
 def _is_secret_key(key: str) -> bool:
-    lowered = key.lower().replace("-", "_")
-    if any(marker in lowered for marker in _SECRET_KEY_MARKERS):
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.casefold()).strip("_")
+    if any(marker in normalized for marker in _SECRET_KEY_MARKERS):
         return True
-    return lowered == "token" or lowered.endswith("_token")
+    return normalized == "token" or normalized.endswith("_token")

@@ -332,6 +332,54 @@ def test_exception_terminalization_applies_configured_redaction_before_retention
     )
 
 
+def test_event_callbacks_receive_mandatory_baseline_redaction():
+    events: list[dict] = []
+    agent = CoreAgent(
+        FakeLLMClient(),
+        event_callback=lambda _event_type, payload: events.append(payload),
+    )
+
+    agent._trace(
+        TraceEvent.TOOL_CALL_STARTED,
+        {
+            "arguments": {
+                "api_key": "sk-callback-secret-123456",
+                "accesskey": "compact-access-secret",
+                "privatekey": "compact-private-secret",
+                "SSHKey": "compact-ssh-secret",
+            },
+            "observation": "access_key=AKIAIOSFODNN7EXAMPLE",
+        },
+    )
+
+    serialized = json.dumps(events)
+    assert "sk-callback-secret-123456" not in serialized
+    assert "compact-access-secret" not in serialized
+    assert "compact-private-secret" not in serialized
+    assert "compact-ssh-secret" not in serialized
+    assert "AKIAIOSFODNN7EXAMPLE" not in serialized
+    assert serialized.count("[redacted]") == 5
+
+
+def test_custom_event_redactor_cannot_reintroduce_a_secret():
+    events: list[dict] = []
+
+    def redact(_event_type: str, _text: str, _metadata: dict) -> str:
+        return "private_key=callback-secret"
+
+    agent = CoreAgent(
+        FakeLLMClient(),
+        event_callback=lambda _event_type, payload: events.append(payload),
+        redaction_callback=redact,
+    )
+
+    agent._trace(TraceEvent.TOOL_OBSERVATION, {"observation": "ordinary text"})
+
+    serialized = json.dumps(events)
+    assert "callback-secret" not in serialized
+    assert "[redacted]" in serialized
+
+
 def test_exception_terminalization_honors_fail_closed_redaction():
     secret = "customer-992-private"
 

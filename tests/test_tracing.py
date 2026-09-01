@@ -99,6 +99,42 @@ def test_logger_writes_v1_lifecycle_turn_ids_timing_and_redacted_payloads(tmp_pa
     assert "[redacted]" in trace_text
 
 
+def test_logger_redacts_private_access_ssh_and_pem_key_forms(tmp_path):
+    logger = JSONLTraceLogger(tmp_path, "credential-forms")
+    private_key = """-----BEGIN OPENSSH PRIVATE KEY-----
+secret-private-material
+-----END OPENSSH PRIVATE KEY-----"""
+
+    logger.log(
+        "tool_observation",
+        {
+            "privateKey": "private-value",
+            "accesskey": "compact-access-value",
+            "privatekey": "compact-private-value",
+            "ssh-key": "ssh-value",
+            "SSHKey": "compact-ssh-value",
+            "message": (
+                "access_key=AKIAIOSFODNN7EXAMPLE "
+                "url=https://user:password@example.com "
+                f"pem={private_key}"
+            ),
+            "public_key": "-----BEGIN PUBLIC KEY----- safe-public-material",
+        },
+    )
+    logger.close()
+
+    trace_text = logger.path.read_text(encoding="utf-8")
+    assert "private-value" not in trace_text
+    assert "compact-access-value" not in trace_text
+    assert "compact-private-value" not in trace_text
+    assert "ssh-value" not in trace_text
+    assert "compact-ssh-value" not in trace_text
+    assert "AKIAIOSFODNN7EXAMPLE" not in trace_text
+    assert "password@example.com" not in trace_text
+    assert "secret-private-material" not in trace_text
+    assert "safe-public-material" in trace_text
+
+
 def test_deferred_logger_close_preserves_lazy_no_trace_behavior(tmp_path):
     logger = JSONLTraceLogger(tmp_path, "unused", defer_until_event="turn_started")
 
