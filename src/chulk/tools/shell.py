@@ -24,6 +24,9 @@ SHELL_CLEANUP_GRACE_SECONDS = 1.0
 _READ_CHUNK_BYTES = 4096
 _TRUNCATION_MARKER = b"\n... shell output truncated ...\n"
 _SHELL_INTERPRETERS = {"ash", "bash", "dash", "fish", "ksh", "sh", "zsh"}
+_SHELL_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
+_SHELL_COMMAND_WRAPPERS = {"builtin", "command", "env", "exec", "nohup"}
+_SHELL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 
 DESTRUCTIVE_PATTERNS = [
     re.compile(r"\bmkfs\b"),
@@ -606,7 +609,7 @@ def _blocked_reason(command: str, root: Path) -> str | None:
 
 def _has_recursive_force_rm(command: str, *, _depth: int = 0) -> bool:
     if _depth > 3:
-        return False
+        return True
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
         lexer.whitespace_split = True
@@ -621,7 +624,7 @@ def _has_recursive_force_rm(command: str, *, _depth: int = 0) -> bool:
         has_recursive = False
         has_force = False
         for argument in tokens[index + 1 :]:
-            if argument in {";", "&&", "||", "|", "&", "(", ")"}:
+            if argument in _SHELL_SEPARATORS:
                 break
             if argument == "--":
                 break
@@ -641,16 +644,60 @@ def _has_recursive_force_rm(command: str, *, _depth: int = 0) -> bool:
     for index, token in enumerate(tokens):
         if Path(token).name not in _SHELL_INTERPRETERS:
             continue
+        found_inline_command = False
         for option_index in range(index + 1, min(index + 4, len(tokens))):
             option = tokens[option_index]
             if option == "--":
                 continue
             if option.startswith("-") and "c" in option.lstrip("-"):
+                found_inline_command = True
                 command_index = option_index + 1
                 if command_index < len(tokens) and _has_recursive_force_rm(tokens[command_index], _depth=_depth + 1):
                     return True
                 break
+        segment_start = _shell_segment_start(tokens, index)
+        if (
+            _is_shell_command_position(tokens, index)
+            and not found_inline_command
+            and segment_start > 0
+            and tokens[segment_start - 1] == "|"
+        ):
+            return True
+
+    for index, token in enumerate(tokens):
+        command_position = _is_shell_command_position(tokens, index)
+        if command_position and Path(token).name == "eval":
+            return True
+        if not command_position:
+            continue
+        if token.startswith(("$", "`")):
+            return True
     return False
+
+
+def _is_shell_command_position(tokens: list[str], index: int) -> bool:
+    if index == 0 or tokens[index - 1] in _SHELL_SEPARATORS:
+        return True
+    segment_start = _shell_segment_start(tokens, index)
+    prefix = tokens[segment_start:index]
+    wrapper_seen = False
+    for token in prefix:
+        if _SHELL_ASSIGNMENT.fullmatch(token) is not None:
+            continue
+        if wrapper_seen and token.startswith("-"):
+            continue
+        if Path(token).name in _SHELL_COMMAND_WRAPPERS:
+            wrapper_seen = True
+            continue
+        return False
+    return True
+
+
+def _shell_segment_start(tokens: list[str], index: int) -> int:
+    return max(
+        (position for position in range(index) if tokens[position] in _SHELL_SEPARATORS),
+        default=-1,
+    ) + 1
 
 
 def _kill_process_tree(process: subprocess.Popen[bytes]) -> str:

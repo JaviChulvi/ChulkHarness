@@ -392,6 +392,19 @@ def test_managed_process_tools_route_through_active_session(tmp_path: Path) -> N
     backend.close()
 
 
+def test_managed_process_blocks_recursive_delete_hidden_by_eval(tmp_path: Path) -> None:
+    backend = HostExecutionBackend(tmp_path)
+    session = backend.open_session(ExecutionSessionRequest(turn_id="blocked-eval"))
+
+    result = session.start_process(ProcessStartRequest("eval 'rm -rf target'"))
+
+    assert result.success is False
+    assert result.error == "blocked_command"
+    assert result.failure_kind == "fatal_safety"
+    assert result.metadata["child_process_started"] is False
+    backend.close()
+
+
 def test_managed_process_tools_require_execution_session() -> None:
     start_tool = next(tool for tool in process_tools() if tool.name == "process_start")
 

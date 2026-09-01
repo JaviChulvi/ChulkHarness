@@ -306,6 +306,14 @@ def test_default_registry_wires_host_configured_byte_limits(tmp_path: Path) -> N
         "sh -c 'rm -rf target'",
         'env FLAG=1 bash -lc "rm --recursive --force target"',
         "find . -exec rm -rf {} +",
+        "eval 'rm -rf target'",
+        "cmd=rm; flags=-rf; $cmd $flags target",
+        "cmd=rm; env $cmd -rf target",
+        "$(printf rm) -rf target",
+        'eval "$UNRESOLVED_COMMAND"',
+        "printf 'rm -rf target' | sh",
+        "command eval 'rm -rf target'",
+        "${UNSET_COMMAND:-rm} -rf target",
     ],
 )
 def test_nested_recursive_force_rm_is_blocked(command: str, tmp_path: Path) -> None:
@@ -321,6 +329,17 @@ def test_quoted_rm_text_remains_benign(tmp_path: Path) -> None:
 
     assert result.success
     assert result.stdout == "rm -rf target"
+
+
+def test_static_shell_scripts_without_destructive_content_remain_allowed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "safe.sh").write_text("printf hello", encoding="utf-8")
+
+    for command in ("sh safe.sh", ". ./safe.sh"):
+        result = run_shell_command({"command": command}, tmp_path)
+        assert result.success
+        assert result.stdout == "hello"
 
 
 def _python_command(source: str) -> str:
