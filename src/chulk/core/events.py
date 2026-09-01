@@ -116,9 +116,7 @@ class RuntimeEventDispatcher:
         self.audit_callback = None
 
     def _redact_payload(self, event_type: str, payload: dict) -> dict:
-        baseline = redact_data(payload)
-        if not isinstance(baseline, dict):
-            raise TypeError("redacted event payload must remain an object")
+        baseline: dict = redact_data(payload)
         if self.redaction_callback is None:
             return baseline
 
@@ -150,12 +148,11 @@ class RuntimeEventDispatcher:
                 ]
             return value
 
-        redacted_payload = redact_value(baseline, "payload")
-        if not isinstance(redacted_payload, dict):
-            return baseline
-        final_payload = redact_data(redacted_payload)
-        if not isinstance(final_payload, dict):
-            return baseline
+        redacted_payload = {
+            key: redact_value(item, f"payload.{key}")
+            for key, item in baseline.items()
+        }
+        final_payload: dict = redact_data(redacted_payload)
         redacted_any = redacted_any or final_payload != redacted_payload
         if redacted_any:
             final_payload["_redacted"] = True
