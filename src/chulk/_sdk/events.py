@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 from typing import Any, Callable
@@ -46,6 +47,20 @@ class EventDispatcher:
         self.active_on_event: EventCallback | None = None
         self.active_on_delta: DeltaCallback | None = None
         self._previous_event_ids: dict[str, str] = {}
+
+    @contextmanager
+    def callbacks(
+        self, *, on_delta: DeltaCallback | None, on_event: EventCallback | None,
+    ) -> Iterator[None]:
+        previous_on_delta = self.active_on_delta
+        previous_on_event = self.active_on_event
+        self.active_on_delta = on_delta
+        self.active_on_event = on_event
+        try:
+            yield
+        finally:
+            self.active_on_delta = previous_on_delta
+            self.active_on_event = previous_on_event
 
     def dispatch(self, event_type: str, payload: dict) -> None:
         if self._base_event_callback is not None:

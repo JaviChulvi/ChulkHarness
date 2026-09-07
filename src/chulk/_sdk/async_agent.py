@@ -22,7 +22,6 @@ from chulk._sdk.results import (
     PlanResult,
     RunResult,
 )
-from chulk.core import Agent as CoreAgent
 from chulk.events import AgentEvent, EventName
 from chulk.hosting import (
     ExecutionScope,
@@ -63,45 +62,20 @@ from chulk.usage import (
 T = TypeVar("T")
 
 
-class AsyncAgent:
+class AsyncAgent(AsyncAgentHandle):
     """Public asynchronous facade backed by Chulk's compatibility runtime."""
 
     def __init__(self, **kwargs: Any) -> None:
-        self._agent = Agent(**kwargs)
-        self._handle = AsyncAgentHandle(self._agent._handle)
+        self._initialize_agent(Agent(**kwargs))
+
+    def _initialize_agent(self, agent: Agent) -> None:
+        self._agent = agent
+        super().__init__(agent)
         self._async_run_gate = asyncio.Lock()
-
-    @property
-    def runtime(self) -> CoreAgent:
-        return self._handle.runtime
-
-    @property
-    def state(self):
-        return self._handle.state
-
-    @property
-    def conversation_id(self) -> str:
-        return self._handle.conversation_id
 
     @property
     def execution_scope(self) -> ExecutionScope:
         return cast(ExecutionScope, self.runtime.execution_scope)
-
-    @property
-    def trace_path(self) -> Path | None:
-        return self._handle.trace_path
-
-    @property
-    def tool_registry(self):
-        return self._handle.tool_registry
-
-    @property
-    def skill_registry(self):
-        return self._handle.skill_registry
-
-    @property
-    def closed(self) -> bool:
-        return self._handle.closed
 
     @property
     def capabilities(self) -> Capabilities:
@@ -109,23 +83,29 @@ class AsyncAgent:
 
     async def run(self, message: str, **kwargs: Any) -> str:
         options = self._agent._run_options(kwargs)
-        return await self._invoke_async("run", lambda: self._handle.run(message, **options), serialized=True)
+        result = await self._invoke_async(
+            "run",
+            lambda: AsyncAgentHandle.run_result(self, message, **options),
+            serialized=True,
+        )
+        return result.content
 
     async def run_result(self, message: str, **kwargs: Any) -> RunResult:
         options = self._agent._run_options(kwargs)
         return await self._invoke_async(
             "run_result",
-            lambda: self._handle.run_result(message, **options),
+            lambda: AsyncAgentHandle.run_result(self, message, **options),
             serialized=True,
         )
 
     async def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
         options = self._agent._run_options(kwargs)
-        return await self._invoke_async(
+        result = await self._invoke_async(
             "run_input",
-            lambda: self._handle.run_input(user_input, **options),
+            lambda: AsyncAgentHandle.run_input_result(self, user_input, **options),
             serialized=True,
         )
+        return result.content
 
     async def run_input_result(
         self,
@@ -135,42 +115,57 @@ class AsyncAgent:
         options = self._agent._run_options(kwargs)
         return await self._invoke_async(
             "run_input_result",
-            lambda: self._handle.run_input_result(user_input, **options),
+            lambda: AsyncAgentHandle.run_input_result(self, user_input, **options),
             serialized=True,
         )
 
     async def plan(self, message: str) -> str:
-        return await self._invoke_async("plan", lambda: self._handle.plan(message), serialized=True)
+        result = await self._invoke_async(
+            "plan",
+            lambda: AsyncAgentHandle.plan_result(self, message),
+            serialized=True,
+        )
+        return result.content
 
     async def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
         return await self._invoke_async(
             "plan_result",
-            lambda: self._handle.plan_result(message, **kwargs),
+            lambda: AsyncAgentHandle.plan_result(self, message, **kwargs),
             serialized=True,
         )
 
     async def approve(self) -> str:
-        return await self._invoke_async("approve", self._handle.approve, serialized=True)
+        result = await self._invoke_async(
+            "approve",
+            lambda: AsyncAgentHandle.approve_result(self),
+            serialized=True,
+        )
+        return result.content
 
     async def approve_result(self, **kwargs: Any) -> RunResult:
         return await self._invoke_async(
             "approve_result",
-            lambda: self._handle.approve_result(**kwargs),
+            lambda: AsyncAgentHandle.approve_result(self, **kwargs),
             serialized=True,
         )
 
     async def reject(self) -> str:
-        return await self._invoke_async("reject", self._handle.reject, serialized=True)
+        result = await self._invoke_async(
+            "reject",
+            lambda: AsyncAgentHandle.reject_result(self),
+            serialized=True,
+        )
+        return result.content
 
     async def reject_result(self, **kwargs: Any) -> RunResult:
         return await self._invoke_async(
             "reject_result",
-            lambda: self._handle.reject_result(**kwargs),
+            lambda: AsyncAgentHandle.reject_result(self, **kwargs),
             serialized=True,
         )
 
     async def close(self) -> None:
-        await self._invoke_async("close", self._handle.close, serialized=True)
+        await self._invoke_async("close", lambda: AsyncAgentHandle.close(self), serialized=True)
 
     async def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         return await asyncio.to_thread(self._agent.list_memory_proposals)
@@ -555,7 +550,7 @@ class AsyncAgent:
                 await worker
 
     async def __aenter__(self) -> "AsyncAgent":
-        self._agent._invoke("enter", self._agent._handle._ensure_open)
+        self._agent._invoke("enter", self._agent._ensure_open)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

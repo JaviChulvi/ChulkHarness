@@ -13,9 +13,8 @@ from chulk._sdk.async_agent import AsyncAgent
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config
 from chulk._sdk.construction import PermissionCallback, _selected_capabilities
 from chulk._sdk.error_mapping import map_public_error
-from chulk._sdk.event_channel import RunGate
 from chulk._sdk.events import EventCallback
-from chulk._sdk.handles import AgentHandle, AsyncAgentHandle
+from chulk._sdk.handles import AsyncAgentHandle
 from chulk._sdk.results import (
     governed_skill_snapshot,
     governed_skill_revision_snapshot,
@@ -244,17 +243,10 @@ class AsyncHostedRuntime(AsyncAgent):
                 raise
             raise mapped from exc
 
-        handle = AgentHandle(core, on_event=on_event)
         sync_facade = Agent.__new__(Agent)
-        sync_facade._handle = handle
-        sync_facade._run_gate = RunGate()
-        sync_facade._capabilities = capabilities
-        sync_facade._deps = deps
-
+        sync_facade._initialize_runtime(core, on_event=on_event, capabilities=capabilities, deps=deps)
         runtime = cls.__new__(cls)
-        runtime._agent = sync_facade
-        runtime._handle = AsyncAgentHandle(handle)
-        runtime._async_run_gate = asyncio.Lock()
+        runtime._initialize_agent(sync_facade)
         runtime._async_owned_services = resolved
         runtime._async_host_flushables = ()
         return runtime
@@ -1128,7 +1120,7 @@ class AsyncHostedRuntime(AsyncAgent):
             failure: BaseException | None = None
             operations: list[Callable[[], Awaitable[object]]] = [
                 self.runtime.resources.flush,
-                self._handle.close,
+                lambda: AsyncAgentHandle.close(self),
             ]
             if owned is not None:
                 operations.append(owned.aclose_owned)

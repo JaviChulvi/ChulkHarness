@@ -423,7 +423,7 @@ def test_sync_generator_early_close_cleans_callbacks_and_gate(tmp_path):
     assert next(stream).name == EventName.RUN_STARTED.value
     stream.close()
 
-    assert facade._handle._active_on_event is None
+    assert facade._events.active_on_event is None
     assert facade.run("second") == "second"
 
 
@@ -487,7 +487,7 @@ async def test_async_generator_close_cancels_delivery_and_releases_gate(tmp_path
     assert first.name == EventName.RUN_STARTED.value
     await stream.aclose()
 
-    assert facade._handle.handle._active_on_event is None
+    assert facade.handle._events.active_on_event is None
     assert await facade.run("second") == "second"
 
 
@@ -510,4 +510,4 @@ async def test_async_consumer_cancellation_keeps_standard_semantics(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert facade._handle.handle._active_on_event is None
+    assert facade.handle._events.active_on_event is None

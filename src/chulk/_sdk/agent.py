@@ -12,12 +12,13 @@ from chulk.capabilities import Capabilities, MemoryMode
 from chulk._sdk.config import AgentConfig, AgentPreset
 from chulk._sdk.construction import (
     PermissionCallback,
-    _build_handle,
+    _build_runtime,
     _selected_capabilities,
 )
 from chulk._sdk.error_mapping import map_public_error
 from chulk._sdk.event_channel import RunEventChannel, RunGate
 from chulk._sdk.events import EventCallback, failure_event, terminal_event
+from chulk._sdk.handles import AgentHandle
 from chulk._sdk.results import (
     PlanResult,
     RunResult,
@@ -99,7 +100,7 @@ from chulk.usage import (
 T = TypeVar("T")
 
 
-class Agent:
+class Agent(AgentHandle):
     """Public synchronous Chulk SDK facade."""
 
     def __init__(
@@ -152,7 +153,7 @@ class Agent:
     ) -> None:
         selected_capabilities = _selected_capabilities(config, capabilities, memory_mode)
         try:
-            self._handle = _build_handle(
+            runtime = _build_runtime(
                 config=config,
                 preset=preset,
                 llm=llm,
@@ -165,7 +166,6 @@ class Agent:
                 permission_callback=permission_callback,
                 plan_step_verifier=plan_step_verifier,
                 async_plan_step_verifier=async_plan_step_verifier,
-                on_event=on_event,
                 mcp=mcp,
                 redaction_callback=redaction_callback,
                 redaction_fail_closed=redaction_fail_closed,
@@ -197,46 +197,29 @@ class Agent:
                 async_tool_catalog_resolver=async_tool_catalog_resolver,
                 tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
             )
+            self._initialize_runtime(runtime, on_event=on_event, capabilities=selected_capabilities, deps=deps)
         except Exception as exc:
             mapped = map_public_error(exc, config=config, operation="construct")
             if mapped is exc:
                 raise
             raise mapped from exc
+
+    def _initialize_runtime(
+        self, runtime: CoreAgent, *, on_event: EventCallback | None, capabilities: Capabilities, deps: object | None,
+    ) -> None:
+        super().__init__(runtime, on_event=on_event)
         self._run_gate = RunGate()
-        self._capabilities = selected_capabilities
+        self._capabilities = capabilities
         self._deps = deps
 
-    @property
+    # Handles permit runtime replacement; the stable facade remains read-only.
+    @property  # type: ignore[misc]
     def runtime(self) -> CoreAgent:
-        return self._handle.runtime
-
-    @property
-    def state(self):
-        return self._handle.state
-
-    @property
-    def conversation_id(self) -> str:
-        return self._handle.conversation_id
+        return self._runtime
 
     @property
     def execution_scope(self) -> ExecutionScope:
         return cast(ExecutionScope, self.runtime.execution_scope)
-
-    @property
-    def trace_path(self) -> Path | None:
-        return self._handle.trace_path
-
-    @property
-    def tool_registry(self):
-        return self._handle.tool_registry
-
-    @property
-    def skill_registry(self):
-        return self._handle.skill_registry
-
-    @property
-    def closed(self) -> bool:
-        return self._handle.closed
 
     @property
     def capabilities(self) -> Capabilities:
@@ -244,55 +227,52 @@ class Agent:
 
     def run(self, message: str, **kwargs: Any) -> str:
         options = self._run_options(kwargs)
-        return self._invoke("run", lambda: self._handle.run(message, **options), serialized=True)
+        return self._invoke("run", lambda: AgentHandle.run_result(self, message, **options), serialized=True).content
 
     def run_result(self, message: str, **kwargs: Any) -> RunResult:
         options = self._run_options(kwargs)
-        return self._invoke("run_result", lambda: self._handle.run_result(message, **options), serialized=True)
+        return self._invoke("run_result", lambda: AgentHandle.run_result(self, message, **options), serialized=True)
 
     def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
         options = self._run_options(kwargs)
         return self._invoke(
             "run_input",
-            lambda: self._handle.run_input(user_input, **options),
+            lambda: AgentHandle.run_input_result(self, user_input, **options),
             serialized=True,
-        )
+        ).content
 
     def run_input_result(self, user_input: UserInput, **kwargs: Any) -> RunResult:
         options = self._run_options(kwargs)
         return self._invoke(
             "run_input_result",
-            lambda: self._handle.run_input_result(user_input, **options),
+            lambda: AgentHandle.run_input_result(self, user_input, **options),
             serialized=True,
         )
 
-    def __call__(self, message: str) -> str:
-        return self.run(message)
-
     def plan(self, message: str) -> str:
-        return self._invoke("plan", lambda: self._handle.plan(message), serialized=True)
+        return self._invoke("plan", lambda: AgentHandle.plan_result(self, message), serialized=True).content
 
     def plan_result(self, message: str, **kwargs: Any) -> PlanResult:
-        return self._invoke("plan_result", lambda: self._handle.plan_result(message, **kwargs), serialized=True)
+        return self._invoke("plan_result", lambda: AgentHandle.plan_result(self, message, **kwargs), serialized=True)
 
     def approve(self) -> str:
-        return self._invoke("approve", self._handle.approve, serialized=True)
+        return self._invoke("approve", lambda: AgentHandle.approve_result(self), serialized=True).content
 
     def approve_result(self, **kwargs: Any) -> RunResult:
-        return self._invoke("approve_result", lambda: self._handle.approve_result(**kwargs), serialized=True)
+        return self._invoke("approve_result", lambda: AgentHandle.approve_result(self, **kwargs), serialized=True)
 
     def reject(self) -> str:
-        return self._invoke("reject", self._handle.reject, serialized=True)
+        return self._invoke("reject", lambda: AgentHandle.reject_result(self), serialized=True).content
 
     def reject_result(self, **kwargs: Any) -> RunResult:
-        return self._invoke("reject_result", lambda: self._handle.reject_result(**kwargs), serialized=True)
+        return self._invoke("reject_result", lambda: AgentHandle.reject_result(self, **kwargs), serialized=True)
 
     def close(self) -> None:
-        self._invoke("close", self._handle.close, serialized=True)
+        self._invoke("close", lambda: AgentHandle.close(self), serialized=True)
 
     def cancel(self) -> bool:
         """Cooperatively cancel the active synchronous turn, if any."""
-        return self._invoke("cancel", self._handle.cancel)
+        return self._invoke("cancel", lambda: AgentHandle.cancel(self))
 
     def list_memory_proposals(self) -> tuple[MemoryProposal, ...]:
         """Return pending manual-memory proposals as immutable snapshots."""
@@ -774,7 +754,8 @@ class Agent:
         """Read one bounded artifact view through the agent ownership boundary."""
         return self._invoke(
             "read_artifact",
-            lambda: self._handle.read_artifact(
+            lambda: AgentHandle.read_artifact(
+                self,
                 artifact_id,
                 mode=mode,
                 offset=offset,
@@ -854,7 +835,7 @@ class Agent:
         yield from channel.iterate(worker)
 
     def __enter__(self) -> "Agent":
-        self._invoke("enter", self._handle._ensure_open)
+        self._invoke("enter", self._ensure_open)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

@@ -100,7 +100,7 @@ def test_facade_maps_provider_tool_permission_safety_and_memory_failures(tmp_pat
 
     for index, (internal, public_type) in enumerate(cases):
         facade = _agent(tmp_path / str(index))
-        facade._handle.run = lambda *args, _error=internal, **kwargs: _raise(_error)  # type: ignore[method-assign]
+        facade.runtime.run_turn = lambda *args, _error=internal, **kwargs: _raise(_error)  # type: ignore[method-assign]
         with pytest.raises(public_type) as caught:
             facade.run("hello")
         assert isinstance(caught.value, ChulkError)
@@ -148,7 +148,7 @@ def test_provider_and_tool_details_are_structured(tmp_path):
         retryable=True,
         fallback_eligible=True,
     )
-    facade._handle.run = lambda *args, **kwargs: _raise(provider_failure)  # type: ignore[method-assign]
+    facade.runtime.run_turn = lambda *args, **kwargs: _raise(provider_failure)  # type: ignore[method-assign]
 
     with pytest.raises(ProviderError) as provider_caught:
         facade.run("hello")
@@ -164,7 +164,7 @@ def test_provider_and_tool_details_are_structured(tmp_path):
         [ToolValidationIssue(path="$.token", message="invalid", actual="token=super-secret")],
         {"type": "object"},
     )
-    facade._handle.run = lambda *args, **kwargs: _raise(validation_failure)  # type: ignore[method-assign]
+    facade.runtime.run_turn = lambda *args, **kwargs: _raise(validation_failure)  # type: ignore[method-assign]
     with pytest.raises(ToolExecutionError) as tool_caught:
         facade.run("hello")
 
@@ -230,7 +230,7 @@ async def test_async_cancellation_is_not_wrapped(tmp_path):
     async def cancel(*args, **kwargs):
         raise asyncio.CancelledError
 
-    facade._handle.run = cancel  # type: ignore[method-assign]
+    facade.runtime.run_turn_async = cancel  # type: ignore[method-assign]
     with pytest.raises(asyncio.CancelledError):
         await facade.run("hello")
 
