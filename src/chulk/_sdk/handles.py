@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from chulk._sdk.events import DeltaCallback, EventCallback, EventDispatcher
 from chulk._sdk.results import (
@@ -26,28 +26,20 @@ from chulk.tracing.artifacts import (
 
 
 class AgentHandle:
-    """Provisional compatibility handle behind the public synchronous facade."""
+    """Provisional handle implementation shared with the synchronous facade."""
 
     def __init__(self, runtime: CoreAgent, *, on_event: EventCallback | None = None) -> None:
-        self.runtime = runtime
+        self._runtime = runtime
         self._events = EventDispatcher(runtime, on_event=on_event)
         self._closed = False
 
     @property
-    def _active_on_event(self) -> EventCallback | None:
-        return self._events.active_on_event
+    def runtime(self) -> CoreAgent:
+        return self._runtime
 
-    @_active_on_event.setter
-    def _active_on_event(self, value: EventCallback | None) -> None:
-        self._events.active_on_event = value
-
-    @property
-    def _active_on_delta(self) -> DeltaCallback | None:
-        return self._events.active_on_delta
-
-    @_active_on_delta.setter
-    def _active_on_delta(self, value: DeltaCallback | None) -> None:
-        self._events.active_on_delta = value
+    @runtime.setter
+    def runtime(self, value: CoreAgent) -> None:
+        self._runtime = value
 
     @property
     def closed(self) -> bool:
@@ -112,19 +104,16 @@ class AgentHandle:
     ) -> RunResult:
         """Run one normal agent turn and return structured SDK metadata."""
         self._ensure_open()
-        content = self._with_callbacks(
-            lambda: self.runtime.run_turn(
+        with self._events.callbacks(on_delta=on_delta, on_event=on_event):
+            content = self.runtime.run_turn(
                 message,
                 context_sections=context_sections,
                 prompt_profile=prompt_profile,
                 locale=locale,
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
-            ),
-            on_delta=on_delta,
-            on_event=on_event,
-        )
-        return self._run_result(content)
+            )
+        return run_result_from_runtime(self.runtime, content)
 
     def run_input(
         self,
@@ -148,19 +137,16 @@ class AgentHandle:
     ) -> RunResult:
         """Run typed input and return structured SDK metadata."""
         self._ensure_open()
-        content = self._with_callbacks(
-            lambda: self.runtime.run_input(
+        with self._events.callbacks(on_delta=on_delta, on_event=on_event):
+            content = self.runtime.run_input(
                 user_input,
                 context_sections=context_sections,
                 prompt_profile=prompt_profile,
                 locale=locale,
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
-            ),
-            on_delta=on_delta,
-            on_event=on_event,
-        )
-        return self._run_result(content)
+            )
+        return run_result_from_runtime(self.runtime, content)
 
     def __call__(self, message: str) -> str:
         return self.run(message)
@@ -178,12 +164,9 @@ class AgentHandle:
     ) -> PlanResult:
         """Run one planned turn and return the created plan snapshot."""
         self._ensure_open()
-        content = self._with_callbacks(
-            lambda: self.runtime.run_planned_turn(message),
-            on_delta=on_delta,
-            on_event=on_event,
-        )
-        return self._plan_result(content)
+        with self._events.callbacks(on_delta=on_delta, on_event=on_event):
+            content = self.runtime.run_planned_turn(message)
+        return plan_result_from_runtime(self.runtime, content)
 
     def approve(self) -> str:
         """Approve and continue a pending plan."""
@@ -200,10 +183,11 @@ class AgentHandle:
         has_plan_to_run = (
             self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
         )
-        content = self._with_callbacks(lambda: self.runtime.approve_plan(), on_delta=on_delta, on_event=on_event)
+        with self._events.callbacks(on_delta=on_delta, on_event=on_event):
+            content = self.runtime.approve_plan()
         if not has_plan_to_run:
             return self._no_pending_plan_result(content)
-        return self._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     def reject(self) -> str:
         """Reject a pending plan or cancel a restored approved plan."""
@@ -220,10 +204,11 @@ class AgentHandle:
         has_plan_to_cancel = (
             self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
         )
-        content = self._with_callbacks(lambda: self.runtime.reject_plan(), on_delta=on_delta, on_event=on_event)
+        with self._events.callbacks(on_delta=on_delta, on_event=on_event):
+            content = self.runtime.reject_plan()
         if not has_plan_to_cancel:
             return self._no_pending_plan_result(content)
-        return self._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     def close(self) -> None:
         """Close owned runtime resources exactly once."""
@@ -277,29 +262,6 @@ class AgentHandle:
         if self._closed:
             raise RuntimeError("Agent is closed")
 
-    def _with_callbacks(
-        self,
-        call: Callable[[], str],
-        *,
-        on_delta: DeltaCallback | None,
-        on_event: EventCallback | None,
-    ) -> str:
-        previous_on_delta = self._events.active_on_delta
-        previous_on_event = self._events.active_on_event
-        self._events.active_on_delta = on_delta
-        self._events.active_on_event = on_event
-        try:
-            return call()
-        finally:
-            self._events.active_on_delta = previous_on_delta
-            self._events.active_on_event = previous_on_event
-
-    def _last_turn(self):
-        return self.runtime.state.turns[-1] if self.runtime.state.turns else None
-
-    def _run_result(self, content: str) -> RunResult:
-        return run_result_from_runtime(self.runtime, content)
-
     def _no_pending_plan_result(self, content: str) -> RunResult:
         return RunResult(
             content=content,
@@ -308,9 +270,6 @@ class AgentHandle:
             conversation_id=self.conversation_id,
             trace_path=self.trace_path,
         )
-
-    def _plan_result(self, content: str) -> PlanResult:
-        return plan_result_from_runtime(self.runtime, content)
 
 
 class AsyncAgentHandle:
@@ -385,11 +344,7 @@ class AsyncAgentHandle:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> RunResult:
         self.handle._ensure_open()
-        previous_on_delta = self.handle._active_on_delta
-        previous_on_event = self.handle._active_on_event
-        self.handle._active_on_delta = on_delta
-        self.handle._active_on_event = on_event
-        try:
+        with self.handle._events.callbacks(on_delta=on_delta, on_event=on_event):
             content = await self.runtime.run_turn_async(
                 message,
                 context_sections=context_sections,
@@ -398,10 +353,7 @@ class AsyncAgentHandle:
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
             )
-        finally:
-            self.handle._active_on_delta = previous_on_delta
-            self.handle._active_on_event = previous_on_event
-        return self.handle._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     async def run_input(
         self,
@@ -423,11 +375,7 @@ class AsyncAgentHandle:
         tool_context: ToolExecutionContext | dict | None = None,
     ) -> RunResult:
         self.handle._ensure_open()
-        previous_on_delta = self.handle._active_on_delta
-        previous_on_event = self.handle._active_on_event
-        self.handle._active_on_delta = on_delta
-        self.handle._active_on_event = on_event
-        try:
+        with self.handle._events.callbacks(on_delta=on_delta, on_event=on_event):
             content = await self.runtime.run_input_async(
                 user_input,
                 context_sections=context_sections,
@@ -436,10 +384,7 @@ class AsyncAgentHandle:
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
             )
-        finally:
-            self.handle._active_on_delta = previous_on_delta
-            self.handle._active_on_event = previous_on_event
-        return self.handle._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     async def plan(self, message: str) -> str:
         return (await self.plan_result(message)).content
@@ -452,16 +397,9 @@ class AsyncAgentHandle:
         on_event: EventCallback | None = None,
     ) -> PlanResult:
         self.handle._ensure_open()
-        previous_on_delta = self.handle._active_on_delta
-        previous_on_event = self.handle._active_on_event
-        self.handle._active_on_delta = on_delta
-        self.handle._active_on_event = on_event
-        try:
+        with self.handle._events.callbacks(on_delta=on_delta, on_event=on_event):
             content = await self.runtime.run_planned_turn_async(message)
-        finally:
-            self.handle._active_on_delta = previous_on_delta
-            self.handle._active_on_event = previous_on_event
-        return self.handle._plan_result(content)
+        return plan_result_from_runtime(self.runtime, content)
 
     async def approve(self) -> str:
         return (await self.approve_result()).content
@@ -476,18 +414,11 @@ class AsyncAgentHandle:
         has_plan_to_run = (
             self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
         )
-        previous_on_delta = self.handle._active_on_delta
-        previous_on_event = self.handle._active_on_event
-        self.handle._active_on_delta = on_delta
-        self.handle._active_on_event = on_event
-        try:
+        with self.handle._events.callbacks(on_delta=on_delta, on_event=on_event):
             content = await self.runtime.approve_plan_async()
-        finally:
-            self.handle._active_on_delta = previous_on_delta
-            self.handle._active_on_event = previous_on_event
         if not has_plan_to_run:
             return self.handle._no_pending_plan_result(content)
-        return self.handle._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     async def reject(self) -> str:
         return (await self.reject_result()).content
@@ -502,18 +433,11 @@ class AsyncAgentHandle:
         has_plan_to_cancel = (
             self.runtime.has_pending_plan() or self.runtime.has_resumable_plan()
         )
-        previous_on_delta = self.handle._active_on_delta
-        previous_on_event = self.handle._active_on_event
-        self.handle._active_on_delta = on_delta
-        self.handle._active_on_event = on_event
-        try:
+        with self.handle._events.callbacks(on_delta=on_delta, on_event=on_event):
             content = await self.runtime.reject_plan_async()
-        finally:
-            self.handle._active_on_delta = previous_on_delta
-            self.handle._active_on_event = previous_on_event
         if not has_plan_to_cancel:
             return self.handle._no_pending_plan_result(content)
-        return self.handle._run_result(content)
+        return run_result_from_runtime(self.runtime, content)
 
     async def close(self) -> None:
         await self.handle.aclose()

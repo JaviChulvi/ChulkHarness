@@ -669,3 +669,35 @@ def test_cancelling_without_an_active_runner_is_immediately_terminal(tmp_path) -
         "goal.cancellation_requested",
         "goal.cancelled",
     ]
+
+
+@pytest.mark.parametrize("domain", ["goal", "child"])
+def test_goal_and_child_metadata_are_immutable_and_round_trip(domain):
+    from decimal import Decimal
+    from chulk.children import ChildTaskResult
+    from chulk.goals import GoalEvidence
+
+    def model(payload):
+        if domain == "goal":
+            return GoalEvidence("evidence", "Summary", ("criterion",), metadata=payload)
+        return ChildTaskResult("Summary", structured_output=payload)
+
+    field = "metadata" if domain == "goal" else "structured_output"
+    source = {
+        7: {"items": [GoalStatus.COMPLETED, NOW, Decimal("1.2300"), ("nested",)]},
+        "set": {"item"}, "frozenset": frozenset({3}),
+    }
+    value = model(source)
+    frozen = getattr(value, field)
+    source[7]["items"].append("later")
+    with pytest.raises(TypeError):
+        frozen["7"]["items"] = ()
+    assert isinstance(frozen["7"]["items"], tuple)
+    encoded = value.to_dict()[field]
+    assert encoded == {
+        "7": {"items": ["completed", NOW.isoformat(), "1.2300", ["nested"]]},
+        "set": ["item"], "frozenset": [3],
+    }
+    assert model(encoded).to_dict()[field] == encoded
+    encoded["7"]["items"].append("export mutation")
+    assert len(frozen["7"]["items"]) == 4

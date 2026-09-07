@@ -23,7 +23,11 @@ from chulk.core.reflection import (
     parse_reflection_response,
 )
 from chulk.core.state import AgentState, TurnState
-from chulk.core.trace_format import format_action_trace, format_model_request_trace
+from chulk.core.trace_format import (
+    format_action_trace,
+    format_model_request_trace,
+    format_model_response_trace,
+)
 from chulk.errors import ConfigurationError, ErrorDetails
 from chulk.llm import (
     LLMActionError,
@@ -1123,6 +1127,31 @@ class ModelTransport:
             response,
         )
 
+    def _summary_request_payload(
+        self,
+        summary_messages: list[dict[str, str]],
+        turn: TurnState,
+        request_index: int,
+        source_message_count: int,
+    ) -> dict:
+        payload = format_model_request_trace(
+            summary_messages,
+            max_prompt_chars=self.trace_max_prompt_chars,
+            request_index=request_index,
+            turn_id=turn.turn_id,
+            loaded_memory_ids=self.state.loaded_memory_ids,
+            loaded_skill_names=self.state.loaded_skill_names,
+            available_tool_names=turn.available_tool_names,
+            context_report={
+                "purpose": "context_summary",
+                "source_message_count": source_message_count,
+                "existing_summary": self.memory.conversation_summary is not None,
+            },
+        )
+        payload["purpose"] = "context_summary"
+        payload["summary_source_message_count"] = source_message_count
+        return payload
+
     def _start_summary(
         self,
         messages: list[dict[str, str]],
@@ -1141,22 +1170,9 @@ class ModelTransport:
             messages=summary_messages,
             purpose="context_summary",
         )
-        payload = format_model_request_trace(
-            summary_messages,
-            max_prompt_chars=self.trace_max_prompt_chars,
-            request_index=request_index,
-            turn_id=turn.turn_id,
-            loaded_memory_ids=self.state.loaded_memory_ids,
-            loaded_skill_names=self.state.loaded_skill_names,
-            available_tool_names=turn.available_tool_names,
-            context_report={
-                "purpose": "context_summary",
-                "source_message_count": len(messages),
-                "existing_summary": self.memory.conversation_summary is not None,
-            },
+        payload = self._summary_request_payload(
+            summary_messages, turn, request_index, len(messages)
         )
-        payload["purpose"] = "context_summary"
-        payload["summary_source_message_count"] = len(messages)
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return summary_messages, request_index
 
@@ -1179,24 +1195,9 @@ class ModelTransport:
                 messages=summary_messages,
                 purpose="context_summary",
             )
-            payload = format_model_request_trace(
-                summary_messages,
-                max_prompt_chars=self.trace_max_prompt_chars,
-                request_index=request_index,
-                turn_id=turn.turn_id,
-                loaded_memory_ids=self.state.loaded_memory_ids,
-                loaded_skill_names=self.state.loaded_skill_names,
-                available_tool_names=turn.available_tool_names,
-                context_report={
-                    "purpose": "context_summary",
-                    "source_message_count": len(messages),
-                    "existing_summary": (
-                        self.memory.conversation_summary is not None
-                    ),
-                },
+            payload = self._summary_request_payload(
+                summary_messages, turn, request_index, len(messages)
             )
-            payload["purpose"] = "context_summary"
-            payload["summary_source_message_count"] = len(messages)
             self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
             await self._flush_async()
         except BaseException as exc:
@@ -1211,18 +1212,13 @@ class ModelTransport:
             raise
         return summary_messages, request_index
 
-    def _summary_failure(
+    def _summary_failure_result(
         self,
         messages: list[dict[str, str]],
         turn: TurnState,
         request_index: int,
         exc: LLMError,
     ) -> ContextSummaryResult:
-        self.release_accounting(
-            turn,
-            request_index=request_index,
-            reason="context_summary_transport_failed",
-        )
         self.trace(
             TraceEvent.MODEL_RESPONSE,
             {
@@ -1237,6 +1233,20 @@ class ModelTransport:
             self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
         )
         return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, True, str(exc))
+
+    def _summary_failure(
+        self,
+        messages: list[dict[str, str]],
+        turn: TurnState,
+        request_index: int,
+        exc: LLMError,
+    ) -> ContextSummaryResult:
+        self.release_accounting(
+            turn,
+            request_index=request_index,
+            reason="context_summary_transport_failed",
+        )
+        return self._summary_failure_result(messages, turn, request_index, exc)
 
     async def _summary_failure_async(
         self,
@@ -1250,20 +1260,35 @@ class ModelTransport:
             request_index=request_index,
             reason="context_summary_transport_failed",
         )
+        return self._summary_failure_result(messages, turn, request_index, exc)
+
+    def _summary_result(
+        self,
+        messages: list[dict[str, str]],
+        turn: TurnState,
+        request_index: int,
+        raw_summary: str,
+        usage: dict | None,
+        cost: dict | None,
+    ) -> ContextSummaryResult:
         self.trace(
             TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "content": "",
-                "purpose": "context_summary",
-                "error": str(exc),
-            },
+            format_model_response_trace(
+                turn_id=turn.turn_id,
+                request_index=request_index,
+                content=raw_summary,
+                purpose="context_summary",
+                usage=usage,
+                cost=cost,
+            ),
         )
-        checkpoint = _fallback_context_checkpoint(
-            self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
-        )
-        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, True, str(exc))
+        checkpoint = _parse_checkpoint(raw_summary)
+        if checkpoint is None:
+            fallback = _fallback_context_checkpoint(
+                self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
+            )
+            return ContextSummaryResult(_render_checkpoint(fallback), fallback, True, "invalid_checkpoint")
+        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, False)
 
     def _finish_summary(self, messages, turn, request_index, response):
         raw_summary = response.content
@@ -1277,24 +1302,7 @@ class ModelTransport:
             fallback_attempts=fallback_attempts,
             purpose="context_summary",
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "content": raw_summary,
-                "purpose": "context_summary",
-                "usage": usage,
-                "cost": cost,
-            },
-        )
-        checkpoint = _parse_checkpoint(raw_summary)
-        if checkpoint is None:
-            fallback = _fallback_context_checkpoint(
-                self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
-            )
-            return ContextSummaryResult(_render_checkpoint(fallback), fallback, True, "invalid_checkpoint")
-        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, False)
+        return self._summary_result(messages, turn, request_index, raw_summary, usage, cost)
 
     async def _finish_summary_async(
         self,
@@ -1314,24 +1322,7 @@ class ModelTransport:
             fallback_attempts=fallback_attempts,
             purpose="context_summary",
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "content": raw_summary,
-                "purpose": "context_summary",
-                "usage": usage,
-                "cost": cost,
-            },
-        )
-        checkpoint = _parse_checkpoint(raw_summary)
-        if checkpoint is None:
-            fallback = _fallback_context_checkpoint(
-                self.memory.conversation_checkpoint, self.memory.conversation_summary, messages
-            )
-            return ContextSummaryResult(_render_checkpoint(fallback), fallback, True, "invalid_checkpoint")
-        return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, False)
+        return self._summary_result(messages, turn, request_index, raw_summary, usage, cost)
 
     def _ensure_prompt_within_budget(
         self,
@@ -1372,25 +1363,14 @@ class ModelTransport:
             ),
         )
 
-    def _record_model_request(
+    def _action_request_payload(
         self,
         turn: TurnState,
         prompt: AgentPrompt,
-        *,
+        messages: list[dict[str, str]],
+        context_report: dict,
         hosted_mcp_enabled: bool,
-    ) -> list[dict[str, str]]:
-        messages = prompt.messages
-        context_report = prompt.context_report.to_dict()
-        turn.context_reports.append(context_report)
-        self.state.last_context_report = context_report
-        turn.model_request_count += 1
-        self.reserve_accounting(
-            turn,
-            request_index=turn.model_request_count,
-            messages=messages,
-            purpose="agent_action",
-            repair_attempts=self.max_json_repair_attempts,
-        )
+    ) -> dict:
         payload = format_model_request_trace(
             messages,
             max_prompt_chars=self.trace_max_prompt_chars,
@@ -1413,6 +1393,30 @@ class ModelTransport:
         payload["native_tool_declarations"] = _bounded_native_tool_declarations(
             prompt.native_tool_declarations,
             max_chars=self.trace_max_prompt_chars,
+        )
+        return payload
+
+    def _record_model_request(
+        self,
+        turn: TurnState,
+        prompt: AgentPrompt,
+        *,
+        hosted_mcp_enabled: bool,
+    ) -> list[dict[str, str]]:
+        messages = prompt.messages
+        context_report = prompt.context_report.to_dict()
+        turn.context_reports.append(context_report)
+        self.state.last_context_report = context_report
+        turn.model_request_count += 1
+        self.reserve_accounting(
+            turn,
+            request_index=turn.model_request_count,
+            messages=messages,
+            purpose="agent_action",
+            repair_attempts=self.max_json_repair_attempts,
+        )
+        payload = self._action_request_payload(
+            turn, prompt, messages, context_report, hosted_mcp_enabled
         )
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return messages
@@ -1437,32 +1441,8 @@ class ModelTransport:
                 purpose="agent_action",
                 repair_attempts=self.max_json_repair_attempts,
             )
-            payload = format_model_request_trace(
-                messages,
-                max_prompt_chars=self.trace_max_prompt_chars,
-                request_index=turn.model_request_count,
-                turn_id=turn.turn_id,
-                loaded_memory_ids=self.state.loaded_memory_ids,
-                loaded_skill_names=self.state.loaded_skill_names,
-                available_tool_names=turn.available_tool_names,
-                context_report=context_report,
-            )
-            payload["action_transport"] = prompt.action_transport
-            payload["hosted_mcp_enabled"] = hosted_mcp_enabled
-            payload["hosted_mcp_server_labels"] = (
-                [server.label for server in self.mcp_servers]
-                if hosted_mcp_enabled
-                else []
-            )
-            payload["native_tool_names"] = [
-                str(declaration.get("name", ""))
-                for declaration in prompt.native_tool_declarations
-            ]
-            payload["native_tool_declarations"] = (
-                _bounded_native_tool_declarations(
-                    prompt.native_tool_declarations,
-                    max_chars=self.trace_max_prompt_chars,
-                )
+            payload = self._action_request_payload(
+                turn, prompt, messages, context_report, hosted_mcp_enabled
             )
             self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
             await self._flush_async()
@@ -1548,12 +1528,7 @@ class ModelTransport:
             message=_format_action_protocol_failure(str(exc), exc.raw_response)
         )
 
-    def _record_action_result(
-        self,
-        turn: TurnState,
-        result: LLMActionResult,
-    ) -> AgentAction:
-        action = result.action
+    def _prepare_action_result(self, turn: TurnState, result: LLMActionResult) -> object:
         if result.metadata.get("provider_mcp_output"):
             turn.extension_metadata["external_content_seen"] = True
         self.state.json_repair_attempts += result.repair_attempts
@@ -1577,6 +1552,42 @@ class ModelTransport:
                     ],
                 },
             )
+        return fallback_attempts
+
+    def _publish_action_result(
+        self,
+        turn: TurnState,
+        result: LLMActionResult,
+        action: AgentAction,
+        usage: dict | None,
+        cost: dict | None,
+    ) -> AgentAction:
+        self.trace(
+            TraceEvent.MODEL_RESPONSE,
+            format_model_response_trace(
+                turn_id=turn.turn_id,
+                request_index=turn.model_request_count,
+                content=result.raw_response,
+                repair_attempts=result.repair_attempts,
+                repair_errors=result.errors,
+                usage=usage,
+                cost=cost,
+                metadata=result.metadata,
+            ),
+        )
+        payload = format_action_trace(action)
+        payload["request_index"] = turn.model_request_count
+        self.trace(TraceEvent.PARSED_ACTION, payload)
+        self.trace(TraceEvent.MODEL_RESPONSE_PARSED, payload)
+        return action
+
+    def _record_action_result(
+        self,
+        turn: TurnState,
+        result: LLMActionResult,
+    ) -> AgentAction:
+        action = result.action
+        fallback_attempts = self._prepare_action_result(turn, result)
         usage, cost = self.record_accounting(
             turn,
             request_index=turn.model_request_count,
@@ -1584,24 +1595,7 @@ class ModelTransport:
             cost=result.cost,
             fallback_attempts=fallback_attempts,
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": turn.model_request_count,
-                "content": result.raw_response,
-                "repair_attempts": result.repair_attempts,
-                "repair_errors": result.errors,
-                "usage": usage,
-                "cost": cost,
-                "metadata": result.metadata,
-            },
-        )
-        payload = format_action_trace(action)
-        payload["request_index"] = turn.model_request_count
-        self.trace(TraceEvent.PARSED_ACTION, payload)
-        self.trace(TraceEvent.MODEL_RESPONSE_PARSED, payload)
-        return action
+        return self._publish_action_result(turn, result, action, usage, cost)
 
     async def _record_action_result_async(
         self,
@@ -1609,31 +1603,7 @@ class ModelTransport:
         result: LLMActionResult,
     ) -> AgentAction:
         action = result.action
-        if result.metadata.get("provider_mcp_output"):
-            turn.extension_metadata["external_content_seen"] = True
-        self.state.json_repair_attempts += result.repair_attempts
-        self.state.errors.extend(
-            f"JSON repair attempt: {error}" for error in result.errors
-        )
-        turn.errors.extend(
-            f"JSON repair attempt: {error}" for error in result.errors
-        )
-        fallback_attempts = getattr(self.llm_client, "last_attempts", None)
-        self._record_model_selection_outcome(turn, fallback_attempts)
-        if fallback_attempts:
-            self.trace(
-                TraceEvent.LLM_FALLBACK_ATTEMPTS,
-                {
-                    "turn_id": turn.turn_id,
-                    "request_index": turn.model_request_count,
-                    "attempts": [
-                        attempt.to_dict()
-                        if hasattr(attempt, "to_dict")
-                        else {"attempt": str(attempt)}
-                        for attempt in fallback_attempts
-                    ],
-                },
-            )
+        fallback_attempts = self._prepare_action_result(turn, result)
         usage, cost = await self._record_accounting_async(
             turn,
             request_index=turn.model_request_count,
@@ -1641,41 +1611,16 @@ class ModelTransport:
             cost=result.cost,
             fallback_attempts=fallback_attempts,
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": turn.model_request_count,
-                "content": result.raw_response,
-                "repair_attempts": result.repair_attempts,
-                "repair_errors": result.errors,
-                "usage": usage,
-                "cost": cost,
-                "metadata": result.metadata,
-            },
-        )
-        payload = format_action_trace(action)
-        payload["request_index"] = turn.model_request_count
-        self.trace(TraceEvent.PARSED_ACTION, payload)
-        self.trace(TraceEvent.MODEL_RESPONSE_PARSED, payload)
-        return action
+        return self._publish_action_result(turn, result, action, usage, cost)
 
-    def _start_reflection(
+    def _publish_reflection_request(
         self,
-        proposed_answer: str,
         turn: TurnState,
-    ) -> tuple[int, list[dict[str, str]], int]:
-        turn.reflection_count += 1
-        attempt = turn.reflection_count
-        messages = build_reflection_messages(turn, proposed_answer)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
-        self.reserve_accounting(
-            turn,
-            request_index=request_index,
-            messages=messages,
-            purpose="reflection",
-        )
+        proposed_answer: str,
+        messages: list[dict[str, str]],
+        request_index: int,
+        attempt: int,
+    ) -> None:
         context_report = {
             "purpose": "reflection",
             "reflection_attempt": attempt,
@@ -1702,6 +1647,26 @@ class ModelTransport:
         request_payload["purpose"] = "reflection"
         request_payload["reflection_attempt"] = attempt
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+
+    def _start_reflection(
+        self,
+        proposed_answer: str,
+        turn: TurnState,
+    ) -> tuple[int, list[dict[str, str]], int]:
+        turn.reflection_count += 1
+        attempt = turn.reflection_count
+        messages = build_reflection_messages(turn, proposed_answer)
+        turn.model_request_count += 1
+        request_index = turn.model_request_count
+        self.reserve_accounting(
+            turn,
+            request_index=request_index,
+            messages=messages,
+            purpose="reflection",
+        )
+        self._publish_reflection_request(
+            turn, proposed_answer, messages, request_index, attempt
+        )
         return attempt, messages, request_index
 
     async def _start_reflection_async(
@@ -1721,32 +1686,9 @@ class ModelTransport:
                 messages=messages,
                 purpose="reflection",
             )
-            context_report = {
-                "purpose": "reflection",
-                "reflection_attempt": attempt,
-                "proposed_answer_chars": len(proposed_answer),
-            }
-            self.trace(
-                TraceEvent.REFLECTION_STARTED,
-                {
-                    "turn_id": turn.turn_id,
-                    "reflection_attempt": attempt,
-                    "proposed_answer": proposed_answer,
-                },
+            self._publish_reflection_request(
+                turn, proposed_answer, messages, request_index, attempt
             )
-            request_payload = format_model_request_trace(
-                messages,
-                max_prompt_chars=self.trace_max_prompt_chars,
-                request_index=request_index,
-                turn_id=turn.turn_id,
-                loaded_memory_ids=self.state.loaded_memory_ids,
-                loaded_skill_names=self.state.loaded_skill_names,
-                available_tool_names=turn.available_tool_names,
-                context_report=context_report,
-            )
-            request_payload["purpose"] = "reflection"
-            request_payload["reflection_attempt"] = attempt
-            self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
             await self._flush_async()
         except BaseException as exc:
             await await_cleanup_after_error(
@@ -1759,6 +1701,28 @@ class ModelTransport:
             )
             raise
         return attempt, messages, request_index
+
+    def _publish_reflection_response(
+        self,
+        turn: TurnState,
+        request_index: int,
+        attempt: int,
+        raw_response: str,
+        usage: dict | None,
+        cost: dict | None,
+    ) -> None:
+        self.trace(
+            TraceEvent.MODEL_RESPONSE,
+            format_model_response_trace(
+                turn_id=turn.turn_id,
+                request_index=request_index,
+                content=raw_response,
+                purpose="reflection",
+                reflection_attempt=attempt,
+                usage=usage,
+                cost=cost,
+            ),
+        )
 
     def _record_reflection_response(
         self,
@@ -1779,17 +1743,8 @@ class ModelTransport:
             fallback_attempts=fallback_attempts,
             purpose="reflection",
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "content": raw_response,
-                "purpose": "reflection",
-                "reflection_attempt": attempt,
-                "usage": usage,
-                "cost": cost,
-            },
+        self._publish_reflection_response(
+            turn, request_index, attempt, raw_response, usage, cost
         )
 
     async def _record_reflection_response_async(
@@ -1811,17 +1766,8 @@ class ModelTransport:
             fallback_attempts=fallback_attempts,
             purpose="reflection",
         )
-        self.trace(
-            TraceEvent.MODEL_RESPONSE,
-            {
-                "turn_id": turn.turn_id,
-                "request_index": request_index,
-                "content": raw_response,
-                "purpose": "reflection",
-                "reflection_attempt": attempt,
-                "usage": usage,
-                "cost": cost,
-            },
+        self._publish_reflection_response(
+            turn, request_index, attempt, raw_response, usage, cost
         )
 
     async def _reserve_accounting_async(

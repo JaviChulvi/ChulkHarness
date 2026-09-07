@@ -372,7 +372,8 @@ def test_session_recorder_checkpoints_approved_and_plan_step_progress(tmp_path):
         assert conn.execute("SELECT count(*) FROM conversation_turns").fetchone()[0] == 1
 
 
-def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path):
+@pytest.mark.parametrize("recorder_type", [SessionRecorder, AsyncSessionRecorder])
+def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path, recorder_type):
     final_turn = TurnState(user_message="finish", turn_id="turn-final")
     final_turn.complete("finished")
 
@@ -429,7 +430,7 @@ def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path
 
     for index, (event_type, turn, payload, status, message_kind) in enumerate(cases):
         store = SQLiteSessionStore(tmp_path / f"terminal-{index}.sqlite")
-        recorder = SessionRecorder(
+        recorder = recorder_type(
             store,
             f"conversation-{index}",
             provider="test",
@@ -439,6 +440,9 @@ def test_session_recorder_atomically_persists_terminal_message_and_turn(tmp_path
             event_type,
             {"turn_id": turn.turn_id, "turn": turn.to_dict(), **payload},
         )
+
+        if isinstance(recorder, AsyncSessionRecorder):
+            asyncio.run(recorder.flush())
 
         restored_turn = store.load_turns(f"conversation-{index}")[0]
         terminal_message = store.load_terminal_turn_message(
@@ -2210,3 +2214,73 @@ def test_session_search_index_backfills_messages_written_before_store_open(
         ).fetchone()
 
     assert row["message_id"] == "legacy-message"
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+def test_async_recorder_retains_copied_events_in_order_after_failed_flush(failure):
+    persisted = []
+
+    class Store:
+        fail = True
+
+        async def create_conversation(self, *args, **kwargs):
+            pass
+
+        async def save_conversation_summary(self, conversation_id, **fields):
+            if self.fail:
+                raise failure()
+            persisted.append(fields)
+
+    store = Store()
+    recorder = AsyncSessionRecorder(store, "conversation", provider="test", model="mock")
+    payload = {
+        "summary": "first",
+        "source_message_count": "2",
+        "summarized_message_count": "1",
+        "checkpoint": {"decisions": ["original"]},
+    }
+    recorder.callback(TraceEvent.CONTEXT_SUMMARY_CREATED, payload)
+    payload["checkpoint"]["decisions"].append("mutated")
+    recorder.callback(TraceEvent.CONTEXT_SUMMARY_CREATED, {"summary": "second"})
+
+    async def flush():
+        with pytest.raises(failure):
+            await recorder.flush()
+        assert persisted == []
+        store.fail = False
+        await recorder.flush()
+        await recorder.flush()
+
+    asyncio.run(flush())
+    assert [fields["content"] for fields in persisted] == ["first", "second"]
+    assert persisted[0]["source_message_count"] == 2
+    assert persisted[0]["metadata"]["summarized_message_count"] == 1
+    assert persisted[0]["metadata"]["checkpoint_v1"] == {"decisions": ["original"]}
+
+
+@pytest.mark.parametrize("recorder_type", [SessionRecorder, AsyncSessionRecorder])
+def test_session_recorders_preserve_malformed_payload_coercion(tmp_path, recorder_type):
+    store = SQLiteSessionStore(tmp_path / "store.sqlite")
+    recorder = recorder_type(store, "conversation", provider="test", model="mock")
+    recorder.callback(TraceEvent.USER_MESSAGE, {"turn_id": "turn", "content": "hello"})
+    recorder.callback(TraceEvent.TOOL_OBSERVATION, {
+        "turn_id": 123, "observation_index": True, "tool_name": None,
+        "observation": 42, "output_metadata": [], "tool_action_context": 9, "turn": [],
+    })
+    recorder.callback(TraceEvent.CONTEXT_SUMMARY_CREATED, {
+        "summary": 42, "source_message_count": "2", "summarized_message_count": None,
+        "checkpoint": [], "fallback": "yes",
+    })
+    if isinstance(recorder, AsyncSessionRecorder):
+        asyncio.run(recorder.flush())
+    assert store.max_observation_index("conversation", "turn") == 1
+    assert store.load_recent_messages("conversation", limit=10)[-1] == {
+        "role": "observation", "content": "42",
+    }
+    summary = store.load_latest_summary("conversation")
+    assert summary.content == "42"
+    assert summary.metadata == {
+        "event": TraceEvent.CONTEXT_SUMMARY_CREATED, "turn_id": "turn",
+        "summarized_message_count": 0, "fallback": True, "checkpoint_v1": {},
+        "source_message_ordinal": 2,
+    }

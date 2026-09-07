@@ -8,8 +8,7 @@ from typing import Any, Callable
 from chulk._runtime.request import AgentAssemblyRequest
 from chulk.capabilities import Capabilities, MemoryMode
 from chulk._sdk.config import AgentConfig, AgentPreset, coerce_config
-from chulk._sdk.events import EventCallback
-from chulk._sdk.handles import AgentHandle
+from chulk.core import Agent as CoreAgent
 from chulk.config import Config
 from chulk.core.plan_execution import AsyncPlanStepVerifier, PlanStepVerifier
 from chulk.llm import LLMClient
@@ -52,7 +51,7 @@ from chulk.streaming import (
 PermissionCallback = Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool]
 
 
-def _build_handle(
+def _build_runtime(
     *,
     config: Config | AgentConfig | None = None,
     preset: AgentPreset | None = None,
@@ -66,7 +65,6 @@ def _build_handle(
     permission_callback: PermissionCallback | None = None,
     plan_step_verifier: PlanStepVerifier | None = None,
     async_plan_step_verifier: AsyncPlanStepVerifier | None = None,
-    on_event: EventCallback | None = None,
     mcp: Iterable[MCPServerConfig] | None = None,
     redaction_callback: Callable[[str, str, dict], str] | None = None,
     redaction_fail_closed: bool = False,
@@ -97,12 +95,12 @@ def _build_handle(
     tool_catalog_resolver: ToolCatalogResolver | None = None,
     async_tool_catalog_resolver: AsyncToolCatalogResolver | None = None,
     tool_catalog_timeout_seconds: float | None = None,
-) -> AgentHandle:
+) -> CoreAgent:
     runtime_config = coerce_config(config)
     selected_tools = tools if tools is not None else (preset.tools if preset is not None else None)
     selected_skills = skills if skills is not None else (preset.skills if preset is not None else None)
     selected_prompt = system_prompt or (preset.system_prompt if preset is not None else None)
-    runtime = create_runtime_agent(
+    return create_runtime_agent(
         AgentAssemblyRequest(
             config=runtime_config,
         conversation_id=conversation_id,
@@ -147,7 +145,6 @@ def _build_handle(
             tool_catalog_timeout_seconds=tool_catalog_timeout_seconds,
         )
     )
-    return AgentHandle(runtime, on_event=on_event)
 
 
 def _selected_capabilities(

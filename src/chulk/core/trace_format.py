@@ -86,3 +86,23 @@ def format_model_request_trace(
         "available_tool_names": available_tool_names,
         "context_report": context_report or {},
     }
+
+
+def format_model_response_trace(
+    *,
+    turn_id: str,
+    request_index: int,
+    content: str,
+    usage: dict | None,
+    cost: dict | None,
+    **details: object,
+) -> dict:
+    """Return response evidence after model accounting has completed."""
+    return {
+        "turn_id": turn_id,
+        "request_index": request_index,
+        "content": content,
+        **details,
+        "usage": usage,
+        "cost": cost,
+    }

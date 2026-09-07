@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 
 import pytest
 
@@ -17,6 +18,7 @@ from chulk import (
     ProviderError,
 )
 from chulk.core import TraceEvent
+from chulk.media import UserInput
 from chulk.llm import LLMClient, LLMError
 from chulk.tracing import JSONLTraceLogger
 import chulk.runtime as runtime_module
@@ -441,3 +443,139 @@ async def test_async_cancellation_terminalizes_and_persists_turn(tmp_path):
         for line in facade.trace_path.read_text(encoding="utf-8").splitlines()
     ]
     assert trace_types[-2:] == [TraceEvent.TURN_FAILED, TraceEvent.TURN_FINISHED]
+
+
+class CountingGate:
+    def __init__(self):
+        self.entries = 0
+
+    @contextmanager
+    def hold(self):
+        self.entries += 1
+        assert self.entries == 1, "facade acquired the execution gate twice"
+        yield
+
+    async def __aenter__(self):
+        self.entries += 1
+        assert self.entries == 1, "facade acquired the execution gate twice"
+
+    async def __aexit__(self, *args):
+        pass
+
+
+_GATED_OPERATIONS = [
+    ("run", "run_turn", ("hello",)),
+    ("run_result", "run_turn", ("hello",)),
+    ("run_input", "run_input", (UserInput.text("hello"),)),
+    ("run_input_result", "run_input", (UserInput.text("hello"),)),
+    ("plan", "run_planned_turn", ("hello",)),
+    ("plan_result", "run_planned_turn", ("hello",)),
+    ("approve", "approve_plan", ()),
+    ("approve_result", "approve_plan", ()),
+    ("reject", "reject_plan", ()),
+    ("reject_result", "reject_plan", ()),
+    ("close", "close", ()),
+]
+
+
+@pytest.mark.parametrize("method,runtime_method,args", _GATED_OPERATIONS)
+@pytest.mark.parametrize("fails", [False, True])
+def test_sync_facade_enters_gate_once_and_preserves_error_operation(
+    tmp_path, monkeypatch, method, runtime_method, args, fails,
+):
+    facade = _agent(tmp_path)
+    gate = CountingGate()
+    facade._run_gate = gate
+
+    def operation(*args, **kwargs):
+        if fails:
+            raise LLMError("injected failure")
+        return "done"
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(facade.runtime, runtime_method, operation)
+            if fails:
+                with pytest.raises(ProviderError) as caught:
+                    getattr(facade, method)(*args)
+                assert caught.value.details.extensions["operation"] == method
+            else:
+                getattr(facade, method)(*args)
+        assert gate.entries == 1
+    finally:
+        facade.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,runtime_method,args", _GATED_OPERATIONS)
+@pytest.mark.parametrize("fails", [False, True])
+async def test_async_facade_enters_gate_once_and_preserves_error_operation(
+    tmp_path, monkeypatch, method, runtime_method, args, fails,
+):
+    facade = AsyncAgent(config=AgentConfig(project_root=tmp_path), llm=FakeLLMClient(), tools=[], skills=[])
+    gate = CountingGate()
+    facade._async_run_gate = gate
+
+    async def operation(*args, **kwargs):
+        if fails:
+            raise LLMError("injected failure")
+        return "done"
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(facade.runtime, "aclose" if runtime_method == "close" else runtime_method + "_async", operation)
+            if fails:
+                with pytest.raises(ProviderError) as caught:
+                    await getattr(facade, method)(*args)
+                assert caught.value.details.extensions["operation"] == method
+            else:
+                await getattr(facade, method)(*args)
+        assert gate.entries == 1
+    finally:
+        await facade.runtime.aclose()
+
+
+def test_public_runtime_property_remains_read_only(tmp_path):
+    facade = _agent(tmp_path)
+    try:
+        with pytest.raises(AttributeError):
+            facade.runtime = facade.runtime
+    finally:
+        facade.close()
+
+
+def test_compatibility_handle_keeps_raw_errors_and_sync_failed_close_state(monkeypatch):
+    runtime = CoreAgent(FakeLLMClient())
+    handle = AgentHandle(runtime)
+    failure = RuntimeError("close failed")
+
+    def fail():
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "close", fail)
+        with pytest.raises(RuntimeError) as caught:
+            handle.close()
+        assert caught.value is failure
+        assert handle.closed
+        handle.close()
+    runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_compatibility_handle_retries_failed_async_close(monkeypatch):
+    runtime = CoreAgent(FakeLLMClient())
+    handle = AsyncAgentHandle(AgentHandle(runtime))
+    failure = RuntimeError("close failed")
+
+    async def fail():
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "aclose", fail)
+        with pytest.raises(RuntimeError) as caught:
+            await handle.close()
+        assert caught.value is failure
+        assert not handle.closed
+    await handle.close()
+    assert handle.closed

@@ -18,6 +18,7 @@ from chulk.execution import (
     ExecutionContextLifecycle,
     HostExecutionBackend,
 )
+from chulk.goals.models import Goal
 from chulk.hosting import (
     AsyncExternalTranscriptSessionRuntimeServices,
     AsyncRuntimeServices,
@@ -189,20 +190,7 @@ def assemble_agent(
     goal_snapshot = (
         goal_execution.assert_boundary() if goal_execution is not None else None
     )
-    if goal_snapshot is not None and goal_snapshot.profile_id != effective_profile_id:
-        raise ValueError("goal execution profile does not match runtime profile")
-    if (
-        goal_snapshot is not None
-        and run_budget is not None
-        and run_budget != goal_snapshot.budget
-    ):
-        raise ValueError("run_budget does not match the claimed goal budget")
-    if (
-        goal_snapshot is not None
-        and usage_dimensions is not None
-        and usage_dimensions.goal_id not in {None, goal_snapshot.id}
-    ):
-        raise ValueError("usage dimensions do not match the claimed goal")
+    _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
     plugins_enabled = resolved_services is None or resolved_services.is_enabled(
         "plugins"
     )
@@ -232,13 +220,9 @@ def assemble_agent(
         plugin_audit_report = selected_plugin_registry.verify_startup()
     else:
         plugin_audit_report = None
-    effective_conversation_metadata = dict(conversation_metadata or {})
-    metadata_profile_id = effective_conversation_metadata.get("profile_id")
-    if metadata_profile_id is not None and metadata_profile_id != effective_profile_id:
-        raise ValueError(
-            "conversation metadata profile_id does not match the runtime profile"
-        )
-    effective_conversation_metadata["profile_id"] = effective_profile_id
+    effective_conversation_metadata = _conversation_metadata(
+        conversation_metadata, effective_profile_id
+    )
     memory_enabled = resolved_services is None or resolved_services.is_enabled("memory")
     memory_store = (
         (
@@ -894,23 +878,7 @@ async def assemble_async_hosted_agent(
         goal_snapshot = (
             goal_execution.assert_boundary() if goal_execution is not None else None
         )
-        if (
-            goal_snapshot is not None
-            and goal_snapshot.profile_id != effective_profile_id
-        ):
-            raise ValueError("goal execution profile does not match runtime profile")
-        if (
-            goal_snapshot is not None
-            and run_budget is not None
-            and run_budget != goal_snapshot.budget
-        ):
-            raise ValueError("run_budget does not match the claimed goal budget")
-        if (
-            goal_snapshot is not None
-            and usage_dimensions is not None
-            and usage_dimensions.goal_id not in {None, goal_snapshot.id}
-        ):
-            raise ValueError("usage dimensions do not match the claimed goal")
+        _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
 
         plugins_enabled = resolved.is_enabled("plugins")
         plugin_registry = resolved.plugins if plugins_enabled else None
@@ -931,16 +899,9 @@ async def assemble_async_hosted_agent(
         else:
             plugin_audit_report = None
 
-        effective_metadata = dict(conversation_metadata or {})
-        metadata_profile_id = effective_metadata.get("profile_id")
-        if (
-            metadata_profile_id is not None
-            and metadata_profile_id != effective_profile_id
-        ):
-            raise ValueError(
-                "conversation metadata profile_id does not match the runtime profile"
-            )
-        effective_metadata["profile_id"] = effective_profile_id
+        effective_metadata = _conversation_metadata(
+            conversation_metadata, effective_profile_id
+        )
         effective_metadata["execution_scope"] = execution_scope.to_dict()
         effective_metadata["execution_scope_key"] = execution_scope.key
 
@@ -1292,3 +1253,30 @@ async def assemble_async_hosted_agent(
                     f"{type(cleanup_error).__name__}: {cleanup_error}"
                 )
         raise
+
+
+def _validate_goal(
+    goal: Goal | None,
+    profile_id: str,
+    run_budget: RunBudget | None,
+    usage_dimensions: UsageDimensions | None,
+) -> None:
+    if goal is None:
+        return
+    if goal.profile_id != profile_id:
+        raise ValueError("goal execution profile does not match runtime profile")
+    if run_budget is not None and run_budget != goal.budget:
+        raise ValueError("run_budget does not match the claimed goal budget")
+    if usage_dimensions is not None and usage_dimensions.goal_id not in {None, goal.id}:
+        raise ValueError("usage dimensions do not match the claimed goal")
+
+
+def _conversation_metadata(
+    metadata: dict[str, object] | None, profile_id: str
+) -> dict[str, object]:
+    result = dict(metadata or {})
+    metadata_profile_id = result.get("profile_id")
+    if metadata_profile_id is not None and metadata_profile_id != profile_id:
+        raise ValueError("conversation metadata profile_id does not match the runtime profile")
+    result["profile_id"] = profile_id
+    return result

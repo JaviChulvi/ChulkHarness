@@ -6,9 +6,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any, Mapping
 
+from chulk._serialization import _freeze_mapping, _plain
 from chulk.usage import BudgetScope, ExactCost, RunBudget, UnknownCostPolicy
 
 
@@ -879,34 +879,6 @@ def _optional_int(value: Any, label: str) -> int | None:
 
 def _total_seconds(value: timedelta | None) -> int | None:
     return int(value.total_seconds()) if value is not None else None
-
-
-def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(
-        {str(key): _freeze(item) for key, item in value.items()}
-    )
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return _freeze_mapping(value)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _plain(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_plain(item) for item in value]
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return str(value)
-    return value
 
 
 __all__ = [

@@ -266,7 +266,7 @@ class EvalRunner:
                     ):
                         break
                     if suite.fail_fast and (
-                        trial.exception or not _trial_required_passed(suite, trial)
+                        trial.exception or not trial.passed
                     ):
                         break
         except BaseException:
@@ -435,7 +435,7 @@ class AsyncEvalRunner:
                     ):
                         break
                     if suite.fail_fast and (
-                        trial.exception or not _trial_required_passed(suite, trial)
+                        trial.exception or not trial.passed
                     ):
                         break
             else:
@@ -644,7 +644,7 @@ def _case_results_from_trials(
                     target.name,
                     trials,
                     len(trials) == suite.trials
-                    and all(_trial_required_passed(suite, trial) for trial in trials),
+                    and all(trial.passed for trial in trials),
                 )
             )
     return results
@@ -1118,7 +1118,7 @@ def _grade_sync(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialRe
         except Exception as exc:
             grade = GradeResult(name, 0.0, False, f"grader failed: {exc}", error=_format_exception(exc))
         grades.append(_mark_required(grade, suite))
-    return TrialResult(trial.case_id, trial.target_name, trial.trial, trial.turns, trial.duration_seconds, tuple(grades), trial.exception, trial.workspace)
+    return replace(trial, grades=tuple(grades))
 
 
 async def _grade_async(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> TrialResult:
@@ -1140,12 +1140,7 @@ async def _grade_async(suite: EvalSuite, case: EvalCase, trial: TrialResult) -> 
         except Exception as exc:
             grade = GradeResult(name, 0.0, False, f"grader failed: {exc}", error=_format_exception(exc))
         grades.append(_mark_required(grade, suite))
-    return TrialResult(trial.case_id, trial.target_name, trial.trial, trial.turns, trial.duration_seconds, tuple(grades), trial.exception, trial.workspace)
-
-
-def _trial_required_passed(suite: EvalSuite, trial: TrialResult) -> bool:
-    del suite
-    return trial.passed
+    return replace(trial, grades=tuple(grades))
 
 
 def _mark_required(grade: GradeResult, suite: EvalSuite) -> GradeResult:
@@ -1208,7 +1203,7 @@ def _build_report(
         "case_count": float(len(cases)),
         "trial_count": float(len(trials)),
         "pass_rate": sum(case.passed for case in cases) / len(cases) if cases else 1.0,
-        "pass_at_k": sum(any(_trial_required_passed(suite, trial) for trial in case.trials) for case in cases) / len(cases) if cases else 1.0,
+        "pass_at_k": sum(any(trial.passed for trial in case.trials) for case in cases) / len(cases) if cases else 1.0,
         "pass_all_k": sum(case.passed for case in cases) / len(cases) if cases else 1.0,
         "mean_latency_seconds": sum(trial.duration_seconds for trial in trials) / len(trials) if trials else 0.0,
         "agent_tokens": float(agent_tokens),

@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from chulk import Agent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
+from chulk import Agent, AsyncAgent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
 from chulk.core.state import TurnState
 from chulk.core.tool_execution import ToolExecutor
 from chulk.llm import LLMClient
@@ -141,7 +141,8 @@ def test_sync_and_async_timeouts_are_reported_per_attempt():
     assert async_result.failure_kind == "timeout"
 
 
-def test_retry_success_rechecks_permission_and_records_attempts(tmp_path):
+@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+def test_retry_success_rechecks_permission_and_records_attempts(tmp_path, facade_type):
     calls = 0
     approvals = []
 
@@ -158,7 +159,7 @@ def test_retry_success_rechecks_permission_and_records_attempts(tmp_path):
             raise RuntimeError("temporary")
         return "ok"
 
-    facade = Agent(
+    facade = facade_type(
         config=AgentConfig(project_root=tmp_path, permission_profile="workspace-write"),
         capabilities=Capabilities.none(),
         llm=FakeLLM([_tool_call("flaky"), _final()]),
@@ -167,7 +168,7 @@ def test_retry_success_rechecks_permission_and_records_attempts(tmp_path):
         permission_callback=lambda request, record: approvals.append(request.tool_name) or True,
     )
 
-    result = facade.run_result("run flaky")
+    result = (asyncio.run(facade.run_result("run flaky")) if facade_type is AsyncAgent else facade.run_result("run flaky"))
 
     assert calls == 2
     assert approvals == ["flaky", "flaky"]
@@ -178,7 +179,8 @@ def test_retry_success_rechecks_permission_and_records_attempts(tmp_path):
     assert all(attempt.permission_decision == "allowed" for attempt in result.tool_calls[0].attempts)
 
 
-def test_retry_exhaustion_is_bounded(tmp_path):
+@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+def test_retry_exhaustion_is_bounded(tmp_path, facade_type):
     calls = 0
 
     @Tool(retry_policy=ToolRetryPolicy(max_attempts=3), idempotent=True)
@@ -188,21 +190,22 @@ def test_retry_exhaustion_is_bounded(tmp_path):
         calls += 1
         raise RuntimeError("temporary")
 
-    facade = Agent(
+    facade = facade_type(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_tool_call("always_fails"), _final()]),
         tools=[always_fails],
         skills=[],
     )
 
-    result = facade.run_result("run")
+    result = (asyncio.run(facade.run_result("run")) if facade_type is AsyncAgent else facade.run_result("run"))
 
     assert calls == 3
     assert len(result.tool_calls[0].attempts) == 3
     assert result.tool_calls[0].attempts[-1].retry_scheduled is False
 
 
-def test_invalid_output_can_be_explicitly_retried(tmp_path):
+@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+def test_invalid_output_can_be_explicitly_retried(tmp_path, facade_type):
     calls = 0
 
     @Tool(
@@ -216,21 +219,22 @@ def test_invalid_output_can_be_explicitly_retried(tmp_path):
         calls += 1
         return {"count": "bad"} if calls == 1 else {"count": 1}
 
-    facade = Agent(
+    facade = facade_type(
         config=AgentConfig(project_root=tmp_path),
         llm=FakeLLM([_tool_call("eventually_valid"), _final()]),
         tools=[eventually_valid],
         skills=[],
     )
 
-    result = facade.run_result("run")
+    result = (asyncio.run(facade.run_result("run")) if facade_type is AsyncAgent else facade.run_result("run"))
 
     assert calls == 2
     assert result.tool_calls[0].success is True
     assert result.tool_calls[0].attempts[0].failure_kind == "invalid_output"
 
 
-def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path):
+@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path, facade_type):
     denied_calls = 0
 
     @Tool(
@@ -244,14 +248,14 @@ def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path):
         denied_calls += 1
         return "unsafe"
 
-    denied_agent = Agent(
+    denied_agent = facade_type(
         config=AgentConfig(project_root=tmp_path / "denied", permission_profile="workspace-write"),
         llm=FakeLLM([_tool_call("denied"), _final()]),
         tools=[denied],
         skills=[],
         permission_callback=lambda request, record: False,
     )
-    denied_result = denied_agent.run_result("run")
+    denied_result = (asyncio.run(denied_agent.run_result("run")) if facade_type is AsyncAgent else denied_agent.run_result("run"))
 
     assert denied_calls == 0
     assert len(denied_result.tool_calls[0].attempts) == 1
@@ -266,13 +270,13 @@ def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path):
         write_calls += 1
         raise RuntimeError("failed")
 
-    write_agent = Agent(
+    write_agent = facade_type(
         config=AgentConfig(project_root=tmp_path / "write"),
         llm=FakeLLM([_tool_call("non_idempotent_write"), _final()]),
         tools=[non_idempotent_write],
         skills=[],
     )
-    write_result = write_agent.run_result("run")
+    write_result = (asyncio.run(write_agent.run_result("run")) if facade_type is AsyncAgent else write_agent.run_result("run"))
 
     assert write_calls == 1
     assert write_result.tool_calls[0].attempts[0].retry_disposition == "non_idempotent_guard"
@@ -452,3 +456,56 @@ async def test_async_tool_flushes_authorization_before_dispatch():
         )
 
     assert tool_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["missing-grants", "no-hook", "allow", "deny", "deny-reason"])
+async def test_authorization_events_match_across_transports(decision):
+    from dataclasses import replace
+    from chulk.hosting import ExecutionScope
+    from chulk.tools.policy import ToolAuthorization, ToolPolicy, ToolPolicyHooks
+
+    runs = []
+    for asynchronous in (False, True):
+        calls = []
+        events = []
+
+        def authorize(*args):
+            calls.append("authorize")
+            return ToolAuthorization(False, "host reason") if decision == "deny-reason" else decision == "allow"
+
+        def credentials(*args):
+            calls.append("credentials")
+            return {}
+
+        @Tool(policy=ToolPolicy(required_grants=frozenset({"read"})))
+        def lookup() -> str:
+            """Look up one value."""
+            calls.append("execute")
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(lookup)
+        executor = ToolExecutor(
+            registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None,
+            trace=lambda event, payload: events.append((event, payload)),
+            get_context=lambda turn: ToolExecutionContext(),
+            execution_scope=replace(ExecutionScope.local(), grants=frozenset() if decision == "missing-grants" else frozenset({"read"})),
+            policy_hooks=None if decision == "no-hook" else ToolPolicyHooks(authorize=authorize, resolve_credentials=credentials),
+        )
+        turn = TurnState("lookup", turn_id="turn")
+        result = await executor.execute_async("lookup", {}, turn) if asynchronous else executor.execute("lookup", {}, turn)
+        authorization_events = [(event, payload) for event, payload in events if event.startswith("tool_authorization_")]
+        assert [event for event, _ in authorization_events] == ["tool_authorization_requested", "tool_authorization_decided"]
+        allowed = decision in {"allow", "no-hook"}
+        assert result.success is allowed
+        assert authorization_events[-1][1]["decision"] == ("allow" if allowed else "deny")
+        if not allowed:
+            assert "credentials" not in calls and "execute" not in calls
+            assert result.error == "authorization_denied"
+            assert len(result.metadata["attempt_history"]) == 1
+        if decision == "deny":
+            assert authorization_events[-1][1]["reason"] == ""
+            assert result.metadata["reason"] == "tool call denied by host authorizer"
+        runs.append((calls, authorization_events, result.observation, result.failure_kind))
+    assert runs[0] == runs[1]

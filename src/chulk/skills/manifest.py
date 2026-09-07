@@ -10,10 +10,8 @@ import re
 from typing import Any
 
 import yaml
-from yaml.composer import ComposerError
-from yaml.constructor import ConstructorError
-from yaml.events import AliasEvent
-from yaml.nodes import MappingNode, Node
+
+from chulk._yaml import StrictManifestLoader
 
 
 SKILL_MANIFEST_SCHEMA_VERSION = 1
@@ -62,80 +60,8 @@ class SkillManifestError(ValueError):
     """Raised when a local skill manifest is unsafe or invalid."""
 
 
-class _StrictSkillLoader(yaml.SafeLoader):
-    """Safe loader that also rejects aliases, anchors, and duplicate keys."""
-
-    def compose_node(self, parent: Node | None, index: int) -> Node:
-        if self.check_event(AliasEvent):
-            event = self.peek_event()
-            raise ComposerError(
-                None,
-                None,
-                "YAML aliases are not allowed in skill manifests",
-                event.start_mark,
-            )
-        event = self.peek_event()
-        if getattr(event, "anchor", None) is not None:
-            raise ComposerError(
-                None,
-                None,
-                "YAML anchors are not allowed in skill manifests",
-                event.start_mark,
-            )
-        node = super().compose_node(parent, index)
-        if node is None:
-            raise ComposerError(None, None, "skill YAML node is missing", None)
-        return node
-
-    def construct_mapping(
-        self,
-        node: MappingNode,
-        deep: bool = False,
-    ) -> dict[Any, Any]:
-        if not isinstance(node, MappingNode):
-            raise ConstructorError(
-                None,
-                None,
-                "expected a mapping",
-                node.start_mark,
-            )
-        seen: set[Any] = set()
-        for key_node, _value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in seen
-            except TypeError as exc:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    "found an unhashable key",
-                    key_node.start_mark,
-                ) from exc
-            if duplicate:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    f"found duplicate key {key!r}",
-                    key_node.start_mark,
-                )
-            seen.add(key)
-        return super().construct_mapping(node, deep=deep)
-
-
-def _reject_custom_tag(
-    _loader: _StrictSkillLoader,
-    tag_suffix: str,
-    node: Node,
-) -> object:
-    raise ConstructorError(
-        None,
-        None,
-        f"custom YAML tag is not allowed: {tag_suffix or node.tag}",
-        node.start_mark,
-    )
-
-
-_StrictSkillLoader.add_multi_constructor("!", _reject_custom_tag)
+class _StrictSkillLoader(StrictManifestLoader):
+    manifest_kind = "skill"
 
 
 @dataclass(frozen=True, slots=True)

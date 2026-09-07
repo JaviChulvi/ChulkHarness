@@ -65,15 +65,7 @@ class SessionRecorder:
         if event_type == TraceEvent.CONTEXT_SUMMARY_CREATED:
             self.store.save_conversation_summary(
                 self.conversation_id,
-                content=str(payload.get("summary") or ""),
-                source_message_count=int(payload.get("source_message_count") or 0),
-                metadata={
-                    "event": event_type,
-                    "turn_id": _payload_turn_id(payload, self.current_turn_id),
-                    "summarized_message_count": int(payload.get("summarized_message_count") or 0),
-                    "fallback": bool(payload.get("fallback")),
-                    "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
-                },
+                **_summary_fields(payload, event_type, self.current_turn_id),
             )
             return
 
@@ -106,19 +98,9 @@ class SessionRecorder:
                         turn_id,
                     )
                 count = previous_count + 1
-            observation = str(payload.get("observation") or "")
-            tool_name = str(payload.get("tool_name") or "tool")
-            action_context = payload.get("tool_action_context")
-            turn = payload.get("turn")
             self.store.save_tool_observation_bundle(
                 self.conversation_id,
-                turn_id=turn_id,
-                observation_index=count,
-                tool_name=tool_name,
-                content=observation,
-                output_metadata=_safe_dict(payload.get("output_metadata")),
-                action_context=action_context if isinstance(action_context, str) else None,
-                turn=turn if isinstance(turn, dict) else None,
+                **_observation_fields(payload, turn_id, count),
             )
             self._observation_counts[turn_id] = max(
                 count,
@@ -276,11 +258,7 @@ class SessionRecorder:
             return False
         return self.store.save_terminal_turn_bundle(
             self.conversation_id,
-            turn_id=turn_id,
-            content=content,
-            message_key=f"{turn_id}:assistant:{message_key_suffix}",
-            turn=turn,
-            metadata=metadata,
+            **_terminal_fields(turn_id, content, message_key_suffix, turn, metadata),
         )
 
     def _ensure_conversation(self) -> None:
@@ -303,3 +281,47 @@ def _payload_turn_id(payload: dict[str, Any], fallback: str | None) -> str | Non
 
 def _safe_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _summary_fields(payload: dict[str, Any], event: str, turn_id: str | None) -> dict[str, Any]:
+    return {
+        "content": str(payload.get("summary") or ""),
+        "source_message_count": int(payload.get("source_message_count") or 0),
+        "metadata": {
+            "event": event,
+            "turn_id": _payload_turn_id(payload, turn_id),
+            "summarized_message_count": int(payload.get("summarized_message_count") or 0),
+            "fallback": bool(payload.get("fallback")),
+            "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
+        },
+    }
+
+
+def _observation_fields(payload: dict[str, Any], turn_id: str, index: int) -> dict[str, Any]:
+    action_context = payload.get("tool_action_context")
+    turn = payload.get("turn")
+    return {
+        "turn_id": turn_id,
+        "observation_index": index,
+        "tool_name": str(payload.get("tool_name") or "tool"),
+        "content": str(payload.get("observation") or ""),
+        "output_metadata": _safe_dict(payload.get("output_metadata")),
+        "action_context": action_context if isinstance(action_context, str) else None,
+        "turn": turn if isinstance(turn, dict) else None,
+    }
+
+
+def _terminal_fields(
+    turn_id: str,
+    content: str,
+    suffix: str,
+    turn: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "turn_id": turn_id,
+        "content": content,
+        "message_key": f"{turn_id}:assistant:{suffix}",
+        "turn": turn,
+        "metadata": metadata,
+    }

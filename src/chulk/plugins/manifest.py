@@ -10,10 +10,8 @@ from typing import Any
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 import yaml
-from yaml.composer import ComposerError
-from yaml.constructor import ConstructorError
-from yaml.events import AliasEvent
-from yaml.nodes import MappingNode, Node
+
+from chulk._yaml import StrictManifestLoader
 
 from chulk.plugins.models import (
     FilesystemAccess,
@@ -73,80 +71,8 @@ class PluginManifestError(ValueError):
     """Raised when plugin metadata cannot be safely inspected."""
 
 
-class _StrictPluginLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects aliases, anchors, and duplicate keys."""
-
-    def compose_node(self, parent: Node | None, index: int) -> Node:
-        if self.check_event(AliasEvent):
-            event = self.peek_event()
-            raise ComposerError(
-                None,
-                None,
-                "YAML aliases are not allowed in plugin manifests",
-                event.start_mark,
-            )
-        event = self.peek_event()
-        if getattr(event, "anchor", None) is not None:
-            raise ComposerError(
-                None,
-                None,
-                "YAML anchors are not allowed in plugin manifests",
-                event.start_mark,
-            )
-        node = super().compose_node(parent, index)
-        if node is None:
-            raise ComposerError(None, None, "plugin YAML node is missing", None)
-        return node
-
-    def construct_mapping(
-        self,
-        node: MappingNode,
-        deep: bool = False,
-    ) -> dict[Any, Any]:
-        if not isinstance(node, MappingNode):
-            raise ConstructorError(
-                None,
-                None,
-                "expected a mapping",
-                node.start_mark,
-            )
-        seen: set[Any] = set()
-        for key_node, _value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in seen
-            except TypeError as exc:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    "found an unhashable key",
-                    key_node.start_mark,
-                ) from exc
-            if duplicate:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    f"found duplicate key {key!r}",
-                    key_node.start_mark,
-                )
-            seen.add(key)
-        return super().construct_mapping(node, deep=deep)
-
-
-def _reject_custom_tag(
-    _loader: _StrictPluginLoader,
-    tag_suffix: str,
-    node: Node,
-) -> object:
-    raise ConstructorError(
-        None,
-        None,
-        f"custom YAML tag is not allowed: {tag_suffix or node.tag}",
-        node.start_mark,
-    )
-
-
-_StrictPluginLoader.add_multi_constructor("!", _reject_custom_tag)
+class _StrictPluginLoader(StrictManifestLoader):
+    manifest_kind = "plugin"
 
 
 def load_plugin_manifest(path: Path | str) -> PluginManifest:
@@ -174,15 +100,7 @@ def load_plugin_manifest(path: Path | str) -> PluginManifest:
         raise PluginManifestError("plugin manifest must contain a mapping")
     if any(not isinstance(key, str) for key in payload):
         raise PluginManifestError("plugin manifest keys must be strings")
-    normalized: dict[str, Any] = {}
-    for key, value in payload.items():
-        clean_key = key.strip().lower().replace("-", "_")
-        if clean_key in normalized:
-            raise PluginManifestError(
-                f"duplicate normalized plugin manifest key: {clean_key}"
-            )
-        normalized[clean_key] = value
-    return plugin_manifest_from_mapping(normalized)
+    return plugin_manifest_from_mapping(payload)
 
 
 def plugin_manifest_from_mapping(

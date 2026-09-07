@@ -3,6 +3,10 @@
 import inspect
 import json
 
+import pytest
+
+from chulk.api import AgentConfig
+
 from chulk.config import (
     Config,
     DEFAULT_DEEPSEEK_MODEL,
@@ -22,6 +26,55 @@ from chulk.config import (
     DEFAULT_TRACE_MAX_PROMPT_CHARS,
     load_config,
 )
+
+
+@pytest.mark.parametrize("value", [True, False, 2.0, "bad"])
+def test_sdk_integer_override_preserves_invalid_value_errors(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "7")
+    with pytest.raises(ValueError, match="CHULK_HISTORY_LIMIT must be an integer"):
+        AgentConfig(project_root=tmp_path, history_limit=value).to_config()
+
+
+def test_sdk_explicit_values_mask_invalid_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "bad")
+    monkeypatch.setenv("CHULK_LLM_TIMEOUT_SECONDS", "bad")
+    config = AgentConfig(project_root=tmp_path, history_limit=3, llm_timeout_seconds=2.5).to_config()
+    assert (config.history_limit, config.llm_timeout_seconds) == (3, 2.5)
+
+
+def test_sdk_and_cli_preserve_duplicate_dotenv_and_empty_environment_rules(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHULK_RUNTIME_DIR", "")
+    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "")
+    (tmp_path / ".env").write_text(
+        "CHULK_RUNTIME_DIR=first\nCHULK_RUNTIME_DIR=last\n"
+        "CHULK_PERMISSION_PROFILE=read-only\n"
+    )
+    sdk = AgentConfig(project_root=tmp_path).to_config()
+    cli = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
+    assert sdk.runtime_dir == tmp_path / "first"
+    assert cli.runtime_dir == tmp_path / "last"
+    assert sdk.permission_profile == DEFAULT_PERMISSION_PROFILE
+    assert cli.permission_profile == "read-only"
+
+
+def test_sdk_validates_fallback_environment_before_collection_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHULK_LLM_FALLBACK_PROVIDERS", "unknown:model")
+    with pytest.raises(ValueError, match="CHULK_LLM_FALLBACK_PROVIDERS"):
+        AgentConfig(project_root=tmp_path, llm_fallback_providers=()).to_config()
+
+
+def test_sdk_validates_mcp_file_before_collection_override_and_numeric_fields(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / ".chulk"
+    runtime_dir.mkdir()
+    (runtime_dir / "mcp.json").write_text("invalid json")
+    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "bad")
+    with pytest.raises(ValueError, match="MCP config is not valid JSON"):
+        AgentConfig(project_root=tmp_path, mcp_servers=()).to_config()
+
+
+def test_sdk_validates_numeric_fields_before_explicit_paths(tmp_path):
+    with pytest.raises(ValueError, match="CHULK_HISTORY_LIMIT"):
+        AgentConfig(project_root=tmp_path, history_limit=0, store_path="\x00").to_config()
 
 
 def test_local_context_config_field_is_keyword_only() -> None:
