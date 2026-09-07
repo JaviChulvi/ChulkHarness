@@ -17,6 +17,7 @@ from chulk.config import (
     DEFAULT_MOONSHOT_MODEL,
     LLMFallbackProviderConfig,
     _iter_dotenv,
+    _resolve_config_path,
     bundled_skills_dir,
     load_config,
 )
@@ -359,17 +360,17 @@ class AgentConfig:
         )
         runtime_dir = runtime_dir or config.runtime_dir
         store_path = (
-            _resolve_path(self.store_path, base=project_root)
+            _resolve_config_path(self.store_path, base=project_root)
             if self.store_path is not None
             else runtime_dir / "store.sqlite"
         )
         traces_dir = (
-            _resolve_path(self.traces_dir, base=project_root)
+            _resolve_config_path(self.traces_dir, base=project_root)
             if self.traces_dir is not None
             else runtime_dir / "traces"
         )
         skills_dir = (
-            _resolve_path(self.skills_dir, base=project_root)
+            _resolve_config_path(self.skills_dir, base=project_root)
             if self.skills_dir is not None
             else runtime_dir / "skills"
         )
@@ -447,17 +448,17 @@ def _project_root_override(env: dict[str, str], value: str | Path | None) -> Pat
         return _resolve_project_root(value)
     configured = _config_key_value(Path.cwd(), env, "CHULK_PROJECT_ROOT")
     if configured is not None:
-        return _resolve_path(configured, base=Path.cwd())
+        return _resolve_config_path(configured, base=Path.cwd())
     return Path.cwd().resolve()
 
 
 def _runtime_dir_override(project_root: Path, env: dict[str, str], value: str | Path | None) -> Path | None:
     if value is not None:
-        return _resolve_path(value, base=project_root)
+        return _resolve_config_path(value, base=project_root)
     configured = _config_key_value(project_root, env, "CHULK_RUNTIME_DIR")
     if configured is None:
         return None
-    return _resolve_path(configured, base=project_root)
+    return _resolve_config_path(configured, base=project_root)
 
 
 def _config_key_has_value(project_root: Path, env: dict[str, str], key: str) -> bool:
@@ -476,13 +477,6 @@ def _config_key_value(project_root: Path, env: dict[str, str], key: str) -> str 
 
 def _resolve_project_root(value: str | Path | None) -> Path:
     return (Path.cwd() if value is None else Path(value)).resolve()
-
-
-def _resolve_path(value: str | Path, *, base: Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path.resolve()
-    return (base / path).resolve()
 
 
 def _skills_dirs(project_skills_dir: Path) -> tuple[Path, ...]:

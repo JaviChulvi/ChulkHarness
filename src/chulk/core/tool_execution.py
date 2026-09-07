@@ -9,6 +9,7 @@ import inspect
 import time
 from typing import Any, Protocol
 
+from chulk.capabilities import ToolRetryPolicy
 from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
@@ -303,18 +304,13 @@ class ToolExecutor:
                     attempt=attempt_number,
                 )
                 raise
-            retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
-            record = _attempt_payload(
-                attempt_number,
-                started_at,
-                result,
-                retry=retry,
+            retry = self._record_attempt(
+                turn, tool_name, result, attempts,
+                retry_policy=retry_policy,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                started_at=started_at,
                 non_idempotent_guard=non_idempotent_guard,
-            )
-            attempts.append(record)
-            self.trace(
-                TraceEvent.TOOL_CALL_ATTEMPT,
-                {"turn_id": turn.turn_id, "tool_name": tool_name, **record},
             )
             if not retry:
                 break
@@ -487,18 +483,13 @@ class ToolExecutor:
                     exc,
                 )
                 raise
-            retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
-            record = _attempt_payload(
-                attempt_number,
-                started_at,
-                result,
-                retry=retry,
+            retry = self._record_attempt(
+                turn, tool_name, result, attempts,
+                retry_policy=retry_policy,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                started_at=started_at,
                 non_idempotent_guard=non_idempotent_guard,
-            )
-            attempts.append(record)
-            self.trace(
-                TraceEvent.TOOL_CALL_ATTEMPT,
-                {"turn_id": turn.turn_id, "tool_name": tool_name, **record},
             )
             if not retry:
                 break
@@ -558,6 +549,60 @@ class ToolExecutor:
             )
         )
 
+    def _record_attempt(
+        self,
+        turn: TurnState,
+        tool_name: str,
+        result: ToolResult,
+        attempts: list[dict],
+        *,
+        retry_policy: ToolRetryPolicy | None,
+        attempt_number: int,
+        max_attempts: int,
+        started_at: str,
+        non_idempotent_guard: bool,
+    ) -> bool:
+        retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
+        record = _attempt_payload(
+            attempt_number,
+            started_at,
+            result,
+            retry=retry,
+            non_idempotent_guard=non_idempotent_guard,
+        )
+        attempts.append(record)
+        self.trace(
+            TraceEvent.TOOL_CALL_ATTEMPT,
+            {"turn_id": turn.turn_id, "tool_name": tool_name, **record},
+        )
+        return retry
+
+    def _record_authorization(
+        self,
+        identity: ToolIdentity,
+        policy: ToolPolicy,
+        arguments: Mapping[str, object],
+        authorization: ToolAuthorization,
+        *,
+        traced: bool = True,
+    ) -> ToolResult | None:
+        if traced:
+            self.trace(
+                TraceEvent.TOOL_AUTHORIZATION_DECIDED,
+                {
+                    **_host_authorization_payload(identity, policy, arguments),
+                    "decision": "allow" if authorization.allowed else "deny",
+                    "reason": authorization.reason,
+                },
+            )
+        if authorization.allowed:
+            return None
+        return _authorization_denied_result(
+            identity,
+            policy,
+            authorization.reason or "tool call denied by host authorizer",
+        )
+
     def _authorization_result(
         self,
         tool,
@@ -575,39 +620,20 @@ class ToolExecutor:
             )
         denied_reason = self._missing_grants_reason(policy)
         if denied_reason is not None:
-            if traced:
-                self.trace(
-                    TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-                    {
-                        **_host_authorization_payload(
-                            identity,
-                            policy,
-                            arguments,
-                        ),
-                        "decision": "deny",
-                        "reason": denied_reason,
-                    },
-                )
-            return _authorization_denied_result(identity, policy, denied_reason)
+            return self._record_authorization(
+                identity, policy, arguments, ToolAuthorization(False, denied_reason),
+                traced=traced,
+            )
         if (
             self.execution_scope is None
             or self.policy_hooks is None
             or self.policy_hooks.authorize is None
         ):
-            if traced:
-                self.trace(
-                    TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-                    {
-                        **_host_authorization_payload(
-                            identity,
-                            policy,
-                            arguments,
-                        ),
-                        "decision": "allow",
-                        "reason": "execution scope grants satisfied",
-                    },
-                )
-            return None
+            return self._record_authorization(
+                identity, policy, arguments,
+                ToolAuthorization(True, "execution scope grants satisfied"),
+                traced=traced,
+            )
         decision = self.policy_hooks.authorize(
             self.execution_scope,
             identity,
@@ -621,26 +647,7 @@ class ToolExecutor:
             raise RuntimeError(
                 "async tool authorizer cannot be used by the synchronous runtime"
             )
-        authorization = _authorization(decision)
-        self.trace(
-            TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-            {
-                **_host_authorization_payload(
-                    identity,
-                    policy,
-                    arguments,
-                ),
-                "decision": "allow" if authorization.allowed else "deny",
-                "reason": authorization.reason,
-            },
-        )
-        if authorization.allowed:
-            return None
-        return _authorization_denied_result(
-            identity,
-            policy,
-            authorization.reason or "tool call denied by host authorizer",
-        )
+        return self._record_authorization(identity, policy, arguments, _authorization(decision))
 
     async def _authorization_result_async(
         self,
@@ -659,39 +666,20 @@ class ToolExecutor:
             )
         denied_reason = self._missing_grants_reason(policy)
         if denied_reason is not None:
-            if traced:
-                self.trace(
-                    TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-                    {
-                        **_host_authorization_payload(
-                            identity,
-                            policy,
-                            arguments,
-                        ),
-                        "decision": "deny",
-                        "reason": denied_reason,
-                    },
-                )
-            return _authorization_denied_result(identity, policy, denied_reason)
+            return self._record_authorization(
+                identity, policy, arguments, ToolAuthorization(False, denied_reason),
+                traced=traced,
+            )
         if (
             self.execution_scope is None
             or self.policy_hooks is None
             or self.policy_hooks.authorize is None
         ):
-            if traced:
-                self.trace(
-                    TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-                    {
-                        **_host_authorization_payload(
-                            identity,
-                            policy,
-                            arguments,
-                        ),
-                        "decision": "allow",
-                        "reason": "execution scope grants satisfied",
-                    },
-                )
-            return None
+            return self._record_authorization(
+                identity, policy, arguments,
+                ToolAuthorization(True, "execution scope grants satisfied"),
+                traced=traced,
+            )
         decision = self.policy_hooks.authorize(
             self.execution_scope,
             identity,
@@ -700,26 +688,7 @@ class ToolExecutor:
         )
         if inspect.isawaitable(decision):
             decision = await decision
-        authorization = _authorization(decision)
-        self.trace(
-            TraceEvent.TOOL_AUTHORIZATION_DECIDED,
-            {
-                **_host_authorization_payload(
-                    identity,
-                    policy,
-                    arguments,
-                ),
-                "decision": "allow" if authorization.allowed else "deny",
-                "reason": authorization.reason,
-            },
-        )
-        if authorization.allowed:
-            return None
-        return _authorization_denied_result(
-            identity,
-            policy,
-            authorization.reason or "tool call denied by host authorizer",
-        )
+        return self._record_authorization(identity, policy, arguments, _authorization(decision))
 
     def _authorized_context(
         self,

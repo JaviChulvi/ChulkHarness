@@ -3033,3 +3033,60 @@ def test_agent_enforces_tool_call_limit():
     assert agent.state.turns[0].status == "failed"
     assert agent.state.turns[0].tool_call_count == 1
     assert "Tool call limit reached" in agent.state.turns[0].errors[0]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("accounting_fails", [False, True])
+def test_model_evidence_surrounds_accounting(asynchronous, accounting_fails):
+    events = []
+
+    class Client(NativeActionRecordingLLMClient):
+        last_attempts = ["fallback attempt"]
+
+        def complete_action(self, messages, **kwargs):
+            return LLMActionResult(
+                action=FinalAnswerAction(type="final_answer", content="ok"),
+                raw_response='{"type":"final_answer","content":"ok"}',
+                repair_attempts=1,
+                errors=["repaired input"],
+                metadata={"provider_mcp_output": True},
+            )
+
+    agent = Agent(Client(), event_callback=lambda event, payload: events.append((event, payload)))
+
+    def account(turn, **kwargs):
+        assert agent.state.json_repair_attempts == 1
+        assert agent.state.errors == ["JSON repair attempt: repaired input"]
+        assert turn.errors == ["JSON repair attempt: repaired input"]
+        assert turn.extension_metadata["external_content_seen"] is True
+        assert kwargs["fallback_attempts"] == ["fallback attempt"]
+        events.append(("accounting", {}))
+        if accounting_fails:
+            raise RuntimeError("accounting unavailable")
+        return {"total_tokens": 7}, {"total_cost": "0.01"}
+
+    async def account_async(turn, **kwargs):
+        return account(turn, **kwargs)
+
+    agent._model_transport.record_accounting = account
+    agent._model_transport.record_accounting_async = account_async
+
+    def run():
+        return asyncio.run(agent.run_turn_async("hello")) if asynchronous else agent.run_turn("hello")
+
+    if accounting_fails:
+        with pytest.raises(RuntimeError, match="accounting unavailable"):
+            run()
+    else:
+        assert run() == "ok"
+    expected = [TraceEvent.MODEL_REQUEST_STARTED, TraceEvent.LLM_FALLBACK_ATTEMPTS, "accounting"]
+    response_events = [TraceEvent.MODEL_RESPONSE, TraceEvent.PARSED_ACTION, TraceEvent.MODEL_RESPONSE_PARSED]
+    relevant = set(expected + response_events)
+    if not accounting_fails:
+        expected += response_events
+        response = next(payload for event, payload in events if event == TraceEvent.MODEL_RESPONSE)
+        assert response["usage"] == {"total_tokens": 7}
+        assert response["cost"] == {"total_cost": "0.01"}
+        assert response["repair_errors"] == ["repaired input"]
+        assert response["metadata"]["provider_mcp_output"] is True
+    assert [event for event, _ in events if event in relevant] == expected

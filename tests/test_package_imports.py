@@ -71,7 +71,24 @@ def test_all_stable_exports_resolve_lazily_with_compatible_aliases() -> None:
 
         assert all(name in namespace for name in chulk.__all__)
         assert all(name in dir(chulk) for name in chulk.__all__)
-        assert namespace["Agent"] is import_module("chulk.api").Agent
+        api = import_module("chulk.api")
+        root_names = set(chulk.__all__)
+        api_names = set(api.__all__)
+        assert len(root_names) == len(chulk.__all__)
+        assert len(api_names) == len(api.__all__)
+        assert root_names - api_names == {
+            "Authoring", "PermissionDecision", "PermissionDecisionRecord",
+            "PermissionRequest", "Plugins", "Research", "Skills", "Tool",
+            "ToolPermissionLevel", "Tools", "__version__", "plugins", "skills",
+            "tool", "tools",
+        }
+        assert api_names - root_names == {
+            "ContentIntegrityError", "ContentLimitError", "ContentNotFoundError",
+            "ContentOwnershipError",
+        }
+        for name in root_names & api_names:
+            assert getattr(chulk, name) is getattr(api, name), name
+            assert namespace[name] is getattr(api, name), name
         assert namespace["Tool"] is namespace["tool"]
         assert namespace["Tools"] is namespace["tools"]
         assert namespace["Skills"] is namespace["skills"]

@@ -3743,3 +3743,52 @@ async def test_secret_classified_tool_output_is_withheld_everywhere(
     assert secret not in serialized
     assert "secret tool output withheld" in serialized
     await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_async", [False, True])
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    [
+        ("profile", "goal execution profile does not match runtime profile"),
+        ("budget", "run_budget does not match the claimed goal budget"),
+        ("usage", "usage dimensions do not match the claimed goal"),
+        ("metadata", "conversation metadata profile_id does not match the runtime profile"),
+    ],
+)
+async def test_hosted_construction_preserves_goal_validation(
+    tmp_path, native_async, mismatch, message
+):
+    from chulk import RunBudget, UsageDimensions
+
+    boundary_calls = []
+    goal = SimpleNamespace(
+        id="goal-1",
+        profile_id="other" if mismatch == "profile" else "default",
+        budget=None,
+    )
+
+    def assert_boundary():
+        boundary_calls.append("boundary")
+        return goal
+
+    metadata = {"profile_id": "other"} if mismatch == "metadata" else {}
+    options = dict(
+        config=AgentConfig(project_root=tmp_path),
+        llm=FakeLLM([_final()]),
+        tools=[],
+        skills=[],
+        execution_scope=_scope(),
+        goal_execution=SimpleNamespace(assert_boundary=assert_boundary),
+        run_budget=RunBudget() if mismatch == "budget" else None,
+        usage_dimensions=UsageDimensions(goal_id="other") if mismatch == "usage" else None,
+        conversation_metadata=metadata,
+    )
+    hub = InMemoryServiceHub()
+    with pytest.raises(ConfigurationError, match=message):
+        if native_async:
+            await AsyncHostedRuntime.create(services=hub.async_services(), **options)
+        else:
+            HostedRuntime(services=hub.services(), **options)
+    assert boundary_calls == ["boundary"]
+    assert metadata == ({"profile_id": "other"} if mismatch == "metadata" else {})

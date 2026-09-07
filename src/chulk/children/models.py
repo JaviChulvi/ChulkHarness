@@ -6,9 +6,9 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any, Mapping
 
+from chulk._serialization import _freeze_mapping, _plain
 from chulk.capabilities import Capabilities, FileAccess, MemoryMode
 from chulk.execution import WorkspaceMode
 from chulk.usage import (
@@ -666,34 +666,6 @@ def _optional_datetime(value: Any, label: str) -> datetime | None:
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be an object")
-    return value
-
-
-def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(
-        {str(key): _freeze(item) for key, item in value.items()}
-    )
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return _freeze_mapping(value)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _plain(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_plain(item) for item in value]
-    if isinstance(value, StrEnum):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return str(value)
     return value
 
 

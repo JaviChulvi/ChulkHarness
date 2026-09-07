@@ -8,6 +8,12 @@ from typing import Any
 
 from chulk.core.events import TraceEvent
 from chulk.hosting.async_utils import call_async_service
+from chulk.sessions.recorder import (
+    _observation_fields,
+    _payload_turn_id,
+    _summary_fields,
+    _terminal_fields,
+)
 
 
 class AsyncSessionRecorder:
@@ -93,17 +99,7 @@ class AsyncSessionRecorder:
             await self._call(
                 "save_conversation_summary",
                 self.conversation_id,
-                content=str(payload.get("summary") or ""),
-                source_message_count=int(payload.get("source_message_count") or 0),
-                metadata={
-                    "event": event_type,
-                    "turn_id": _payload_turn_id(payload, self.current_turn_id),
-                    "summarized_message_count": int(
-                        payload.get("summarized_message_count") or 0
-                    ),
-                    "fallback": bool(payload.get("fallback")),
-                    "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
-                },
+                **_summary_fields(payload, event_type, self.current_turn_id),
             )
             return
 
@@ -156,21 +152,7 @@ class AsyncSessionRecorder:
             await self._call(
                 "save_tool_observation_bundle",
                 self.conversation_id,
-                turn_id=turn_id,
-                observation_index=count,
-                tool_name=str(payload.get("tool_name") or "tool"),
-                content=str(payload.get("observation") or ""),
-                output_metadata=_safe_dict(payload.get("output_metadata")),
-                action_context=(
-                    payload.get("tool_action_context")
-                    if isinstance(payload.get("tool_action_context"), str)
-                    else None
-                ),
-                turn=(
-                    payload.get("turn")
-                    if isinstance(payload.get("turn"), dict)
-                    else None
-                ),
+                **_observation_fields(payload, turn_id, count),
             )
             self._observation_counts[turn_id] = max(
                 count,
@@ -372,11 +354,7 @@ class AsyncSessionRecorder:
             await self._call(
                 "save_terminal_turn_bundle",
                 self.conversation_id,
-                turn_id=turn_id,
-                content=content,
-                message_key=f"{turn_id}:assistant:{message_key_suffix}",
-                turn=turn,
-                metadata=metadata,
+                **_terminal_fields(turn_id, content, message_key_suffix, turn, metadata),
             )
         )
 
@@ -400,18 +378,6 @@ class AsyncSessionRecorder:
             *args,
             **kwargs,
         )
-
-
-def _payload_turn_id(
-    payload: dict[str, Any],
-    fallback: str | None,
-) -> str | None:
-    turn_id = payload.get("turn_id")
-    return turn_id if isinstance(turn_id, str) and turn_id else fallback
-
-
-def _safe_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 __all__ = ["AsyncSessionRecorder"]

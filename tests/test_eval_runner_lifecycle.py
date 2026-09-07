@@ -586,3 +586,46 @@ def test_denied_tool_never_runs_and_allowlisted_tool_uses_fixture_double() -> No
     )
     assert not blocked_report.operational_errors
     assert blocked_calls == 0
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_grading_preserves_all_trial_fields(asynchronous):
+    from dataclasses import fields
+    from chulk.evals import CallableGrader, GradeResult
+
+    captured = []
+
+    class AgentDouble:
+        def run_result(self, message, **kwargs):
+            return _result()
+
+        def close(self):
+            pass
+
+    class AsyncAgentDouble:
+        async def run_result(self, message, **kwargs):
+            return _result()
+
+        async def close(self):
+            pass
+
+    def grade(case, trial):
+        captured.append(trial)
+        return GradeResult("capture", 1.0, True, "passed")
+
+    suite = EvalSuite(
+        "preserve-fields",
+        EvalDataset((EvalCase("case", (EvalTurn("one"), EvalTurn("two"))),)),
+        (EvalTarget("target", lambda context: AsyncAgentDouble() if asynchronous else AgentDouble()),),
+        (CallableGrader("capture", grade),),
+        required_graders=("capture",),
+    )
+    report = asyncio.run(AsyncEvalRunner().run(suite)) if asynchronous else EvalRunner().run(suite)
+    graded = report.cases[0].trials[0]
+    assert len(captured) == 1
+    for field in fields(graded):
+        if field.name != "grades":
+            assert getattr(graded, field.name) == getattr(captured[0], field.name)
+    assert graded.passed
+    assert graded.grades[0].grader == "capture"
+    assert graded.grades[0].details["required"] is True
