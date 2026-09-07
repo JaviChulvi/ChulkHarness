@@ -250,3 +250,58 @@ def test_inspection_rejects_missing_declared_migration(tmp_path):
 
     with pytest.raises(PluginInspectionError, match="missing"):
         inspect_plugin_directory(package)
+
+
+@pytest.mark.parametrize("kind", ["plugin", "skill"])
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("name: *missing", "YAML aliases are not allowed in {kind} manifests"),
+        ("name: &value example", "YAML anchors are not allowed in {kind} manifests"),
+        ("name: !custom example", "custom YAML tag is not allowed: custom"),
+        ("name: example\nname: other", "found duplicate key 'name'"),
+        ("configuration:\n  nested: 1\n  nested: 2", "found duplicate key 'nested'"),
+        ("? [a, b]\n: value", "found an unhashable key"),
+    ],
+)
+def test_manifest_yaml_policy_preserves_context(tmp_path, kind, payload, message):
+    from chulk.skills import SkillManifestError, load_skill_package
+
+    if kind == "plugin":
+        path = tmp_path / "chulk-plugin.yaml"
+        path.write_text(payload, encoding="utf-8")
+        loader, error = load_plugin_manifest, PluginManifestError
+    else:
+        path = tmp_path / "SKILL.md"
+        path.write_text(f"---\n{payload}\n---\nInstructions.\n", encoding="utf-8")
+        loader, error = load_skill_package, SkillManifestError
+
+    with pytest.raises(error) as caught:
+        loader(path)
+
+    assert message.format(kind=kind) in str(caught.value)
+    assert caught.value.__cause__ is not None
+
+
+def test_plugin_yaml_and_mapping_share_normalization(tmp_path):
+    import yaml
+
+    from chulk.plugins.manifest import plugin_manifest_from_mapping
+
+    payload = plugin_manifest().replace("schema_version:", "Schema-Version:")
+    path = tmp_path / "chulk-plugin.yaml"
+    path.write_text(payload, encoding="utf-8")
+
+    assert load_plugin_manifest(path) == plugin_manifest_from_mapping(
+        yaml.safe_load(payload)
+    )
+
+    path.write_text(payload + "schema_version: 1\n", encoding="utf-8")
+    with pytest.raises(PluginManifestError) as from_yaml:
+        load_plugin_manifest(path)
+    with pytest.raises(PluginManifestError) as from_mapping:
+        plugin_manifest_from_mapping(yaml.safe_load(path.read_text()))
+    assert str(from_yaml.value) == str(from_mapping.value)
+    assert str(from_yaml.value) == (
+        "duplicate normalized plugin manifest key: schema_version"
+    )
