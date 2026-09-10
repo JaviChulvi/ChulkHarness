@@ -175,6 +175,42 @@ def run_init_command(
     return EXIT_OK
 
 
+def run_agent_directory_command(
+    command: str,
+    path: Path | str,
+    *,
+    agent_id: str | None = None,
+    json_output: bool,
+    output_func: Callable[[str], None],
+    error_func: Callable[[str], None],
+) -> int:
+    """Run filesystem-first authoring commands without loading runtime config."""
+    from chulk.authoring import AgentDirectory, initialize_agent_directory
+
+    try:
+        if command == "init":
+            if agent_id is None:
+                raise ValueError("agent init requires --id")
+            files = initialize_agent_directory(path, agent_id=agent_id)
+            payload = {"ok": True, "status": "initialized", "files": [str(item) for item in files]}
+        elif command == "check":
+            source = AgentDirectory.load(path)
+            payload = {"ok": True, "status": "valid", "agent": source.to_dict()}
+        else:
+            raise ValueError(f"unknown agent command: {command}")
+    except (OSError, ValueError, KeyError) as exc:
+        return _emit_error(
+            "agent_directory_error",
+            exc,
+            json_output=json_output,
+            output_func=output_func,
+            error_func=error_func,
+            exit_code=EXIT_CONFIGURATION_ERROR,
+        )
+    output_func(json_text(payload) if json_output else json.dumps(payload, indent=2))
+    return EXIT_OK
+
+
 def run_trace_command(
     command: str,
     path: Path | str | None,

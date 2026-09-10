@@ -1,6 +1,7 @@
 """Optional local control-server contracts."""
 
 from chulk.server.app import ServerDependencyError, create_control_app
+from chulk.server.ai_sdk import ai_sdk_ui_chunks
 from chulk.server.client import ControlApiClient, ControlApiError
 from chulk.server.journal import (
     PublicEventCursorExpiredError,
@@ -48,6 +49,7 @@ from chulk.server.permissions import (
 
 __all__ = [
     "API_SCHEMA_VERSION",
+    "ai_sdk_ui_chunks",
     "ApiError",
     "AutomationActionRequest",
     "ConversationCreateRequest",

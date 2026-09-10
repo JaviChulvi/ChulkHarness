@@ -378,3 +378,10 @@ native tool payloads, and repair attempts remain private. OpenAI Responses and
 OpenAI-compatible Chat Completions use native async iterators. Other providers
 may implement the same protocol; the base client supplies a one-shot async
 compatibility stream, so native incremental support is not mandatory.
+
+## Model middleware
+
+`wrap_model_client(client, middleware)` adds a small `prepare(request)` /
+`observe(request, result)` hook around the validated action request. Use it for
+request metadata or observability; it does not intercept provider transports,
+tool execution, retries, approvals, or public final-answer streaming.

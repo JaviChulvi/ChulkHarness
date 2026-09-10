@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from chulk.authoring import (
         AGENT_DEFINITION_SCHEMA_VERSION,
         AgentCompiler,
+        AgentDirectory,
         AgentDefinition,
         AgentDefinitionRecord,
         AgentDefinitionRuntime,
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
         WorkflowEffect,
         WorkflowGraph,
         WorkflowStep,
+        initialize_agent_directory,
     )
     from chulk.profiles import RuntimeProfile
     from chulk.skills import (
@@ -646,6 +648,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AGENT_DEFINITION_SCHEMA_VERSION",
     "AgentCompiler",
+    "AgentDirectory",
     "AgentDefinition",
     "AgentDefinitionRecord",
     "AgentDefinitionRuntime",
@@ -685,6 +688,7 @@ __all__ = [
     "WorkflowEffect",
     "WorkflowGraph",
     "WorkflowStep",
+    "initialize_agent_directory",
     "ApprovalConflictError",
     "ApprovalDecision",
     "ApprovalLifecyclePayload",

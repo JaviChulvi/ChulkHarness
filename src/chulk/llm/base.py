@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 import inspect
 import json
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from chulk.core.actions import ActionParseError, AgentAction, parse_model_response
 from chulk.core.prompts import format_action_protocol_for_prompt
@@ -170,6 +170,56 @@ class LLMStreamChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
     usage: LLMUsage | None = None
     cost: LLMCost | None = None
+
+
+class ModelMiddleware(Protocol):
+    """Small request/response hook around Chulk's validated action boundary."""
+
+    def prepare(self, request: "ModelRequest") -> "ModelRequest": ...
+
+    def observe(self, request: "ModelRequest", result: LLMActionResult) -> LLMActionResult: ...
+
+
+class MiddlewareLLMClient:
+    """Apply middleware without changing provider transports or action parsing."""
+
+    def __init__(self, client: "LLMClient", middleware: tuple[ModelMiddleware, ...]) -> None:
+        self.client = client
+        self.middleware = middleware
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.client, name)
+
+    def complete_action_request(self, request: "ModelRequest", **kwargs: Any) -> LLMActionResult:
+        prepared = self._prepare(request)
+        result = call_with_supported_kwargs(
+            self.client.complete_action_request, prepared, **kwargs
+        )
+        return self._observe(prepared, result)
+
+    async def acomplete_action_request(
+        self, request: "ModelRequest", **kwargs: Any
+    ) -> LLMActionResult:
+        prepared = self._prepare(request)
+        result = await call_async_with_supported_kwargs(
+            self.client.acomplete_action_request, prepared, **kwargs
+        )
+        return self._observe(prepared, result)
+
+    def _prepare(self, request: "ModelRequest") -> "ModelRequest":
+        for item in self.middleware:
+            request = item.prepare(request)
+        return request
+
+    def _observe(self, request: "ModelRequest", result: LLMActionResult) -> LLMActionResult:
+        for item in reversed(self.middleware):
+            result = item.observe(request, result)
+        return result
+
+
+def wrap_model_client(client: "LLMClient", *middleware: ModelMiddleware) -> MiddlewareLLMClient:
+    """Return a thin validated-action wrapper for request metadata or observability."""
+    return MiddlewareLLMClient(client, tuple(middleware))
 
 
 class LLMClient:

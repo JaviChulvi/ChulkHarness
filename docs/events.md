@@ -4,6 +4,11 @@ Chulk projects selected runtime activity into one versioned public envelope.
 Internal JSONL trace names and payloads are diagnostic implementation details;
 they are not automatically exposed as SDK events.
 
+`chulk.server.ai_sdk_ui_chunks(...)` is an optional adapter for Vercel AI SDK
+clients. It projects safe final-answer text into UI message chunks and retains
+tool/approval records as `data-chulk-*` chunks. Chulk's event stream remains
+the stable source of truth for durable state and reconnection.
+
 ```python
 from chulk import Agent, EventName, RunCompletedPayload
 

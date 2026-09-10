@@ -25,6 +25,7 @@ from chulk.cli.entrypoints import (
     EXIT_OK,
     json_text,
     run_doctor_command,
+    run_agent_directory_command,
     run_exec_command,
     run_init_command,
     run_trace_command,
@@ -592,6 +593,15 @@ def main(
         )
     if args.command == "doctor":
         return run_doctor_command(json_output=args.json_output, output_func=output_func)
+    if args.command == "agent":
+        return run_agent_directory_command(
+            args.agent_command,
+            args.path,
+            agent_id=getattr(args, "agent_id", None),
+            json_output=args.json_output,
+            output_func=output_func,
+            error_func=error_func,
+        )
     if args.command == "trace":
         return run_trace_command(
             args.trace_command,

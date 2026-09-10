@@ -58,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_exec_parser(subparsers)
     _add_doctor_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_agent_parser(subparsers)
     _add_profile_parser(subparsers)
     _add_model_parser(subparsers)
     _add_plugins_parser(subparsers)
@@ -897,6 +898,20 @@ def _add_init_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--json", action="store_true", dest="json_output", help="Emit structured JSON."
     )
+
+
+def _add_agent_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "agent", help="Initialize and validate filesystem-first agent sources."
+    )
+    commands = parser.add_subparsers(dest="agent_command", required=True)
+    init = commands.add_parser("init", help="Create a minimal agent directory.")
+    init.add_argument("path")
+    init.add_argument("--id", required=True, dest="agent_id")
+    init.add_argument("--json", action="store_true", dest="json_output")
+    check = commands.add_parser("check", help="Parse and validate one agent directory.")
+    check.add_argument("path")
+    check.add_argument("--json", action="store_true", dest="json_output")
 
 
 def _add_trace_parser(subparsers: argparse._SubParsersAction) -> None:

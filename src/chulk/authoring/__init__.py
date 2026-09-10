@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         ReviewPreview,
         WorkflowGenerator,
     )
+    from chulk.authoring.directory import AgentDirectory, initialize_agent_directory
     from chulk.authoring.models import (
         AGENT_DEFINITION_SCHEMA_VERSION,
         AgentDefinition,
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AGENT_DEFINITION_SCHEMA_VERSION",
     "AgentCompiler",
+    "AgentDirectory",
     "AgentDefinition",
     "AgentDefinitionRecord",
     "AgentDefinitionRuntime",
@@ -96,6 +98,7 @@ __all__ = [
     "WorkflowGraph",
     "WorkflowStep",
     "canonical_json",
+    "initialize_agent_directory",
     "request_digest",
     "validate_definition_catalogs",
 ]
@@ -105,6 +108,7 @@ _EXPORT_MODULES = (
     "chulk.authoring.models",
     "chulk.authoring.catalog",
     "chulk.authoring.compiler",
+    "chulk.authoring.directory",
     "chulk.authoring.runtime",
 )
 
