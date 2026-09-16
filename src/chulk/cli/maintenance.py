@@ -28,6 +28,24 @@ _PROVIDER_SDK_REQUIREMENTS = {
     "gemini": ("google.genai", "google-genai", "gemini"),
 }
 
+_PROVIDER_REQUIRED_SETTINGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "openai": (("openai_api_key", "OPENAI_API_KEY"),),
+    "deepseek": (("deepseek_api_key", "CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY"),),
+    "moonshot": (("moonshot_api_key", "CHULK_MOONSHOT_API_KEY or MOONSHOT_API_KEY"),),
+    "local": (),
+    "openai-compatible": (
+        ("openai_compatible_api_key", "CHULK_OPENAI_COMPATIBLE_API_KEY"),
+        ("openai_compatible_base_url", "CHULK_OPENAI_COMPATIBLE_BASE_URL"),
+    ),
+    "openrouter": (("openrouter_api_key", "CHULK_OPENROUTER_API_KEY or OPENROUTER_API_KEY"),),
+    "anthropic": (("anthropic_api_key", "CHULK_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY"),),
+    "bedrock": (
+        ("bedrock_api_key", "CHULK_BEDROCK_API_KEY, BEDROCK_API_KEY, or AWS_BEARER_TOKEN_BEDROCK"),
+        ("bedrock_base_url", "CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL"),
+    ),
+    "gemini": (("gemini_api_key", "CHULK_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY"),),
+}
+
 _GITIGNORE_HEADING = "# Chulk runtime state"
 _GITIGNORE_RULES = (
     ".env",
@@ -420,57 +438,11 @@ def _missing_provider_package(provider: str) -> str | None:
 
 def _missing_provider_settings(config: Config, provider: str) -> tuple[str, ...]:
     """Return unresolved environment requirements for one configured provider."""
-    if provider == "openai":
-        return () if _has_provider_value(config.openai_api_key) else ("OPENAI_API_KEY",)
-    if provider == "deepseek":
-        return (
-            ()
-            if _has_provider_value(config.deepseek_api_key)
-            else ("CHULK_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY",)
-        )
-    if provider == "moonshot":
-        return (
-            ()
-            if _has_provider_value(config.moonshot_api_key)
-            else ("CHULK_MOONSHOT_API_KEY or MOONSHOT_API_KEY",)
-        )
-    if provider == "local":
-        return ()
-    if provider == "openai-compatible":
-        missing = []
-        if not _has_provider_value(config.openai_compatible_api_key):
-            missing.append("CHULK_OPENAI_COMPATIBLE_API_KEY")
-        if not _has_provider_value(config.openai_compatible_base_url):
-            missing.append("CHULK_OPENAI_COMPATIBLE_BASE_URL")
-        return tuple(missing)
-    if provider == "openrouter":
-        return (
-            ()
-            if _has_provider_value(config.openrouter_api_key)
-            else ("CHULK_OPENROUTER_API_KEY or OPENROUTER_API_KEY",)
-        )
-    if provider == "anthropic":
-        return (
-            ()
-            if _has_provider_value(config.anthropic_api_key)
-            else ("CHULK_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY",)
-        )
-    if provider == "bedrock":
-        missing = []
-        if not _has_provider_value(config.bedrock_api_key):
-            missing.append(
-                "CHULK_BEDROCK_API_KEY, BEDROCK_API_KEY, or AWS_BEARER_TOKEN_BEDROCK"
-            )
-        if not _has_provider_value(config.bedrock_base_url):
-            missing.append("CHULK_BEDROCK_BASE_URL or CHULK_BASE_URL")
-        return tuple(missing)
-    if provider == "gemini":
-        return (
-            ()
-            if _has_provider_value(config.gemini_api_key)
-            else ("CHULK_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY",)
-        )
-    return ()
+    return tuple(
+        message
+        for attribute, message in _PROVIDER_REQUIRED_SETTINGS.get(provider, ())
+        if not _has_provider_value(getattr(config, attribute))
+    )
 
 
 def _has_provider_value(value: str | None) -> bool:

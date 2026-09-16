@@ -1,100 +1,65 @@
 """Tests for configuration loading."""
-
 import inspect
 import json
-
 import pytest
-
 from chulk.api import AgentConfig
+from chulk.config import Config, DEFAULT_DEEPSEEK_MODEL, DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS, DEFAULT_LOCAL_MODEL, DEFAULT_MAX_OBSERVATION_CHARS, DEFAULT_MAX_REFLECTION_ATTEMPTS, DEFAULT_MAX_SKILL_CONTENT_CHARS, DEFAULT_MAX_SKILLS_PER_TURN, DEFAULT_MAX_TOOL_STDERR_CHARS, DEFAULT_MAX_TOOL_STDOUT_CHARS, DEFAULT_MODEL, DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL, DEFAULT_PERMISSION_PROFILE, DEFAULT_TRACE_MAX_PROMPT_CHARS, load_config
 
-from chulk.config import (
-    Config,
-    DEFAULT_DEEPSEEK_MODEL,
-    DEFAULT_LOCAL_BASE_URL,
-    DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS,
-    DEFAULT_LOCAL_MODEL,
-    DEFAULT_MAX_OBSERVATION_CHARS,
-    DEFAULT_MAX_REFLECTION_ATTEMPTS,
-    DEFAULT_MAX_SKILL_CONTENT_CHARS,
-    DEFAULT_MAX_SKILLS_PER_TURN,
-    DEFAULT_MAX_TOOL_STDERR_CHARS,
-    DEFAULT_MAX_TOOL_STDOUT_CHARS,
-    DEFAULT_MODEL,
-    DEFAULT_MOONSHOT_BASE_URL,
-    DEFAULT_MOONSHOT_MODEL,
-    DEFAULT_PERMISSION_PROFILE,
-    DEFAULT_TRACE_MAX_PROMPT_CHARS,
-    load_config,
-)
-
-
-@pytest.mark.parametrize("value", [True, False, 2.0, "bad"])
+@pytest.mark.parametrize('value', [True, False, 2.0, 'bad'])
 def test_sdk_integer_override_preserves_invalid_value_errors(tmp_path, monkeypatch, value):
-    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "7")
-    with pytest.raises(ValueError, match="CHULK_HISTORY_LIMIT must be an integer"):
+    monkeypatch.setenv('CHULK_HISTORY_LIMIT', '7')
+    with pytest.raises(ValueError, match='CHULK_HISTORY_LIMIT must be an integer'):
         AgentConfig(project_root=tmp_path, history_limit=value).to_config()
 
-
 def test_sdk_explicit_values_mask_invalid_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "bad")
-    monkeypatch.setenv("CHULK_LLM_TIMEOUT_SECONDS", "bad")
+    monkeypatch.setenv('CHULK_HISTORY_LIMIT', 'bad')
+    monkeypatch.setenv('CHULK_LLM_TIMEOUT_SECONDS', 'bad')
     config = AgentConfig(project_root=tmp_path, history_limit=3, llm_timeout_seconds=2.5).to_config()
     assert (config.history_limit, config.llm_timeout_seconds) == (3, 2.5)
 
-
 def test_sdk_and_cli_preserve_duplicate_dotenv_and_empty_environment_rules(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHULK_RUNTIME_DIR", "")
-    monkeypatch.setenv("CHULK_PERMISSION_PROFILE", "")
-    (tmp_path / ".env").write_text(
-        "CHULK_RUNTIME_DIR=first\nCHULK_RUNTIME_DIR=last\n"
-        "CHULK_PERMISSION_PROFILE=read-only\n"
-    )
+    monkeypatch.setenv('CHULK_RUNTIME_DIR', '')
+    monkeypatch.setenv('CHULK_PERMISSION_PROFILE', '')
+    (tmp_path / '.env').write_text('CHULK_RUNTIME_DIR=first\nCHULK_RUNTIME_DIR=last\nCHULK_PERMISSION_PROFILE=read-only\n')
     sdk = AgentConfig(project_root=tmp_path).to_config()
-    cli = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
-    assert sdk.runtime_dir == tmp_path / "first"
-    assert cli.runtime_dir == tmp_path / "last"
+    cli = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
+    assert sdk.runtime_dir == tmp_path / 'first'
+    assert cli.runtime_dir == tmp_path / 'last'
     assert sdk.permission_profile == DEFAULT_PERMISSION_PROFILE
-    assert cli.permission_profile == "read-only"
-
+    assert cli.permission_profile == 'read-only'
 
 def test_sdk_validates_fallback_environment_before_collection_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHULK_LLM_FALLBACK_PROVIDERS", "unknown:model")
-    with pytest.raises(ValueError, match="CHULK_LLM_FALLBACK_PROVIDERS"):
+    monkeypatch.setenv('CHULK_LLM_FALLBACK_PROVIDERS', 'unknown:model')
+    with pytest.raises(ValueError, match='CHULK_LLM_FALLBACK_PROVIDERS'):
         AgentConfig(project_root=tmp_path, llm_fallback_providers=()).to_config()
 
-
 def test_sdk_validates_mcp_file_before_collection_override_and_numeric_fields(tmp_path, monkeypatch):
-    runtime_dir = tmp_path / ".chulk"
+    runtime_dir = tmp_path / '.chulk'
     runtime_dir.mkdir()
-    (runtime_dir / "mcp.json").write_text("invalid json")
-    monkeypatch.setenv("CHULK_HISTORY_LIMIT", "bad")
-    with pytest.raises(ValueError, match="MCP config is not valid JSON"):
+    (runtime_dir / 'mcp.json').write_text('invalid json')
+    monkeypatch.setenv('CHULK_HISTORY_LIMIT', 'bad')
+    with pytest.raises(ValueError, match='MCP config is not valid JSON'):
         AgentConfig(project_root=tmp_path, mcp_servers=()).to_config()
 
-
 def test_sdk_validates_numeric_fields_before_explicit_paths(tmp_path):
-    with pytest.raises(ValueError, match="CHULK_HISTORY_LIMIT"):
-        AgentConfig(project_root=tmp_path, history_limit=0, store_path="\x00").to_config()
-
+    with pytest.raises(ValueError, match='CHULK_HISTORY_LIMIT'):
+        AgentConfig(project_root=tmp_path, history_limit=0, store_path='\x00').to_config()
 
 def test_local_context_config_field_is_keyword_only() -> None:
-    parameter = inspect.signature(Config).parameters["local_context_window_tokens"]
-    moonshot_key = inspect.signature(Config).parameters["moonshot_api_key"]
-    moonshot_url = inspect.signature(Config).parameters["moonshot_base_url"]
-
+    parameter = inspect.signature(Config).parameters['local_context_window_tokens']
+    moonshot_key = inspect.signature(Config).parameters['moonshot_api_key']
+    moonshot_url = inspect.signature(Config).parameters['moonshot_base_url']
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert moonshot_key.kind is inspect.Parameter.KEYWORD_ONLY
     assert moonshot_url.kind is inspect.Parameter.KEYWORD_ONLY
 
-
 def test_load_config_uses_defaults(tmp_path):
-    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
     assert config.project_root == tmp_path
-    assert config.runtime_dir == tmp_path / ".chulk"
-    assert config.skills_dir == tmp_path / ".chulk" / "skills"
-    assert config.skills_dirs[-1] == tmp_path / ".chulk" / "skills"
-    assert config.llm_provider == "openai"
+    assert config.runtime_dir == tmp_path / '.chulk'
+    assert config.skills_dir == tmp_path / '.chulk' / 'skills'
+    assert config.skills_dirs[-1] == tmp_path / '.chulk' / 'skills'
+    assert config.llm_provider == 'openai'
     assert config.model == DEFAULT_MODEL
     assert config.llm_fallback_providers == ()
     assert config.openai_api_key is None
@@ -113,52 +78,25 @@ def test_load_config_uses_defaults(tmp_path):
     assert config.max_tool_stderr_chars == DEFAULT_MAX_TOOL_STDERR_CHARS
     assert config.max_reflection_attempts == DEFAULT_MAX_REFLECTION_ATTEMPTS
     assert config.permission_profile == DEFAULT_PERMISSION_PROFILE
-    assert config.mcp_config_path == tmp_path / ".chulk" / "mcp.json"
+    assert config.mcp_config_path == tmp_path / '.chulk' / 'mcp.json'
     assert config.mcp_servers == ()
-
 
 def test_load_config_defaults_project_root_to_current_directory(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-
     config = load_config({})
-
     assert config.project_root == tmp_path
-    assert config.runtime_dir == tmp_path / ".chulk"
-
+    assert config.runtime_dir == tmp_path / '.chulk'
 
 def test_load_config_reads_dotenv(tmp_path):
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "OPENAI_API_KEY=dotenv-key",
-                "CHULK_MODEL=dotenv-model",
-                "CHULK_HISTORY_LIMIT=7",
-                "CHULK_MAX_SKILLS_PER_TURN=2",
-                "CHULK_MAX_SKILL_CONTENT_CHARS=800",
-                "CHULK_TRACE_MAX_PROMPT_CHARS=1234",
-                "CHULK_MAX_OBSERVATION_CHARS=900",
-                "CHULK_MAX_TOOL_STDOUT_CHARS=700",
-                "CHULK_MAX_TOOL_STDERR_CHARS=300",
-                "CHULK_MAX_REFLECTION_ATTEMPTS=1",
-                "CHULK_PERMISSION_PROFILE=read-only",
-                "DEEPSEEK_API_KEY=deepseek-key",
-                "CHULK_LOCAL_API_KEY=local-key",
-                "CHULK_LOCAL_BASE_URL=http://localhost:11434/v1",
-                "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS=65536",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config({"CHULK_PROJECT_ROOT": str(tmp_path)})
-
+    (tmp_path / '.env').write_text('\n'.join(['OPENAI_API_KEY=dotenv-key', 'CHULK_MODEL=dotenv-model', 'CHULK_HISTORY_LIMIT=7', 'CHULK_MAX_SKILLS_PER_TURN=2', 'CHULK_MAX_SKILL_CONTENT_CHARS=800', 'CHULK_TRACE_MAX_PROMPT_CHARS=1234', 'CHULK_MAX_OBSERVATION_CHARS=900', 'CHULK_MAX_TOOL_STDOUT_CHARS=700', 'CHULK_MAX_TOOL_STDERR_CHARS=300', 'CHULK_MAX_REFLECTION_ATTEMPTS=1', 'CHULK_PERMISSION_PROFILE=read-only', 'DEEPSEEK_API_KEY=deepseek-key', 'CHULK_LOCAL_API_KEY=local-key', 'CHULK_LOCAL_BASE_URL=http://localhost:11434/v1', 'CHULK_LOCAL_CONTEXT_WINDOW_TOKENS=65536']), encoding='utf-8')
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
     assert config.project_root == tmp_path
-    assert config.openai_api_key == "dotenv-key"
-    assert config.deepseek_api_key == "deepseek-key"
-    assert config.local_api_key == "local-key"
-    assert config.local_base_url == "http://localhost:11434/v1"
-    assert config.local_context_window_tokens == 65_536
-    assert config.model == "dotenv-model"
+    assert config.openai_api_key == 'dotenv-key'
+    assert config.deepseek_api_key == 'deepseek-key'
+    assert config.local_api_key == 'local-key'
+    assert config.local_base_url == 'http://localhost:11434/v1'
+    assert config.local_context_window_tokens == 65536
+    assert config.model == 'dotenv-model'
     assert config.history_limit == 7
     assert config.max_skills_per_turn == 2
     assert config.max_skill_content_chars == 800
@@ -167,263 +105,133 @@ def test_load_config_reads_dotenv(tmp_path):
     assert config.max_tool_stdout_chars == 700
     assert config.max_tool_stderr_chars == 300
     assert config.max_reflection_attempts == 1
-    assert config.permission_profile == "read-only"
-
+    assert config.permission_profile == 'read-only'
 
 def test_load_config_reads_mcp_config_from_default_path(tmp_path):
-    mcp_dir = tmp_path / ".chulk"
+    mcp_dir = tmp_path / '.chulk'
     mcp_dir.mkdir()
-    (mcp_dir / "mcp.json").write_text(
-        json.dumps(
-            {
-                "servers": [
-                    {
-                        "label": "docs",
-                        "transport": "streamable_http",
-                        "server_url": "https://mcp.example.com",
-                        "server_description": "Docs server",
-                        "allowed_tools": ["search"],
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-        }
-    )
-
-    assert config.mcp_config_path == tmp_path / ".chulk" / "mcp.json"
+    (mcp_dir / 'mcp.json').write_text(json.dumps({'servers': [{'label': 'docs', 'transport': 'streamable_http', 'server_url': 'https://mcp.example.com', 'server_description': 'Docs server', 'allowed_tools': ['search']}]}), encoding='utf-8')
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
+    assert config.mcp_config_path == tmp_path / '.chulk' / 'mcp.json'
     assert len(config.mcp_servers) == 1
     server = config.mcp_servers[0]
-    assert server.label == "docs"
-    assert server.allowed_tools == ("search",)
+    assert server.label == 'docs'
+    assert server.allowed_tools == ('search',)
     assert server.authorization is None
     assert server.defer_loading is True
 
-
 def test_load_config_resolves_relative_runtime_dir_against_project_root(monkeypatch, tmp_path):
-    project_root = tmp_path / "project"
-    launch_cwd = tmp_path / "launch-cwd"
+    project_root = tmp_path / 'project'
+    launch_cwd = tmp_path / 'launch-cwd'
     project_root.mkdir()
     launch_cwd.mkdir()
     monkeypatch.chdir(launch_cwd)
-
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(project_root),
-            "CHULK_RUNTIME_DIR": "env-runtime",
-        }
-    )
-
-    assert config.runtime_dir == project_root / "env-runtime"
-    assert config.skills_dir == project_root / "env-runtime" / "skills"
-    assert config.skills_dirs[-1] == project_root / "env-runtime" / "skills"
-    assert config.mcp_config_path == project_root / "env-runtime" / "mcp.json"
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(project_root), 'CHULK_RUNTIME_DIR': 'env-runtime'})
+    assert config.runtime_dir == project_root / 'env-runtime'
+    assert config.skills_dir == project_root / 'env-runtime' / 'skills'
+    assert config.skills_dirs[-1] == project_root / 'env-runtime' / 'skills'
+    assert config.mcp_config_path == project_root / 'env-runtime' / 'mcp.json'
 
 def test_load_config_resolves_dotenv_runtime_dir_against_project_root(monkeypatch, tmp_path):
-    project_root = tmp_path / "project"
-    launch_cwd = tmp_path / "launch-cwd"
+    project_root = tmp_path / 'project'
+    launch_cwd = tmp_path / 'launch-cwd'
     project_root.mkdir()
     launch_cwd.mkdir()
-    (project_root / ".env").write_text("CHULK_RUNTIME_DIR=dotenv-runtime\n", encoding="utf-8")
+    (project_root / '.env').write_text('CHULK_RUNTIME_DIR=dotenv-runtime\n', encoding='utf-8')
     monkeypatch.chdir(launch_cwd)
-
-    config = load_config({"CHULK_PROJECT_ROOT": str(project_root)})
-
-    assert config.runtime_dir == project_root / "dotenv-runtime"
-    assert config.skills_dir == project_root / "dotenv-runtime" / "skills"
-    assert config.mcp_config_path == project_root / "dotenv-runtime" / "mcp.json"
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(project_root)})
+    assert config.runtime_dir == project_root / 'dotenv-runtime'
+    assert config.skills_dir == project_root / 'dotenv-runtime' / 'skills'
+    assert config.mcp_config_path == project_root / 'dotenv-runtime' / 'mcp.json'
 
 def test_environment_overrides_dotenv(tmp_path):
-    (tmp_path / ".env").write_text("CHULK_MODEL=dotenv-model\n", encoding="utf-8")
-
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_MODEL": "env-model",
-        }
-    )
-
-    assert config.model == "env-model"
-
+    (tmp_path / '.env').write_text('CHULK_MODEL=dotenv-model\n', encoding='utf-8')
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_MODEL': 'env-model'})
+    assert config.model == 'env-model'
 
 def test_invalid_integer_config_raises(tmp_path):
     try:
-        load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_HISTORY_LIMIT": "zero"})
+        load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_HISTORY_LIMIT': 'zero'})
     except ValueError as exc:
-        assert "CHULK_HISTORY_LIMIT" in str(exc)
+        assert 'CHULK_HISTORY_LIMIT' in str(exc)
     else:
-        raise AssertionError("Expected invalid integer config to fail")
-
+        raise AssertionError('Expected invalid integer config to fail')
 
 def test_invalid_local_context_window_config_raises(tmp_path):
-    for value in ("1", "4096"):
+    for value in ('1', '4096'):
         try:
-            load_config(
-                {
-                    "CHULK_PROJECT_ROOT": str(tmp_path),
-                    "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS": value,
-                }
-            )
+            load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LOCAL_CONTEXT_WINDOW_TOKENS': value})
         except ValueError as exc:
-            assert "CHULK_LOCAL_CONTEXT_WINDOW_TOKENS" in str(exc)
-            assert "greater than the local response reserve" in str(exc)
+            assert 'CHULK_LOCAL_CONTEXT_WINDOW_TOKENS' in str(exc)
+            assert 'greater than the local response reserve' in str(exc)
         else:
-            raise AssertionError("Expected invalid local context window config to fail")
-
+            raise AssertionError('Expected invalid local context window config to fail')
 
 def test_invalid_reflection_attempts_config_raises(tmp_path):
     try:
-        load_config({"CHULK_PROJECT_ROOT": str(tmp_path), "CHULK_MAX_REFLECTION_ATTEMPTS": "-1"})
+        load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_MAX_REFLECTION_ATTEMPTS': '-1'})
     except ValueError as exc:
-        assert "CHULK_MAX_REFLECTION_ATTEMPTS" in str(exc)
+        assert 'CHULK_MAX_REFLECTION_ATTEMPTS' in str(exc)
     else:
-        raise AssertionError("Expected invalid reflection attempt config to fail")
-
+        raise AssertionError('Expected invalid reflection attempt config to fail')
 
 def test_invalid_permission_profile_config_raises(tmp_path):
     try:
-        load_config(
-            {
-                "CHULK_PROJECT_ROOT": str(tmp_path),
-                "CHULK_PERMISSION_PROFILE": "anything-goes",
-            }
-        )
+        load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_PERMISSION_PROFILE': 'anything-goes'})
     except ValueError as exc:
-        assert "CHULK_PERMISSION_PROFILE" in str(exc)
+        assert 'CHULK_PERMISSION_PROFILE' in str(exc)
     else:
-        raise AssertionError("Expected invalid permission profile config to fail")
-
+        raise AssertionError('Expected invalid permission profile config to fail')
 
 def test_deepseek_provider_uses_deepseek_default_model(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_PROVIDER": "deepseek",
-            "DEEPSEEK_API_KEY": "deepseek-key",
-        }
-    )
-
-    assert config.llm_provider == "deepseek"
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_PROVIDER': 'deepseek', 'DEEPSEEK_API_KEY': 'deepseek-key'})
+    assert config.llm_provider == 'deepseek'
     assert config.model == DEFAULT_DEEPSEEK_MODEL
-    assert config.deepseek_api_key == "deepseek-key"
-
+    assert config.deepseek_api_key == 'deepseek-key'
 
 def test_moonshot_provider_uses_default_model_and_key_alias(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_PROVIDER": "moonshot",
-            "MOONSHOT_API_KEY": "moonshot-key",
-        }
-    )
-
-    assert config.llm_provider == "moonshot"
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_PROVIDER': 'moonshot', 'MOONSHOT_API_KEY': 'moonshot-key'})
+    assert config.llm_provider == 'moonshot'
     assert config.model == DEFAULT_MOONSHOT_MODEL
-    assert config.moonshot_api_key == "moonshot-key"
+    assert config.moonshot_api_key == 'moonshot-key'
     assert config.moonshot_base_url == DEFAULT_MOONSHOT_BASE_URL
 
-
 def test_local_provider_uses_local_default_model_and_base_url(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_PROVIDER": "local",
-        }
-    )
-
-    assert config.llm_provider == "local"
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_PROVIDER': 'local'})
+    assert config.llm_provider == 'local'
     assert config.model == DEFAULT_LOCAL_MODEL
     assert config.local_base_url == DEFAULT_LOCAL_BASE_URL
     assert config.local_api_key is None
     assert config.local_context_window_tokens == DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
 
-
 def test_load_config_parses_fallback_providers(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_PROVIDER": "deepseek",
-            "CHULK_MODEL": "deepseek-v4-pro",
-            "DEEPSEEK_API_KEY": "deepseek-key",
-            "CHULK_LLM_FALLBACK_PROVIDERS": "openai:gpt-4.1-mini, deepseek:deepseek-v4-flash",
-        }
-    )
-
-    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
-        ("openai", "gpt-4.1-mini"),
-        ("deepseek", "deepseek-v4-flash"),
-    ]
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_PROVIDER': 'deepseek', 'CHULK_MODEL': 'deepseek-v4-pro', 'DEEPSEEK_API_KEY': 'deepseek-key', 'CHULK_LLM_FALLBACK_PROVIDERS': 'openai:gpt-4.1-mini, deepseek:deepseek-v4-flash'})
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [('openai', 'gpt-4.1-mini'), ('deepseek', 'deepseek-v4-flash')]
 
 def test_load_config_uses_provider_default_for_fallback_without_model(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_FALLBACK_PROVIDERS": "deepseek",
-        }
-    )
-
-    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
-        ("deepseek", DEFAULT_DEEPSEEK_MODEL),
-    ]
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_FALLBACK_PROVIDERS': 'deepseek'})
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [('deepseek', DEFAULT_DEEPSEEK_MODEL)]
 
 def test_load_config_uses_moonshot_default_for_fallback_without_model(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_FALLBACK_PROVIDERS": "moonshot",
-        }
-    )
-
-    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
-        ("moonshot", DEFAULT_MOONSHOT_MODEL),
-    ]
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_FALLBACK_PROVIDERS': 'moonshot'})
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [('moonshot', DEFAULT_MOONSHOT_MODEL)]
 
 def test_load_config_uses_local_default_for_fallback_without_model(tmp_path):
-    config = load_config(
-        {
-            "CHULK_PROJECT_ROOT": str(tmp_path),
-            "CHULK_LLM_FALLBACK_PROVIDERS": "local",
-        }
-    )
-
-    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [
-        ("local", DEFAULT_LOCAL_MODEL),
-    ]
-
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_FALLBACK_PROVIDERS': 'local'})
+    assert [(item.provider, item.model) for item in config.llm_fallback_providers] == [('local', DEFAULT_LOCAL_MODEL)]
 
 def test_load_config_rejects_unknown_fallback_provider(tmp_path):
     try:
-        load_config(
-            {
-                "CHULK_PROJECT_ROOT": str(tmp_path),
-                "CHULK_LLM_FALLBACK_PROVIDERS": "unknown",
-            }
-        )
+        load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_FALLBACK_PROVIDERS': 'unknown'})
     except ValueError as exc:
-        assert "CHULK_LLM_FALLBACK_PROVIDERS" in str(exc)
+        assert 'CHULK_LLM_FALLBACK_PROVIDERS' in str(exc)
     else:
-        raise AssertionError("Expected invalid fallback provider config to fail")
-
+        raise AssertionError('Expected invalid fallback provider config to fail')
 
 def test_invalid_provider_config_raises(tmp_path):
     try:
-        load_config(
-            {
-                "CHULK_PROJECT_ROOT": str(tmp_path),
-                "CHULK_LLM_PROVIDER": "unknown",
-            }
-        )
+        load_config({'CHULK_PROJECT_ROOT': str(tmp_path), 'CHULK_LLM_PROVIDER': 'unknown'})
     except ValueError as exc:
-        assert "CHULK_LLM_PROVIDER" in str(exc)
+        assert 'CHULK_LLM_PROVIDER' in str(exc)
     else:
-        raise AssertionError("Expected invalid provider config to fail")
+        raise AssertionError('Expected invalid provider config to fail')

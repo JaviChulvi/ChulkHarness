@@ -1,14 +1,10 @@
 """Tests for structured output, timeout, and bounded retry policies."""
-
 from __future__ import annotations
-
 import asyncio
 import json
 from types import SimpleNamespace
 import time
-
 import pytest
-
 from chulk import Agent, AsyncAgent, AgentConfig, Capabilities, Tool, ToolOutputPolicy, ToolRetryPolicy
 from chulk.core.state import TurnState
 from chulk.core.tool_execution import ToolExecutor
@@ -17,21 +13,13 @@ from chulk.tools import ToolExecutionContext, ToolRegistry
 from chulk.tools.permissions import ToolPermissionPolicy
 from chulk.tools.policy import schema_digest as policy_schema_digest
 from chulk.tools.schema import schema_digest
-
-
-OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {"count": {"type": "integer", "minimum": 0}},
-    "required": ["count"],
-    "additionalProperties": False,
-}
-
+OUTPUT_SCHEMA = {'type': 'object', 'properties': {'count': {'type': 'integer', 'minimum': 0}}, 'required': ['count'], 'additionalProperties': False}
 
 def test_schema_digest_compatibility_export_uses_schema_owner() -> None:
     assert policy_schema_digest is schema_digest
 
-
 class FakeLLM(LLMClient):
+
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
 
@@ -40,146 +28,102 @@ class FakeLLM(LLMClient):
             return self.responses[0]
         return self.responses.pop(0)
 
-
 def _tool_call(name: str) -> str:
-    return json.dumps(
-        {
-            "type": "tool_call",
-            "content": None,
-            "tool_name": name,
-            "arguments_json": "{}",
-        }
-    )
-
+    return json.dumps({'type': 'tool_call', 'content': None, 'tool_name': name, 'arguments_json': '{}'})
 
 def _final() -> str:
-    return json.dumps({"type": "final_answer", "content": "done"})
-
+    return json.dumps({'type': 'final_answer', 'content': 'done'})
 
 def test_structured_output_contract_accepts_valid_values():
+
     @Tool(output_policy=ToolOutputPolicy(OUTPUT_SCHEMA))
     def count_items() -> dict:
         """Count items."""
-        return {"count": 2}
-
+        return {'count': 2}
     registry = ToolRegistry()
     registry.register(count_items)
-
-    result = registry.run("count_items", {})
-
+    result = registry.run('count_items', {})
     assert result.success is True
-    assert result.value == {"count": 2}
-    assert result.metadata["output_validated"] is True
-    assert result.metadata["structured_output"] == {"count": 2}
+    assert result.value == {'count': 2}
+    assert result.metadata['output_validated'] is True
+    assert result.metadata['structured_output'] == {'count': 2}
 
-
-@pytest.mark.parametrize(
-    ("schema", "value"),
-    [
-        ({"type": "string", "minLength": 1}, "ready"),
-        ({"type": "array", "items": {"type": "integer"}}, [1, 2, 3]),
-    ],
-)
+@pytest.mark.parametrize(('schema', 'value'), [({'type': 'string', 'minLength': 1}, 'ready'), ({'type': 'array', 'items': {'type': 'integer'}}, [1, 2, 3])])
 def test_structured_output_contract_accepts_non_object_root_schemas(schema, value):
+
     @Tool(output_schema=schema)
     def structured_value():
         """Return a primitive or array structured value."""
         return value
-
     registry = ToolRegistry()
     registry.register(structured_value)
-
-    result = registry.run("structured_value", {})
-
+    result = registry.run('structured_value', {})
     assert result.success is True
     assert result.value == value
-    assert result.metadata["structured_output"] == value
-
+    assert result.metadata['structured_output'] == value
 
 def test_structured_output_contract_rejects_invalid_values_with_fields():
+
     @Tool(output_schema=OUTPUT_SCHEMA)
     def count_items() -> dict:
         """Return an invalid count."""
-        return {"count": "two"}
-
+        return {'count': 'two'}
     registry = ToolRegistry()
     registry.register(count_items)
-
-    result = registry.run("count_items", {})
-
+    result = registry.run('count_items', {})
     assert result.success is False
-    assert result.failure_kind == "invalid_output"
+    assert result.failure_kind == 'invalid_output'
     assert result.value is None
-    assert result.metadata["validation_errors"][0]["path"] == "count"
-
+    assert result.metadata['validation_errors'][0]['path'] == 'count'
 
 def test_sync_and_async_timeouts_are_reported_per_attempt():
+
     @Tool(timeout_seconds=0.01)
     def slow_sync() -> str:
         """Run too slowly."""
         time.sleep(0.05)
-        return "late"
+        return 'late'
 
     @Tool(timeout_seconds=0.01)
     async def slow_async() -> str:
         """Run too slowly asynchronously."""
         await asyncio.sleep(0.05)
-        return "late"
-
+        return 'late'
     registry = ToolRegistry()
     registry.register(slow_sync)
     registry.register(slow_async)
-
-    sync_result = registry.run("slow_sync", {})
-
-    assert sync_result.failure_kind == "timeout"
+    sync_result = registry.run('slow_sync', {})
+    assert sync_result.failure_kind == 'timeout'
 
     async def run_async():
-        return await registry.run_async("slow_async", {})
-
+        return await registry.run_async('slow_async', {})
     async_result = asyncio.run(run_async())
-    assert async_result.failure_kind == "timeout"
+    assert async_result.failure_kind == 'timeout'
 
-
-@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+@pytest.mark.parametrize('facade_type', [Agent, AsyncAgent])
 def test_retry_success_rechecks_permission_and_records_attempts(tmp_path, facade_type):
     calls = 0
     approvals = []
 
-    @Tool(
-        requires_confirmation=True,
-        retry_policy=ToolRetryPolicy(max_attempts=3),
-        idempotent=True,
-    )
+    @Tool(requires_confirmation=True, retry_policy=ToolRetryPolicy(max_attempts=3), idempotent=True)
     def flaky() -> str:
         """Fail once, then succeed."""
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RuntimeError("temporary")
-        return "ok"
-
-    facade = facade_type(
-        config=AgentConfig(project_root=tmp_path, permission_profile="workspace-write"),
-        capabilities=Capabilities.none(),
-        llm=FakeLLM([_tool_call("flaky"), _final()]),
-        tools=[flaky],
-        skills=[],
-        permission_callback=lambda request, record: approvals.append(request.tool_name) or True,
-    )
-
-    result = (asyncio.run(facade.run_result("run flaky")) if facade_type is AsyncAgent else facade.run_result("run flaky"))
-
+            raise RuntimeError('temporary')
+        return 'ok'
+    facade = facade_type(config=AgentConfig(project_root=tmp_path, permission_profile='workspace-write'), capabilities=Capabilities.none(), llm=FakeLLM([_tool_call('flaky'), _final()]), tools=[flaky], skills=[], permission_callback=lambda request, record: approvals.append(request.tool_name) or True)
+    result = asyncio.run(facade.run_result('run flaky')) if facade_type is AsyncAgent else facade.run_result('run flaky')
     assert calls == 2
-    assert approvals == ["flaky", "flaky"]
+    assert approvals == ['flaky', 'flaky']
     assert result.tool_calls[0].success is True
     assert len(result.tool_calls[0].attempts) == 2
     assert result.tool_calls[0].attempts[0].retry_scheduled is True
     assert result.tool_calls[0].attempts[1].success is True
-    assert all(attempt.permission_decision == "allowed" for attempt in result.tool_calls[0].attempts)
+    assert all((attempt.permission_decision == 'allowed' for attempt in result.tool_calls[0].attempts))
 
-
-@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+@pytest.mark.parametrize('facade_type', [Agent, AsyncAgent])
 def test_retry_exhaustion_is_bounded(tmp_path, facade_type):
     calls = 0
 
@@ -188,79 +132,44 @@ def test_retry_exhaustion_is_bounded(tmp_path, facade_type):
         """Always fail."""
         nonlocal calls
         calls += 1
-        raise RuntimeError("temporary")
-
-    facade = facade_type(
-        config=AgentConfig(project_root=tmp_path),
-        llm=FakeLLM([_tool_call("always_fails"), _final()]),
-        tools=[always_fails],
-        skills=[],
-    )
-
-    result = (asyncio.run(facade.run_result("run")) if facade_type is AsyncAgent else facade.run_result("run"))
-
+        raise RuntimeError('temporary')
+    facade = facade_type(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_tool_call('always_fails'), _final()]), tools=[always_fails], skills=[])
+    result = asyncio.run(facade.run_result('run')) if facade_type is AsyncAgent else facade.run_result('run')
     assert calls == 3
     assert len(result.tool_calls[0].attempts) == 3
     assert result.tool_calls[0].attempts[-1].retry_scheduled is False
 
-
-@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+@pytest.mark.parametrize('facade_type', [Agent, AsyncAgent])
 def test_invalid_output_can_be_explicitly_retried(tmp_path, facade_type):
     calls = 0
 
-    @Tool(
-        output_schema=OUTPUT_SCHEMA,
-        retry_policy=ToolRetryPolicy(max_attempts=2, retryable_failure_kinds=("invalid_output",)),
-        idempotent=True,
-    )
+    @Tool(output_schema=OUTPUT_SCHEMA, retry_policy=ToolRetryPolicy(max_attempts=2, retryable_failure_kinds=('invalid_output',)), idempotent=True)
     def eventually_valid() -> dict:
         """Return valid output after one invalid attempt."""
         nonlocal calls
         calls += 1
-        return {"count": "bad"} if calls == 1 else {"count": 1}
-
-    facade = facade_type(
-        config=AgentConfig(project_root=tmp_path),
-        llm=FakeLLM([_tool_call("eventually_valid"), _final()]),
-        tools=[eventually_valid],
-        skills=[],
-    )
-
-    result = (asyncio.run(facade.run_result("run")) if facade_type is AsyncAgent else facade.run_result("run"))
-
+        return {'count': 'bad'} if calls == 1 else {'count': 1}
+    facade = facade_type(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_tool_call('eventually_valid'), _final()]), tools=[eventually_valid], skills=[])
+    result = asyncio.run(facade.run_result('run')) if facade_type is AsyncAgent else facade.run_result('run')
     assert calls == 2
     assert result.tool_calls[0].success is True
-    assert result.tool_calls[0].attempts[0].failure_kind == "invalid_output"
+    assert result.tool_calls[0].attempts[0].failure_kind == 'invalid_output'
 
-
-@pytest.mark.parametrize("facade_type", [Agent, AsyncAgent])
+@pytest.mark.parametrize('facade_type', [Agent, AsyncAgent])
 def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path, facade_type):
     denied_calls = 0
 
-    @Tool(
-        requires_confirmation=True,
-        retry_policy=ToolRetryPolicy(max_attempts=3, retryable_failure_kinds=("user_blocked",)),
-        idempotent=True,
-    )
+    @Tool(requires_confirmation=True, retry_policy=ToolRetryPolicy(max_attempts=3, retryable_failure_kinds=('user_blocked',)), idempotent=True)
     def denied() -> str:
         """Must not run."""
         nonlocal denied_calls
         denied_calls += 1
-        return "unsafe"
-
-    denied_agent = facade_type(
-        config=AgentConfig(project_root=tmp_path / "denied", permission_profile="workspace-write"),
-        llm=FakeLLM([_tool_call("denied"), _final()]),
-        tools=[denied],
-        skills=[],
-        permission_callback=lambda request, record: False,
-    )
-    denied_result = (asyncio.run(denied_agent.run_result("run")) if facade_type is AsyncAgent else denied_agent.run_result("run"))
-
+        return 'unsafe'
+    denied_agent = facade_type(config=AgentConfig(project_root=tmp_path / 'denied', permission_profile='workspace-write'), llm=FakeLLM([_tool_call('denied'), _final()]), tools=[denied], skills=[], permission_callback=lambda request, record: False)
+    denied_result = asyncio.run(denied_agent.run_result('run')) if facade_type is AsyncAgent else denied_agent.run_result('run')
     assert denied_calls == 0
     assert len(denied_result.tool_calls[0].attempts) == 1
-    assert denied_result.tool_calls[0].attempts[0].permission_decision == "denied"
-
+    assert denied_result.tool_calls[0].attempts[0].permission_decision == 'denied'
     write_calls = 0
 
     @Tool(retry_policy=ToolRetryPolicy(max_attempts=3))
@@ -268,19 +177,11 @@ def test_permission_denial_and_non_idempotent_tools_are_never_retried(tmp_path, 
         """Fail without retrying."""
         nonlocal write_calls
         write_calls += 1
-        raise RuntimeError("failed")
-
-    write_agent = facade_type(
-        config=AgentConfig(project_root=tmp_path / "write"),
-        llm=FakeLLM([_tool_call("non_idempotent_write"), _final()]),
-        tools=[non_idempotent_write],
-        skills=[],
-    )
-    write_result = (asyncio.run(write_agent.run_result("run")) if facade_type is AsyncAgent else write_agent.run_result("run"))
-
+        raise RuntimeError('failed')
+    write_agent = facade_type(config=AgentConfig(project_root=tmp_path / 'write'), llm=FakeLLM([_tool_call('non_idempotent_write'), _final()]), tools=[non_idempotent_write], skills=[])
+    write_result = asyncio.run(write_agent.run_result('run')) if facade_type is AsyncAgent else write_agent.run_result('run')
     assert write_calls == 1
-    assert write_result.tool_calls[0].attempts[0].retry_disposition == "non_idempotent_guard"
-
+    assert write_result.tool_calls[0].attempts[0].retry_disposition == 'non_idempotent_guard'
 
 @pytest.mark.asyncio
 async def test_async_cancellation_is_not_converted_or_retried():
@@ -291,19 +192,14 @@ async def test_async_cancellation_is_not_converted_or_retried():
         """Wait until cancelled."""
         started.set()
         await asyncio.sleep(10)
-        return "late"
-
+        return 'late'
     registry = ToolRegistry()
     registry.register(cancellable)
-    task = asyncio.create_task(
-        registry.run_async("cancellable", {}, context=ToolExecutionContext())
-    )
+    task = asyncio.create_task(registry.run_async('cancellable', {}, context=ToolExecutionContext()))
     await started.wait()
     task.cancel()
-
     with pytest.raises(asyncio.CancelledError):
         await task
-
 
 @pytest.mark.asyncio
 async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
@@ -316,61 +212,40 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
         """Wait until cancelled."""
         started.set()
         await asyncio.Future()
-        raise AssertionError("unreachable")
+        raise AssertionError('unreachable')
 
     class Usage:
+
         async def reserve_tool_call(self, **_kwargs):
-            return SimpleNamespace(
-                id="reservation-1",
-                budget=SimpleNamespace(
-                    scope=SimpleNamespace(value="turn"),
-                ),
-                reserved_tool_calls=1,
-            )
+            return SimpleNamespace(id='reservation-1', budget=SimpleNamespace(scope=SimpleNamespace(value='turn')), reserved_tool_calls=1)
 
         async def release_tool_call(self, **_kwargs):
             nonlocal released
             released = True
-            raise RuntimeError("tool release failed")
+            raise RuntimeError('tool release failed')
 
     class Goal:
+
         def begin_tool(self, **_kwargs):
             return object()
 
         def finish_tool(self, _checkpoint, _result):
-            raise AssertionError("cancelled tools cannot finish")
+            raise AssertionError('cancelled tools cannot finish')
 
         def abort_tool(self, checkpoint, error):
             aborted.append(error)
             return checkpoint
-
     registry = ToolRegistry()
     registry.register(cancellable)
-    executor = ToolExecutor(
-        registry=registry,
-        permission_policy=ToolPermissionPolicy(),
-        permission_callback=None,
-        trace=lambda _name, _payload=None: None,
-        get_context=lambda _turn: None,
-        goal_execution=Goal(),
-        async_usage_accounting=Usage(),
-    )
-    task = asyncio.create_task(
-        executor.execute_async("cancellable", {}, TurnState("cancel"))
-    )
+    executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda _name, _payload=None: None, get_context=lambda _turn: None, goal_execution=Goal(), async_usage_accounting=Usage())
+    task = asyncio.create_task(executor.execute_async('cancellable', {}, TurnState('cancel')))
     await started.wait()
-
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as error:
         await task
-
     assert released
     assert aborted == [error.value]
-    assert any(
-        "tool release failed" in note
-        for note in getattr(error.value, "__notes__", ())
-    )
-
+    assert any(('tool release failed' in note for note in getattr(error.value, '__notes__', ())))
 
 @pytest.mark.asyncio
 async def test_async_durable_effect_cleanup_preserves_cancellation():
@@ -382,44 +257,29 @@ async def test_async_durable_effect_cleanup_preserves_cancellation():
         """Wait until cancelled."""
         started.set()
         await asyncio.Future()
-        raise AssertionError("unreachable")
+        raise AssertionError('unreachable')
 
     class DurableEffects:
+
         async def prepare_async(self, **_kwargs):
-            return "effect-1"
+            return 'effect-1'
 
         async def started_async(self, _token):
             return None
 
         async def failed_async(self, _token, error):
             failed_with.append(error)
-            raise RuntimeError("effect quarantine failed")
-
+            raise RuntimeError('effect quarantine failed')
     registry = ToolRegistry()
     registry.register(cancellable)
-    executor = ToolExecutor(
-        registry=registry,
-        permission_policy=ToolPermissionPolicy(),
-        permission_callback=None,
-        trace=lambda _name, _payload=None: None,
-        get_context=lambda _turn: ToolExecutionContext(),
-        durable_effects=DurableEffects(),
-    )
-    task = asyncio.create_task(
-        executor.execute_async("cancellable", {}, TurnState("cancel"))
-    )
+    executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda _name, _payload=None: None, get_context=lambda _turn: ToolExecutionContext(), durable_effects=DurableEffects())
+    task = asyncio.create_task(executor.execute_async('cancellable', {}, TurnState('cancel')))
     await started.wait()
-
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as error:
         await task
-
     assert failed_with == [error.value]
-    assert any(
-        "effect quarantine failed" in note
-        for note in getattr(error.value, "__notes__", ())
-    )
-
+    assert any(('effect quarantine failed' in note for note in getattr(error.value, '__notes__', ())))
 
 @pytest.mark.asyncio
 async def test_async_tool_flushes_authorization_before_dispatch():
@@ -431,81 +291,58 @@ async def test_async_tool_flushes_authorization_before_dispatch():
         """Perform one external side effect."""
         nonlocal tool_calls
         tool_calls += 1
-        return "done"
+        return 'done'
 
     async def reject_authorization_journal() -> None:
-        assert "tool_permission_decided" in trace_events
-        raise RuntimeError("authorization journal unavailable")
-
+        assert 'tool_permission_decided' in trace_events
+        raise RuntimeError('authorization journal unavailable')
     registry = ToolRegistry()
     registry.register(side_effect)
-    executor = ToolExecutor(
-        registry=registry,
-        permission_policy=ToolPermissionPolicy(),
-        permission_callback=None,
-        trace=lambda name, _payload=None: trace_events.append(name),
-        get_context=lambda _turn: None,
-        flush_async=reject_authorization_journal,
-    )
-
-    with pytest.raises(RuntimeError, match="authorization journal unavailable"):
-        await executor.execute_async(
-            "side_effect",
-            {},
-            TurnState("run side effect"),
-        )
-
+    executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda name, _payload=None: trace_events.append(name), get_context=lambda _turn: None, flush_async=reject_authorization_journal)
+    with pytest.raises(RuntimeError, match='authorization journal unavailable'):
+        await executor.execute_async('side_effect', {}, TurnState('run side effect'))
     assert tool_calls == 0
 
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decision", ["missing-grants", "no-hook", "allow", "deny", "deny-reason"])
+@pytest.mark.parametrize('decision', ['missing-grants', 'no-hook', 'allow', 'deny', 'deny-reason'])
 async def test_authorization_events_match_across_transports(decision):
     from dataclasses import replace
     from chulk.hosting import ExecutionScope
     from chulk.tools.policy import ToolAuthorization, ToolPolicy, ToolPolicyHooks
-
     runs = []
     for asynchronous in (False, True):
         calls = []
         events = []
 
         def authorize(*args):
-            calls.append("authorize")
-            return ToolAuthorization(False, "host reason") if decision == "deny-reason" else decision == "allow"
+            calls.append('authorize')
+            return ToolAuthorization(False, 'host reason') if decision == 'deny-reason' else decision == 'allow'
 
         def credentials(*args):
-            calls.append("credentials")
+            calls.append('credentials')
             return {}
 
-        @Tool(policy=ToolPolicy(required_grants=frozenset({"read"})))
+        @Tool(policy=ToolPolicy(required_grants=frozenset({'read'})))
         def lookup() -> str:
             """Look up one value."""
-            calls.append("execute")
-            return "ok"
-
+            calls.append('execute')
+            return 'ok'
         registry = ToolRegistry()
         registry.register(lookup)
-        executor = ToolExecutor(
-            registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None,
-            trace=lambda event, payload: events.append((event, payload)),
-            get_context=lambda turn: ToolExecutionContext(),
-            execution_scope=replace(ExecutionScope.local(), grants=frozenset() if decision == "missing-grants" else frozenset({"read"})),
-            policy_hooks=None if decision == "no-hook" else ToolPolicyHooks(authorize=authorize, resolve_credentials=credentials),
-        )
-        turn = TurnState("lookup", turn_id="turn")
-        result = await executor.execute_async("lookup", {}, turn) if asynchronous else executor.execute("lookup", {}, turn)
-        authorization_events = [(event, payload) for event, payload in events if event.startswith("tool_authorization_")]
-        assert [event for event, _ in authorization_events] == ["tool_authorization_requested", "tool_authorization_decided"]
-        allowed = decision in {"allow", "no-hook"}
+        executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda event, payload: events.append((event, payload)), get_context=lambda turn: ToolExecutionContext(), execution_scope=replace(ExecutionScope.local(), grants=frozenset() if decision == 'missing-grants' else frozenset({'read'})), policy_hooks=None if decision == 'no-hook' else ToolPolicyHooks(authorize=authorize, resolve_credentials=credentials))
+        turn = TurnState('lookup', turn_id='turn')
+        result = await executor.execute_async('lookup', {}, turn) if asynchronous else executor.execute('lookup', {}, turn)
+        authorization_events = [(event, payload) for event, payload in events if event.startswith('tool_authorization_')]
+        assert [event for event, _ in authorization_events] == ['tool_authorization_requested', 'tool_authorization_decided']
+        allowed = decision in {'allow', 'no-hook'}
         assert result.success is allowed
-        assert authorization_events[-1][1]["decision"] == ("allow" if allowed else "deny")
+        assert authorization_events[-1][1]['decision'] == ('allow' if allowed else 'deny')
         if not allowed:
-            assert "credentials" not in calls and "execute" not in calls
-            assert result.error == "authorization_denied"
-            assert len(result.metadata["attempt_history"]) == 1
-        if decision == "deny":
-            assert authorization_events[-1][1]["reason"] == ""
-            assert result.metadata["reason"] == "tool call denied by host authorizer"
+            assert 'credentials' not in calls and 'execute' not in calls
+            assert result.error == 'authorization_denied'
+            assert len(result.metadata['attempt_history']) == 1
+        if decision == 'deny':
+            assert authorization_events[-1][1]['reason'] == ''
+            assert result.metadata['reason'] == 'tool call denied by host authorizer'
         runs.append((calls, authorization_events, result.observation, result.failure_kind))
     assert runs[0] == runs[1]
