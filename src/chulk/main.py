@@ -89,6 +89,19 @@ from chulk.usage import ExactCost, RunBudget, UsageDimensions
 from chulk.usage import UsageLedger
 
 
+_PROVIDER_SPEC_TYPES: dict[str, Callable[..., BindableLLM]] = {
+    "openai": OpenAIProvider,
+    "deepseek": DeepSeekProvider,
+    "moonshot": MoonshotProvider,
+    "local": LocalProvider,
+    "openai-compatible": OpenAICompatibleProvider,
+    "openrouter": OpenRouterProvider,
+    "anthropic": AnthropicProvider,
+    "bedrock": BedrockProvider,
+    "gemini": GeminiProvider,
+}
+
+
 def format_config(config: Config) -> str:
     """Format non-secret configuration values for terminal output."""
     values = {
@@ -346,36 +359,12 @@ def create_cli_llm(config: Config) -> FallbackChain:
 def _create_provider_spec(
     provider: str,
     model: str,
-) -> (
-    OpenAIProvider
-    | DeepSeekProvider
-    | MoonshotProvider
-    | LocalProvider
-    | OpenAICompatibleProvider
-    | OpenRouterProvider
-    | AnthropicProvider
-    | BedrockProvider
-    | GeminiProvider
-):
-    if provider == "openai":
-        return OpenAIProvider(model=model)
-    if provider == "deepseek":
-        return DeepSeekProvider(model=model)
-    if provider == "moonshot":
-        return MoonshotProvider(model=model)
-    if provider == "local":
-        return LocalProvider(model=model)
-    if provider == "openai-compatible":
-        return OpenAICompatibleProvider(model=model)
-    if provider == "openrouter":
-        return OpenRouterProvider(model=model)
-    if provider == "anthropic":
-        return AnthropicProvider(model=model)
-    if provider == "bedrock":
-        return BedrockProvider(model=model)
-    if provider == "gemini":
-        return GeminiProvider(model=model)
-    raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}")
+) -> BindableLLM:
+    try:
+        provider_type = _PROVIDER_SPEC_TYPES[provider]
+    except KeyError as exc:
+        raise LLMConfigurationError(f"Unsupported CLI LLM provider: {provider}") from exc
+    return provider_type(model=model)
 
 
 def _format_fallback_providers(config: Config) -> str:

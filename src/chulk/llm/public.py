@@ -52,8 +52,38 @@ class BindableLLM(Protocol):
         """Return a configured LLM client."""
 
 
+class _ProviderSpec:
+    """Shared binding for declarative provider dataclasses."""
+
+    model: str
+    api_key: str | None
+    provider: str
+    timeout_seconds: float | None
+    max_retries: int | None
+
+    def bind_config(self, config: "Config") -> LLMClient:
+        local_context_window_tokens = None
+        if hasattr(self, "context_window_tokens"):
+            context_window = getattr(self, "context_window_tokens")
+            local_context_window_tokens = (
+                context_window
+                if context_window is not None
+                else config.local_context_window_tokens
+            )
+        return _bind_llm_client(
+            config,
+            provider=self.provider,
+            model=self.model,
+            api_key=self.api_key,
+            base_url=getattr(self, "base_url", None),
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+            local_context_window_tokens=local_context_window_tokens,
+        )
+
+
 @dataclass(frozen=True)
-class OpenAIProvider:
+class OpenAIProvider(_ProviderSpec):
     """OpenAI provider spec for the public API."""
 
     model: str
@@ -62,19 +92,10 @@ class OpenAIProvider:
     max_retries: int | None = None
     provider: str = "openai"
 
-    def bind_config(self, config: "Config") -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class DeepSeekProvider:
+class DeepSeekProvider(_ProviderSpec):
     """DeepSeek provider spec for the public API."""
 
     model: str
@@ -84,20 +105,10 @@ class DeepSeekProvider:
     max_retries: int | None = None
     provider: str = "deepseek"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class MoonshotProvider:
+class MoonshotProvider(_ProviderSpec):
     """Moonshot AI provider spec for the public API."""
 
     model: str
@@ -107,20 +118,10 @@ class MoonshotProvider:
     max_retries: int | None = None
     provider: str = "moonshot"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class LocalProvider:
+class LocalProvider(_ProviderSpec):
     """Local OpenAI-compatible provider spec for the public API."""
 
     model: str
@@ -131,25 +132,10 @@ class LocalProvider:
     max_retries: int | None = None
     provider: str = "local"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-            local_context_window_tokens=(
-                self.context_window_tokens
-                if self.context_window_tokens is not None
-                else config.local_context_window_tokens
-            ),
-        )
 
 
 @dataclass(frozen=True)
-class OpenAICompatibleProvider:
+class OpenAICompatibleProvider(_ProviderSpec):
     """User-selected hosted OpenAI-compatible provider spec."""
 
     model: str
@@ -159,20 +145,10 @@ class OpenAICompatibleProvider:
     max_retries: int | None = None
     provider: str = "openai-compatible"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class OpenRouterProvider:
+class OpenRouterProvider(_ProviderSpec):
     """OpenRouter provider spec for the public API."""
 
     model: str
@@ -182,20 +158,10 @@ class OpenRouterProvider:
     max_retries: int | None = None
     provider: str = "openrouter"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class AnthropicProvider:
+class AnthropicProvider(_ProviderSpec):
     """Anthropic provider spec for the public API."""
 
     model: str
@@ -205,20 +171,10 @@ class AnthropicProvider:
     max_retries: int | None = None
     provider: str = "anthropic"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class BedrockProvider:
+class BedrockProvider(_ProviderSpec):
     """AWS Bedrock OpenAI-compatible provider spec for the public API."""
 
     model: str
@@ -228,20 +184,10 @@ class BedrockProvider:
     max_retries: int | None = None
     provider: str = "bedrock"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
-class GeminiProvider:
+class GeminiProvider(_ProviderSpec):
     """Google Gemini provider spec for the public API."""
 
     model: str
@@ -251,16 +197,6 @@ class GeminiProvider:
     max_retries: int | None = None
     provider: str = "gemini"
 
-    def bind_config(self, config: Config) -> LLMClient:
-        return _bind_llm_client(
-            config,
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries,
-        )
 
 
 @dataclass(frozen=True)
@@ -602,13 +538,9 @@ class FallbackChain(LLMClient):
             provider_name, model = _provider_identity(provider)
             if not self._provider_is_available(provider):
                 attempt = ProviderAttempt(
-                    provider_name,
-                    model,
-                    False,
-                    0.0,
+                    provider_name, model, False, 0.0,
                     error="provider skipped by circuit breaker",
-                    error_code="circuit_open",
-                    retryable=False,
+                    error_code="circuit_open", retryable=False,
                     fallback_eligible=True,
                     model_profile_id=getattr(provider, "model_profile_id", None),
                 )
@@ -864,9 +796,13 @@ class FallbackChain(LLMClient):
             provider_name, model = _provider_identity(provider)
             if not self._provider_is_available(provider):
                 attempt = ProviderAttempt(
-                    provider_name, model, False, 0.0,
+                    provider_name,
+                    model,
+                    False,
+                    0.0,
                     error="provider skipped by circuit breaker",
-                    error_code="circuit_open", retryable=False,
+                    error_code="circuit_open",
+                    retryable=False,
                     fallback_eligible=True,
                     model_profile_id=getattr(provider, "model_profile_id", None),
                 )
