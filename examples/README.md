@@ -6,9 +6,11 @@ applications and local automation. A useful progression is:
 1. Run `00_sdk_quickstart.py` for a deterministic tool-call loop with
    host-owned application data.
 2. Run `repo_review_bot/app.py` for a complete read-only embedded application.
-3. Choose a numbered live-provider example for the specific SDK contract you
+3. Run `grounded_assistant/app.py` for host-scoped source lookup and checked
+   citation IDs.
+4. Choose a numbered live-provider example for the specific SDK contract you
    want to learn.
-4. Move to `hosted_runtime/` only when you need tenant-scoped persistence,
+5. Move to `hosted_runtime/` only when you need tenant-scoped persistence,
    parent-child work, or recovery contracts.
 
 Run the credential-free scripts from the repository root:
@@ -16,6 +18,7 @@ Run the credential-free scripts from the repository root:
 ```bash
 python examples/00_sdk_quickstart.py
 python examples/repo_review_bot/app.py
+python examples/grounded_assistant/app.py
 python examples/hosted_runtime/hosted_app.py
 python examples/hosted_runtime/parent_child_app.py
 python examples/hosted_runtime/resilience_contract.py
@@ -81,6 +84,9 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `00_sdk_quickstart.py` injects a host-owned order store into a validated tool
   call, is deterministic by default, and supports explicit live-provider opt-in.
 - `repo_review_bot/app.py` is a complete deterministic, read-only embedded application with a scrubbed trace walkthrough.
+- `grounded_assistant/app.py` injects already-authorized fictional sources,
+  performs exact-ID read-only retrieval, and rejects unknown or unretrieved
+  citation IDs.
 - `hosted_runtime/hosted_app.py` proves sync and async tenant-scoped embedding with in-memory services and zero local runtime files.
 - `hosted_runtime/parent_child_app.py` runs bounded durable child work, ordered
   progress, parent aggregation, and exactly-once completion delivery entirely

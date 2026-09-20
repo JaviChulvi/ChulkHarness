@@ -94,6 +94,10 @@ store is application-owned data injected through `ToolContext`. From a source
 checkout, run `python examples/00_sdk_quickstart.py` for the same pattern with
 an explicit scripted-or-live switch and isolated example state.
 
+Continue with the [grounded assistant starter](../examples/grounded_assistant/README.md)
+to restrict exact-ID retrieval to host-scoped sources and reject citations that
+were not retrieved during the run.
+
 Both paths default to `chulk.testing.ScriptedLLMClient`, so they need no API
 key, provider account, or network connection. The scripted client makes the
 model decisions repeatable; Chulk still validates the request, executes the
