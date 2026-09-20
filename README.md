@@ -9,6 +9,7 @@ who want an inspectable runtime and a small embedding API.
 - New SDK user: [credential-free quickstart](docs/quickstart.md)
 - Embedding an application: [documentation index](docs/index.md)
 - Runnable patterns: [SDK examples](examples/README.md)
+- Source-grounded embedding: [grounded assistant starter](examples/grounded_assistant/README.md)
 - Testing an agent: [evaluation framework](docs/evals.md)
 - Talking to a server agent from a phone: [Telegram adapter](docs/telegram.md)
 - Project direction: [roadmap](TODO.md)
@@ -72,7 +73,8 @@ with Agent(
 
 See the [SDK quickstart](examples/00_sdk_quickstart.py) and
 [repository-review application](examples/repo_review_bot/README.md) for complete
-runnable examples.
+runnable examples. For host-scoped evidence lookup and checked source IDs, see
+the [grounded assistant starter](examples/grounded_assistant/README.md).
 
 Create a credential-free evaluation suite with `chulk eval init`, run it with
 `chulk eval run evals/suite.py:suite`, and enforce explicit quality thresholds
