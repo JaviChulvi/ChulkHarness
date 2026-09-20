@@ -589,6 +589,8 @@ def main(
             json_output=args.json_output,
             output_path=getattr(args, "output", None),
             force=bool(getattr(args, "force", False)),
+            export_format=getattr(args, "format", "html"),
+            acknowledge_sensitive_data=bool(getattr(args, "acknowledge_sensitive_data", False)),
             max_bytes=getattr(args, "max_bytes", None),
             max_events=getattr(args, "max_events", None),
             unbounded=bool(getattr(args, "unbounded", False)),

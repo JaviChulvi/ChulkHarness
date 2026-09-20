@@ -571,18 +571,22 @@ def export_replay_fixture(
         trace,
         acknowledge_sensitive_data=acknowledge_sensitive_data,
     )
+    return _publish_replay_fixture(fixture, output_path, trace.path, overwrite)
+
+
+def _publish_replay_fixture(
+    fixture: ReplayFixture, output_path: Path | str, source_path: Path, overwrite: bool,
+) -> Path:
     destination = Path(output_path).expanduser().absolute()
-    if destination.resolve() == trace.path.resolve():
-        raise ReplayFixtureError(
-            "Replay fixture output cannot overwrite the source trace",
-            fixture_path=destination,
-        )
     try:
+        if destination.resolve() == source_path.resolve():
+            raise ValueError("Replay fixture output cannot overwrite the source trace")
         return write_private_text(
             destination,
             fixture.to_json(),
             overwrite=overwrite,
             private_parent=False,
+            atomic=True,
         )
     except (FileExistsError, OSError, ValueError) as exc:
         raise ReplayFixtureError(

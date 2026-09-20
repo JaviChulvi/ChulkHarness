@@ -23,7 +23,7 @@ from chulk.core import Agent
 from chulk.errors import ChulkError
 from chulk.llm import LLMConfigurationError, LLMError
 from chulk.tools.permissions import PermissionDecision
-from chulk.tracing.execution import execute_replay_fixture
+from chulk.tracing.execution import execute_replay_fixture, export_verified_replay_fixture
 from chulk.tracing.fixtures import load_replay_fixture
 
 
@@ -183,6 +183,8 @@ def run_trace_command(
     json_output: bool,
     output_path: Path | str | None,
     force: bool,
+    export_format: str = "html",
+    acknowledge_sensitive_data: bool = False,
     max_bytes: int | None = None,
     max_events: int | None = None,
     unbounded: bool = False,
@@ -235,6 +237,16 @@ def run_trace_command(
             return EXIT_OK
         if command != "export":
             raise ValueError(f"Unknown trace command: {command}")
+        if export_format == "replay-fixture":
+            destination, replay_report = export_verified_replay_fixture(
+                path, output_path, acknowledge_sensitive_data=acknowledge_sensitive_data,
+                overwrite=force, max_bytes=max_bytes, max_events=max_events, unbounded=unbounded,
+            )
+            payload = {"ok": True, "status": "exported", "format": "replay-fixture",
+                       "output_path": str(destination), "verified_executable": True,
+                       "matched": True, "recorded_status": replay_report.actual["result"]["status"]}
+            output_func(json_text(payload) if json_output else f"Replay fixture exported to {destination}")
+            return EXIT_OK
         destination = export_trace_html(
             path,
             output_path=output_path,
