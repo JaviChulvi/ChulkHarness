@@ -116,6 +116,23 @@ def test_trace_export_writes_private_round_trippable_fixture(tmp_path: Path) -> 
     with pytest.raises(ReplayFixtureError, match='already exists'):
         export_replay_fixture(trace, output, acknowledge_sensitive_data=True)
 
+def test_fixture_export_translates_embedded_nul_path_error(tmp_path: Path) -> None:
+    trace = _write_trace(tmp_path / 'source.jsonl', [_event('parsed_action', {'type': 'final_answer', 'request_index': 1}), _event('final_answer', {'content': 'answer'})])
+    with pytest.raises(ReplayFixtureError, match='embedded null byte'):
+        export_replay_fixture(trace, tmp_path / 'fixture\0ignored.json', acknowledge_sensitive_data=True)
+    assert not (tmp_path / 'fixture').exists()
+
+def test_fixture_force_overwrite_is_rejected(tmp_path: Path) -> None:
+    trace = _write_trace(tmp_path / 'source.jsonl', [_event('parsed_action', {'type': 'final_answer', 'request_index': 1}), _event('final_answer', {'content': 'replacement'})])
+    output = tmp_path / 'fixture.json'
+    output.write_text('preserve existing fixture', encoding='utf-8')
+
+    with pytest.raises(ReplayFixtureError, match='does not replace'):
+        export_replay_fixture(trace, output, acknowledge_sensitive_data=True, overwrite=True)
+
+    assert output.read_text(encoding='utf-8') == 'preserve existing fixture'
+    assert not list(tmp_path.glob('.fixture.json.*.tmp'))
+
 @pytest.mark.skipif(os.name != 'posix', reason='symlink behavior')
 def test_fixture_loader_rejects_symlink_target(tmp_path: Path) -> None:
     target = tmp_path / 'fixture.json'

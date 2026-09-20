@@ -84,6 +84,28 @@ Python suite reference such as `suite: my_project.evals:suite`.
 - `live` uses the target factory's provider. It requires `max_total_cost`;
   unknown pricing requires `EvalSafetyPolicy(allow_unknown_cost=True)`.
 
+To preserve a failed run as an executable regression, export and verify the
+fixture first:
+
+```bash
+chulk trace export .chulk/traces/failed-run.jsonl \
+  --format replay-fixture --output evals/failed-run.replay.json \
+  --acknowledge-sensitive-data
+chulk trace replay --execute-fixture evals/failed-run.replay.json --json
+```
+
+Then reference it from a dataset in the same directory:
+
+```json
+{"schema_version":1,"id":"recorded-failure","turns":[{"input":"Replay recorded run"}],"reference":{"status":"failed"},"replay_fixture":"failed-run.replay.json"}
+```
+
+Set the suite's `mode=EvaluationMode.REPLAY`. Replay fixture paths are resolved
+relative to the dataset and cannot leave that directory. A matched replay of a
+recorded `failed` result proves behavioral equivalence; it is not reported as
+a successful agent run. Fixture export redacts known sensitive forms, but the
+source and derived fixture still require review before sharing.
+
 Built-in graders cover exact/contained/regex/JSON answers, status and errors,
 tool calls, arguments, results and failures, ordered event milestones, skills, memories, plans,
 latency, tokens, and cost. `CallableGrader` accepts application checks.

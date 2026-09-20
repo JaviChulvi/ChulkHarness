@@ -933,13 +933,14 @@ def _add_trace_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_trace_limits(replay_parser)
     export_parser = trace_subparsers.add_parser("export", help="Export a trace report.")
     export_parser.add_argument("path", help="Path to a Chulk JSONL trace.")
-    export_parser.add_argument("--format", choices=("html",), default="html")
+    export_parser.add_argument("--format", choices=("html", "replay-fixture"), default="html")
     export_parser.add_argument(
         "--output", help="Destination path (defaults beside the trace)."
     )
     export_parser.add_argument(
-        "--force", action="store_true", help="Replace an existing destination."
+        "--force", action="store_true", help="Replace an existing HTML destination."
     )
+    export_parser.add_argument("--acknowledge-sensitive-data", action="store_true", help="Acknowledge that replay fixtures derive from sensitive raw traces.")
     export_parser.add_argument(
         "--json", action="store_true", dest="json_output", help="Emit structured JSON."
     )

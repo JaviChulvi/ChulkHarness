@@ -2,11 +2,13 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
 from typing import Any
 import pytest
+import chulk.storage.private_files as private_files
 from chulk.capabilities import ToolRetryPolicy
 from tests.core_agent import build_core_agent as Agent
 from chulk.llm import LLMClient
@@ -17,6 +19,10 @@ from chulk.tracing import JSONLTraceLogger, ReplayFixture, Trace
 from chulk.tracing.execution import execute_replay_fixture, execute_replay_fixture_async
 
 def _capture_fixture(tmp_path: Path, client: LLMClient, *, registry: ToolRegistry | None=None, max_reflection_attempts: int=0, planned: bool=False) -> ReplayFixture:
+    trace_path = _capture_trace(tmp_path, client, registry=registry, max_reflection_attempts=max_reflection_attempts, planned=planned)
+    return ReplayFixture.from_trace(Trace.from_jsonl(trace_path), acknowledge_sensitive_data=True)
+
+def _capture_trace(tmp_path: Path, client: LLMClient, *, registry: ToolRegistry | None=None, max_reflection_attempts: int=0, planned: bool=False) -> Path:
     logger = JSONLTraceLogger(tmp_path / 'traces', 'golden')
     agent = Agent(client, trace_logger=logger, tool_registry=registry, max_reflection_attempts=max_reflection_attempts)
     if planned:
@@ -25,7 +31,7 @@ def _capture_fixture(tmp_path: Path, client: LLMClient, *, registry: ToolRegistr
     else:
         agent.run_turn('Perform the recorded work.')
     agent.close()
-    return ReplayFixture.from_trace(Trace.from_jsonl(logger.path), acknowledge_sensitive_data=True)
+    return logger.path
 
 def _tool_registry(result_factory, *, retry_policy: ToolRetryPolicy | None=None) -> ToolRegistry:
     registry = ToolRegistry()
@@ -156,6 +162,113 @@ def test_cli_executes_fixture_while_diagnostic_replay_remains_separate(tmp_path:
     assert payload['mode'] == 'executable_fixture'
     assert payload['offline'] is True
     assert payload['executed'] is True
+
+def test_cli_exports_failed_recorded_run_as_verified_executable_fixture(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    trace_path = _capture_trace(tmp_path, ScriptedLLMClient([_tool_action()]), registry=_tool_registry(lambda _arguments: ToolResult(tool_name='lookup', success=False, observation='Blocked destructive request.', error='destructive_command', failure_kind=ToolFailureKind.FATAL_SAFETY)))
+    fixture_path = tmp_path / 'failed-run.replay.json'
+    built: list[ReplayFixture] = []
+    original_from_trace = ReplayFixture.from_trace.__func__
+
+    def record_fixture(cls: type[ReplayFixture], *args: Any, **kwargs: Any) -> ReplayFixture:
+        fixture = original_from_trace(cls, *args, **kwargs)
+        built.append(fixture)
+        return fixture
+
+    monkeypatch.setattr(ReplayFixture, 'from_trace', classmethod(record_fixture))
+
+    exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--acknowledge-sensitive-data', '--json'])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload['format'] == 'replay-fixture'
+    assert payload['verified_executable'] is True
+    assert payload['matched'] is True
+    assert payload['recorded_status'] == 'failed'
+    assert fixture_path.is_file()
+    assert len(built) == 1
+    report = execute_replay_fixture(ReplayFixture.from_dict(json.loads(fixture_path.read_text(encoding='utf-8'))))
+    assert report.ok is True
+    assert report.actual['result']['status'] == 'failed'
+
+def test_cli_fixture_export_requires_acknowledgement_and_redacts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    secret = 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkdW1teS11c2VyIn0.ZHVtbXktc2lnbmF0dXJl'
+    trace_path = _capture_trace(tmp_path, ScriptedLLMClient([{'type': 'tool_call', 'tool_name': 'lookup', 'arguments': {'query': secret}}, {'type': 'final_answer', 'content': 'Recorded answer.'}]), registry=_tool_registry(lambda _arguments: ToolResult(tool_name='lookup', success=True, observation=secret)))
+    fixture_path = tmp_path / 'sensitive.replay.json'
+
+    denied = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--json'])
+    denied_payload = json.loads(capsys.readouterr().out)
+    exported = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--acknowledge-sensitive-data', '--json'])
+    capsys.readouterr()
+
+    assert denied == 1
+    assert 'explicit sensitive-data acknowledgement' in denied_payload['error']
+    assert exported == 0
+    assert secret not in fixture_path.read_text(encoding='utf-8')
+    assert '[redacted]' in fixture_path.read_text(encoding='utf-8')
+
+@pytest.mark.parametrize(('payload', 'message'), [({'type': 'turn_started', 'payload': {}}, 'no parsed model actions'), ({'type': 'parsed_action', 'payload': {'type': 'unsupported'}}, 'model action type must be one of')])
+def test_cli_fixture_export_rejects_missing_or_unsupported_evidence(tmp_path: Path, capsys: pytest.CaptureFixture[str], payload: dict[str, Any], message: str) -> None:
+    trace_path = tmp_path / 'unsupported.jsonl'
+    trace_path.write_text(json.dumps({'schema_version': 1, 'conversation_id': 'unsupported', 'timestamp': '2026-01-01T00:00:00+00:00', **payload}) + '\n', encoding='utf-8')
+    fixture_path = tmp_path / 'unsupported.replay.json'
+
+    exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--acknowledge-sensitive-data', '--json'])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert message in result['error']
+    assert not fixture_path.exists()
+
+def test_cli_fixture_export_rejects_missing_tool_observation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    trace_path = tmp_path / 'missing-observation.jsonl'
+    records = [
+        {'schema_version': 1, 'conversation_id': 'missing', 'timestamp': '2026-01-01T00:00:00+00:00', 'type': 'parsed_action', 'payload': {**_tool_action(), 'request_index': 1}},
+        {'schema_version': 1, 'conversation_id': 'missing', 'timestamp': '2026-01-01T00:00:01+00:00', 'type': 'tool_call_completed', 'payload': {'tool_name': 'lookup', 'iteration': 1, 'success': True}},
+    ]
+    trace_path.write_text('\n'.join(json.dumps(record) for record in records) + '\n', encoding='utf-8')
+    fixture_path = tmp_path / 'missing-observation.replay.json'
+
+    exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--acknowledge-sensitive-data', '--json'])
+    result = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert 'missing its model observation' in result['error']
+    assert not fixture_path.exists()
+
+@pytest.mark.skipif(os.name != 'posix', reason='symlink behavior')
+def test_cli_fixture_export_rejects_unsafe_output_and_overwrite(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    trace_path = _capture_trace(tmp_path, ScriptedLLMClient([{'type': 'final_answer', 'content': 'Recorded answer.'}]))
+    fixture_path = tmp_path / 'existing.replay.json'
+    fixture_path.write_text('preserved', encoding='utf-8')
+    linked_path = tmp_path / 'linked.replay.json'
+    linked_path.symlink_to(fixture_path)
+
+    for output_path in (fixture_path, linked_path, trace_path):
+        exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(output_path), '--acknowledge-sensitive-data', '--json'])
+        result = json.loads(capsys.readouterr().out)
+        assert exit_code == 1
+        assert result['status'] == 'trace_error'
+
+    for output_path in (linked_path, trace_path):
+        exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(output_path), '--acknowledge-sensitive-data', '--force', '--json'])
+        result = json.loads(capsys.readouterr().out)
+        assert exit_code == 1
+        assert result['status'] == 'trace_error'
+
+    assert fixture_path.read_text(encoding='utf-8') == 'preserved'
+
+def test_cli_fixture_export_reports_unsupported_filesystem_as_json(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    trace_path = _capture_trace(tmp_path, ScriptedLLMClient([{'type': 'final_answer', 'content': 'Recorded answer.'}]))
+    fixture_path = tmp_path / 'unsupported.replay.json'
+
+    monkeypatch.setattr(private_files, '_require_atomic_primitives', lambda: (_ for _ in ()).throw(TypeError('dir_fd unavailable')))
+    exit_code = main(['trace', 'export', str(trace_path), '--format', 'replay-fixture', '--output', str(fixture_path), '--acknowledge-sensitive-data', '--json'])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload['status'] == 'trace_error'
+    assert 'unsupported' in payload['error']
+    assert not fixture_path.exists()
 
 def test_cli_rejects_unbounded_fixture_execution(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     fixture = _capture_fixture(tmp_path, ScriptedLLMClient([{'type': 'final_answer', 'content': 'Bounded replay.'}]))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from chulk.core.action_loop import run_action_loop, run_action_loop_async
@@ -23,8 +24,10 @@ from chulk.tracing.fixtures import (
     RecordedToolResult,
     ReplayFixture,
     ReplayFixtureError,
+    _publish_replay_fixture,
     normalize_replay_value,
 )
+from chulk.tracing.reader import Trace
 
 
 _CORE_EVENT_TYPES = frozenset(
@@ -434,6 +437,18 @@ def execute_replay_fixture(fixture: ReplayFixture) -> ReplayExecutionReport:
     runtime = _build_runtime(fixture)
     _run(runtime, asynchronous=False)
     return _report(runtime, asynchronous=False)
+
+
+def export_verified_replay_fixture(
+    trace_path: str | Path, output_path: str | Path | None, *, acknowledge_sensitive_data: bool, overwrite: bool = False,
+    max_bytes: int | None = None, max_events: int | None = None, unbounded: bool = False) -> tuple[Path, ReplayExecutionReport]:
+    trace = Trace.from_jsonl(trace_path, max_bytes=max_bytes, max_events=max_events, unbounded=unbounded)
+    fixture = ReplayFixture.from_trace(trace, acknowledge_sensitive_data=acknowledge_sensitive_data)
+    report = execute_replay_fixture(fixture)
+    if not report.ok:
+        raise ReplayFixtureError("Replay fixture is not executable: " + ", ".join(report.mismatches))
+    return (_publish_replay_fixture(fixture, output_path or trace.path.with_suffix(".replay.json"),
+                                    trace.path, overwrite), report)
 
 
 async def execute_replay_fixture_async(

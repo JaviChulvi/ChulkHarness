@@ -121,6 +121,10 @@ chulk trace inspect .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl
 chulk trace replay .chulk/traces/<conversation-id>.jsonl --json
 chulk trace export .chulk/traces/<conversation-id>.jsonl --format html
+chulk trace export .chulk/traces/<conversation-id>.jsonl \
+  --format replay-fixture --output evals/failed.replay.json \
+  --acknowledge-sensitive-data
+chulk trace replay --execute-fixture evals/failed.replay.json --json
 chulk trace inspect .chulk/traces/<conversation-id>.jsonl --max-events 50000
 chulk trace inspect .chulk/traces/<conversation-id>.jsonl --unbounded
 ```
@@ -138,6 +142,24 @@ or accesses the network, and it does not modify the source trace. This is
 diagnostic reconstruction, not executable regression replay. `export` writes
 an escaped, self-contained HTML report with the same inventory but never
 embeds artifact content.
+
+The `replay-fixture` export turns a recorded run into a versioned, offline
+regression fixture. It requires `--acknowledge-sensitive-data`, validates that
+the trace contains supported model actions and required tool observations,
+and executes the candidate through the real offline replay boundary before
+writing it. Missing or unsupported evidence fails without creating a fixture.
+Existing destinations are rejected; `--force` is not supported for replay
+fixtures. The default destination is `<trace-name>.replay.json` beside the
+trace. Atomic fixture publication currently requires Linux `O_TMPFILE`,
+`linkat(AT_EMPTY_PATH)`, and directory-descriptor support; unsupported platforms
+fail closed without writing.
+
+A replay report with `status: matched` means the recorded behavior was
+reproduced. It does not mean the recorded run succeeded: a fixture whose
+`actual.result.status` is `failed` is a valid regression when that failure is
+matched. Fixture export applies the shared redactor, but acknowledgement is
+still required because redaction cannot establish that arbitrary sensitive
+data is absent. Review and scrub fixtures before committing or sharing them.
 
 Command output can repeat sensitive content from the trace and must receive the
 same handling as the source file.

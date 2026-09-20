@@ -284,7 +284,7 @@ These stories are ordered after the maintenance tranche above.
 - [ ] Include all stable request, context, memory, skill, permission, tool,
   output, final-answer, error, usage, and cost evidence in inspect/export views.
 - [ ] Read full truncated-output artifacts safely from trace metadata.
-- [ ] Add trace-based and golden action-loop regression replay.
+- [x] Add trace-based and golden action-loop regression replay.
 - [ ] Keep raw traces explicitly sensitive and unstable where appropriate.
 
 ### US-N2: Add A Sandbox And Richer Permission Policy
