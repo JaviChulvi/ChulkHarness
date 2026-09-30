@@ -92,7 +92,7 @@ def public_api_smoke_source() -> str:
     return textwrap.dedent(
         """
         import importlib.util
-        from importlib.metadata import metadata, version
+        from importlib.metadata import distribution, metadata, version
         import os
         from pathlib import Path
 
@@ -131,10 +131,11 @@ def public_api_smoke_source() -> str:
         source_root = Path(os.environ["CHULK_SMOKE_SOURCE_ROOT"]).resolve()
         assert not package_root.is_relative_to(source_root)
         assert (package_root / "py.typed").is_file()
-        eval_dashboard = package_root / "server" / "eval_dashboard"
-        assert (eval_dashboard / "index.html").is_file()
-        assert (eval_dashboard / "evals.css").is_file()
-        assert (eval_dashboard / "evals.js").is_file()
+        for retired_view in ("webchat", "dashboard", "eval_dashboard"):
+            assert not (package_root / "server" / retired_view).exists()
+        for retired_module in ("chulk.authoring", "chulk.plugins", "chulk.discord", "chulk.skills.publication", "chulk.cli.plugins"):
+            assert importlib.util.find_spec(retired_module) is None
+        assert not any(entry.name == "chulk-discord" for entry in distribution("chulkharness").entry_points)
 
         package_metadata = metadata("chulkharness")
         assert package_metadata["Name"] == "chulkharness"
@@ -145,9 +146,9 @@ def public_api_smoke_source() -> str:
         assert importlib.util.find_spec("chulk.tests") is None
         assert importlib.util.find_spec("chulk.tui") is None
         assert importlib.util.find_spec("chulk.cli.tui") is None
-        assert "tui" not in (package_metadata.get_all("Provides-Extra") or [])
+        assert not {"tui", "discord"}.intersection(package_metadata.get_all("Provides-Extra") or [])
         requirements = package_metadata.get_all("Requires-Dist") or []
-        assert not any(requirement.lower().startswith("textual") for requirement in requirements)
+        assert not any(requirement.lower().startswith(("textual", "discord.py")) for requirement in requirements)
 
         project_root = Path.cwd().resolve()
         config = AgentConfig.local(
@@ -202,7 +203,7 @@ def public_api_smoke_source() -> str:
         assert isinstance(eval_report, EvalReport)
         assert eval_report.passed
 
-        print("metadata, typing, evals, dashboard assets, resources, and runtime defaults are available")
+        print("metadata, typing, evals, resources, and runtime defaults are available")
         """
     ).strip()
 

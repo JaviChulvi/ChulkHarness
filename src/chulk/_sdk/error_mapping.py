@@ -21,12 +21,6 @@ from chulk.core.signals import DurableApprovalPaused
 from chulk.llm.base import LLMConfigurationError, LLMError
 from chulk.mcp.config import MCPConfigError
 from chulk.memory.security import MemorySecretError
-from chulk.plugins import (
-    PluginLoadError,
-    PluginLockError,
-    PluginRegistrationError,
-    PluginVerificationError,
-)
 from chulk.tools.permissions import TerminalPermissionDenied
 from chulk.tools.schema import ToolValidationError
 
@@ -50,10 +44,6 @@ def map_public_error(
         (
             LLMConfigurationError,
             MCPConfigError,
-            PluginLoadError,
-            PluginLockError,
-            PluginRegistrationError,
-            PluginVerificationError,
         ),
     ):
         return ConfigurationError(str(exc), details=details)

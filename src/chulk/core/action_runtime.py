@@ -89,8 +89,6 @@ class AgentRuntimeComponents:
     skill_lifecycle: Any = None
     learning_proposals: Any = None
     learning_reviewer: Any = None
-    plugin_registry: Any = None
-    plugin_audit_report: Any = None
     goal_execution: Any = None
     content_store: Any = None
     media_processors: Any = None

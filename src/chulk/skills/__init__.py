@@ -69,18 +69,6 @@ if TYPE_CHECKING:
         SkillSelection,
         explicit_skill_names,
     )
-    from chulk.skills.publication import (
-        AsyncInMemorySkillPublicationStore,
-        AsyncSkillPublicationManager,
-        AsyncSkillPublicationStore,
-        InMemorySkillPublicationStore,
-        PortableSkill,
-        SkillActivationRecord,
-        SkillPublicationManager,
-        SkillPublicationRecord,
-        SkillPublicationStore,
-        skill_reference_map,
-    )
 
 
 def bundled_skills_dir() -> Path:
@@ -201,15 +189,6 @@ __all__ = [
     "SkillRevisionRecord",
     "SkillScope",
     "SkillUsageKind",
-    "AsyncInMemorySkillPublicationStore",
-    "AsyncSkillPublicationManager",
-    "AsyncSkillPublicationStore",
-    "InMemorySkillPublicationStore",
-    "PortableSkill",
-    "SkillActivationRecord",
-    "SkillPublicationManager",
-    "SkillPublicationRecord",
-    "SkillPublicationStore",
     "RestrictedLearningReviewer",
     "bundled_skills_dir",
     "explicit_skill_names",
@@ -224,7 +203,6 @@ __all__ = [
     "resolve_skill_resource",
     "shell",
     "skill_package_digest",
-    "skill_reference_map",
 ]
 
 
@@ -237,7 +215,6 @@ _EXPORT_MODULES = (
     "chulk.skills.lifecycle_store",
     "chulk.skills.proposals",
     "chulk.skills.reviewer",
-    "chulk.skills.publication",
 )
 
 

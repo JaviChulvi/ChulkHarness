@@ -1,4 +1,4 @@
-"""CLI and optional dashboard coverage for evaluation results."""
+"""CLI coverage for evaluation results."""
 from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone

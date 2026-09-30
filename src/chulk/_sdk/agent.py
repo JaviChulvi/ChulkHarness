@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from pathlib import Path
 import threading
 from typing import Any, Callable, TypeVar, cast
 from uuid import uuid4
@@ -47,16 +46,6 @@ from chulk.hosting.tool_catalog import (
 )
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry, UserInput
-from chulk.plugins import (
-    LoadedPluginEntryPoint,
-    LocalPluginRegistry,
-    PluginAuditReport,
-    PluginCategory,
-    PluginInspection,
-    PluginLifecycleReceipt,
-    PluginLockEntry,
-    PluginUpdatePlan,
-)
 from chulk.results import (
     GovernedSkill,
     GovernedSkillRevision,
@@ -138,7 +127,6 @@ class Agent(AgentHandle):
         learning_review_policy: LearningReviewPolicy | None = None,
         learning_review_quota: LearningReviewQuota | None = None,
         automatic_learning_approval: bool = False,
-        plugin_registry: LocalPluginRegistry | None = None,
         goal_execution: GoalExecutionContext | None = None,
         content_store: ContentStore | None = None,
         media_processors: MediaProcessorRegistry | None = None,
@@ -184,7 +172,6 @@ class Agent(AgentHandle):
                 learning_review_policy=learning_review_policy,
                 learning_review_quota=learning_review_quota,
                 automatic_learning_approval=automatic_learning_approval,
-                plugin_registry=plugin_registry,
                 goal_execution=goal_execution,
                 content_store=content_store,
                 media_processors=media_processors,
@@ -474,195 +461,6 @@ class Agent(AgentHandle):
             ),
         )
 
-    def inspect_plugin(self, path: Path | str) -> PluginInspection:
-        """Inspect a local plugin package without importing its code."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "inspect_plugin",
-            lambda: registry.inspect(path),
-        )
-
-    def register_local_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] = (),
-    ) -> PluginLockEntry:
-        """Register one exact local package through an explicit host action."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "register_local_plugin",
-            lambda: registry.register_local(
-                path,
-                approved_by=approved_by,
-                acknowledge_host_authority=acknowledge_host_authority,
-                granted_capabilities=granted_capabilities,
-            ),
-            serialized=True,
-        )
-
-    def install_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] = (),
-    ) -> PluginLifecycleReceipt:
-        """Quarantine and install an exact directory or prebuilt wheel."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "install_plugin",
-            lambda: registry.install(
-                path,
-                approved_by=approved_by,
-                acknowledge_host_authority=acknowledge_host_authority,
-                granted_capabilities=granted_capabilities,
-            ),
-            serialized=True,
-        )
-
-    def plan_plugin_update(
-        self,
-        path: Path | str,
-    ) -> PluginUpdatePlan:
-        """Return a static update and authority diff without enabling it."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "plan_plugin_update",
-            lambda: registry.plan_update(path),
-        )
-
-    def update_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] | None = None,
-        approve_authority_changes: bool = False,
-    ) -> PluginLifecycleReceipt:
-        """Apply one reviewed update with rollback boundaries."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "update_plugin",
-            lambda: registry.update(
-                path,
-                approved_by=approved_by,
-                acknowledge_host_authority=acknowledge_host_authority,
-                granted_capabilities=granted_capabilities,
-                approve_authority_changes=approve_authority_changes,
-            ),
-            serialized=True,
-        )
-
-    def uninstall_plugin(
-        self,
-        plugin_name: str,
-        *,
-        approved_by: str,
-    ) -> PluginLifecycleReceipt:
-        """Disable a plugin while retaining exact recovery metadata."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "uninstall_plugin",
-            lambda: registry.uninstall(
-                plugin_name,
-                approved_by=approved_by,
-            ),
-            serialized=True,
-        )
-
-    def rollback_plugin(
-        self,
-        plugin_name: str,
-        *,
-        approved_by: str,
-    ) -> PluginLifecycleReceipt:
-        """Restore the newest valid plugin recovery point."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "rollback_plugin",
-            lambda: registry.rollback(
-                plugin_name,
-                approved_by=approved_by,
-            ),
-            serialized=True,
-        )
-
-    def revoke_plugin(
-        self,
-        plugin_name: str,
-        *,
-        reason: str,
-        revoked_by: str,
-    ) -> PluginLifecycleReceipt:
-        """Revoke one exact installed digest and fail closed at startup."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "revoke_plugin",
-            lambda: registry.revoke(
-                plugin_name,
-                reason=reason,
-                revoked_by=revoked_by,
-            ),
-            serialized=True,
-        )
-
-    def list_plugins(self) -> tuple[PluginLockEntry, ...]:
-        """List reviewed plugin registrations without importing them."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            return ()
-        return self._invoke("list_plugins", registry.list)
-
-    def audit_plugins(self) -> PluginAuditReport:
-        """Recheck exact plugin identities without importing plugin code."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke("audit_plugins", registry.audit)
-
-    def load_plugin_entry_point(
-        self,
-        plugin_name: str,
-        category: PluginCategory | str,
-        entry_name: str,
-        *,
-        available_capabilities: tuple[str, ...] = (),
-    ) -> LoadedPluginEntryPoint:
-        """Import an exact reviewed factory through the host SDK boundary."""
-        registry = self.runtime.plugin_registry
-        if registry is None:
-            raise RuntimeError("plugin registry is not configured")
-        return self._invoke(
-            "load_plugin_entry_point",
-            lambda: registry.load_entry_point(
-                plugin_name,
-                category,
-                entry_name,
-                available_capabilities=available_capabilities,
-            ),
-            serialized=True,
-        )
 
     @property
     def usage_ledger(self) -> UsageLedger:

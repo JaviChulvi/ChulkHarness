@@ -10,7 +10,6 @@ from chulk.execution import ExecutionBackend
 from chulk.hosting import ExecutionScope, RuntimeServices
 from chulk.hosting.services import ResolvedRuntimeServices
 from chulk.media import ContentStore, MediaProcessorRegistry
-from chulk.plugins import LocalPluginRegistry
 
 
 @dataclass(frozen=True)
@@ -31,7 +30,6 @@ def resolve_runtime_services(
     tool_specs: Iterable[object] | None,
     skill_specs: object | Iterable[object] | None,
     execution_backend: ExecutionBackend | None,
-    plugin_registry: LocalPluginRegistry | None,
     content_store: ContentStore | None,
     media_processors: MediaProcessorRegistry | None,
     memory_namespace: str | None,
@@ -51,7 +49,6 @@ def resolve_runtime_services(
         name
         for name, value in (
             ("execution_backend", execution_backend),
-            ("plugin_registry", plugin_registry),
             ("content_store", content_store),
             ("media_processors", media_processors),
             ("memory_namespace", memory_namespace),

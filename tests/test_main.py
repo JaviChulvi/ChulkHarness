@@ -873,3 +873,13 @@ def test_main_reports_missing_openai_key(monkeypatch, tmp_path, capsys):
     assert captured.out == ''
     assert 'configuration error' in captured.err
     assert 'OPENAI_API_KEY' in captured.err
+
+
+@pytest.mark.parametrize('argv', [['plugins', 'list'], ['server', 'start', '--eval-dashboard'], ['gateway', 'start', '--adapter', 'discord']])
+def test_main_rejects_retired_surfaces_before_loading_config(monkeypatch, argv):
+    def unexpected_config_load():
+        pytest.fail('retired surface must not initialize the runtime')
+    monkeypatch.setattr('chulk.main.load_cli_config', unexpected_config_load)
+    with pytest.raises(SystemExit) as error:
+        main(argv)
+    assert error.value.code == 2

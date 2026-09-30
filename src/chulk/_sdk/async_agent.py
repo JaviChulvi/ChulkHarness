@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import suppress
-from pathlib import Path
 from typing import Any, Callable, TypeVar, cast
 
 from chulk.capabilities import Capabilities
@@ -27,15 +26,6 @@ from chulk.hosting import (
     ExecutionScope,
 )
 from chulk.media import UserInput
-from chulk.plugins import (
-    LoadedPluginEntryPoint,
-    PluginAuditReport,
-    PluginCategory,
-    PluginInspection,
-    PluginLifecycleReceipt,
-    PluginLockEntry,
-    PluginUpdatePlan,
-)
 from chulk.results import (
     GovernedSkill,
     GovernedSkillRevision,
@@ -277,130 +267,6 @@ class AsyncAgent(AsyncAgentHandle):
             turn_id=turn_id,
         )
 
-    async def inspect_plugin(
-        self,
-        path: Path | str,
-    ) -> PluginInspection:
-        return await asyncio.to_thread(self._agent.inspect_plugin, path)
-
-    async def register_local_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] = (),
-    ) -> PluginLockEntry:
-        return await asyncio.to_thread(
-            self._agent.register_local_plugin,
-            path,
-            approved_by=approved_by,
-            acknowledge_host_authority=acknowledge_host_authority,
-            granted_capabilities=granted_capabilities,
-        )
-
-    async def install_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] = (),
-    ) -> PluginLifecycleReceipt:
-        return await asyncio.to_thread(
-            self._agent.install_plugin,
-            path,
-            approved_by=approved_by,
-            acknowledge_host_authority=acknowledge_host_authority,
-            granted_capabilities=granted_capabilities,
-        )
-
-    async def plan_plugin_update(
-        self,
-        path: Path | str,
-    ) -> PluginUpdatePlan:
-        return await asyncio.to_thread(
-            self._agent.plan_plugin_update,
-            path,
-        )
-
-    async def update_plugin(
-        self,
-        path: Path | str,
-        *,
-        approved_by: str,
-        acknowledge_host_authority: bool,
-        granted_capabilities: tuple[str, ...] | None = None,
-        approve_authority_changes: bool = False,
-    ) -> PluginLifecycleReceipt:
-        return await asyncio.to_thread(
-            self._agent.update_plugin,
-            path,
-            approved_by=approved_by,
-            acknowledge_host_authority=acknowledge_host_authority,
-            granted_capabilities=granted_capabilities,
-            approve_authority_changes=approve_authority_changes,
-        )
-
-    async def uninstall_plugin(
-        self,
-        plugin_name: str,
-        *,
-        approved_by: str,
-    ) -> PluginLifecycleReceipt:
-        return await asyncio.to_thread(
-            self._agent.uninstall_plugin,
-            plugin_name,
-            approved_by=approved_by,
-        )
-
-    async def rollback_plugin(
-        self,
-        plugin_name: str,
-        *,
-        approved_by: str,
-    ) -> PluginLifecycleReceipt:
-        return await asyncio.to_thread(
-            self._agent.rollback_plugin,
-            plugin_name,
-            approved_by=approved_by,
-        )
-
-    async def revoke_plugin(
-        self,
-        plugin_name: str,
-        *,
-        reason: str,
-        revoked_by: str,
-    ) -> PluginLifecycleReceipt:
-        return await asyncio.to_thread(
-            self._agent.revoke_plugin,
-            plugin_name,
-            reason=reason,
-            revoked_by=revoked_by,
-        )
-
-    async def list_plugins(self) -> tuple[PluginLockEntry, ...]:
-        return await asyncio.to_thread(self._agent.list_plugins)
-
-    async def audit_plugins(self) -> PluginAuditReport:
-        return await asyncio.to_thread(self._agent.audit_plugins)
-
-    async def load_plugin_entry_point(
-        self,
-        plugin_name: str,
-        category: PluginCategory | str,
-        entry_name: str,
-        *,
-        available_capabilities: tuple[str, ...] = (),
-    ) -> LoadedPluginEntryPoint:
-        return await asyncio.to_thread(
-            self._agent.load_plugin_entry_point,
-            plugin_name,
-            category,
-            entry_name,
-            available_capabilities=available_capabilities,
-        )
 
     @property
     def usage_ledger(self) -> UsageLedger:

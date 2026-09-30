@@ -1,7 +1,7 @@
 # Hosted gateway
 
 `GatewayRuntime` keeps provider adapters at the edge while the host owns
-routing, durable inbox/outbox state, execution scope, published definitions,
+routing, durable inbox/outbox state, execution scope, agent revisions,
 and run submission. Existing adapters remain compatible with the SQLite
 reference ledger.
 
@@ -14,7 +14,7 @@ The public sync and async boundaries are:
 - `GatewayRouter` and `AsyncGatewayRouter` for authenticated application
   routing.
 - `GatewayScopeResolver` and `AsyncGatewayScopeResolver` for selecting one
-  immutable `ExecutionScope` and published agent-definition revision.
+  immutable `ExecutionScope` and host-provided agent revision.
 - `GatewayRunSubmitter` and `AsyncGatewayRunSubmitter` for idempotent durable
   run submission.
 
@@ -22,10 +22,10 @@ The public sync and async boundaries are:
 required storage choices. A third-party store can implement these protocols
 without importing a concrete SQLite type.
 
-`PublishedDefinitionGatewayResolver` rejects draft, revoked, or missing
-revisions. `DurableGatewayRunSubmitter` records the definition digest, source
-event, correlation ID, and a stable input digest in `RunSubmission`. Async
-variants await definition and run stores directly.
+The host implements the scope resolver and validates its own agent revision.
+`DurableGatewayRunSubmitter` records the supplied revision digest, source event,
+correlation ID, and a stable input digest in `RunSubmission`. The async
+submitter awaits the run store directly.
 
 ## Ownership and acknowledgement
 

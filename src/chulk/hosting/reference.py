@@ -25,7 +25,6 @@ from chulk.memory.models import MemoryProposalRecord, MemoryRecord
 from chulk.memory.retrieval import resolve_profile_conflicts
 from chulk.memory.security import ensure_memory_payload_safe
 from chulk.memory.store import select_recent_conversation_messages
-from chulk.plugins import PluginAuditReport
 from chulk.redaction import redact_text
 from chulk.runs import AsyncInMemoryRunStore, InMemoryRunStore
 from chulk.sessions import ConversationRecord, ConversationSummaryRecord, MessageRecord, SessionHit, SessionMessage, SessionSearchPage, SessionWindow
@@ -129,7 +128,7 @@ class InMemoryServiceHub:
 
         def host_factory(factory: Any) -> ServiceBinding[Any]:
             return ServiceBinding.scoped(factory, ownership=ResourceOwnership.HOST)
-        return RuntimeServices(memory=host_factory(lambda scope: self._memory.setdefault(scope.key, InMemoryMemoryService(scope))), sessions=host_factory(sessions), skills=host_factory(lambda scope: SkillRuntimeServices(registry=InMemorySkillService(scope))), traces=host_factory(traces), artifacts=host_factory(artifacts), usage=host_factory(lambda scope: self._usage.setdefault(scope.key, InMemoryUsageService(scope))), audit=host_factory(lambda scope: self._audit.setdefault(scope.key, InMemoryAuditSink(scope))), execution=host_factory(InMemoryExecutionBackend), plugins=host_factory(InMemoryPluginService), content=host_factory(InMemoryContentService), media=host_factory(lambda _scope: MediaProcessorRegistry()), tool_policy=ServiceBinding.host(policy_hooks or ToolPolicyHooks()), runs=host_factory(runs), approvals=host_factory(approvals), events=host_factory(lambda scope: self._events.setdefault(scope.key, InMemoryEventSink(scope))))
+        return RuntimeServices(memory=host_factory(lambda scope: self._memory.setdefault(scope.key, InMemoryMemoryService(scope))), sessions=host_factory(sessions), skills=host_factory(lambda scope: SkillRuntimeServices(registry=InMemorySkillService(scope))), traces=host_factory(traces), artifacts=host_factory(artifacts), usage=host_factory(lambda scope: self._usage.setdefault(scope.key, InMemoryUsageService(scope))), audit=host_factory(lambda scope: self._audit.setdefault(scope.key, InMemoryAuditSink(scope))), execution=host_factory(InMemoryExecutionBackend), content=host_factory(InMemoryContentService), media=host_factory(lambda _scope: MediaProcessorRegistry()), tool_policy=ServiceBinding.host(policy_hooks or ToolPolicyHooks()), runs=host_factory(runs), approvals=host_factory(approvals), events=host_factory(lambda scope: self._events.setdefault(scope.key, InMemoryEventSink(scope))))
 
     def async_services(self, *, policy_hooks: ToolPolicyHooks | None=None) -> AsyncRuntimeServices:
         """Return the corresponding bundle for ``AsyncHostedRuntime``."""
@@ -157,7 +156,7 @@ class InMemoryServiceHub:
             sync_runs = self._runs.setdefault(scope.key, InMemoryRunStore())
             sync = self._approvals.setdefault(scope.key, InMemoryApprovalStore(sync_runs))
             return self._async_approvals.setdefault(scope.key, AsyncInMemoryApprovalStore(sync))
-        return AsyncRuntimeServices(memory=AsyncServiceBinding.scoped(memory, ownership=ResourceOwnership.HOST), sessions=AsyncServiceBinding.scoped(sessions, ownership=ResourceOwnership.HOST), skills=AsyncServiceBinding.scoped(skills, ownership=ResourceOwnership.HOST), traces=AsyncServiceBinding.scoped(lambda scope: adapt(services.traces, scope), ownership=ResourceOwnership.HOST), artifacts=AsyncServiceBinding.scoped(lambda scope: adapt(services.artifacts, scope), ownership=ResourceOwnership.HOST), usage=AsyncServiceBinding.scoped(lambda scope: adapt(services.usage, scope), ownership=ResourceOwnership.HOST), audit=AsyncServiceBinding.scoped(lambda scope: adapt(services.audit, scope), ownership=ResourceOwnership.HOST), execution=AsyncServiceBinding.scoped(lambda scope: adapt(services.execution, scope), ownership=ResourceOwnership.HOST), plugins=AsyncServiceBinding.scoped(lambda scope: adapt(services.plugins, scope), ownership=ResourceOwnership.HOST), content=AsyncServiceBinding.scoped(lambda scope: adapt(services.content, scope), ownership=ResourceOwnership.HOST), media=AsyncServiceBinding.scoped(lambda scope: adapt(services.media, scope), ownership=ResourceOwnership.HOST), tool_policy=services.tool_policy, runs=AsyncServiceBinding.scoped(async_runs, ownership=ResourceOwnership.HOST), approvals=AsyncServiceBinding.scoped(async_approvals, ownership=ResourceOwnership.HOST), events=AsyncServiceBinding.scoped(lambda scope: _async_value(self._async_events.setdefault(scope.key, AsyncInMemoryEventSink(scope))), ownership=ResourceOwnership.HOST))
+        return AsyncRuntimeServices(memory=AsyncServiceBinding.scoped(memory, ownership=ResourceOwnership.HOST), sessions=AsyncServiceBinding.scoped(sessions, ownership=ResourceOwnership.HOST), skills=AsyncServiceBinding.scoped(skills, ownership=ResourceOwnership.HOST), traces=AsyncServiceBinding.scoped(lambda scope: adapt(services.traces, scope), ownership=ResourceOwnership.HOST), artifacts=AsyncServiceBinding.scoped(lambda scope: adapt(services.artifacts, scope), ownership=ResourceOwnership.HOST), usage=AsyncServiceBinding.scoped(lambda scope: adapt(services.usage, scope), ownership=ResourceOwnership.HOST), audit=AsyncServiceBinding.scoped(lambda scope: adapt(services.audit, scope), ownership=ResourceOwnership.HOST), execution=AsyncServiceBinding.scoped(lambda scope: adapt(services.execution, scope), ownership=ResourceOwnership.HOST), content=AsyncServiceBinding.scoped(lambda scope: adapt(services.content, scope), ownership=ResourceOwnership.HOST), media=AsyncServiceBinding.scoped(lambda scope: adapt(services.media, scope), ownership=ResourceOwnership.HOST), tool_policy=services.tool_policy, runs=AsyncServiceBinding.scoped(async_runs, ownership=ResourceOwnership.HOST), approvals=AsyncServiceBinding.scoped(async_approvals, ownership=ResourceOwnership.HOST), events=AsyncServiceBinding.scoped(lambda scope: _async_value(self._async_events.setdefault(scope.key, AsyncInMemoryEventSink(scope))), ownership=ResourceOwnership.HOST))
 
     def trace_events(self, scope: ExecutionScope) -> tuple[dict[str, Any], ...]:
         trace = self._traces.get(scope.key)
@@ -790,20 +789,6 @@ class _InMemoryExecutionSession:
     async def aclose(self) -> None:
         self.close()
 
-class InMemoryPluginService:
-
-    def __init__(self, scope: ExecutionScope) -> None:
-        self.scope = scope
-        self.profile_id = scope.actor_id or 'default'
-
-    def verify_startup(self) -> PluginAuditReport:
-        return PluginAuditReport(profile_id=self.profile_id)
-
-    def list(self) -> tuple[Any, ...]:
-        return ()
-
-    def audit(self) -> PluginAuditReport:
-        return self.verify_startup()
 
 class InMemoryContentService:
 

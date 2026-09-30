@@ -119,8 +119,6 @@ class Agent:
         skill_lifecycle = components.skill_lifecycle
         learning_proposals = components.learning_proposals
         learning_reviewer = components.learning_reviewer
-        plugin_registry = components.plugin_registry
-        plugin_audit_report = components.plugin_audit_report
         goal_execution = components.goal_execution
         content_store = components.content_store
         media_processors = components.media_processors
@@ -223,8 +221,6 @@ class Agent:
         )
         self._close_trace_logger = close_trace_logger
         self.resolved_services = components.resolved_services
-        self.plugin_registry = plugin_registry
-        self.plugin_audit_report = plugin_audit_report
         self.goal_execution = goal_execution
         self.content_store = content_store
         self.media_processors = media_processors or MediaProcessorRegistry()

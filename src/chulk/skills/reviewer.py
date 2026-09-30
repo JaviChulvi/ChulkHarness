@@ -472,7 +472,7 @@ def _review_messages(
     }
     system = f"""\
 You are a restricted learning reviewer. You have no tools and no authority to
-read files, use the network, call plugins, mutate memory, or mutate skills.
+read files, use the network, mutate memory, or mutate skills.
 Review only the supplied evidence. Return one JSON object and nothing else.
 
 Return either:
