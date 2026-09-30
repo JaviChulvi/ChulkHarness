@@ -31,7 +31,7 @@ Do not use this guide as a snapshot of every model, provider, environment variab
 - Subsystem persistence behavior: the relevant store under `src/chulk/memory/`, `src/chulk/sessions/`, `src/chulk/scheduling/`, or another owning package.
 - Tools, schemas, permissions, and bounded output: `src/chulk/tools/`, `src/chulk/capabilities.py`, and the corresponding documentation.
 - CLI commands and terminal behavior: `src/chulk/main.py` and `src/chulk/cli/`.
-- Control-plane server and operator interface: `src/chulk/server/`, `src/chulk/tui/`, and `src/chulk/cli/tui.py`.
+- Control-plane server and web interface: `src/chulk/server/`.
 - Dependencies, supported Python versions, and development tooling: `pyproject.toml` and `environment.yml`.
 - Required automation and validation: `.github/workflows/ci.yml` and `scripts/`.
 - User-facing behavior and examples: `README.md`, `docs/`, and `examples/`.
@@ -57,7 +57,7 @@ src/chulk/
   presets/                # Supported agent presets
   scheduling/             # Scheduled-job models, persistence, and tools
   mcp/, telegram/         # External protocol and channel adapters
-  server/, tui/           # Control-plane server and operator interface
+  server/                 # Control-plane server and web interface
   cli/                    # Terminal formatting, progress, and commands
   tracing/                # Trace, artifact, and log primitives
 tests/                    # Pytest suite outside the importable package

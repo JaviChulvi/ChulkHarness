@@ -143,6 +143,11 @@ def public_api_smoke_source() -> str:
         project_urls = package_metadata.get_all("Project-URL") or []
         assert any(url.startswith("Repository, https://github.com/JaviChulvi/ChulkHarness") for url in project_urls)
         assert importlib.util.find_spec("chulk.tests") is None
+        assert importlib.util.find_spec("chulk.tui") is None
+        assert importlib.util.find_spec("chulk.cli.tui") is None
+        assert "tui" not in (package_metadata.get_all("Provides-Extra") or [])
+        requirements = package_metadata.get_all("Requires-Dist") or []
+        assert not any(requirement.lower().startswith("textual") for requirement in requirements)
 
         project_root = Path.cwd().resolve()
         config = AgentConfig.local(

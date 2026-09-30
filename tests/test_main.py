@@ -3,6 +3,7 @@ import json
 import re
 import sqlite3
 from types import SimpleNamespace
+import pytest
 from chulk import __version__
 from chulk.config import load_config
 from chulk.core.actions import FinalAnswerAction
@@ -26,6 +27,24 @@ def fake_factory(_config):
 
 def strip_ansi(text: str) -> str:
     return re.sub('\\x1b\\[[0-9;]*m', '', text)
+
+def test_main_help_excludes_removed_tui(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(['--help'])
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert 'tui' not in output
+    assert 'exec' in output
+
+def test_main_rejects_removed_tui_before_loading_config(monkeypatch, capsys):
+    def unexpected_config_load():
+        pytest.fail('removed command must not initialize the runtime')
+
+    monkeypatch.setattr('chulk.main.load_cli_config', unexpected_config_load)
+    with pytest.raises(SystemExit) as exc_info:
+        main(['tui'])
+    assert exc_info.value.code == 2
+    assert "invalid choice: 'tui'" in capsys.readouterr().err
 
 def test_main_prints_current_status(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv('CHULK_PROJECT_ROOT', str(tmp_path))
