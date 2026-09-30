@@ -220,6 +220,7 @@ class AgentPrompt:
     omitted_messages: list[dict[str, str]] = field(default_factory=list)
     action_transport: Literal["provider_native", "chulk_json"] = "chulk_json"
     native_tool_declarations: list[dict[str, Any]] = field(default_factory=list)
+    goal_context: dict[str, Any] | None = None
 
 
 def estimate_tokens(text: str) -> int:

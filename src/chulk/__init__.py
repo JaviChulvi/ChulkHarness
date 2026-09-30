@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         DockerExecutionBackend, DockerUnavailableError, FileAccess, FileListRequest, FileReadRequest,
         FileSearchRequest, FileWriteRequest, FilesystemAccess, GitWorktreeBackend, GitWorktreePolicy, Goal,
         GoalActionCheckpoint, GoalActionConflictError, GoalActionState, GoalApproval,
-        GoalCancellationPropagator, GoalChangedPayload, GoalClaim, GoalCriterion, GoalEvent,
+        GoalCancellationPropagator, GoalChangedPayload, GoalClaim, GoalCriterion, GoalEvent, GoalModelRequest,
         GoalEventCallback, GoalEvidence, GoalExecutionContext, GoalLeaseConflictError, GoalNotFoundError,
         GoalRevisionConflictError, GoalRisk, GoalRetentionPolicy, GoalService, GoalStatus, GoalSteering,
         GoalStep, GoalStepStatus, GoalStore, GovernedSkill, GovernedSkillRevision, HostExecutionBackend,
@@ -230,7 +230,7 @@ ExecutionSession ExecutionSessionRequest ExecutionWorkspace ExecutionBackendFact
 EnvironmentPolicy EndpointRef ExactCost DockerPolicy DockerExecutionBackend DockerUnavailableError
 FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest FilesystemAccess
 GitWorktreeBackend GitWorktreePolicy Goal GoalActionCheckpoint GoalActionConflictError
-GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalClaim GoalCriterion
+GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalClaim GoalCriterion GoalModelRequest
 GoalEvent GoalEventCallback GoalEvidence GoalExecutionContext GoalLeaseConflictError
 GoalNotFoundError GoalRevisionConflictError GoalRisk GoalRetentionPolicy GoalService GoalStatus
 GoalSteering GoalStep GoalStepStatus GoalStore GovernedSkill GovernedSkillRevision

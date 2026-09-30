@@ -319,6 +319,9 @@ These stories are ordered after the maintenance tranche above.
 
 ### US-N5: Strengthen Plans And Durable Goals
 
+- [x] Persist authoritative goal description/constraints and explicit steering
+  supersession, with durable incorporation receipts and mandatory prompt context.
+
 - [ ] Add public plan-step risk, expected-tool, budget, and richer acceptance
   fields.
 - [ ] Add selected-step approval/skip APIs and blocked-step recovery.

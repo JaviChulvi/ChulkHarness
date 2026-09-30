@@ -9,6 +9,7 @@ from typing import Any, Literal
 from chulk.core.prompts import (
     format_action_protocol_for_prompt,
     format_conversation_summary_for_prompt,
+    format_goal_context_for_prompt,
     format_context_sections_for_prompt,
     format_external_content_rules_for_prompt,
     format_memories_for_prompt,
@@ -108,6 +109,7 @@ def build_agent_prompt(
     native_tool_declarations: list[dict[str, Any]] | None = None,
     context_budget: ContextBudget | None = None,
     runtime_status: str | None = None,
+    goal_context: dict[str, Any] | None = None,
 ) -> AgentPrompt:
     """Build model input and a context report from prompt, tools, and history."""
     registered_tools = tool_registry.list_tools()
@@ -193,6 +195,11 @@ def build_agent_prompt(
     system_parts: list[tuple[str, str, str, dict]] = [
         ("system_prompt", "Base system prompt", system_instructions_prompt, {}),
     ]
+    if goal_context is not None:
+        system_parts.append((
+            "goal_context", "Mandatory goal context", format_goal_context_for_prompt(goal_context),
+            {"goal_id": goal_context["goal_id"], "revision": goal_context["revision"], "mandatory": True},
+        ))
     if profile_memories or relevant_memories:
         system_parts.append(
             (
@@ -429,6 +436,7 @@ def build_agent_prompt(
         context_report=context_report,
         omitted_messages=omitted_messages,
         action_transport=action_transport,
+        goal_context=goal_context,
         native_tool_declarations=safe_native_tool_declarations,
     )
 

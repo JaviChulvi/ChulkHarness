@@ -5,6 +5,11 @@ Each agent writes internal JSONL trace events under `<runtime_dir>/traces/`.
 selected context, tool calls, observations, permission decisions, failures, and
 the final answer.
 
+Claimed-goal requests also record `goal_model_request`: goal revision, steering
+IDs, purpose and durable request identity. The goal store's acknowledgment links
+that receipt to its persisted response; it is distinct from fulfillment evidence.
+See [goal context and recovery](goals.md).
+
 Trace files are raw sensitive runtime output. Redaction covers common secret
 forms but cannot prove that arbitrary personal data, proprietary text, tool
 output, or credentials are absent. Restrict access, set retention, and scrub

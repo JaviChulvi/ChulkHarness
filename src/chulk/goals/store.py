@@ -16,6 +16,7 @@ from chulk.goals.models import (
     GoalActionCheckpoint,
     GoalActionState,
     GoalClaim,
+    GoalModelRequest,
     GoalEvent,
     GoalRetentionPolicy,
     GoalStatus,
@@ -383,6 +384,107 @@ class GoalStore:
                 step_id=step_id,
                 now=observed,
             )
+
+    def begin_model_request(
+        self, claim: GoalClaim, *, step_id: str, conversation_id: str,
+        turn_id: str, request_index: int, purpose: str, goal_revision: int,
+        steering_ids: tuple[str, ...],
+    ) -> GoalModelRequest:
+        """Persist the exact mandatory context at the request admission boundary."""
+        now = self._now()
+        receipt = GoalModelRequest(
+            id=uuid4().hex, goal_id=claim.goal_id, profile_id=self.profile_id,
+            step_id=step_id, conversation_id=conversation_id, turn_id=turn_id,
+            request_index=request_index, purpose=purpose, goal_revision=goal_revision,
+            steering_ids=steering_ids, created_at=now,
+        )
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            goal = _assert_action_boundary(conn, claim, profile_id=self.profile_id,
+                                          step_id=step_id, now=now)
+            if goal.revision != goal_revision:
+                raise GoalRevisionConflictError(goal.id, goal_revision, goal.revision)
+            if steering_ids != tuple(item.id for item in goal.active_steering):
+                raise GoalActionConflictError("model request omitted active steering")
+            existing = conn.execute("""
+                SELECT * FROM goal_model_requests
+                WHERE conversation_id = ? AND turn_id = ? AND request_index = ?
+            """, (conversation_id, turn_id, request_index)).fetchone()
+            if existing is not None:
+                raise GoalActionConflictError("model request already exists; reconcile before dispatch")
+            conn.execute("""
+                INSERT INTO goal_model_requests (
+                    id, goal_id, profile_id, step_id, conversation_id, turn_id,
+                    request_index, purpose, goal_revision, steering_ids_json,
+                    claim_token, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (receipt.id, receipt.goal_id, receipt.profile_id, receipt.step_id,
+                  receipt.conversation_id, receipt.turn_id, receipt.request_index,
+                  receipt.purpose, receipt.goal_revision, _json(list(steering_ids)),
+                  claim.claim_token, now.isoformat()))
+        return receipt
+
+    def acknowledge_model_response(
+        self, claim: GoalClaim, request_id: str, *, response_ref: str,
+    ) -> GoalModelRequest:
+        """Acknowledge only after the owning session/journal persisted its response.
+
+        A current runner can reconcile a prior receipt using a durable response
+        reference. This updates incorporation, never evidence or completion.
+        """
+        clean_ref = response_ref.strip()
+        if not clean_ref:
+            raise ValueError("a durable response reference is required")
+        now = self._now()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_claim_owner(conn, claim, profile_id=self.profile_id, now=now)
+            row = conn.execute("""
+                SELECT * FROM goal_model_requests
+                WHERE id = ? AND goal_id = ? AND profile_id = ?
+            """, (request_id, claim.goal_id, self.profile_id)).fetchone()
+            if row is None:
+                raise GoalActionConflictError("goal model request was not found")
+            current = _model_request_from_row(row)
+            if current.response_ref is not None:
+                if current.response_ref != clean_ref:
+                    raise GoalActionConflictError("model response reference changed")
+                return current
+            conn.execute("""
+                UPDATE goal_model_requests SET response_ref = ?, incorporated_at = ?
+                WHERE id = ? AND incorporated_at IS NULL
+            """, (clean_ref, now.isoformat(), request_id))
+            for steering_id in current.steering_ids:
+                conn.execute("""
+                    INSERT INTO goal_steering_incorporations
+                        (goal_id, profile_id, steering_id, request_id)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(goal_id, steering_id) DO UPDATE SET request_id = excluded.request_id
+                """, (claim.goal_id, self.profile_id, steering_id, request_id))
+        return replace(current, response_ref=clean_ref, incorporated_at=now)
+
+    def model_requests(
+        self, goal_id: str, *, pending_only: bool = False, limit: int = 100,
+    ) -> tuple[GoalModelRequest, ...]:
+        self.get(goal_id)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("model request limit must be between 1 and 10000")
+        pending = "AND incorporated_at IS NULL" if pending_only else ""
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute(f"""
+                SELECT * FROM goal_model_requests WHERE goal_id = ? AND profile_id = ?
+                {pending} ORDER BY created_at, id LIMIT ?
+            """, (goal_id, self.profile_id, limit)).fetchall()
+        return tuple(_model_request_from_row(row) for row in rows)
+
+    def incorporated_steering_ids(self, goal_id: str) -> frozenset[str]:
+        self.get(goal_id)
+        with sqlite_connection(self.db_path) as conn:
+            rows = conn.execute("""
+                SELECT steering_id FROM goal_steering_incorporations
+                WHERE goal_id = ? AND profile_id = ?
+            """, (goal_id, self.profile_id)).fetchall()
+        return frozenset(str(row["steering_id"]) for row in rows)
 
     def begin_action(
         self,
@@ -806,6 +908,18 @@ def _goal_row(
     if row is None:
         raise GoalNotFoundError(f"goal {goal_id!r} does not exist")
     return row
+
+
+def _model_request_from_row(row: sqlite3.Row) -> GoalModelRequest:
+    return GoalModelRequest(
+        id=str(row["id"]), goal_id=str(row["goal_id"]), profile_id=str(row["profile_id"]),
+        step_id=str(row["step_id"]), conversation_id=str(row["conversation_id"]),
+        turn_id=str(row["turn_id"]), request_index=int(row["request_index"]),
+        purpose=str(row["purpose"]), goal_revision=int(row["goal_revision"]),
+        steering_ids=tuple(json.loads(row["steering_ids_json"])),
+        created_at=_datetime(row["created_at"]), response_ref=row["response_ref"],
+        incorporated_at=_optional_datetime(row["incorporated_at"]),
+    )
 
 
 def _goal_from_row(row: sqlite3.Row) -> Goal:

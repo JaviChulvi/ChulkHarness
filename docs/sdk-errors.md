@@ -32,6 +32,10 @@ the redacted extensions include the configured input budget, estimated prompt
 tokens, and overage. Increase the configured context window or reduce required
 host-provided prompt content; history compaction does not discard those sections.
 
+For claimed goals, this includes authoritative goal state. An oversized mandatory
+goal section prevents even a summary request. Missing durable response recording
+also raises `ConfigurationError` before a work-directing provider request.
+
 Details are present only when known. They can include provider, model, tool,
 invalid field, validation issues, retryability, conversation and turn ids, and
 the trace path. Translated errors retain the internal exception in `__cause__`

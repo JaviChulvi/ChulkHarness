@@ -18,6 +18,7 @@ DOCS = ROOT / "docs"
 TOPICS = (
     "quickstart.md",
     "sdk.md",
+    "goals.md",
     "hosting.md",
     "postgres.md",
     "gateway.md",

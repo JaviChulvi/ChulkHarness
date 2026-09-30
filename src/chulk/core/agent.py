@@ -350,6 +350,8 @@ class Agent:
             output_policy=output_policy,
             async_output_policy=async_output_policy,
             output_policy_failure_mode=self.output_policy_failure_mode,
+            goal_execution=self.goal_execution,
+            durable_responses=components.session_recorder is not None,
         )
         self._turn_effects.final_answer_streaming = self.final_answer_streaming
         self._turn_effects.stream_final_answer = (

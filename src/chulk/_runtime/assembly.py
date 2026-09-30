@@ -574,9 +574,6 @@ def assemble_agent(
                 or model_capabilities.default_response_reserve_tokens
             ),
             trace_path=trace_logger.path,
-            boundary_callback=(
-                goal_execution.assert_boundary if goal_execution is not None else None
-            ),
         )
     )
     configured_mcp_servers = (
@@ -876,7 +873,8 @@ async def assemble_async_hosted_agent(
             )
         effective_profile_id = profile_id or config.profile_id
         goal_snapshot = (
-            goal_execution.assert_boundary() if goal_execution is not None else None
+            await call_async_service(goal_execution, "assert_boundary")
+            if goal_execution is not None else None
         )
         _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
 

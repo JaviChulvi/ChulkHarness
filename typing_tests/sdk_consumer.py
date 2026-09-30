@@ -8,6 +8,10 @@ from chulk import (
     Agent,
     AgentCompiler,
     AgentConfig,
+    Goal,
+    GoalModelRequest,
+    GoalService,
+    GoalSteering,
     ApprovalStore,
     ApprovalSubmission,
     ApprovalValidation,
@@ -595,3 +599,12 @@ def consume_complete_eval_contract(
         checked_grade,
     )
     return mode, safety, status, target.fingerprint
+
+
+def goal_context_contract(service: GoalService, goal: Goal) -> tuple[str, tuple[str, ...], GoalModelRequest | None]:
+    instruction = GoalSteering(id="new", instruction="Keep scope", created_by="host", supersedes=())
+    active: tuple[GoalSteering, ...] = goal.active_steering
+    assert instruction.supersedes == ()
+    assert all(item.id for item in active)
+    receipts: tuple[GoalModelRequest, ...] = service.store.model_requests(goal.id)
+    return str(goal.description), goal.constraints, receipts[0] if receipts else None

@@ -158,6 +158,7 @@ class GoalSteering:
     instruction: str
     created_by: str
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    supersedes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _required(self.id, "steering id"))
@@ -172,13 +173,15 @@ class GoalSteering:
             _required(self.created_by, "steering actor"),
         )
         object.__setattr__(self, "created_at", _utc(self.created_at, "created_at"))
+        object.__setattr__(self, "supersedes", _unique_optional(self.supersedes))
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "instruction": self.instruction,
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(),
+            "supersedes": list(self.supersedes),
         }
 
 
@@ -322,11 +325,19 @@ class Goal:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     last_error: str | None = None
+    description: str | None = None
+    constraints: tuple[str, ...] = ()
+    steering_fulfillments: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _required(self.id, "goal id"))
         object.__setattr__(self, "profile_id", _required(self.profile_id, "profile id"))
         object.__setattr__(self, "title", _required(self.title, "goal title"))
+        object.__setattr__(
+            self, "description",
+            _required(self.title if self.description is None else self.description, "goal description"),
+        )
+        object.__setattr__(self, "constraints", _unique_optional(self.constraints))
         object.__setattr__(self, "acceptance_criteria", tuple(self.acceptance_criteria))
         object.__setattr__(self, "steps", tuple(self.steps))
         object.__setattr__(self, "status", GoalStatus(self.status))
@@ -337,6 +348,14 @@ class Goal:
         object.__setattr__(self, "evidence", tuple(self.evidence))
         object.__setattr__(self, "approvals", tuple(self.approvals))
         object.__setattr__(self, "steering", tuple(self.steering))
+        active_ids: set[str] = set()
+        seen_ids: set[str] = set()
+        for instruction in self.steering:
+            if instruction.id in seen_ids or not set(instruction.supersedes) <= active_ids:
+                raise ValueError("steering must have unique ids and supersede active instructions")
+            seen_ids.add(instruction.id)
+            active_ids.difference_update(instruction.supersedes)
+            active_ids.add(instruction.id)
         object.__setattr__(
             self,
             "source_conversation_id",
@@ -369,6 +388,21 @@ class Goal:
                 object.__setattr__(self, field_name, _utc(value, field_name))
         object.__setattr__(self, "last_error", _optional(self.last_error))
         _validate_goal_graph(self.acceptance_criteria, self.steps, self.evidence)
+        fulfillment = {
+            instruction_id: _unique_required(tuple(evidence_ids), "fulfillment evidence id")
+            for instruction_id, evidence_ids in self.steering_fulfillments.items()
+        }
+        evidence_ids = {item.id for item in self.evidence}
+        if not set(fulfillment) <= seen_ids or any(
+            not set(refs) <= evidence_ids for refs in fulfillment.values()
+        ):
+            raise ValueError("steering fulfillment requires known instruction and evidence ids")
+        object.__setattr__(self, "steering_fulfillments", _freeze_mapping(fulfillment))
+
+    @property
+    def active_steering(self) -> tuple[GoalSteering, ...]:
+        superseded = {item_id for item in self.steering for item_id in item.supersedes}
+        return tuple(item for item in self.steering if item.id not in superseded)
 
     @property
     def terminal(self) -> bool:
@@ -406,6 +440,9 @@ class Goal:
             "id": self.id,
             "profile_id": self.profile_id,
             "title": self.title,
+            "description": self.description,
+            "constraints": list(self.constraints),
+            "steering_fulfillments": _plain(self.steering_fulfillments),
             "acceptance_criteria": [
                 criterion.to_dict() for criterion in self.acceptance_criteria
             ],
@@ -486,6 +523,50 @@ class GoalClaim:
         object.__setattr__(self, "runner_id", _required(self.runner_id, "runner id"))
         object.__setattr__(self, "claim_token", _required(self.claim_token, "claim token"))
         object.__setattr__(self, "lease_until", _utc(self.lease_until, "lease_until"))
+
+
+@dataclass(frozen=True, slots=True)
+class GoalModelRequest:
+    """Goal context receipt; a response reference acknowledges incorporation only."""
+
+    id: str
+    goal_id: str
+    profile_id: str
+    step_id: str
+    conversation_id: str
+    turn_id: str
+    request_index: int
+    purpose: str
+    goal_revision: int
+    steering_ids: tuple[str, ...]
+    created_at: datetime
+    response_ref: str | None = None
+    incorporated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("id", "goal_id", "profile_id", "step_id", "conversation_id", "turn_id", "purpose"):
+            object.__setattr__(self, name, _required(getattr(self, name), name))
+        if isinstance(self.request_index, bool) or not isinstance(self.request_index, int) or self.request_index < 1:
+            raise ValueError("request_index must be positive")
+        if isinstance(self.goal_revision, bool) or not isinstance(self.goal_revision, int) or self.goal_revision < 0:
+            raise ValueError("goal_revision must be non-negative")
+        object.__setattr__(self, "steering_ids", _unique_optional(self.steering_ids))
+        object.__setattr__(self, "created_at", _utc(self.created_at, "created_at"))
+        object.__setattr__(self, "response_ref", _optional(self.response_ref))
+        if self.incorporated_at is not None:
+            object.__setattr__(self, "incorporated_at", _utc(self.incorporated_at, "incorporated_at"))
+        if (self.response_ref is None) != (self.incorporated_at is None):
+            raise ValueError("response reference and incorporation timestamp must be paired")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "goal_id": self.goal_id, "profile_id": self.profile_id,
+            "step_id": self.step_id, "conversation_id": self.conversation_id,
+            "turn_id": self.turn_id, "request_index": self.request_index,
+            "purpose": self.purpose, "goal_revision": self.goal_revision,
+            "steering_ids": list(self.steering_ids), "created_at": self.created_at.isoformat(),
+            "response_ref": self.response_ref, "incorporated_at": _iso(self.incorporated_at),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,6 +671,12 @@ def goal_from_dict(value: Mapping[str, Any]) -> Goal:
         id=str(value["id"]),
         profile_id=str(value["profile_id"]),
         title=str(value["title"]),
+        description=_optional_text_value(value.get("description")),
+        constraints=_strings(value.get("constraints", ())),
+        steering_fulfillments={
+            key: _strings(refs)
+            for key, refs in _mapping(value.get("steering_fulfillments", {}), "steering_fulfillments").items()
+        },
         acceptance_criteria=tuple(
             GoalCriterion(
                 id=str(item["id"]),
@@ -689,6 +776,7 @@ def _steering_from_dict(value: Mapping[str, Any]) -> GoalSteering:
         instruction=str(value["instruction"]),
         created_by=str(value["created_by"]),
         created_at=_datetime(value["created_at"], "created_at"),
+        supersedes=_strings(value.get("supersedes", ())),
     )
 
 
@@ -887,6 +975,7 @@ __all__ = [
     "GoalActionState",
     "GoalApproval",
     "GoalClaim",
+    "GoalModelRequest",
     "GoalCriterion",
     "GoalEvent",
     "GoalEvidence",

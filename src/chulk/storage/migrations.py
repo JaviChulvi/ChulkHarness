@@ -19,6 +19,18 @@ class SQLiteMigration:
     apply: Callable[[sqlite3.Connection], None]
 
 
+def _execute_script(conn: sqlite3.Connection, script: str) -> None:
+    """Execute migration SQL without executescript's implicit transaction commit."""
+    statement = ""
+    for character in script:
+        statement += character
+        if character == ";" and sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
+
+
 def _migrate_to_shared_schema(conn: sqlite3.Connection) -> None:
     """Adopt legacy stores and create the complete shared schema."""
     conn.execute(
@@ -670,7 +682,7 @@ def _migrate_to_skill_lifecycle(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_public_control_plane(conn: sqlite3.Connection) -> None:
     """Create the profile-owned public event and permission ledgers."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS public_events (
             event_id TEXT PRIMARY KEY,
@@ -728,7 +740,7 @@ def _migrate_to_public_control_plane(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_conversation_dispatch(conn: sqlite3.Connection) -> None:
     """Persist API and gateway submissions before shared execution."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS conversation_commands (
             id TEXT PRIMARY KEY,
@@ -762,7 +774,7 @@ def _migrate_to_conversation_dispatch(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_control_decisions(conn: sqlite3.Connection) -> None:
     """Persist idempotent plan decisions across host restarts."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS control_decisions (
             id TEXT PRIMARY KEY,
@@ -791,7 +803,7 @@ def _migrate_to_control_decisions(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_durable_goals(conn: sqlite3.Connection) -> None:
     """Create revisioned goals, append-only events, and action checkpoints."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS goals (
             id TEXT PRIMARY KEY,
@@ -866,7 +878,7 @@ def _migrate_to_durable_goals(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_child_task_graph(conn: sqlite3.Connection) -> None:
     """Create profile-owned child tasks, attempts, events, and delivery outbox."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS child_tasks (
             id TEXT PRIMARY KEY,
@@ -1026,7 +1038,7 @@ def _migrate_to_child_task_graph(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_automation_engine(conn: sqlite3.Connection) -> None:
     """Create profile-owned automation definitions, runs, controls, and triggers."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS automation_jobs (
             id TEXT PRIMARY KEY,
@@ -1317,7 +1329,7 @@ def _migrate_to_automation_engine(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_durable_hosted_execution(conn: sqlite3.Connection) -> None:
     """Add the shared hosted run, effect, approval, and audit ledger."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS durable_runs (
             id TEXT PRIMARY KEY,
@@ -1503,7 +1515,7 @@ def _migrate_to_durable_hosted_execution(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_durable_parent_child_runs(conn: sqlite3.Connection) -> None:
     """Add scoped child lineage, progress, aggregation, and completion delivery."""
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS durable_run_parents (
             parent_run_id TEXT PRIMARY KEY,
@@ -1582,7 +1594,7 @@ def _migrate_to_durable_parent_child_runs(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_agent_evaluations(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+    _execute_script(conn,
         """
         CREATE TABLE IF NOT EXISTS eval_runs (
             id TEXT PRIMARY KEY,
@@ -1766,6 +1778,42 @@ def _backfill_memory_tags(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_to_goal_context_receipts(conn: sqlite3.Connection) -> None:
+    """Keep mandatory goal context and response incorporation outside summaries."""
+    conn.execute("""
+        CREATE TABLE goal_model_requests (
+            id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL,
+            step_id TEXT NOT NULL, conversation_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+            request_index INTEGER NOT NULL CHECK (request_index > 0), purpose TEXT NOT NULL,
+            goal_revision INTEGER NOT NULL CHECK (goal_revision >= 0),
+            steering_ids_json TEXT NOT NULL, claim_token TEXT NOT NULL,
+            created_at TEXT NOT NULL, response_ref TEXT, incorporated_at TEXT,
+            UNIQUE (conversation_id, turn_id, request_index),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+            CHECK ((response_ref IS NULL) = (incorporated_at IS NULL))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX idx_goal_model_requests_pending
+        ON goal_model_requests(profile_id, goal_id, incorporated_at, created_at, id)
+    """)
+    conn.execute("""
+        CREATE TABLE goal_steering_incorporations (
+            goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, steering_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            PRIMARY KEY (goal_id, steering_id),
+            FOREIGN KEY (goal_id) REFERENCES goals(id) ON DELETE CASCADE,
+            FOREIGN KEY (request_id) REFERENCES goal_model_requests(id) ON DELETE CASCADE
+        )
+    """)
+    for row in conn.execute("SELECT id, snapshot_json FROM goals").fetchall():
+        snapshot = json.loads(row["snapshot_json"])
+        snapshot.setdefault("description", snapshot["title"])
+        snapshot.setdefault("constraints", [])
+        conn.execute("UPDATE goals SET snapshot_json = ? WHERE id = ?",
+                     (json.dumps(snapshot, sort_keys=True), row["id"]))
+
+
 SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
@@ -1804,6 +1852,7 @@ SQLITE_MIGRATIONS = (
         "resumable-agent-evaluations",
         _migrate_to_resumable_agent_evaluations,
     ),
+    SQLiteMigration(22, "goal-context-receipts", _migrate_to_goal_context_receipts),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

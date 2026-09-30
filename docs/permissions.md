@@ -1,5 +1,8 @@
 # Capabilities, permissions, and approval
 
+[Goal steering](goals.md) changes the requested work, not authority. It cannot
+broaden execution scope, tool grants, credentials or host approvals.
+
 Chulk uses three separate safety decisions. They answer different questions and
 none bypasses the next layer.
 
