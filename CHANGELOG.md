@@ -62,6 +62,12 @@ API is still pre-1.0.
 - Added a conservative local-server context setting so runtime prompt budgets
   never assume a model's architecture maximum exceeds the loaded deployment.
 
+### Removed
+
+- Removed the optional Textual operator TUI, `chulk tui` command, and `tui`
+  installation extra. Use the local `chulk` chat or `chulk exec` instead.
+- Removed Textual from the development dependencies.
+
 ### Security
 
 - Reject credential-like content before durable memory storage.

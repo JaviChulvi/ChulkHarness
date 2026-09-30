@@ -102,6 +102,11 @@ Common interactive commands include `/help`, `/plan <request>`, `/approve`,
 `/mcp`. The CLI and SDK share the same runtime builder but use different safety
 defaults; inspect `chulk --show-config` before enabling side effects.
 
+The terminal interface is the local CLI shown above. The optional `chulk tui`
+operator interface and `tui` installation extra have been removed; use `chulk`
+for interactive chat and `chulk exec` for a single request. Neither command
+requires the control server.
+
 For private remote access from a phone, `chulk-telegram` runs an allowlisted
 Telegram bot over outbound long polling. It requires no public server port; see
 the [Telegram adapter guide](docs/telegram.md). An optional bounded Tavily tool
