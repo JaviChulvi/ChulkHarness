@@ -34,9 +34,9 @@ def run_gateway_command(
     """Execute one deterministic owner-side gateway operation."""
     try:
         if command == "start":
-            if adapter not in {"telegram", "discord"}:
-                raise ValueError("gateway adapter must be telegram or discord")
-            if adapter == "telegram" and account_id != "primary":
+            if adapter != "telegram":
+                raise ValueError("gateway adapter must be telegram")
+            if account_id != "primary":
                 raise ValueError(
                     "the Telegram gateway currently uses account 'primary'"
                 )

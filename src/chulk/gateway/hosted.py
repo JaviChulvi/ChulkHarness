@@ -1,94 +1,17 @@
-"""Published-definition and durable-run adapters for hosted gateway ingress."""
+"""Durable-run adapters for hosted gateway ingress."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from enum import Enum
 import hashlib
 import json
 from typing import Any
 
-from chulk.authoring import (
-    AgentDefinitionStore,
-    AsyncAgentDefinitionStore,
-    DefinitionStatus,
-)
 from chulk.gateway.models import InboundEnvelope
 from chulk.gateway.stores import GatewayRunTarget
-from chulk.hosting.scope import ExecutionScope
 from chulk.runs import AsyncRunStore, RunStore, RunSubmission, StepDefinition
-
-
-ScopeFactory = Callable[[Any, InboundEnvelope], ExecutionScope]
-AsyncScopeFactory = Callable[
-    [Any, InboundEnvelope],
-    Awaitable[ExecutionScope],
-]
-
-
-class PublishedDefinitionGatewayResolver:
-    """Resolve host authority to one active immutable definition revision."""
-
-    def __init__(
-        self,
-        definitions: AgentDefinitionStore,
-        scope_factory: ScopeFactory,
-    ) -> None:
-        self.definitions = definitions
-        self.scope_factory = scope_factory
-
-    def resolve(self, route: Any, envelope: InboundEnvelope) -> GatewayRunTarget:
-        scope = self.scope_factory(route, envelope)
-        if not isinstance(scope, ExecutionScope):
-            raise TypeError("gateway scope factory must return ExecutionScope")
-        record = self.definitions.get(
-            scope,
-            scope.agent_id,
-            scope.agent_version,
-        )
-        if record.status is not DefinitionStatus.PUBLISHED:
-            raise ValueError("gateway agent definition is not published")
-        return GatewayRunTarget(
-            scope=scope,
-            definition_id=record.definition.agent_id,
-            definition_version=record.definition.version,
-            definition_digest=record.definition.digest,
-        )
-
-
-class AsyncPublishedDefinitionGatewayResolver:
-    """Native async published-definition resolver."""
-
-    def __init__(
-        self,
-        definitions: AsyncAgentDefinitionStore,
-        scope_factory: AsyncScopeFactory,
-    ) -> None:
-        self.definitions = definitions
-        self.scope_factory = scope_factory
-
-    async def resolve(
-        self,
-        route: Any,
-        envelope: InboundEnvelope,
-    ) -> GatewayRunTarget:
-        scope = await self.scope_factory(route, envelope)
-        if not isinstance(scope, ExecutionScope):
-            raise TypeError("gateway scope factory must return ExecutionScope")
-        record = await self.definitions.get(
-            scope,
-            scope.agent_id,
-            scope.agent_version,
-        )
-        if record.status is not DefinitionStatus.PUBLISHED:
-            raise ValueError("gateway agent definition is not published")
-        return GatewayRunTarget(
-            scope=scope,
-            definition_id=record.definition.agent_id,
-            definition_version=record.definition.version,
-            definition_digest=record.definition.digest,
-        )
 
 
 class DurableGatewayRunSubmitter:
@@ -206,7 +129,5 @@ def _portable(value: Any) -> Any:
 
 __all__ = [
     "AsyncDurableGatewayRunSubmitter",
-    "AsyncPublishedDefinitionGatewayResolver",
     "DurableGatewayRunSubmitter",
-    "PublishedDefinitionGatewayResolver",
 ]

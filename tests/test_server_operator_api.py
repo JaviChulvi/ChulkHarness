@@ -66,7 +66,7 @@ def test_job_listing_uses_the_requested_profile_owner(tmp_path) -> None:
     profile_store = SQLiteProfileStore(config.runtime_dir / 'control.sqlite', base_config=config)
     other = profile_store.create_profile('other', project_root=tmp_path)
     default_job = SQLiteScheduleStore(config.store_path).create(adapter='telegram', destination_id='default-owner', prompt='default work', next_run_at=datetime.now(timezone.utc) + timedelta(days=1))
-    other_job = SQLiteScheduleStore(other.profile.store_path, profile_id='other').create(adapter='discord', destination_id='other-owner', prompt='other work', next_run_at=datetime.now(timezone.utc) + timedelta(days=1))
+    other_job = SQLiteScheduleStore(other.profile.store_path, profile_id='other').create(adapter='custom', destination_id='other-owner', prompt='other work', next_run_at=datetime.now(timezone.utc) + timedelta(days=1))
     with TestClient(app) as client:
         default_jobs = client.get('/v1/profiles/default/jobs', headers=_auth(tokens)).json()['jobs']
         other_jobs = client.get('/v1/profiles/other/jobs', headers=_auth(tokens)).json()['jobs']

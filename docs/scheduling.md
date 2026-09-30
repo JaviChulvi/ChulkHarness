@@ -1,14 +1,14 @@
 # Hosted scheduling
 
 Local `ScheduledJob` prompt jobs remain a compatibility path for channel
-adapters. Hosted applications should schedule immutable definition references
+adapters. Hosted applications should schedule immutable host-owned agent references
 and submit durable runs when an occurrence becomes due.
 
 `HostedScheduledOccurrence` binds:
 
 - the host schedule ID;
-- one `GatewayRunTarget` containing the exact `ExecutionScope` and published
-  definition digest;
+- one `GatewayRunTarget` containing the exact `ExecutionScope` and host-provided
+  revision digest;
 - the timezone-aware scheduled instant; and
 - a stable occurrence idempotency key.
 

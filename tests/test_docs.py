@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_documentation_checker_passes() -> None:
     completed = subprocess.run([sys.executable, 'scripts/check_docs.py'], cwd=ROOT, capture_output=True, text=True, timeout=30, check=False)
     assert completed.returncode == 0, completed.stderr
-    assert '20 topics' in completed.stdout
+    assert '19 topics' in completed.stdout
     assert 'trace hygiene' in completed.stdout
 
 def test_index_routes_sdk_cli_and_repository_developers() -> None:

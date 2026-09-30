@@ -24,7 +24,6 @@ python examples/hosted_runtime/parent_child_app.py
 python examples/hosted_runtime/resilience_contract.py
 # Requires CHULK_POSTGRES_URL and the optional postgres extra:
 python examples/hosted_runtime/postgres_app.py
-python examples/portable_agent/portable_agent.py
 python examples/evaluation_suite/app.py
 python examples/software_engineer_eval/app.py
 ```
@@ -94,7 +93,6 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `hosted_runtime/resilience_contract.py` runs the reusable isolation, durable effect/approval, and gateway recovery gates without credentials or external infrastructure.
 - `hosted_runtime/postgres_app.py` composes the optional PostgreSQL run,
   approval, gateway, and schedule stores and verifies a native-async read.
-- `portable_agent/portable_agent.py` compiles, reviews, publishes, and runs one immutable definition without credentials or local runtime files.
 - `evaluation_suite/app.py` runs a multi-turn, credential-free SDK evaluation
   with explicit graders and a quality threshold.
 - `software_engineer_eval/app.py` evaluates the real `SoftwareEngineer()`

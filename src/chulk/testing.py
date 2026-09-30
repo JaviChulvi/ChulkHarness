@@ -328,13 +328,6 @@ async def assert_async_hosted_services_contract(
     await _native_call(execution_session.aclose)
     checks.append("async_execution_lifecycle")
 
-    plugin_report = await _native_call(first.plugins.verify_startup)
-    _require(
-        plugin_report is not None,
-        "async plugin startup verification returned no report",
-    )
-    checks.append("async_plugin_startup")
-
     await _native_call(
         first.runs.submit,
         first_scope,

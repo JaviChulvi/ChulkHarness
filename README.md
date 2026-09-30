@@ -107,6 +107,13 @@ operator interface and `tui` installation extra have been removed; use `chulk`
 for interactive chat and `chulk exec` for a single request. Neither command
 requires the control server.
 
+Browser chat, operations and evaluation dashboards, Discord, plugin
+installation/catalogs, and portable agent compilation/publication have also
+been removed. Extend a local agent with tools, skills, or MCP, and inspect
+saved evaluations with `chulk eval list`, `show`, `compare`, and `export`.
+See [migration notes](docs/release-policy.md#local-harness-simplification-migration)
+for retired SDK imports and hosted plugin bindings.
+
 For private remote access from a phone, `chulk-telegram` runs an allowlisted
 Telegram bot over outbound long polling. It requires no public server port; see
 the [Telegram adapter guide](docs/telegram.md). An optional bounded Tavily tool
