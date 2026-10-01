@@ -77,7 +77,15 @@ typing tests, and examples together with each affected delivery.
 - Preserve output and accounting across the tool/session/ledger/goal boundaries.
 - Draft PR publication and CI must be verified rather than assumed.
 
-## Next action
+## Current implementation progress
 
-Rebuild final PR 1 wheel, publish draft PR and verify required CI. Then branch
-PR 2 from PR 1: opt-in bounded slices and persistent stagnation detection.
+- The user explicitly approved the complete four-stage implementation plan.
+- PR 1 head `a86ac05` CI ran the Linux/PostgreSQL suite: 2087 passed, one
+  skipped, three failed. The failures were the documentation topic count and
+  the replay transport missing the new asynchronous prompt method.
+- Both owning fixes are implemented. Local documentation/context/replay tests
+  passed 44 cases; two CLI replay export cases require Linux atomic-publication
+  primitives. Ruff, Linux-platform mypy (331 files), and docs checks passed.
+- Next: confirm repaired PR 1 CI, then implement PR 2 bounded slices and
+  persistent stagnation on `feat/goal-bounded-slices`. Stages 2-4 are still
+  required; publication of PR 1 alone does not complete the objective.

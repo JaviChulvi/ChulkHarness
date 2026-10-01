@@ -174,6 +174,9 @@ class _ScriptedModelTransport:
         del turn, require_plan
         return None
 
+    async def build_prompt_async(self, turn: TurnState, *, require_plan: bool) -> None:
+        return self.build_prompt(turn, require_plan=require_plan)
+
     def compact_prompt(
         self,
         prompt: None,
