@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from chulk.core.action_runtime import ActionLoopPort, AgentTurnCancelled
-from chulk.core.actions import AgentAction, PlanStepUpdateAction
+from chulk.core.actions import AgentAction, PlanStepUpdateAction, parse_model_response
+from chulk.core.trace_format import format_action_trace
+from chulk.core.events import TraceEvent
+from chulk.goals.runtime import GoalSliceExhausted
 from chulk.core.model_transport import ProtocolFailure
 from chulk.core.state import TurnState
 from chulk.core.transitions import (
+    ExecuteToolEffect,
     ModelActionSignal,
     PlanStepResultSignal,
     PrepareIterationSignal,
@@ -24,7 +28,46 @@ from chulk.core.turn_effects import (
 )
 
 
-def run_action_loop(
+def run_action_loop(runtime: ActionLoopPort, turn: TurnState, *, require_plan: bool) -> str:
+    try:
+        return _drive_action_loop(runtime, turn, require_plan=require_plan)
+    except GoalSliceExhausted as exc:
+        return runtime.effects.yield_turn(exc.dimension, turn)
+
+
+async def run_action_loop_async(runtime: ActionLoopPort, turn: TurnState, *, require_plan: bool) -> str:
+    try:
+        return await _drive_action_loop_async(runtime, turn, require_plan=require_plan)
+    except GoalSliceExhausted as exc:
+        result = runtime.effects.yield_turn(exc.dimension, turn)
+        await _flush(runtime)
+        return result
+
+
+def _pending_signal(turn: TurnState) -> TransitionSignal | None:
+    pending = turn.extension_metadata.get("goal_pending")
+    if not pending:
+        return None
+    if pending["phase"] == "reflection_result":
+        return ReflectionResultSignal(**pending["result"])
+    payload = dict(pending["action"])
+    if payload["type"] == "plan_step_update":
+        payload = {"type": payload.pop("type"), "step_update": payload}
+    return _model_signal(parse_model_response(payload))
+
+
+def _checkpoint(runtime: ActionLoopPort, turn: TurnState) -> None:
+    if runtime.effects.goal_continuation:
+        runtime.effects.trace(TraceEvent.TURN_CHECKPOINTED, runtime.effects.state_snapshot(turn))
+
+
+def _remember_action(runtime: ActionLoopPort, turn: TurnState, result: AgentAction | ProtocolFailure) -> None:
+    if runtime.effects.goal_continuation and not isinstance(result, ProtocolFailure):
+        turn.extension_metadata["goal_pending"] = {"phase": "action", "action": format_action_trace(result)}
+        _checkpoint(runtime, turn)
+
+
+def _drive_action_loop(
     runtime: ActionLoopPort,
     turn: TurnState,
     *,
@@ -44,23 +87,27 @@ def run_action_loop(
         if preparation.outcome != TransitionOutcome.PROCEED:
             raise RuntimeError("Plan preparation must proceed or stop")
 
-        prompt = runtime.model.build_prompt(turn, require_plan=require_plan)
-        prompt = runtime.model.compact_prompt(
-            prompt,
-            turn,
-            require_plan=require_plan,
-        )
-        model_result = runtime.model.request_action(
-            turn,
-            prompt,
-            require_plan=require_plan,
-        )
+        signal = _pending_signal(turn)
+        if signal is None:
+            prompt = runtime.model.build_prompt(turn, require_plan=require_plan)
+            prompt = runtime.model.compact_prompt(
+                prompt,
+                turn,
+                require_plan=require_plan,
+            )
+            model_result = runtime.model.request_action(
+                turn,
+                prompt,
+                require_plan=require_plan,
+            )
+            _remember_action(runtime, turn, model_result)
+            signal = _model_signal(model_result)
         _raise_if_cancelled(runtime)
         application = _apply_signal(
             runtime,
             turn,
             require_plan=require_plan,
-            signal=_model_signal(model_result),
+            signal=signal,
         )
         if application.outcome == TransitionOutcome.AWAIT_RESULT:
             pending = application.pending
@@ -82,27 +129,35 @@ def run_action_loop(
             elif isinstance(pending, PendingReflection):
                 reflection = runtime.model.reflect(pending.proposed_answer, turn)
                 _raise_if_cancelled(runtime)
+                result_signal = ReflectionResultSignal(
+                    proposed_answer=pending.proposed_answer,
+                    approved=reflection.approved,
+                    reason=reflection.reason,
+                    feedback=reflection.feedback,
+                )
+                if runtime.effects.goal_continuation:
+                    turn.extension_metadata["goal_pending"] = {
+                        "phase": "reflection_result",
+                        "result": {"proposed_answer": pending.proposed_answer,
+                                   "approved": reflection.approved, "reason": reflection.reason,
+                                   "feedback": reflection.feedback},
+                    }
+                    _checkpoint(runtime, turn)
                 application = _apply_signal(
-                    runtime,
-                    turn,
-                    require_plan=require_plan,
-                    signal=ReflectionResultSignal(
-                        proposed_answer=pending.proposed_answer,
-                        approved=reflection.approved,
-                        reason=reflection.reason,
-                        feedback=reflection.feedback,
-                    ),
+                    runtime, turn, require_plan=require_plan, signal=result_signal,
                 )
             else:  # pragma: no cover - validated by TurnEffects
                 raise RuntimeError("Unknown pending action-loop operation")
 
+        turn.extension_metadata.pop("goal_pending", None)
+        _checkpoint(runtime, turn)
         if application.outcome == TransitionOutcome.STOP:
             return _response(application)
         if application.outcome != TransitionOutcome.CONTINUE:
             raise RuntimeError("Action transition must continue, await a result, or stop")
 
 
-async def run_action_loop_async(
+async def _drive_action_loop_async(
     runtime: ActionLoopPort,
     turn: TurnState,
     *,
@@ -123,23 +178,28 @@ async def run_action_loop_async(
         if preparation.outcome != TransitionOutcome.PROCEED:
             raise RuntimeError("Plan preparation must proceed or stop")
 
-        prompt = await runtime.model.build_prompt_async(turn, require_plan=require_plan)
-        prompt = await runtime.model.compact_prompt_async(
-            prompt,
-            turn,
-            require_plan=require_plan,
-        )
-        model_result = await runtime.model.request_action_async(
-            turn,
-            prompt,
-            require_plan=require_plan,
-        )
+        signal = _pending_signal(turn)
+        if signal is None:
+            prompt = await runtime.model.build_prompt_async(turn, require_plan=require_plan)
+            prompt = await runtime.model.compact_prompt_async(
+                prompt,
+                turn,
+                require_plan=require_plan,
+            )
+            model_result = await runtime.model.request_action_async(
+                turn,
+                prompt,
+                require_plan=require_plan,
+            )
+            _remember_action(runtime, turn, model_result)
+            await _flush(runtime)
+            signal = _model_signal(model_result)
         _raise_if_cancelled(runtime)
         application = await _apply_signal_async(
             runtime,
             turn,
             require_plan=require_plan,
-            signal=_model_signal(model_result),
+            signal=signal,
         )
         if application.outcome == TransitionOutcome.AWAIT_RESULT:
             pending = application.pending
@@ -166,20 +226,29 @@ async def run_action_loop_async(
                     turn,
                 )
                 _raise_if_cancelled(runtime)
+                result_signal = ReflectionResultSignal(
+                    proposed_answer=pending.proposed_answer,
+                    approved=reflection.approved,
+                    reason=reflection.reason,
+                    feedback=reflection.feedback,
+                )
+                if runtime.effects.goal_continuation:
+                    turn.extension_metadata["goal_pending"] = {
+                        "phase": "reflection_result",
+                        "result": {"proposed_answer": pending.proposed_answer,
+                                   "approved": reflection.approved, "reason": reflection.reason,
+                                   "feedback": reflection.feedback},
+                    }
+                    _checkpoint(runtime, turn)
+                    await _flush(runtime)
                 application = await _apply_signal_async(
-                    runtime,
-                    turn,
-                    require_plan=require_plan,
-                    signal=ReflectionResultSignal(
-                        proposed_answer=pending.proposed_answer,
-                        approved=reflection.approved,
-                        reason=reflection.reason,
-                        feedback=reflection.feedback,
-                    ),
+                    runtime, turn, require_plan=require_plan, signal=result_signal,
                 )
             else:  # pragma: no cover - validated by TurnEffects
                 raise RuntimeError("Unknown pending action-loop operation")
 
+        turn.extension_metadata.pop("goal_pending", None)
+        _checkpoint(runtime, turn)
         if application.outcome == TransitionOutcome.STOP:
             await _flush(runtime)
             return _response(application)
@@ -199,6 +268,8 @@ def _apply_signal(
 ) -> TransitionApplication:
     snapshot = runtime.effects.snapshot(turn, require_plan=require_plan)
     transition = reduce_transition(snapshot, signal)
+    if runtime.effects.goal_continuation and isinstance(transition.effect, ExecuteToolEffect):
+        runtime.tools.admit(transition.effect.action.tool_name, turn)
     return runtime.effects.apply(
         turn,
         transition,
@@ -218,6 +289,8 @@ async def _apply_signal_async(
 ) -> TransitionApplication:
     snapshot = runtime.effects.snapshot(turn, require_plan=require_plan)
     transition = reduce_transition(snapshot, signal)
+    if runtime.effects.goal_continuation and isinstance(transition.effect, ExecuteToolEffect):
+        await runtime.tools.admit_async(transition.effect.action.tool_name, turn)
     return await runtime.effects.apply_async(
         turn,
         transition,

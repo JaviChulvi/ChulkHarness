@@ -111,3 +111,9 @@ supported version. That job runs the complete credential-free suite against
 PostgreSQL, static and documentation checks, public examples, the deterministic
 evaluation, and a clean-wheel install/import smoke test. Provider network calls
 remain outside required CI.
+
+Goal slice continuation adds `GoalSliceLimits`, SDK `RunStatus.YIELDED`,
+`RunYieldedPayload`, and sync/async `continue_goal_slice`. Event schema v4
+retains readers for v1-v3; exhaustive status matches should handle `YIELDED`.
+SQLite migration 23 adds durable verification decisions. Existing snapshots
+without continuation metadata continue to load with their prior semantics.

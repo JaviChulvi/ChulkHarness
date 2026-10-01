@@ -14,7 +14,7 @@ from chulk.core.observations import (
     format_tool_observation_async,
 )
 from chulk.core.plan_execution import PlanExecution
-from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState
+from chulk.core.state import AgentState, ObservationRecord, PlanStep, ToolCallRecord, TurnState, utc_now
 from chulk.core.transitions import (
     ActionLoopSnapshot,
     ActionTransition,
@@ -85,6 +85,7 @@ class TurnEffects:
     async_artifact_writer: (
         Callable[[str, str], Awaitable[dict | None]] | None
     ) = None
+    goal_continuation: bool = False
     final_answer_streaming: FinalAnswerStreamingMode = FinalAnswerStreamingMode.VALIDATED
     stream_final_answer: Callable[[str, TurnState], FinalAnswerStreamResult] | None = None
     stream_final_answer_async: (
@@ -103,6 +104,7 @@ class TurnEffects:
         )
         return ActionLoopSnapshot(
             require_plan=require_plan,
+            goal_continuation=self.goal_continuation,
             planning_feedback_count=turn.planning_feedback_count,
             planning_tool_limit_feedback_sent=turn.planning_tool_limit_feedback_sent,
             plan_execution_feedback_count=turn.plan_execution_feedback_count,
@@ -175,6 +177,7 @@ class TurnEffects:
             blocked_message = self.plan.apply_step_result(turn, effect.action)
             if blocked_message is not None:
                 response = self.block_turn(blocked_message, turn)
+                return _validate_application(outcome=TransitionOutcome.STOP, response=response, pending=None)
         elif isinstance(effect, CompleteAnswerEffect):
             response = self.complete_answer(effect.content, turn)
         elif isinstance(effect, RequestReflectionEffect):
@@ -242,7 +245,7 @@ class TurnEffects:
                 else None
             )
             return _validate_application(
-                outcome=transition.outcome,
+                outcome=TransitionOutcome.STOP if verification_response is not None else transition.outcome,
                 response=verification_response,
                 pending=None,
             )
@@ -386,6 +389,17 @@ class TurnEffects:
         if turn is not None:
             self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
         return message
+
+    def yield_turn(self, dimension: str, turn: TurnState) -> str:
+        """Finish only the slice; preserve its pending phase and approved plan."""
+        turn.status = "yielded"
+        turn.ended_at = utc_now()
+        turn.final_answer = None
+        turn.extension_metadata["yield_reason"] = dimension
+        self.state.final_answer = None
+        self.trace(TraceEvent.TURN_YIELDED, {"turn_id": turn.turn_id, "dimension": dimension})
+        self.trace(TraceEvent.TURN_FINISHED, self.state_snapshot(turn))
+        return ""
 
     def block_turn(self, message: str, turn: TurnState) -> str:
         self.state.errors.append(message)

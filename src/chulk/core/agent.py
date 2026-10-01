@@ -26,6 +26,7 @@ from chulk.core.planning import read_only_planning_tool_names
 from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.state import AgentState, TurnState
 from chulk.core.signals import DurableApprovalPaused
+from chulk.errors import ConfigurationError
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm.lifecycle import aclose_resources, close_resources
@@ -222,6 +223,9 @@ class Agent:
         self._close_trace_logger = close_trace_logger
         self.resolved_services = components.resolved_services
         self.goal_execution = goal_execution
+        if goal_execution is not None and goal_execution.slice_limits is not None:
+            if usage_accounting is None and components.async_usage_accounting is None:
+                raise ConfigurationError("Goal slices require durable usage accounting")
         self.content_store = content_store
         self.media_processors = media_processors or MediaProcessorRegistry()
         self.tool_contexts = ToolContextRuntime(
@@ -240,6 +244,7 @@ class Agent:
             trace=self.events.emit,
             usage_accounting=usage_accounting,
             async_usage_accounting=components.async_usage_accounting,
+            goal_execution=goal_execution,
         )
         self.memory_context = MemoryContextService(
             state=self.state,
@@ -294,6 +299,7 @@ class Agent:
             trace=self.events.emit,
             verifier=plan_step_verifier,
             async_verifier=async_plan_step_verifier,
+            goal_execution=goal_execution,
         )
         self._turn_effects = TurnEffects(
             state=self.state,
@@ -308,6 +314,7 @@ class Agent:
             ),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
             max_reflection_attempts=self.max_reflection_attempts,
+            goal_continuation=bool(goal_execution and goal_execution.slice_limits),
             max_observation_chars=self.max_observation_chars,
             max_tool_stdout_chars=self.max_tool_stdout_chars,
             max_tool_stderr_chars=self.max_tool_stderr_chars,
@@ -570,6 +577,57 @@ class Agent:
             raise ValueError("user_message cannot be empty")
         return await self._run_user_turn_async(clean_message, require_plan=True)
 
+    def _continuation_source(self) -> TurnState:
+        if self.goal_execution is None or self.goal_execution.slice_limits is None:
+            raise ConfigurationError("Goal continuation is not enabled")
+        if not self.state.turns or self.state.turns[-1].status != "yielded":
+            raise ConfigurationError("No yielded goal turn to continue")
+        return self.state.turns[-1]
+
+    @staticmethod
+    def _copy_continuation(previous: TurnState, turn: TurnState) -> None:
+        turn.active_plan = deepcopy(previous.active_plan)
+        turn.plan_approved = previous.plan_approved
+        turn.reflection_count = previous.reflection_count
+        turn.reflections = deepcopy(previous.reflections)
+        turn.loaded_memory_ids = list(previous.loaded_memory_ids)
+        turn.loaded_skill_names = list(previous.loaded_skill_names)
+        turn.planning_feedback_count = previous.planning_feedback_count
+        turn.plan_execution_feedback_count = previous.plan_execution_feedback_count
+        turn.extension_metadata["continued_from_turn_id"] = previous.turn_id
+        failure = previous.non_retryable_tool_failure_sequence()
+        if failure is not None:
+            turn.extension_metadata["goal_failure_guard"] = {
+                "tool_name": failure.tool_name, "fingerprint": failure.fingerprint,
+                "failure_kind": failure.failure_kind, "count": failure.count,
+            }
+        for key in ("goal_pending", "goal_tool_attempts", "external_content_seen"):
+            if key in previous.extension_metadata:
+                turn.extension_metadata[key] = deepcopy(previous.extension_metadata[key])
+
+    def continue_goal_slice(self, *, tool_context: ToolExecutionContext | dict | None = None,
+                            turn_id: str | None = None) -> str:
+        """Continue durable goal work without adding another user instruction."""
+        previous = self._continuation_source()
+        assert self.goal_execution is not None
+        self.goal_execution.assert_boundary()
+        return self._run_user_turn(
+            previous.user_message, require_plan=False, continuation=previous,
+            context_sections=list(previous.context_sections), prompt_profile=previous.prompt_profile,
+            locale=previous.locale, tool_context=tool_context, turn_id=turn_id,
+        )
+
+    async def continue_goal_slice_async(self, *, tool_context: ToolExecutionContext | dict | None = None,
+                                      turn_id: str | None = None) -> str:
+        previous = self._continuation_source()
+        assert self.goal_execution is not None
+        await self.goal_execution.assert_boundary_async()
+        return await self._run_user_turn_async(
+            previous.user_message, require_plan=False, continuation=previous,
+            context_sections=list(previous.context_sections), prompt_profile=previous.prompt_profile,
+            locale=previous.locale, tool_context=tool_context, turn_id=turn_id,
+        )
+
     def _run_user_turn(
         self,
         clean_message: str,
@@ -584,6 +642,7 @@ class Agent:
         model_input: UserInput | None = None,
         media_events: list[dict] | None = None,
         turn_id: str | None = None,
+        continuation: TurnState | None = None,
     ) -> str:
         """Start a user turn and run it until it completes or waits for approval."""
         self._cancel_requested.clear()
@@ -619,6 +678,7 @@ class Agent:
                 model_input=model_input,
                 media_events=media_events,
                 turn_id=effective_turn_id,
+                continuation=continuation,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -654,6 +714,7 @@ class Agent:
         model_input: UserInput | None = None,
         media_events: list[dict] | None = None,
         turn_id: str | None = None,
+        continuation: TurnState | None = None,
     ) -> str:
         """Start a user turn and run it with async tool execution."""
         self._cancel_requested.clear()
@@ -689,6 +750,7 @@ class Agent:
                 model_input=model_input,
                 media_events=media_events,
                 turn_id=effective_turn_id,
+                continuation=continuation,
             )
             if isinstance(turn_or_response, str):
                 return turn_or_response
@@ -732,10 +794,11 @@ class Agent:
         model_input: UserInput | None = None,
         media_events: list[dict] | None = None,
         turn_id: str | None = None,
+        continuation: TurnState | None = None,
     ) -> TurnState | str:
         """Create a turn while awaiting hosted memory, skills, and execution."""
 
-        blocked = self._new_turn_block_message()
+        blocked = self._new_turn_block_message() if continuation is None else None
         if blocked is not None:
             return blocked
 
@@ -762,6 +825,8 @@ class Agent:
                 execution_context.metadata if execution_context else {}
             ),
         )
+        if continuation is not None:
+            self._copy_continuation(continuation, turn)
         turn.model_input = model_input
         await self.tool_contexts.prepare_async(turn, execution_context)
         self.state.current_turn_id = turn.turn_id
@@ -812,6 +877,12 @@ class Agent:
                 },
             )
 
+        if continuation is not None:
+            await self.memory_context.restore_async(turn)
+            await self.skill_context.restore_async(turn)
+            await self.resources.flush()
+            return turn
+
         await self.memory_context.extract_async(clean_message)
         await self.memory_context.select_async(clean_message)
         await self.skill_context.select_async(clean_message)
@@ -839,9 +910,10 @@ class Agent:
         model_input: UserInput | None = None,
         media_events: list[dict] | None = None,
         turn_id: str | None = None,
+        continuation: TurnState | None = None,
     ) -> TurnState | str:
         """Create and trace a user turn before model/tool execution."""
-        blocked = self._new_turn_block_message()
+        blocked = self._new_turn_block_message() if continuation is None else None
         if blocked is not None:
             return blocked
 
@@ -868,6 +940,8 @@ class Agent:
             if execution_context
             else {},
         )
+        if continuation is not None:
+            self._copy_continuation(continuation, turn)
         turn.model_input = model_input
         self.tool_contexts.prepare(turn, execution_context)
         self.state.current_turn_id = turn.turn_id
@@ -918,6 +992,11 @@ class Agent:
                 },
             )
 
+        if continuation is not None:
+            self.memory_context.restore(turn)
+            self.skill_context.restore(turn)
+            return turn
+
         self.memory_context.extract(clean_message)
         self.memory_context.select(clean_message)
         self.skill_context.select(clean_message)
@@ -932,6 +1011,8 @@ class Agent:
         return turn
 
     def _new_turn_block_message(self) -> str | None:
+        if self.state.turns and self.state.turns[-1].status == "yielded":
+            return "Goal work has yielded; use continue_goal_slice or steer the goal before continuing."
         if self.has_pending_plan():
             return (
                 "A plan is waiting for approval. Use /approve to execute it or "

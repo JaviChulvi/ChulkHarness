@@ -35,7 +35,7 @@ def test_event_envelope_and_catalog_are_stable(tmp_path):
     facade = _agent(tmp_path)
     events = list(facade.run_events('hello'))
     assert [event.name for event in events] == ['run.started', 'memory.loaded', 'skill.loaded', 'budget.reserved', 'model.request.started', 'budget.committed', 'model.response.completed', 'model.delta', 'run.completed']
-    assert all((event.schema_version == EVENT_SCHEMA_VERSION == 3 for event in events))
+    assert all((event.schema_version == EVENT_SCHEMA_VERSION == 4 for event in events))
     assert all((event.profile_id == 'default' for event in events))
     assert all((event.conversation_id == facade.conversation_id for event in events))
     assert all((event.turn_id == events[0].turn_id for event in events))

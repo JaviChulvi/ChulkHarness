@@ -196,7 +196,7 @@ async def test_async_cancellation_is_not_converted_or_retried():
     registry = ToolRegistry()
     registry.register(cancellable)
     task = asyncio.create_task(registry.run_async('cancellable', {}, context=ToolExecutionContext()))
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -226,6 +226,12 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
 
     class Goal:
 
+        def slice_budget(self, _turn):
+            return None
+
+        def on_budget_exhausted(self, _error):
+            return None
+
         def begin_tool(self, **_kwargs):
             return object()
 
@@ -239,7 +245,7 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
     registry.register(cancellable)
     executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda _name, _payload=None: None, get_context=lambda _turn: None, goal_execution=Goal(), async_usage_accounting=Usage())
     task = asyncio.create_task(executor.execute_async('cancellable', {}, TurnState('cancel')))
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as error:
         await task
@@ -274,7 +280,7 @@ async def test_async_durable_effect_cleanup_preserves_cancellation():
     registry.register(cancellable)
     executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda _name, _payload=None: None, get_context=lambda _turn: ToolExecutionContext(), durable_effects=DurableEffects())
     task = asyncio.create_task(executor.execute_async('cancellable', {}, TurnState('cancel')))
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as error:
         await task

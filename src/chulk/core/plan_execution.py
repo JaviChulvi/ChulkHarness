@@ -11,6 +11,8 @@ from chulk.core.events import TraceEvent
 from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, ToolCallRecord, TurnState
 from chulk.core.transitions import FinishToolEffect
 from chulk.memory import ConversationMemory
+from chulk.goals.runtime import GoalExecutionContext
+from chulk.hosting.async_utils import call_async_service
 from chulk.tools.registry import ToolResult
 
 
@@ -75,6 +77,7 @@ class PlanExecution:
     trace: Callable[[str, dict | None], None]
     verifier: PlanStepVerifier | None = None
     async_verifier: AsyncPlanStepVerifier | None = None
+    goal_execution: GoalExecutionContext | None = None
 
     def present(self, turn: TurnState, plan: Plan) -> str:
         turn.wait_for_plan_approval(plan)
@@ -166,6 +169,7 @@ class PlanExecution:
         step = plan.active_step()
         if step is None or action.step_id != step.id:
             raise RuntimeError("Validated plan step update lost its active step")
+        context = self.goal_execution.verification_context() if self.goal_execution and self.goal_execution.slice_limits else None
         verification: PlanStepVerification | None = None
         if action.status == "completed":
             if self.verifier is not None:
@@ -176,7 +180,11 @@ class PlanExecution:
                 raise RuntimeError(
                     "async plan step verifier requires asynchronous plan execution"
                 )
-        return self._apply_step_result(turn, step, action, verification)
+        rejection_count = 0
+        if context is not None and verification is not None and self.goal_execution is not None:
+            rejection_count = self.goal_execution.record_verification(turn,
+                context=context, passed=verification.passed, feedback=verification.evidence)
+        return self._apply_step_result(turn, step, action, verification, rejection_count=rejection_count)
 
     async def apply_step_result_async(
         self,
@@ -189,6 +197,7 @@ class PlanExecution:
         step = plan.active_step()
         if step is None or action.step_id != step.id:
             raise RuntimeError("Validated plan step update lost its active step")
+        context = await call_async_service(self.goal_execution, "verification_context") if self.goal_execution and self.goal_execution.slice_limits else None
         verification: PlanStepVerification | None = None
         if action.status == "completed":
             request = _verification_request(turn, plan, step, action)
@@ -198,7 +207,11 @@ class PlanExecution:
                 verification = _require_verification(
                     await asyncio.to_thread(self.verifier, request)
                 )
-        return self._apply_step_result(turn, step, action, verification)
+        rejection_count = 0
+        if context is not None and verification is not None and self.goal_execution is not None:
+            rejection_count = await call_async_service(self.goal_execution, "record_verification", turn,
+                context=context, passed=verification.passed, feedback=verification.evidence)
+        return self._apply_step_result(turn, step, action, verification, rejection_count=rejection_count)
 
     def _apply_step_result(
         self,
@@ -206,6 +219,7 @@ class PlanExecution:
         step: PlanStep,
         action: PlanStepUpdateAction,
         verification: PlanStepVerification | None,
+        *, rejection_count: int = 0,
     ) -> str | None:
         if action.status == "completed" and verification is not None:
             if not verification.passed:
@@ -221,8 +235,12 @@ class PlanExecution:
                         "step_id": step.id,
                         "asserted_evidence": action.evidence,
                         "verification": verification.to_dict(),
+                        "unchanged_evidence_rejections": rejection_count,
                     },
                 )
+                if rejection_count >= 3:
+                    step.block(f"verification_stagnation: three rejections without new evidence. {verification.evidence}")
+                    return _blocked_message(step)
                 return None
         step.add_evidence(action.evidence, tool_name="plan_step_update")
         if action.status == "completed":

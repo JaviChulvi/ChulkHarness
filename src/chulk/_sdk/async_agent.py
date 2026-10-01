@@ -88,6 +88,9 @@ class AsyncAgent(AsyncAgentHandle):
             serialized=True,
         )
 
+    async def continue_goal_slice(self, **kwargs: Any) -> RunResult:
+        return await self._invoke_async("continue_goal_slice", lambda: AsyncAgentHandle.continue_goal_slice(self, **kwargs), serialized=True)
+
     async def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
         options = self._agent._run_options(kwargs)
         result = await self._invoke_async(

@@ -19,7 +19,7 @@ def test_plain_package_import_loads_only_the_version_contract() -> None:
     completed = _run_fresh_import('\n        import json\n        import sys\n\n        before = set(sys.modules)\n        import chulk\n\n        loaded = sorted(\n            name\n            for name in sys.modules\n            if name not in before\n            and (name == "chulk" or name.startswith("chulk."))\n        )\n        print(json.dumps(loaded))\n        print(len(chulk.__all__))\n        print("Agent" in vars(chulk))\n        ')
     loaded, export_count, agent_materialized = completed.stdout.splitlines()
     assert json.loads(loaded) == ['chulk', 'chulk._version']
-    assert export_count == '540'
+    assert export_count == '542'
     assert agent_materialized == 'False'
 
 def test_all_stable_exports_resolve_lazily_with_compatible_aliases() -> None:

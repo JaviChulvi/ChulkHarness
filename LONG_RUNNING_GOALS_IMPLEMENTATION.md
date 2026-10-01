@@ -27,8 +27,8 @@ The original study checkout is untouched.
 
 | PR | Branch | Base | State | Commit | URL |
 | --- | --- | --- | --- | --- | --- |
-| 1: authoritative context and steering | feat/goal-authoritative-context | main | draft; integrating new main | 0df52f2 | https://github.com/JaviChulvi/ChulkHarness/pull/128 |
-| 2: bounded slices and stagnation | feat/goal-bounded-slices | feat/goal-authoritative-context | pending | pending | pending |
+| 1: authoritative context and steering | feat/goal-authoritative-context | main | draft; full CI green | 598fce5 | https://github.com/JaviChulvi/ChulkHarness/pull/128 |
+| 2: bounded slices and stagnation | feat/goal-bounded-slices | feat/goal-authoritative-context | implemented; validating | pending | pending |
 | 3: local runner, CLI, SDK | feat/goal-local-runner | feat/goal-bounded-slices | pending | pending | pending |
 | 4: hosted durable execution | feat/goal-hosted-execution | feat/goal-local-runner | pending | pending | pending |
 
@@ -89,3 +89,54 @@ typing tests, and examples together with each affected delivery.
 - Next: confirm repaired PR 1 CI, then implement PR 2 bounded slices and
   persistent stagnation on `feat/goal-bounded-slices`. Stages 2-4 are still
   required; publication of PR 1 alone does not complete the objective.
+
+## Stage 2 execution checkpoint (2026-10-02)
+
+- PR 1 full required CI passed: run 36930051500, head 598fce5.
+- Stage 2 adds immutable GoalSliceLimits, ledger-backed dynamic turn constraints,
+  YIELDED results/public events (schema 4; readers retain 1-3), explicit sync/async
+  continuation, and pending action/reflection/attempt checkpoints in sessions.
+- Tool admission precedes counters; refused summary admission preserves history.
+  JSON repairs now commit all provider calls. The prior tool failure guard
+  survives slices. Native async goal persistence currently uses drained sync
+  bindings; native goal-store protocol work belongs to stage 3.
+- Migration 23 persists fenced/idempotent verification decisions and blocks on
+  three same-context/same-evidence rejections. Result digests exclude new IDs.
+- 19 deterministic slice tests pass, covering 5/5/2, reopen, cumulative global
+  budgets, reflection/final streaming, retry phases, stagnation and migration.
+- Full macOS coverage run: 2056 passed, 44 skipped, 10 platform failures; coverage
+  81.68%. Failures are existing Linux atomic-publication/replay export behavior
+  and platform-specific embedded-NUL error wording. See /tmp/chulk-stage2-pytest.log.
+  An earlier run was interrupted after an outdated Goal test double caused a
+  cancellation test to wait indefinitely; fixed the double and bounded the wait.
+- Ruff, Linux-platform mypy (331 files), compileall, docs (20 topics), quickstart
+  and review-bot examples passed. Clean wheel installation/import/example smoke
+  passed after moving stale generated build output aside.
+- Latest changes refresh continuation prompt guidance and release a demonstrably
+  unsent reservation when goal receipt admission rejects it. Focused recheck in
+  progress; required Linux/PostgreSQL CI will run on the published PR.
+- Still required: publish/attach draft PR 2, then implement and publish stages
+  3 and 4. Do not claim the four-stage objective complete after this slice.
+
+## Stage 3 design notes for continuation
+
+Use a small sync/async GoalRunner around the existing Agent loop; require an
+explicit verifier, durable recorder/accounting and finite goal model-call limit
+before admission. Keep GoalService.run audited. Add an owner transaction for
+claim + ordered eligible-step selection/start + persisted conversation/slice IDs.
+Use a dedicated execution conversation and a projection of the chosen goal step.
+Fence progress with token and revision; persist verification/evidence/completion
+idempotently. Heartbeat 120/40 through model/tool/verifier waits, preserving owned
+in-flight draining after pause/cancel. CLI goal run invokes runner foreground;
+single-slice flag and explicit project verifier configuration fail before model
+use if missing. Native async store operations must be awaited; sync bindings use
+call_async_service. Do not introduce a second model/action loop.
+
+Stage 4 must extend durable effect/run owners and PostgreSQL adapters, preserve
+unknown model reservations and recover known responses/results before usage,
+observations, verification, progress and events. Stable operation IDs cannot be
+just turn IDs/argument hashes; dispatched mutations without known results block
+for reconciliation and retry-step must not bypass them. The current stage-2
+turn checkpoints support known slice yields, not arbitrary external-effect crash
+replay. Existing InMemoryUsageService does not enforce slice budgets: automatic
+hosted execution must require a genuine durable usage binding.

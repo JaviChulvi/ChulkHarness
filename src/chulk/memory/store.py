@@ -89,6 +89,10 @@ class ConversationMemory:
         self._pending_summary_messages = []
         self.trim_to_limit()
 
+    def pending_summary_messages(self) -> list[dict[str, str]]:
+        """Inspect unsummarized history without discarding it before admission."""
+        return list(self._pending_summary_messages)
+
     def consume_pending_summary_messages(self) -> list[dict[str, str]]:
         """Return messages dropped by the raw history limit since the last compaction."""
         messages = list(self._pending_summary_messages)

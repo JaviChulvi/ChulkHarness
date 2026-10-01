@@ -62,6 +62,7 @@ class ActionLoopSnapshot:
     active_plan_step_id: str | None = None
     planning_tool_names: frozenset[str] = field(default_factory=frozenset)
     tool_call_count: int = 0
+    goal_continuation: bool = False
     max_tool_calls_per_turn: int = 5
     reflection_count: int = 0
     max_reflection_attempts: int = 0
@@ -392,7 +393,7 @@ def _reduce_tool_call(
             "arguments instead of repeating the rejected call."
         )
 
-    if snapshot.tool_call_count >= snapshot.max_tool_calls_per_turn:
+    if not snapshot.goal_continuation and snapshot.tool_call_count >= snapshot.max_tool_calls_per_turn:
         if phase == "planning" and not snapshot.planning_tool_limit_feedback_sent:
             return ActionTransition(
                 effect=RequestPlanRevisionEffect(
@@ -486,7 +487,7 @@ def _reduce_tool_result(
     )
     retry_scheduled = (
         retry_number <= snapshot.active_plan_step_retry_limit
-        and tool_calls_remaining > 0
+        and (snapshot.goal_continuation or tool_calls_remaining > 0)
     )
     if retry_scheduled:
         disposition = "retry_scheduled"

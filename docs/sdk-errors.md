@@ -51,3 +51,9 @@ Tool failures that the agent loop can safely report to the model remain
 cancellation continues to work. `TraceFormatError` remains compatible with
 existing `ValueError` catches and is also a public `TraceError`; `MCPConfigError`
 similarly remains a `ValueError` and is a `ConfigurationError`.
+
+Goal slices reject an operation larger than their configured fresh allowance
+with `ConfigurationError`, before any provider or tool dispatch. A slice limit
+that can admit the operation on the next turn returns `RunStatus.YIELDED` rather
+than an error. Global goal limits continue to raise `BudgetExceededError` with
+the exhausted dimension and recorded consumption.

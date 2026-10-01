@@ -15,6 +15,7 @@ from chulk.resources import HostResource
 
 
 class RunStatus(StrEnum):
+    YIELDED = "yielded"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"

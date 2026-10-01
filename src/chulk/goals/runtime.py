@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from hashlib import sha256
+import json
 
 from typing import Any
 
-from chulk.goals.models import Goal, GoalActionCheckpoint, GoalClaim, GoalModelRequest
+from chulk.goals.models import Goal, GoalActionCheckpoint, GoalClaim, GoalModelRequest, GoalSliceLimits
 from chulk.goals.store import GoalStore
 from chulk.hosting.async_utils import call_async_service
 from chulk.tools.registry import ToolResult
+from chulk.usage import BudgetExceededError, BudgetScope, RunBudget
+from chulk.errors import ConfigurationError
+from chulk.core.state import TurnState
+
+
+class GoalSliceExhausted(Exception):
+    """Internal control signal; no operation was admitted in this phase."""
+
+    def __init__(self, dimension: str) -> None:
+        self.dimension = dimension
+        super().__init__(f"Goal slice exhausted: {dimension}")
 
 
 @dataclass(slots=True)
@@ -19,6 +35,35 @@ class GoalExecutionContext:
     store: GoalStore
     claim: GoalClaim
     step_id: str
+    slice_limits: GoalSliceLimits | None = None
+    slice_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    def slice_budget(self, turn: TurnState) -> RunBudget | None:
+        if self.slice_limits is None:
+            return None
+        # Persist the deadline with the turn; reopening does not extend its slice.
+        deadline = turn.extension_metadata.get("goal_slice_deadline")
+        if deadline is None:
+            deadline = (self.slice_clock().astimezone(timezone.utc) + timedelta(
+                seconds=self.slice_limits.max_seconds
+            )).isoformat()
+            turn.extension_metadata["goal_slice_deadline"] = deadline
+        return RunBudget(
+            scope=BudgetScope.TURN,
+            max_model_calls=self.slice_limits.max_model_calls,
+            max_tool_calls=self.slice_limits.max_tool_calls,
+            deadline=datetime.fromisoformat(deadline),
+        )
+
+    def on_budget_exhausted(self, error: BudgetExceededError) -> None:
+        if self.slice_limits is None or error.scope is not BudgetScope.TURN:
+            return
+        if error.dimension != "deadline" and Decimal(error.requested) > Decimal(error.limit):
+            raise ConfigurationError(
+                f"Operation requires {error.requested} {error.dimension}; "
+                f"a fresh goal slice allows {error.limit}"
+            ) from error
+        raise GoalSliceExhausted(error.dimension) from error
 
     @property
     def goal_id(self) -> str:
@@ -44,6 +89,7 @@ class GoalExecutionContext:
         step = goal.step(self.step_id)
         return {
             "goal_id": goal.id, "revision": goal.revision,
+            **({"slice_limits": asdict(self.slice_limits)} if self.slice_limits is not None else {}),
             "description": goal.description, "constraints": list(goal.constraints),
             "acceptance_criteria": [item.to_dict() for item in goal.acceptance_criteria],
             "active_step": {
@@ -120,6 +166,7 @@ class GoalExecutionContext:
             self.claim,
             checkpoint.id,
             result={
+                "digest": sha256(result.to_observation().encode()).hexdigest(),
                 "success": result.success,
                 "tool_name": result.tool_name,
                 "failure_kind": result.failure_kind,
@@ -137,6 +184,25 @@ class GoalExecutionContext:
             self.claim,
             checkpoint.id,
             error=f"{type(error).__name__}: {error}",
+        )
+
+    def verification_context(self) -> dict[str, Any]:
+        goal = self.assert_boundary()
+        criteria = {"description": goal.description, "constraints": goal.constraints,
+                    "criteria": [item.to_dict() for item in goal.acceptance_criteria],
+                    "instructions": [item.to_dict() for item in goal.active_steering]}
+        evidence = sorted({
+            str(item.result["digest"]) for item in self.store.action_checkpoints(goal.id)
+            if item.step_id == self.step_id and item.result and "digest" in item.result
+        } | {item.summary for item in goal.evidence if item.step_id == self.step_id})
+        return {"expected_revision": goal.revision,
+                "context_digest": sha256(json.dumps(criteria, sort_keys=True).encode()).hexdigest(),
+                "evidence_digest": sha256(json.dumps(evidence).encode()).hexdigest()}
+
+    def record_verification(self, turn: TurnState, *, context: dict[str, Any], passed: bool, feedback: str) -> int:
+        return self.store.record_verification(
+            self.claim, step_id=self.step_id, operation_id=f"{turn.turn_id}:model:{turn.model_request_count}",
+            passed=passed, feedback=feedback, **context,
         )
 
     def heartbeat(self, *, lease_seconds: int = 120) -> GoalClaim:

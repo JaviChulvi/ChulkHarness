@@ -25,6 +25,7 @@ from chulk.events import (
     ResourcesLoadedPayload,
     ResourceAvailablePayload,
     RunCompletedPayload,
+    RunYieldedPayload,
     RunFailedPayload,
     RunStartedPayload,
     ToolCallPayload,
@@ -439,6 +440,9 @@ def project_event(runtime: CoreAgent, event_type: str, payload: dict[str, Any]) 
         return None
     if event_type == TraceEvent.TURN_FINISHED:
         result = run_result_from_runtime(runtime)
+        if result.status == "yielded":
+            return _event(EventName.RUN_YIELDED, conversation_id, turn_id,
+                          RunYieldedPayload(result), extensions, profile_id=runtime.profile_id)
         if result.status in {"failed", "blocked", "cancelled"}:
             message = result.errors[-1] if result.errors else result.content or "The run failed."
             return _event(
@@ -468,8 +472,11 @@ def terminal_event(
     causation_id: str | None = None,
 ) -> AgentEvent:
     """Create the exact in-band terminal event for a generator run result."""
-    payload: RunFailedPayload | RunCompletedPayload
-    if getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
+    payload: RunFailedPayload | RunCompletedPayload | RunYieldedPayload
+    if getattr(result, "status", None) == "yielded":
+        payload = RunYieldedPayload(result)
+        name = EventName.RUN_YIELDED
+    elif getattr(result, "status", None) in {"failed", "blocked", "cancelled"}:
         errors = getattr(result, "errors", ())
         message = errors[-1] if errors else getattr(result, "content", "The run failed.")
         payload = RunFailedPayload(_run_failure_payload(result, message))

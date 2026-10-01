@@ -271,6 +271,8 @@ def consume_terminal(payload: RunCompletedPayload) -> str:
 
 def exhaustive_run_status(status: RunStatus) -> str:
     match status:
+        case RunStatus.YIELDED:
+            return "yielded"
         case RunStatus.IN_PROGRESS:
             return "in_progress"
         case RunStatus.COMPLETED:

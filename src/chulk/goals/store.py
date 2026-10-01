@@ -23,7 +23,7 @@ from chulk.goals.models import (
     GoalStepStatus,
     goal_from_dict,
 )
-from chulk.goals.transitions import GoalMutation, mark_step_uncertain
+from chulk.goals.transitions import GoalMutation, mark_step_uncertain, block_step
 from chulk.redaction import redact_data
 from chulk.storage import initialize_sqlite_database, sqlite_connection
 from chulk.storage.private_files import write_private_text
@@ -629,6 +629,52 @@ class GoalStore:
             ).fetchone()
         assert updated is not None
         return _checkpoint_from_row(updated)
+
+    def record_verification(
+        self, claim: GoalClaim, *, step_id: str, operation_id: str,
+        expected_revision: int, context_digest: str, evidence_digest: str,
+        passed: bool, feedback: str,
+    ) -> int:
+        """Fence and persist a decision; the third unchanged rejection blocks atomically."""
+        now = self._now()
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _assert_claim_owner(conn, claim, profile_id=self.profile_id, now=now)
+            existing = conn.execute(
+                "SELECT * FROM goal_verifications WHERE goal_id = ? AND operation_id = ?",
+                (claim.goal_id, operation_id),
+            ).fetchone()
+            if existing is not None:
+                if (existing["context_digest"], existing["evidence_digest"], bool(existing["passed"]), existing["feedback"]) != (context_digest, evidence_digest, passed, feedback):
+                    raise GoalActionConflictError("verification identity reused with a different decision")
+                return int(existing["rejection_count"])
+            _assert_action_boundary(conn, claim, profile_id=self.profile_id, step_id=step_id, now=now)
+            if current.revision != expected_revision:
+                raise GoalRevisionConflictError(current.id, expected_revision, current.revision)
+            previous = conn.execute(
+                "SELECT * FROM goal_verifications WHERE goal_id = ? AND step_id = ? ORDER BY sequence DESC LIMIT 1",
+                (claim.goal_id, step_id),
+            ).fetchone()
+            count = 0 if passed else 1
+            if not passed and previous is not None and previous["context_digest"] == context_digest and previous["evidence_digest"] == evidence_digest:
+                count += int(previous["rejection_count"])
+            conn.execute("""
+                INSERT INTO goal_verifications
+                    (goal_id, profile_id, step_id, operation_id, context_digest, evidence_digest,
+                     passed, feedback, rejection_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (claim.goal_id, self.profile_id, step_id, operation_id, context_digest, evidence_digest,
+                  int(passed), feedback, count, now.isoformat()))
+            if count >= 3:
+                reason = f"verification_stagnation: three rejections without new evidence. {feedback}"
+                changed = block_step(current, step_id, reason).with_revision(current.revision + 1, now=now)
+                conn.execute("""UPDATE goals SET status = ?, revision = ?, snapshot_json = ?, updated_at = ?
+                                WHERE id = ? AND profile_id = ? AND revision = ? AND claim_token = ?""",
+                             (changed.status.value, changed.revision, _json(changed.to_dict()), now.isoformat(),
+                              current.id, self.profile_id, current.revision, claim.claim_token))
+                _insert_event(conn, changed, kind="goal.blocked", actor=claim.runner_id,
+                              payload={"reason": reason, "operation_id": operation_id}, now=now)
+        return count
 
     def retention_candidates(
         self,

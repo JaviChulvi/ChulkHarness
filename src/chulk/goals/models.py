@@ -12,6 +12,21 @@ from chulk._serialization import _freeze_mapping, _plain
 from chulk.usage import BudgetScope, ExactCost, RunBudget, UnknownCostPolicy
 
 
+@dataclass(frozen=True, slots=True)
+class GoalSliceLimits:
+    """Cooperative per-turn limits, separate from the durable goal budget."""
+
+    max_tool_calls: int = 5
+    max_model_calls: int = 20
+    max_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        for name in ("max_tool_calls", "max_model_calls", "max_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+
 class GoalStatus(StrEnum):
     DRAFT = "draft"
     APPROVED = "approved"
@@ -976,6 +991,7 @@ __all__ = [
     "GoalApproval",
     "GoalClaim",
     "GoalModelRequest",
+    "GoalSliceLimits",
     "GoalCriterion",
     "GoalEvent",
     "GoalEvidence",

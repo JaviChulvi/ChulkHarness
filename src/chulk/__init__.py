@@ -79,7 +79,7 @@ if TYPE_CHECKING:
         DockerExecutionBackend, DockerUnavailableError, FileAccess, FileListRequest, FileReadRequest,
         FileSearchRequest, FileWriteRequest, GitWorktreeBackend, GitWorktreePolicy, Goal,
         GoalActionCheckpoint, GoalActionConflictError, GoalActionState, GoalApproval,
-        GoalCancellationPropagator, GoalChangedPayload, GoalClaim, GoalCriterion, GoalEvent, GoalModelRequest,
+        GoalCancellationPropagator, GoalChangedPayload, GoalClaim, GoalCriterion, GoalEvent, GoalModelRequest, GoalSliceLimits,
         GoalEventCallback, GoalEvidence, GoalExecutionContext, GoalLeaseConflictError, GoalNotFoundError,
         GoalRevisionConflictError, GoalRisk, GoalRetentionPolicy, GoalService, GoalStatus, GoalSteering,
         GoalStep, GoalStepStatus, GoalStore, GovernedSkill, GovernedSkillRevision, HostExecutionBackend,
@@ -103,7 +103,7 @@ if TYPE_CHECKING:
         PassThroughOutputPolicy, AsyncPassThroughOutputPolicy, OutputPolicyFailureMode, ResourceKind,
         HostResource, ResourceAvailablePayload, ResourcePersistence, ReservationState, ResourcePolicy,
         ResolvedProfileRuntime, ResolvedModelCandidate, ResolvedModelRuntime, RunResult, RunBudget,
-        RuntimeChildAgentFactory, ProviderError, ResourcesLoadedPayload, RunCompletedPayload,
+        RuntimeChildAgentFactory, ProviderError, ResourcesLoadedPayload, RunCompletedPayload, RunYieldedPayload,
         RunFailedPayload, RunStartedPayload, SerializedEventPayload, RunStatus, SafetyError, SecretPolicy,
         SessionHit, SessionMessage, SessionSearchPage, SessionSearchService, SessionWindow,
         ShellExecutionDecision, ShellExecutionPolicy, ShellExecutionRequest, SQLiteProfileStore,
@@ -203,7 +203,7 @@ ExecutionSession ExecutionSessionRequest ExecutionWorkspace ExecutionBackendFact
 EnvironmentPolicy EndpointRef ExactCost DockerPolicy DockerExecutionBackend DockerUnavailableError
 FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest
 GitWorktreeBackend GitWorktreePolicy Goal GoalActionCheckpoint GoalActionConflictError
-GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalClaim GoalCriterion GoalModelRequest
+GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalClaim GoalCriterion GoalModelRequest GoalSliceLimits
 GoalEvent GoalEventCallback GoalEvidence GoalExecutionContext GoalLeaseConflictError
 GoalNotFoundError GoalRevisionConflictError GoalRisk GoalRetentionPolicy GoalService GoalStatus
 GoalSteering GoalStep GoalStepStatus GoalStore GovernedSkill GovernedSkillRevision
@@ -229,7 +229,7 @@ AsyncIncrementalOutputPolicy PassThroughOutputPolicy AsyncPassThroughOutputPolic
 OutputPolicyFailureMode ResourceKind HostResource ResourceAvailablePayload ResourcePersistence
 ReservationState ResourcePolicy ResolvedProfileRuntime ResolvedModelCandidate ResolvedModelRuntime
 RunResult RunBudget RuntimeChildAgentFactory ProviderError ResourcesLoadedPayload
-RunCompletedPayload RunFailedPayload RunStartedPayload SerializedEventPayload RunStatus SafetyError
+RunCompletedPayload RunYieldedPayload RunFailedPayload RunStartedPayload SerializedEventPayload RunStatus SafetyError
 SecretPolicy SessionHit SessionMessage SessionSearchPage SessionSearchService SessionWindow
 ShellExecutionDecision ShellExecutionPolicy ShellExecutionRequest SQLiteProfileStore SQLiteGoalStore
 SQLiteUsageStore StoredAgentProfile ReactionPart ReplyPart TextPart Skills Research Tool ToolContext

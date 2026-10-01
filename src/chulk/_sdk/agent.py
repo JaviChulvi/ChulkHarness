@@ -220,6 +220,9 @@ class Agent(AgentHandle):
         options = self._run_options(kwargs)
         return self._invoke("run_result", lambda: AgentHandle.run_result(self, message, **options), serialized=True)
 
+    def continue_goal_slice(self, **kwargs: Any) -> RunResult:
+        return self._invoke("continue_goal_slice", lambda: AgentHandle.continue_goal_slice(self, **kwargs), serialized=True)
+
     def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
         options = self._run_options(kwargs)
         return self._invoke(

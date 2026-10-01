@@ -108,28 +108,36 @@ class ModelTransport:
     def _begin_goal_request(self, turn: TurnState, context: dict[str, Any] | None, purpose: str) -> dict:
         if self.goal_execution is None:
             return {}
-        if not self.durable_responses:
-            raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
-        if context is None:
-            raise RuntimeError("goal context missing at request admission")
-        receipt = self.goal_execution.begin_model_request(
-            context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
-            request_index=turn.model_request_count, purpose=purpose,
-        )
+        try:
+            if not self.durable_responses:
+                raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
+            if context is None:
+                raise RuntimeError("goal context missing at request admission")
+            receipt = self.goal_execution.begin_model_request(
+                context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
+                request_index=turn.model_request_count, purpose=purpose,
+            )
+        except BaseException:
+            self.release_accounting(turn, request_index=turn.model_request_count, reason="goal_admission_rejected")
+            raise
         turn.extension_metadata['goal_model_request'] = receipt.to_dict()
         return {'goal_model_request': receipt.to_dict()}
 
     async def _begin_goal_request_async(self, turn: TurnState, context: dict[str, Any] | None, purpose: str) -> dict:
         if self.goal_execution is None:
             return {}
-        if not self.durable_responses:
-            raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
-        if context is None:
-            raise RuntimeError("goal context missing at request admission")
-        receipt = await self.goal_execution.begin_model_request_async(
-            context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
-            request_index=turn.model_request_count, purpose=purpose,
-        )
+        try:
+            if not self.durable_responses:
+                raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
+            if context is None:
+                raise RuntimeError("goal context missing at request admission")
+            receipt = await self.goal_execution.begin_model_request_async(
+                context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
+                request_index=turn.model_request_count, purpose=purpose,
+            )
+        except BaseException as exc:
+            await await_cleanup_after_error(self._release_accounting_async(turn, request_index=turn.model_request_count, reason="goal_admission_rejected"), exc)
+            raise
         turn.extension_metadata['goal_model_request'] = receipt.to_dict()
         return {'goal_model_request': receipt.to_dict()}
 
@@ -309,10 +317,10 @@ class ModelTransport:
     def _start_final_answer_stream(self, turn: TurnState, draft: str) -> tuple[list[dict[str, str]], int]:
         context = self.goal_execution.context() if self.goal_execution is not None else None
         messages = self._final_answer_messages(turn, draft, goal_context=context)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
+        request_index = turn.model_request_count + 1
+        self._admit_model_request(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
+        turn.model_request_count = request_index
         receipt_payload = self._begin_goal_request(turn, context, 'incremental_final_answer')
-        self.reserve_accounting(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
         payload = format_model_request_trace(messages, max_prompt_chars=self.trace_max_prompt_chars, request_index=request_index, turn_id=turn.turn_id, loaded_memory_ids=self.state.loaded_memory_ids, loaded_skill_names=self.state.loaded_skill_names, available_tool_names=turn.available_tool_names, context_report={'purpose': 'incremental_final_answer'})
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
@@ -323,10 +331,10 @@ class ModelTransport:
     async def _start_final_answer_stream_async(self, turn: TurnState, draft: str) -> tuple[list[dict[str, str]], int]:
         context = await self.goal_execution.context_async() if self.goal_execution is not None else None
         messages = self._final_answer_messages(turn, draft, goal_context=context)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
+        request_index = turn.model_request_count + 1
+        await self._admit_model_request_async(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
+        turn.model_request_count = request_index
         receipt_payload = await self._begin_goal_request_async(turn, context, 'incremental_final_answer')
-        await self._reserve_accounting_async(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
         payload = format_model_request_trace(messages, max_prompt_chars=self.trace_max_prompt_chars, request_index=request_index, turn_id=turn.turn_id, loaded_memory_ids=self.state.loaded_memory_ids, loaded_skill_names=self.state.loaded_skill_names, available_tool_names=turn.available_tool_names, context_report={'purpose': 'incremental_final_answer'})
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
@@ -436,12 +444,13 @@ class ModelTransport:
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
             self._ensure_prompt_within_budget(turn, current_prompt)
-            pending_messages = self.memory.consume_pending_summary_messages()
+            pending_messages = self.memory.pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
             result = self._summarize(messages, turn)
+            self.memory.consume_pending_summary_messages()
             current_prompt = self._apply_summary(turn, require_plan=require_plan, pending_messages=pending_messages, omitted_messages=omitted_messages, summary=result.content, checkpoint=result.checkpoint, fallback=result.fallback, error=result.error)
         return current_prompt
 
@@ -450,12 +459,13 @@ class ModelTransport:
         current_prompt = prompt
         for _ in range(SUMMARY_COMPACTION_PASSES):
             self._ensure_prompt_within_budget(turn, current_prompt)
-            pending_messages = self.memory.consume_pending_summary_messages()
+            pending_messages = self.memory.pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
             result = await self._summarize_async(messages, turn)
+            self.memory.consume_pending_summary_messages()
             current_prompt = self._apply_summary(turn, require_plan=require_plan, pending_messages=pending_messages, omitted_messages=omitted_messages, summary=result.content, checkpoint=result.checkpoint, fallback=result.fallback, error=result.error, goal_context=await self.goal_execution.context_async() if self.goal_execution is not None else None)
         return current_prompt
 
@@ -569,9 +579,9 @@ class ModelTransport:
         if self.goal_execution is not None:
             self.goal_execution.assert_boundary()
         summary_messages = _context_summary_messages(previous_summary=self.memory.conversation_summary, previous_checkpoint=self.memory.conversation_checkpoint, messages=messages)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
-        self.reserve_accounting(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
+        request_index = turn.model_request_count + 1
+        self._admit_model_request(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
+        turn.model_request_count = request_index
         payload = self._summary_request_payload(summary_messages, turn, request_index, len(messages))
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return (summary_messages, request_index)
@@ -580,10 +590,10 @@ class ModelTransport:
         if self.goal_execution is not None:
             await self.goal_execution.assert_boundary_async()
         summary_messages = _context_summary_messages(previous_summary=self.memory.conversation_summary, previous_checkpoint=self.memory.conversation_checkpoint, messages=messages)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
+        request_index = turn.model_request_count + 1
         try:
-            await self._reserve_accounting_async(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
+            await self._admit_model_request_async(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
+            turn.model_request_count = request_index
             payload = self._summary_request_payload(summary_messages, turn, request_index, len(messages))
             self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
             await self._flush_async()
@@ -654,9 +664,10 @@ class ModelTransport:
         context_report = prompt.context_report.to_dict()
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
-        turn.model_request_count += 1
+        request_index = turn.model_request_count + 1
+        self._admit_model_request(turn, request_index=request_index, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
+        turn.model_request_count = request_index
         receipt_payload = self._begin_goal_request(turn, prompt.goal_context, 'agent_action')
-        self.reserve_accounting(turn, request_index=turn.model_request_count, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
         payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
         payload.update(receipt_payload)
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
@@ -667,10 +678,11 @@ class ModelTransport:
         context_report = prompt.context_report.to_dict()
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
-        turn.model_request_count += 1
-        receipt_payload = await self._begin_goal_request_async(turn, prompt.goal_context, 'agent_action')
+        request_index = turn.model_request_count + 1
         try:
-            await self._reserve_accounting_async(turn, request_index=turn.model_request_count, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
+            await self._admit_model_request_async(turn, request_index=request_index, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
+            turn.model_request_count = request_index
+            receipt_payload = await self._begin_goal_request_async(turn, prompt.goal_context, 'agent_action')
             payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
             payload.update(receipt_payload)
             self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
@@ -684,7 +696,7 @@ class ModelTransport:
         self.state.json_repair_attempts += exc.repair_attempts
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
-        usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost)
+        usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost, fallback_attempts=self._accounting_attempts(exc, getattr(self.llm_client, "last_attempts", None)))
         if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
             self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
         if exc.raw_response is not None:
@@ -695,12 +707,22 @@ class ModelTransport:
         self.state.json_repair_attempts += exc.repair_attempts
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
-        usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost)
+        usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost, fallback_attempts=self._accounting_attempts(exc, getattr(self.llm_client, "last_attempts", None)))
         if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
             self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
         if exc.raw_response is not None:
             await self._acknowledge_goal_response_async(turn, turn.model_request_count)
         return ProtocolFailure(message=_format_action_protocol_failure(str(exc), exc.raw_response))
+
+    def _accounting_attempts(self, result: LLMActionResult | LLMActionError, attempts: object) -> object:
+        # FallbackChain already records each repair/provider attempt separately.
+        if attempts or result.repair_attempts == 0:
+            return attempts
+        return [{"provider": getattr(self.llm_client, "provider", None),
+                 "model": getattr(self.llm_client, "model", None),
+                 "model_calls": result.repair_attempts + 1, "success": True,
+                 "usage": result.usage.to_dict() if result.usage else None,
+                 "cost": result.cost.to_dict() if result.cost else None}]
 
     def _prepare_action_result(self, turn: TurnState, result: LLMActionResult) -> object:
         if result.metadata.get('provider_mcp_output'):
@@ -725,7 +747,7 @@ class ModelTransport:
     def _record_action_result(self, turn: TurnState, result: LLMActionResult) -> AgentAction:
         action = result.action
         fallback_attempts = self._prepare_action_result(turn, result)
-        usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=fallback_attempts)
+        usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=self._accounting_attempts(result, fallback_attempts))
         action = self._publish_action_result(turn, result, action, usage, cost)
         self._acknowledge_goal_response(turn, turn.model_request_count)
         return action
@@ -733,7 +755,7 @@ class ModelTransport:
     async def _record_action_result_async(self, turn: TurnState, result: LLMActionResult) -> AgentAction:
         action = result.action
         fallback_attempts = self._prepare_action_result(turn, result)
-        usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=fallback_attempts)
+        usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=self._accounting_attempts(result, fallback_attempts))
         action = self._publish_action_result(turn, result, action, usage, cost)
         await self._acknowledge_goal_response_async(turn, turn.model_request_count)
         return action
@@ -749,27 +771,27 @@ class ModelTransport:
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
 
     def _start_reflection(self, proposed_answer: str, turn: TurnState) -> tuple[int, list[dict[str, str]], int]:
-        turn.reflection_count += 1
-        attempt = turn.reflection_count
         context = self.goal_execution.context() if self.goal_execution is not None else None
         messages = self._with_goal_context(turn, build_reflection_messages(turn, proposed_answer), context)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
+        request_index = turn.model_request_count + 1
+        self._admit_model_request(turn, request_index=request_index, messages=messages, purpose='reflection')
+        turn.model_request_count = request_index
         self._begin_goal_request(turn, context, 'reflection')
-        self.reserve_accounting(turn, request_index=request_index, messages=messages, purpose='reflection')
+        turn.reflection_count += 1
+        attempt = turn.reflection_count
         self._publish_reflection_request(turn, proposed_answer, messages, request_index, attempt)
         return (attempt, messages, request_index)
 
     async def _start_reflection_async(self, proposed_answer: str, turn: TurnState) -> tuple[int, list[dict[str, str]], int]:
-        turn.reflection_count += 1
-        attempt = turn.reflection_count
         context = await self.goal_execution.context_async() if self.goal_execution is not None else None
         messages = self._with_goal_context(turn, build_reflection_messages(turn, proposed_answer), context)
-        turn.model_request_count += 1
-        request_index = turn.model_request_count
-        await self._begin_goal_request_async(turn, context, 'reflection')
+        request_index = turn.model_request_count + 1
         try:
-            await self._reserve_accounting_async(turn, request_index=request_index, messages=messages, purpose='reflection')
+            await self._admit_model_request_async(turn, request_index=request_index, messages=messages, purpose='reflection')
+            turn.model_request_count = request_index
+            await self._begin_goal_request_async(turn, context, 'reflection')
+            turn.reflection_count += 1
+            attempt = turn.reflection_count
             self._publish_reflection_request(turn, proposed_answer, messages, request_index, attempt)
             await self._flush_async()
         except BaseException as exc:
@@ -793,6 +815,22 @@ class ModelTransport:
         usage, cost = await self._record_accounting_async(turn, request_index=request_index, usage=response.usage, cost=response.cost, fallback_attempts=fallback_attempts, purpose='reflection')
         self._publish_reflection_response(turn, request_index, attempt, raw_response, usage, cost)
         await self._acknowledge_goal_response_async(turn, request_index)
+
+    def _admit_model_request(self, turn: TurnState, *, request_index: int, **kwargs: Any) -> dict | None:
+        continuation = self.goal_execution is not None and self.goal_execution.slice_limits is not None
+        if not continuation:
+            turn.model_request_count = request_index
+        result = self.reserve_accounting(turn, request_index=request_index, **kwargs)
+        turn.model_request_count = request_index
+        return result
+
+    async def _admit_model_request_async(self, turn: TurnState, *, request_index: int, **kwargs: Any) -> dict | None:
+        continuation = self.goal_execution is not None and self.goal_execution.slice_limits is not None
+        if not continuation:
+            turn.model_request_count = request_index
+        result = await self._reserve_accounting_async(turn, request_index=request_index, **kwargs)
+        turn.model_request_count = request_index
+        return result
 
     async def _reserve_accounting_async(self, turn: TurnState, **kwargs: object) -> dict | None:
         callback = self.reserve_accounting_async

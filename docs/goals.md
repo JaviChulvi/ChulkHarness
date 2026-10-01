@@ -71,3 +71,28 @@ Goal text does not grant tools, broaden `ExecutionScope`, load credentials, or
 override host policy and approvals. Evidence references are data, not authority.
 See [permissions](permissions.md), [configuration](configuration.md),
 [SDK errors](sdk-errors.md), and [hosted services](hosting.md).
+
+## Bounded goal slices
+
+Set `execution.slice_limits = GoalSliceLimits()` on a claimed
+`GoalExecutionContext` to enable continuation. Defaults are five tool attempts,
+twenty provider calls and sixty cooperative seconds per slice. The existing
+goal ledger still enforces its cumulative limits; a new slice does not reset it.
+Repairs, fallback attempts, reflection and history summaries consume provider
+allowance. Conservative reservations can yield before the nominal call limit.
+An operation larger than a fresh slice raises `ConfigurationError`.
+
+`Agent.continue_goal_slice()` and `await AsyncAgent.continue_goal_slice()`
+resume the latest yielded turn in the same conversation, including after reopen.
+They allocate a new turn and refresh host tool/context bindings without inserting
+a user instruction. Pending validated actions and reflection outcomes survive
+a yield. Slice exhaustion returns `RunStatus.YIELDED`, empty answer content and
+`run.yielded`; it neither completes nor retries the authoritative goal step.
+This opt-in boundary does not yet make the CLI coordinate automatic execution.
+
+A configured host verifier's decisions are persisted by migration 23. Rejection
+counts are keyed by the selected step, authoritative criteria/instructions and
+observed result content. The third rejection without changed evidence blocks
+the goal with `verification_stagnation`. New IDs and model assertions are not
+evidence. Raw result output remains in the owning session/artifact store; goal
+checkpoints retain digests. Ordinary unbound turns retain their current behavior.
