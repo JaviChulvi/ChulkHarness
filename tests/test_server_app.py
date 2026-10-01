@@ -63,66 +63,23 @@ def test_http_api_requires_auth_origin_and_browser_csrf(tmp_path) -> None:
     assert tokens.load_or_create() not in audit
     assert 'request body' not in audit
 
-def test_webchat_shell_is_public_but_control_data_stays_authenticated(tmp_path) -> None:
-    app, tokens = _app(tmp_path)
-    with TestClient(app) as client:
-        page = client.get('/webchat')
-        stylesheet = client.get('/webchat/assets/app.css')
-        script = client.get('/webchat/assets/app.js')
-        assert page.status_code == 200
-        assert 'Chulk <span>control room</span>' in page.text
-        assert tokens.load_or_create() not in page.text
-        assert "frame-ancestors 'none'" in page.headers['content-security-policy']
-        assert stylesheet.status_code == 200
-        assert script.status_code == 200
-        assert 'sessionStorage' in script.text
-        assert client.get('/v1/session').status_code == 401
-        assert client.get('/webchat/assets/missing.js').status_code == 404
 
-def test_operator_dashboard_is_public_shell_with_authenticated_data(tmp_path) -> None:
-    app, tokens = _app(tmp_path)
-    with TestClient(app) as client:
-        page = client.get('/dashboard')
-        stylesheet = client.get('/dashboard/assets/dashboard.css')
-        script = client.get('/dashboard/assets/dashboard.js')
-        assert page.status_code == 200
-        assert 'Chulk operations board' in page.text
-        assert 'id="attention"' in page.text
-        assert 'id="work"' in page.text
-        assert 'id="usage"' in page.text
-        assert 'id="evidence"' in page.text
-        assert '<dialog' in page.text
-        assert tokens.load_or_create() not in page.text
-        assert "frame-ancestors 'none'" in page.headers['content-security-policy']
-        assert stylesheet.status_code == 200
-        assert '@media (max-width: 580px)' in stylesheet.text
-        assert '@media (prefers-reduced-motion: reduce)' in stylesheet.text
-        assert script.status_code == 200
-        assert 'api("/v1/profiles")' in script.text
-        assert 'sessionStorage' in script.text
-        assert 'innerHTML' not in script.text
-        assert client.get('/v1/profiles').status_code == 401
-        inbox = client.get('/v1/profiles/default/permissions?status=pending', headers=_auth(tokens))
-        assert inbox.status_code == 200
-        assert inbox.json()['permissions'] == []
-        assert client.get('/dashboard/assets/missing.js').status_code == 404
-
-def test_authenticated_webchat_session_creates_pairing_and_lists_routes(tmp_path) -> None:
+def test_authenticated_control_session_creates_pairing_and_lists_routes(tmp_path) -> None:
     app, tokens = _app(tmp_path)
     origin = 'http://localhost:3000'
     with TestClient(app) as client:
         session = client.get('/v1/session', headers={**_auth(tokens), 'Origin': origin})
         assert session.status_code == 200
         csrf = session.json()['csrf_token']
-        created = client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'discord', 'account_id': 'primary', 'profile_id': 'default', 'principal_id': 'user-7', 'ttl_seconds': 600})
+        created = client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'telegram', 'account_id': 'primary', 'profile_id': 'default', 'principal_id': 'user-7', 'ttl_seconds': 600})
         routes = client.get('/v1/gateway/routes', headers={**_auth(tokens), 'Origin': origin})
         assert created.status_code == 201
         assert len(created.json()['pairing']['code']) >= 24
         assert created.json()['pairing']['principal_id'] == 'user-7'
         assert routes.status_code == 200
         assert routes.json()['routes'] == []
-        assert client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'discord', 'account_id': 'primary', 'profile_id': 'missing'}).status_code == 404
-        assert client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'discord', 'account_id': 'primary', 'profile_id': 'default', 'ttl_seconds': 10}).status_code == 400
+        assert client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'telegram', 'account_id': 'primary', 'profile_id': 'missing'}).status_code == 404
+        assert client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'telegram', 'account_id': 'primary', 'profile_id': 'default', 'ttl_seconds': 10}).status_code == 400
         assert client.post('/v1/gateway/pairings', headers={**_auth(tokens), 'Origin': origin, 'X-Chulk-CSRF': csrf}, json={'adapter': 'unknown', 'account_id': 'primary', 'profile_id': 'default'}).status_code == 400
 
 def test_http_api_creates_conversation_and_queues_idempotent_message(tmp_path) -> None:
@@ -300,3 +257,20 @@ async def _asgi_sse_request(app, path: str, *, token: str, last_event_id: str | 
             body_sent.set()
     await app(scope, receive, send)
     return messages
+
+
+@pytest.mark.parametrize('path', ['/webchat', '/webchat/assets/app.js', '/dashboard', '/dashboard/assets/dashboard.js', '/evals', '/evals/assets/evals.js', '/v1/evals/runs'])
+def test_removed_browser_interfaces_have_no_routes_or_public_auth_bypass(tmp_path, path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers=_auth(tokens)).status_code == 404
+        assert client.head(path, headers=_auth(tokens)).status_code == 404
+
+
+def test_control_pairing_rejects_retired_discord_adapter(tmp_path) -> None:
+    app, tokens = _app(tmp_path)
+    with TestClient(app) as client:
+        response = client.post('/v1/gateway/pairings', headers=_auth(tokens), json={'adapter': 'discord', 'account_id': 'primary', 'profile_id': 'default'})
+        assert response.status_code == 400
+        assert 'adapter must be telegram' in response.json()['error']['message']

@@ -31,7 +31,6 @@ from chulk.cli.entrypoints import (
 )
 from chulk.cli.gateway import run_gateway_command
 from chulk.cli.profiles import run_profile_command
-from chulk.cli.plugins import run_plugin_command
 from chulk.cli.models import run_model_command
 from chulk.cli.usage import run_usage_command
 from chulk.cli.sessions import run_session_command
@@ -72,7 +71,6 @@ from chulk.profiles import (
     ProfileRuntimeFactory,
 )
 from chulk.gateway import SQLiteGatewayLedger, SQLiteGatewayRouter
-from chulk.plugins import LocalPluginRegistry
 from chulk._runtime.request import AgentAssemblyRequest
 from chulk.runtime import create_agent
 from chulk.sessions import (
@@ -650,7 +648,6 @@ def main(
                 host=getattr(args, "host", "127.0.0.1"),
                 port=getattr(args, "port", 8765),
                 allow_remote=bool(getattr(args, "allow_remote", False)),
-                enable_eval_dashboard=bool(getattr(args, "eval_dashboard", False)),
                 json_output=bool(getattr(args, "json_output", False)),
                 output_func=output_func,
                 error_func=error_func,
@@ -663,15 +660,6 @@ def main(
             account_id = getattr(args, "account", "primary")
 
             def start_gateway() -> int:
-                if adapter_name == "discord":
-                    from chulk.discord.main import run_discord_gateway
-
-                    return run_discord_gateway(
-                        config,
-                        control_db_path=control_path,
-                        profile_runtime_factory=profile_factory,
-                        account_id=account_id,
-                    )
                 return run_telegram_gateway(
                     config,
                     control_db_path=control_path,
@@ -697,50 +685,6 @@ def main(
                     getattr(args, "include_disabled", False)
                 ),
                 json_output=bool(getattr(args, "json_output", False)),
-                output_func=output_func,
-                error_func=error_func,
-            )
-        if args.command == "plugins":
-            return run_plugin_command(
-                args.plugin_command,
-                registry=LocalPluginRegistry(
-                    config.runtime_dir,
-                    profile_id=profile.id,
-                ),
-                path=getattr(args, "path", None),
-                approved_by=getattr(args, "approved_by", None),
-                plugin_name=getattr(args, "plugin_name", None),
-                repository_url=getattr(args, "repository_url", None),
-                commit_sha=getattr(args, "commit", None),
-                allowed_git_hosts=tuple(
-                    getattr(args, "allowed_git_hosts", ())
-                ),
-                approve_authority_changes=bool(
-                    getattr(args, "approve_authority_changes", False)
-                ),
-                reason=getattr(args, "reason", None),
-                revoked_by=getattr(args, "revoked_by", None),
-                catalog_path=getattr(args, "catalog_path", None),
-                query=getattr(args, "query", None),
-                category=getattr(args, "category", None),
-                version=getattr(args, "version", None),
-                limit=int(getattr(args, "limit", 50)),
-                acknowledge_host_authority=bool(
-                    getattr(
-                        args,
-                        "acknowledge_host_authority",
-                        False,
-                    )
-                ),
-                granted_capabilities=(
-                    tuple(args.granted_capabilities)
-                    if getattr(args, "granted_capabilities", None)
-                    is not None
-                    else None
-                ),
-                json_output=bool(
-                    getattr(args, "json_output", False)
-                ),
                 output_func=output_func,
                 error_func=error_func,
             )

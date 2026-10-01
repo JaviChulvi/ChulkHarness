@@ -19,11 +19,11 @@ def test_plain_package_import_loads_only_the_version_contract() -> None:
     completed = _run_fresh_import('\n        import json\n        import sys\n\n        before = set(sys.modules)\n        import chulk\n\n        loaded = sorted(\n            name\n            for name in sys.modules\n            if name not in before\n            and (name == "chulk" or name.startswith("chulk."))\n        )\n        print(json.dumps(loaded))\n        print(len(chulk.__all__))\n        print("Agent" in vars(chulk))\n        ')
     loaded, export_count, agent_materialized = completed.stdout.splitlines()
     assert json.loads(loaded) == ['chulk', 'chulk._version']
-    assert export_count == '625'
+    assert export_count == '540'
     assert agent_materialized == 'False'
 
 def test_all_stable_exports_resolve_lazily_with_compatible_aliases() -> None:
-    completed = _run_fresh_import('\n        from importlib import import_module\n\n        import chulk\n\n        namespace = {}\n        exec("from chulk import *", namespace)\n\n        assert all(name in namespace for name in chulk.__all__)\n        assert all(name in dir(chulk) for name in chulk.__all__)\n        api = import_module("chulk.api")\n        root_names = set(chulk.__all__)\n        api_names = set(api.__all__)\n        assert len(root_names) == len(chulk.__all__)\n        assert len(api_names) == len(api.__all__)\n        assert root_names - api_names == {\n            "Authoring", "PermissionDecision", "PermissionDecisionRecord",\n            "PermissionRequest", "Plugins", "Research", "Skills", "Tool",\n            "ToolPermissionLevel", "Tools", "__version__", "plugins", "skills",\n            "tool", "tools",\n        }\n        assert api_names - root_names == {\n            "ContentIntegrityError", "ContentLimitError", "ContentNotFoundError",\n            "ContentOwnershipError",\n        }\n        for name in root_names & api_names:\n            assert getattr(chulk, name) is getattr(api, name), name\n            assert namespace[name] is getattr(api, name), name\n        assert namespace["Tool"] is namespace["tool"]\n        assert namespace["Tools"] is namespace["tools"]\n        assert namespace["Skills"] is namespace["skills"]\n        assert namespace["Plugins"] is namespace["plugins"]\n        try:\n            chulk.not_a_public_export\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError("unknown package attributes must fail")\n        print("ok")\n        ')
+    completed = _run_fresh_import('\n        from importlib import import_module\n\n        import chulk\n\n        namespace = {}\n        exec("from chulk import *", namespace)\n\n        assert all(name in namespace for name in chulk.__all__)\n        assert all(name in dir(chulk) for name in chulk.__all__)\n        api = import_module("chulk.api")\n        root_names = set(chulk.__all__)\n        api_names = set(api.__all__)\n        assert len(root_names) == len(chulk.__all__)\n        assert len(api_names) == len(api.__all__)\n        assert root_names - api_names == {\n            "PermissionDecision", "PermissionDecisionRecord",\n            "PermissionRequest", "Research", "Skills", "Tool",\n            "ToolPermissionLevel", "Tools", "__version__", "skills",\n            "tool", "tools",\n        }\n        assert api_names - root_names == {\n            "ContentIntegrityError", "ContentLimitError", "ContentNotFoundError",\n            "ContentOwnershipError",\n        }\n        for name in root_names & api_names:\n            assert getattr(chulk, name) is getattr(api, name), name\n            assert namespace[name] is getattr(api, name), name\n        assert namespace["Tool"] is namespace["tool"]\n        assert namespace["Tools"] is namespace["tools"]\n        assert namespace["Skills"] is namespace["skills"]\n        try:\n            chulk.not_a_public_export\n        except AttributeError:\n            pass\n        else:\n            raise AssertionError("unknown package attributes must fail")\n        print("ok")\n        ')
     assert completed.stdout.strip() == 'ok'
 
 def test_advanced_api_imports_without_root_import_ordering() -> None:
@@ -32,4 +32,27 @@ def test_advanced_api_imports_without_root_import_ordering() -> None:
 
 def test_tool_package_keeps_public_refs_after_implementation_imports() -> None:
     completed = _run_fresh_import('\n        import chulk.telegram.bot\n        from chulk import tools\n        from chulk.tools.public import ToolRef\n\n        ref_names = (\n            "calculator",\n            "read_file",\n            "list_files",\n            "search_files",\n            "search_memory",\n            "list_memories",\n            "summarize_memories",\n        )\n        assert all(isinstance(getattr(tools, name), ToolRef) for name in ref_names)\n        print("ok")\n        ')
+    assert completed.stdout.strip() == 'ok'
+
+
+def test_retired_distribution_and_publication_surfaces_are_absent():
+    completed = _run_fresh_import("""
+        from importlib.util import find_spec
+        from dataclasses import fields
+        import chulk
+        from chulk import Agent, AsyncAgent, AsyncHostedRuntime, RuntimeServices, AsyncRuntimeServices
+        from chulk.hosting import HostedCapability
+        for module in ('chulk.authoring', 'chulk.plugins', 'chulk.discord', 'chulk.skills.publication', 'chulk.cli.plugins'):
+            assert find_spec(module) is None
+        for name in ('Authoring', 'Plugins', 'plugins', 'AgentCompiler', 'AgentDefinitionRuntime', 'PortableSkill', 'LocalPluginRegistry', 'AsyncPluginService', 'PublishedDefinitionGatewayResolver'):
+            assert name not in chulk.__all__
+            assert not hasattr(chulk, name)
+        for facade in (Agent, AsyncAgent, AsyncHostedRuntime):
+            for operation in ('install_plugin', 'inspect_plugin', 'list_plugins', 'load_plugin_entry_point'):
+                assert not hasattr(facade, operation)
+        for services in (RuntimeServices, AsyncRuntimeServices):
+            assert 'plugins' not in {field.name for field in fields(services)}
+        assert 'plugins' not in {capability.value for capability in HostedCapability}
+        print('ok')
+    """)
     assert completed.stdout.strip() == 'ok'

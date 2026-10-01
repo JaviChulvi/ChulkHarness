@@ -23,7 +23,6 @@ TOPICS = (
     "postgres.md",
     "gateway.md",
     "scheduling.md",
-    "authoring.md",
     "configuration.md",
     "providers.md",
     "tools.md",

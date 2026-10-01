@@ -252,16 +252,3 @@ evaluates the public `SoftwareEngineer()` preset against a disposable buggy
 Python project. It requires the agent to read the implementation, apply a
 minimal patch, run the regression test, and pass answer, status, error, and
 tool-call graders without provider credentials.
-
-Start the authenticated, read-only result viewer with:
-
-```bash
-chulk server start --eval-dashboard
-```
-
-Open `/evals` and authenticate with the local control token. The dashboard
-filters and paginates runs, compares target/provider/model results, shows
-baseline deltas and grader evidence, and reports cost and latency. Trace links
-are available only when the persisted reference still resolves inside the
-configured Chulk trace directory; deleted, external, and unrecorded traces are
-shown as unavailable. The browser cannot execute suites or change baselines.

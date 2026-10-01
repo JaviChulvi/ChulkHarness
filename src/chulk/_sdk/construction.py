@@ -26,9 +26,6 @@ from chulk.hosting.tool_catalog import (
 )
 from chulk.mcp import MCPServerConfig
 from chulk.media import ContentStore, MediaProcessorRegistry
-from chulk.plugins import (
-    LocalPluginRegistry,
-)
 from chulk.skills import (
     LearningReviewPolicy,
     LearningReviewQuota,
@@ -83,7 +80,6 @@ def _build_runtime(
     learning_review_policy: LearningReviewPolicy | None = None,
     learning_review_quota: LearningReviewQuota | None = None,
     automatic_learning_approval: bool = False,
-    plugin_registry: LocalPluginRegistry | None = None,
     goal_execution: GoalExecutionContext | None = None,
     content_store: ContentStore | None = None,
     media_processors: MediaProcessorRegistry | None = None,
@@ -131,7 +127,6 @@ def _build_runtime(
         learning_review_policy=learning_review_policy,
         learning_review_quota=learning_review_quota,
         automatic_learning_approval=automatic_learning_approval,
-        plugin_registry=plugin_registry,
         goal_execution=goal_execution,
         content_store=content_store,
         media_processors=media_processors,

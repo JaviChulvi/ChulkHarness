@@ -10,22 +10,14 @@ from chulk._version import __version__
 # fmt: off
 if TYPE_CHECKING:
     from chulk.api import (
-        AGENT_DEFINITION_SCHEMA_VERSION, AgentCompiler, AgentDefinition, AgentDefinitionRecord,
-        AgentDefinitionRuntime, AgentDefinitionStore, ArtifactCatalog, AsyncAgentDefinitionStore,
-        AsyncInMemoryAgentDefinitionStore, AsyncInMemorySkillPublicationStore, AsyncSkillPublicationManager,
-        AsyncSkillPublicationStore, BudgetDefinition, CompiledAgentPackage, CompilerRequest,
-        DefinitionProvenance, DefinitionStatus, EvaluationCaseResult, EvaluationReport,
-        InMemoryAgentDefinitionStore, InMemorySkillPublicationStore, PortableSkill, PromptCatalog,
-        PublicationError, ReviewPreview, RuntimeProfile, SkillActivationRecord, SkillPublicationManager,
-        SkillPublicationRecord, SkillPublicationStore, ToolCatalog, ToolReference, TriggerDefinition,
-        ValidationFinding, ValidationReport, VersionedReference, WorkflowApproval, WorkflowEffect,
-        WorkflowGraph, WorkflowStep, ApprovalConflictError, ApprovalDecision, ApprovalLifecyclePayload,
+        RuntimeProfile,
+        ApprovalConflictError, ApprovalDecision, ApprovalLifecyclePayload,
         ApprovalNotFoundError, ApprovalOutcomeKind, ApprovalRequest, ApprovalResumeOutcome, ApprovalStatus,
         ApprovalStore, ApprovalSubmission, ApprovalValidation, AsyncApprovalStore,
         AsyncApprovalStoreAdapter, AsyncDurableApprovalCoordinator, AsyncDurableApprovalService,
         AsyncInMemoryApprovalStore, AsyncInMemoryRunStore, AsyncDurableEffectCoordinator,
         AsyncDurableHostedExecutor, AsyncGatewayRouter, AsyncGatewayRunSubmitter, AsyncGatewayScopeResolver,
-        AsyncGatewayStore, AsyncDurableGatewayRunSubmitter, AsyncPublishedDefinitionGatewayResolver,
+        AsyncGatewayStore, AsyncDurableGatewayRunSubmitter,
         AsyncRunEventPublisher, AsyncRunStoreAdapter, AsyncSQLiteApprovalStore, AsyncSQLiteRunStore,
         AsyncRunStore, AttemptRecord, AttemptStatus, Checkpoint, ChildRunProgress, ChildRunRecord,
         DurableEffectCoordinator, DurableEffectToken, DurableExecutionOutcome, DurableHostedExecutor,
@@ -39,7 +31,7 @@ if TYPE_CHECKING:
         StepRecord, StepStatus, ArtifactStore, ArtifactService, AsyncArtifactStore, AsyncAuditSink,
         AsyncEventSink, AsyncExecutionJournal, AsyncExternalTranscriptSessionRuntimeServices,
         AsyncInMemoryEventSink, AsyncHostedRuntime, AsyncLearningProposalService, AsyncLearningReviewer,
-        AsyncPlanStepVerifier, AsyncMemoryService, AsyncPluginService, AsyncRuntimeServices,
+        AsyncPlanStepVerifier, AsyncMemoryService, AsyncRuntimeServices,
         AsyncServiceBinding, AsyncSessionService, AsyncSkillLifecycleService, AsyncSkillLifecycleStore,
         AsyncSkillService, AsyncTraceSink, AsyncTraceService, AsyncTranscriptProjectionSink,
         AsyncTranscriptResolver, AsyncUsageService, AsyncToolCatalogResolver, AuditSink, AuditService,
@@ -66,7 +58,7 @@ if TYPE_CHECKING:
         RuntimeAutomationRunner, SQLiteScheduleStore, ScheduledJob, TriggerEnvelope, TriggerKind,
         TriggerTrust, runtime_automation_runner_factory, Agent, AgentConfig, AgentEvent,
         ApplicationEventIntent, ApplicationEventPayload, ApplicationEventSchema, AgentHandle, AgentPreset,
-        AgentProfile, AsyncAgent, AsyncAgentHandle, AsyncChatAgent, AuthenticationState, AuditSeverity,
+        AgentProfile, AsyncAgent, AsyncAgentHandle, AsyncChatAgent, AuthenticationState,
         AuxiliaryModelProfiles, BudgetExceededError, BudgetPayload, BudgetReservation, BudgetScope,
         DEFAULT_CHILD_LEASE_SECONDS, AttemptBoundary, ChatAgent, Capabilities, ChildAgentFactory,
         ChildAgentRunner, ChildAuthority, ChildCompletionDelivery, ChildDeliveryConflictError,
@@ -85,7 +77,7 @@ if TYPE_CHECKING:
         ExecutionPolicy, ExecutionResult, ExecutionSession, ExecutionSessionRequest, ExecutionWorkspace,
         ExecutionBackendFactory, EnvironmentPolicy, EndpointRef, ExactCost, DockerPolicy,
         DockerExecutionBackend, DockerUnavailableError, FileAccess, FileListRequest, FileReadRequest,
-        FileSearchRequest, FileWriteRequest, FilesystemAccess, GitWorktreeBackend, GitWorktreePolicy, Goal,
+        FileSearchRequest, FileWriteRequest, GitWorktreeBackend, GitWorktreePolicy, Goal,
         GoalActionCheckpoint, GoalActionConflictError, GoalActionState, GoalApproval,
         GoalCancellationPropagator, GoalChangedPayload, GoalClaim, GoalCriterion, GoalEvent, GoalModelRequest,
         GoalEventCallback, GoalEvidence, GoalExecutionContext, GoalLeaseConflictError, GoalNotFoundError,
@@ -94,21 +86,14 @@ if TYPE_CHECKING:
         InboundEnvelope, InboundPart, InvalidGoalTransitionError, InvalidChildTaskTransitionError, MCP,
         MemoryError, MemoryMode, MemoryRetentionPolicy, MediaPart, MediaReference, MemoryProposal,
         MemoryProposalStatus, LearningProposal, LearningReview, LearningReviewPolicy, LearningReviewQuota,
-        LearningProposalChangedPayload, LoadedPluginEntryPoint, LocalPluginRegistry, NetworkPolicy,
+        LearningProposalChangedPayload, NetworkPolicy,
         ModelDeltaPayload, ModelCapabilityRequirements, ModelDiagnostic, ModelProfile,
         ModelProfileAlreadyExistsError, ModelProfileNotFoundError, ModelProfileService, ModelProfileStore,
         ModelProfileValidator, ModelRequestPayload, ModelResponsePayload, ModelSelectionResult,
-        ModelSelectionSkip, Observation, OutboundEnvelope, PublishedDefinitionGatewayResolver,
+        ModelSelectionSkip, Observation, OutboundEnvelope,
         PermissionDeniedError, PermissionPayload, ParentCompletionValidator, Plan, PlanResult, PlanPayload,
         PlanSnapshot, PlanStatus, PlanStep, PlanStepEvidence, PlanStepStatus, PlanStepVerification,
-        PlanStepVerificationRequest, PlanStepVerifier, PluginAuditFinding, PluginAuditReport,
-        PluginArtifactError, PluginAuthorityDiff, PluginCatalogEntry, PluginCatalogError,
-        PluginCatalogSnapshot, PluginCatalogSource, PluginCategory, PluginDependency, PluginEntryPoint,
-        PluginFilesystemRequirement, PluginInspection, PluginInspectionError, PluginLifecycleAction,
-        PluginLifecycleError, PluginLifecycleReceipt, PluginLoadError, PluginLockEntry, PluginLockError,
-        PluginLockFile, PluginManifest, PluginManifestError, PluginMigrationError, PluginPackage,
-        PluginRegistrationError, PluginRegistrationStatus, PluginRevocation, PluginReview, PluginSourceKind,
-        PluginTrustState, PluginUpdatePlan, ReviewedPluginCatalog, PluginVerificationError,
+        PlanStepVerificationRequest, PlanStepVerifier,
         PatchApplyRequest, ProcessHandle, ProcessLogChunk, ProcessLogEntry, ProcessLogsRequest,
         ProcessPolicy, ProcessPollRequest, ProcessSnapshot, ProcessStartRequest, ProcessState,
         ProcessTerminateRequest, ProcessWriteRequest, ProfileAlreadyExistsError, ProfileNotFoundError,
@@ -139,11 +124,8 @@ if TYPE_CHECKING:
         RetentionPolicy, TextInputPart, TransformKind, UnsupportedMediaError, UserInput,
         media_delivery_tool, media_generation_tool, media_transform_tool, browser_action_tool,
         browser_read_tool, browser_tools, git_read_tool, git_test_tool, git_tools, git_write_tool,
-        safe_fetch_tool, agent, async_agent, async_chat_agent, chat_agent, inspect_plugin_directory,
-        load_plugin_manifest,
+        safe_fetch_tool, agent, async_agent, async_chat_agent, chat_agent,
     )
-    from chulk import authoring as Authoring
-    from chulk import plugins as Plugins
     from chulk import research as Research
     from chulk import skills as Skills
     from chulk import tools as Tools
@@ -152,28 +134,19 @@ if TYPE_CHECKING:
     )
 
     Tool = tool
-    plugins = Plugins
     skills = Skills
     tools = Tools
 # fmt: on
 
 __all__ = """\
-AGENT_DEFINITION_SCHEMA_VERSION AgentCompiler AgentDefinition AgentDefinitionRecord
-AgentDefinitionRuntime AgentDefinitionStore ArtifactCatalog AsyncAgentDefinitionStore
-AsyncInMemoryAgentDefinitionStore AsyncInMemorySkillPublicationStore AsyncSkillPublicationManager
-AsyncSkillPublicationStore Authoring BudgetDefinition CompiledAgentPackage CompilerRequest
-DefinitionProvenance DefinitionStatus EvaluationCaseResult EvaluationReport
-InMemoryAgentDefinitionStore InMemorySkillPublicationStore PortableSkill PromptCatalog
-PublicationError ReviewPreview RuntimeProfile SkillActivationRecord SkillPublicationManager
-SkillPublicationRecord SkillPublicationStore ToolCatalog ToolReference TriggerDefinition
-ValidationFinding ValidationReport VersionedReference WorkflowApproval WorkflowEffect WorkflowGraph
-WorkflowStep ApprovalConflictError ApprovalDecision ApprovalLifecyclePayload ApprovalNotFoundError
+RuntimeProfile
+ApprovalConflictError ApprovalDecision ApprovalLifecyclePayload ApprovalNotFoundError
 ApprovalOutcomeKind ApprovalRequest ApprovalResumeOutcome ApprovalStatus ApprovalStore
 ApprovalSubmission ApprovalValidation AsyncApprovalStore AsyncApprovalStoreAdapter
 AsyncDurableApprovalCoordinator AsyncDurableApprovalService AsyncInMemoryApprovalStore
 AsyncInMemoryRunStore AsyncDurableEffectCoordinator AsyncDurableHostedExecutor AsyncGatewayRouter
 AsyncGatewayRunSubmitter AsyncGatewayScopeResolver AsyncGatewayStore AsyncDurableGatewayRunSubmitter
-AsyncPublishedDefinitionGatewayResolver AsyncRunEventPublisher AsyncRunStoreAdapter
+AsyncRunEventPublisher AsyncRunStoreAdapter
 AsyncSQLiteApprovalStore AsyncSQLiteRunStore AsyncRunStore AttemptRecord AttemptStatus Checkpoint
 ChildRunProgress ChildRunRecord DurableEffectCoordinator DurableEffectToken DurableExecutionOutcome
 DurableHostedExecutor DurableApprovalCoordinator DurableApprovalService DurableRunStatus
@@ -186,7 +159,7 @@ RunStore RunSubmission SQLiteApprovalStore SQLiteRunStore StepDefinition StepLif
 StepRecord StepStatus ArtifactStore ArtifactService AsyncArtifactStore AsyncAuditSink AsyncEventSink
 AsyncExecutionJournal AsyncExternalTranscriptSessionRuntimeServices AsyncInMemoryEventSink
 AsyncHostedRuntime AsyncLearningProposalService AsyncLearningReviewer AsyncPlanStepVerifier
-AsyncMemoryService AsyncPluginService AsyncRuntimeServices AsyncServiceBinding AsyncSessionService
+AsyncMemoryService AsyncRuntimeServices AsyncServiceBinding AsyncSessionService
 AsyncSkillLifecycleService AsyncSkillLifecycleStore AsyncSkillService AsyncTraceSink
 AsyncTraceService AsyncTranscriptProjectionSink AsyncTranscriptResolver AsyncUsageService
 AsyncToolCatalogResolver AuditSink AuditService CallbackEventSink DataClassification DeliveryPayload
@@ -211,7 +184,7 @@ RecurrenceCalculator RecurrenceKind RecurrenceSpec RuntimeAutomationRunner SQLit
 ScheduledJob TriggerEnvelope TriggerKind TriggerTrust runtime_automation_runner_factory Agent
 AgentConfig AgentEvent ApplicationEventIntent ApplicationEventPayload ApplicationEventSchema
 AgentHandle AgentPreset AgentProfile AsyncAgent AsyncAgentHandle AsyncChatAgent AuthenticationState
-AuditSeverity AuxiliaryModelProfiles BudgetExceededError BudgetPayload BudgetReservation BudgetScope
+AuxiliaryModelProfiles BudgetExceededError BudgetPayload BudgetReservation BudgetScope
 DEFAULT_CHILD_LEASE_SECONDS AttemptBoundary ChatAgent Capabilities ChildAgentFactory
 ChildAgentRunner ChildAuthority ChildCompletionDelivery ChildDeliveryConflictError
 ChildDeliveryStatus ChildEvidenceRef ChildResultBuilder ChildResultRejectedError
@@ -228,7 +201,7 @@ DelegationService DiagnosticCategory ErrorDetails EVENT_SCHEMA_VERSION
 SUPPORTED_EVENT_SCHEMA_VERSIONS EventName ExecutionBackend ExecutionPolicy ExecutionResult
 ExecutionSession ExecutionSessionRequest ExecutionWorkspace ExecutionBackendFactory
 EnvironmentPolicy EndpointRef ExactCost DockerPolicy DockerExecutionBackend DockerUnavailableError
-FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest FilesystemAccess
+FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest
 GitWorktreeBackend GitWorktreePolicy Goal GoalActionCheckpoint GoalActionConflictError
 GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalClaim GoalCriterion GoalModelRequest
 GoalEvent GoalEventCallback GoalEvidence GoalExecutionContext GoalLeaseConflictError
@@ -237,22 +210,16 @@ GoalSteering GoalStep GoalStepStatus GoalStore GovernedSkill GovernedSkillRevisi
 HostExecutionBackend InboundEnvelope InboundPart InvalidGoalTransitionError
 InvalidChildTaskTransitionError MCP MemoryError MemoryMode MemoryRetentionPolicy MediaPart
 MediaReference MemoryProposal MemoryProposalStatus LearningProposal LearningReview
-LearningReviewPolicy LearningReviewQuota LearningProposalChangedPayload LoadedPluginEntryPoint
-LocalPluginRegistry NetworkPolicy ModelDeltaPayload ModelCapabilityRequirements ModelDiagnostic
+LearningReviewPolicy LearningReviewQuota LearningProposalChangedPayload
+NetworkPolicy ModelDeltaPayload ModelCapabilityRequirements ModelDiagnostic
 ModelProfile ModelProfileAlreadyExistsError ModelProfileNotFoundError ModelProfileService
 ModelProfileStore ModelProfileValidator ModelRequestPayload ModelResponsePayload
 ModelSelectionResult ModelSelectionSkip Observation OutboundEnvelope
-PublishedDefinitionGatewayResolver PermissionDecision PermissionDecisionRecord PermissionRequest
+PermissionDecision PermissionDecisionRecord PermissionRequest
 PermissionDeniedError PermissionPayload ParentCompletionValidator Plan PlanResult PlanPayload
 PlanSnapshot PlanStatus PlanStep PlanStepEvidence PlanStepStatus PlanStepVerification
-PlanStepVerificationRequest PlanStepVerifier PluginAuditFinding PluginAuditReport
-PluginArtifactError PluginAuthorityDiff PluginCatalogEntry PluginCatalogError PluginCatalogSnapshot
-PluginCatalogSource PluginCategory PluginDependency PluginEntryPoint PluginFilesystemRequirement
-PluginInspection PluginInspectionError PluginLifecycleAction PluginLifecycleError
-PluginLifecycleReceipt PluginLoadError PluginLockEntry PluginLockError PluginLockFile PluginManifest
-PluginManifestError PluginMigrationError PluginPackage PluginRegistrationError
-PluginRegistrationStatus PluginRevocation PluginReview PluginSourceKind PluginTrustState
-PluginUpdatePlan ReviewedPluginCatalog PluginVerificationError Plugins PatchApplyRequest
+PlanStepVerificationRequest PlanStepVerifier
+PatchApplyRequest
 ProcessHandle ProcessLogChunk ProcessLogEntry ProcessLogsRequest ProcessPolicy ProcessPollRequest
 ProcessSnapshot ProcessStartRequest ProcessState ProcessTerminateRequest ProcessWriteRequest
 ProfileAlreadyExistsError ProfileNotFoundError ProfileOwnershipError ProfileRuntimeFactory
@@ -281,20 +248,18 @@ MediaLimits MediaProcessorRegistry MediaTransformResult ModelRequest ProcessorCa
 RetentionPolicy TextInputPart TransformKind UnsupportedMediaError UserInput media_delivery_tool
 media_generation_tool media_transform_tool browser_action_tool browser_read_tool browser_tools
 git_read_tool git_test_tool git_tools git_write_tool safe_fetch_tool __version__ agent async_agent
-async_chat_agent chat_agent inspect_plugin_directory load_plugin_manifest plugins skills tool tools
+async_chat_agent chat_agent skills tool tools
 """.split()
 
 
 if not TYPE_CHECKING:
     _ROOT_EXPORT_OWNERS: dict[str, tuple[str, str | None]] = {
-        "Authoring": ("chulk.authoring", None),
         "PermissionDecision": ("chulk.tools.permissions", "PermissionDecision"),
         "PermissionDecisionRecord": (
             "chulk.tools.permissions",
             "PermissionDecisionRecord",
         ),
         "PermissionRequest": ("chulk.tools.permissions", "PermissionRequest"),
-        "Plugins": ("chulk.plugins", None),
         "Research": ("chulk.research", None),
         "Skills": ("chulk.skills", None),
         "Tool": ("chulk.tools", "tool"),
@@ -303,7 +268,6 @@ if not TYPE_CHECKING:
             "ToolPermissionLevel",
         ),
         "Tools": ("chulk.tools", None),
-        "plugins": ("chulk.plugins", None),
         "skills": ("chulk.skills", None),
         "tool": ("chulk.tools", "tool"),
         "tools": ("chulk.tools", None),

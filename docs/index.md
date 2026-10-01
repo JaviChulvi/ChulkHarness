@@ -23,7 +23,6 @@ Choose the path that matches what you are doing:
 - [PostgreSQL](postgres.md): optional relational stores, migrations, pools, and recovery.
 - [Hosted gateway](gateway.md): durable ingress, definition routing, delivery, and reconciliation.
 - [Hosted scheduling](scheduling.md): definition-pinned durable occurrences.
-- [Portable authoring](authoring.md): immutable definitions, constrained compilation, publication, and revocation.
 - [Configuration](configuration.md): precedence, paths, and host ownership.
 - [Providers](providers.md): injected, scripted, hosted, and local clients.
 - [Tools](tools.md): custom tools, application context, outputs, and retries.

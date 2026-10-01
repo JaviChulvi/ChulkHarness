@@ -20,7 +20,6 @@ from chulk.hosting.services import ServiceBinding, SessionRuntimeServices, Skill
 from chulk.llm import LLMCost, LLMClient, LLMUsage
 from tests.support import RepeatingFakeLLMClient
 from chulk.memory.security import MemorySecretError
-from chulk.plugins import PluginAuditReport
 from chulk.runtime import create_async_hosted_agent
 from chulk.skills import LearningReviewOutcome, Skill, SkillManifest
 from chulk.tools import ToolExecutionContext, ToolRegistry, ToolResult
@@ -122,11 +121,11 @@ def test_tool_only_hosted_profile_resolves_explicit_disabled_services(tmp_path: 
     manifest = complete.for_profile(profile, **{name: getattr(complete, name) for name in ('sessions', 'traces', 'usage', 'audit', 'execution', 'tool_policy', 'events')})
     runtime = HostedRuntime(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_final('tool-only ok')]), tools=[], skills=[], capabilities=Capabilities.none(), services=manifest, execution_scope=_scope())
     assert runtime.run('hello') == 'tool-only ok'
-    assert runtime.service_manifest.disabled_services == ('memory', 'skills', 'artifacts', 'plugins', 'content', 'media', 'runs', 'approvals')
+    assert runtime.service_manifest.disabled_services == ('memory', 'skills', 'artifacts', 'content', 'media', 'runs', 'approvals')
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(HostedServiceDisabledError) as error:
-        runtime.runtime.plugin_registry.audit()
-    assert error.value.details.invalid_field == 'plugins'
+        manifest.artifacts.resolve(_scope()).write('disabled', {})
+    assert error.value.details.invalid_field == 'artifacts'
     runtime.close()
 
 def test_hosted_profile_validates_dependencies_and_bindings() -> None:
@@ -507,7 +506,6 @@ async def test_in_memory_reference_services_cover_management_edges() -> None:
     await backend.aclose()
     assert session.closed
     assert backend.closed
-    assert services.plugins.audit().profile_id == 'default'
     assert services.content.sweep_expired() == 0
 
 def test_in_memory_reference_usage_is_paginated_and_fully_aggregated() -> None:
@@ -684,7 +682,6 @@ async def test_direct_async_hosted_sync_compatibility_keeps_management_calls(tmp
     assert await agent.list_memory_proposals() == ()
     assert await agent.list_learning_proposals() == ()
     assert await agent.list_governed_skills() == ()
-    assert await agent.list_plugins() == ()
     assert (await agent.query_usage()).entries
     assert await agent.group_usage(UsageGroupBy.RESOURCE_KIND)
     search = await agent.search_sessions('sync compatibility')
@@ -764,7 +761,6 @@ async def test_async_hosted_runtime_awaits_all_turn_services_natively(tmp_path: 
     proposals = await agent.list_memory_proposals()
     usage = await agent.query_usage()
     grouped_usage = await agent.group_usage(UsageGroupBy.RESOURCE_KIND)
-    plugins = await agent.list_plugins()
     assert result.content == 'native complete'
     assert 'native redacted result' in result.observations[0].content
     assert 'TAIL' in artifact_read['content']
@@ -772,10 +768,9 @@ async def test_async_hosted_runtime_awaits_all_turn_services_natively(tmp_path: 
     assert proposals == ()
     assert usage.entries
     assert grouped_usage
-    assert plugins == ()
     assert {loop_id for _service, _method, loop_id in calls} == {id(loop)}
     invoked = {(service, method) for service, method, _loop_id in calls}
-    expected = {('plugins', 'verify_startup'), ('skills.registry', 'load_metadata'), ('skills.registry', 'configure_environment'), ('skills.registry', 'load_selected_skills'), ('memory', 'profile_memories'), ('memory', 'search_memory'), ('sessions.store', 'create_conversation'), ('sessions.store', 'save_turn_snapshot'), ('sessions.store', 'save_message'), ('sessions.store', 'save_model_request'), ('sessions.store', 'save_model_response'), ('sessions.store', 'save_tool_call'), ('sessions.store', 'save_tool_observation_bundle'), ('sessions.store', 'save_terminal_turn_bundle'), ('sessions.search', 'search'), ('execution', 'open_session_async'), ('usage', 'reserve_model_request'), ('usage', 'commit_model_request'), ('usage', 'reserve_tool_call'), ('usage', 'commit_tool_call'), ('usage', 'query'), ('usage', 'group'), ('plugins', 'list'), ('artifacts', 'write'), ('artifacts', 'read'), ('traces', 'log'), ('audit', 'record'), ('events', 'emit'), ('tool_policy', 'authorize'), ('tool_policy', 'derive_effect_key'), ('tool_policy', 'redact')}
+    expected = {('skills.registry', 'load_metadata'), ('skills.registry', 'configure_environment'), ('skills.registry', 'load_selected_skills'), ('memory', 'profile_memories'), ('memory', 'search_memory'), ('sessions.store', 'create_conversation'), ('sessions.store', 'save_turn_snapshot'), ('sessions.store', 'save_message'), ('sessions.store', 'save_model_request'), ('sessions.store', 'save_model_response'), ('sessions.store', 'save_tool_call'), ('sessions.store', 'save_tool_observation_bundle'), ('sessions.store', 'save_terminal_turn_bundle'), ('sessions.search', 'search'), ('execution', 'open_session_async'), ('usage', 'reserve_model_request'), ('usage', 'commit_model_request'), ('usage', 'reserve_tool_call'), ('usage', 'commit_tool_call'), ('usage', 'query'), ('usage', 'group'), ('artifacts', 'write'), ('artifacts', 'read'), ('traces', 'log'), ('audit', 'record'), ('events', 'emit'), ('tool_policy', 'authorize'), ('tool_policy', 'derive_effect_key'), ('tool_policy', 'redact')}
     assert expected <= invoked
     await agent.close()
 
@@ -1397,55 +1392,6 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(tmp_path: Pa
             calls.append(('learning.review', id(asyncio.get_running_loop())))
             return LearningReviewOutcome(skipped=False, rationale='reviewed', proposal_ids=('proposal-1',), review_run_id='review-run-1')
 
-    class Plugins:
-        profile_id = 'default'
-
-        async def verify_startup(self):
-            return PluginAuditReport(profile_id=self.profile_id)
-
-        async def inspect(self, _path):
-            calls.append(('plugins.inspect', id(asyncio.get_running_loop())))
-            return 'inspection'
-
-        async def register_local(self, _path, **_kwargs):
-            calls.append(('plugins.register', id(asyncio.get_running_loop())))
-            return 'registered'
-
-        async def install(self, _path, **_kwargs):
-            calls.append(('plugins.install', id(asyncio.get_running_loop())))
-            return 'installed'
-
-        async def plan_update(self, _path):
-            calls.append(('plugins.plan', id(asyncio.get_running_loop())))
-            return 'plan'
-
-        async def update(self, _path, **_kwargs):
-            calls.append(('plugins.update', id(asyncio.get_running_loop())))
-            return 'updated'
-
-        async def uninstall(self, _name, **_kwargs):
-            calls.append(('plugins.uninstall', id(asyncio.get_running_loop())))
-            return 'uninstalled'
-
-        async def rollback(self, _name, **_kwargs):
-            calls.append(('plugins.rollback', id(asyncio.get_running_loop())))
-            return 'rolled-back'
-
-        async def revoke(self, _name, **_kwargs):
-            calls.append(('plugins.revoke', id(asyncio.get_running_loop())))
-            return 'revoked'
-
-        async def list(self):
-            calls.append(('plugins.list', id(asyncio.get_running_loop())))
-            return ['listed']
-
-        async def audit(self):
-            calls.append(('plugins.audit', id(asyncio.get_running_loop())))
-            return PluginAuditReport(profile_id=self.profile_id)
-
-        async def load_entry_point(self, *_args, **_kwargs):
-            calls.append(('plugins.load', id(asyncio.get_running_loop())))
-            return 'entry-point'
 
     class Usage:
 
@@ -1468,7 +1414,6 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(tmp_path: Pa
         return replace(resolved, lifecycle_store=LifecycleStore(), lifecycle=Lifecycle(), learning_proposals=proposal_service, learning_reviewer=Reviewer())
     fields = {name: getattr(services, name) for name in services.__dataclass_fields__}
     fields['skills'] = AsyncServiceBinding.scoped(skills, ownership='host')
-    fields['plugins'] = AsyncServiceBinding.host(Plugins())
     fields['usage'] = AsyncServiceBinding.host(Usage())
     agent = await AsyncHostedRuntime.create(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_final()]), tools=[], skills=[], services=AsyncRuntimeServices(**fields), execution_scope=_scope())
     turn = TurnState(user_message='completed')
@@ -1486,17 +1431,6 @@ async def test_async_hosted_learning_facade_awaits_proposal_service(tmp_path: Pa
     assert (await agent.rollback_skill('revision-1')).name == 'review'
     assert (await agent.list_skill_revisions('review'))[0].id == 'revision-1'
     assert (await agent.confirm_skill_success())[0].name == 'review'
-    assert await agent.inspect_plugin(tmp_path) == 'inspection'
-    assert await agent.register_local_plugin(tmp_path, approved_by='host', acknowledge_host_authority=True) == 'registered'
-    assert await agent.install_plugin(tmp_path, approved_by='host', acknowledge_host_authority=True) == 'installed'
-    assert await agent.plan_plugin_update(tmp_path) == 'plan'
-    assert await agent.update_plugin(tmp_path, approved_by='host', acknowledge_host_authority=True) == 'updated'
-    assert await agent.uninstall_plugin('plugin', approved_by='host') == 'uninstalled'
-    assert await agent.rollback_plugin('plugin', approved_by='host') == 'rolled-back'
-    assert await agent.revoke_plugin('plugin', reason='test', revoked_by='host') == 'revoked'
-    assert await agent.list_plugins() == ('listed',)
-    assert (await agent.audit_plugins()).profile_id == 'default'
-    assert await agent.load_plugin_entry_point('plugin', 'tools', 'entry') == 'entry-point'
     assert (await agent.query_usage()).entries == ()
     assert await agent.group_usage('resource_kind') == ()
     assert {loop_id for _name, loop_id in calls} == {id(loop)}

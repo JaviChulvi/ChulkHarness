@@ -27,7 +27,7 @@ The original study checkout is untouched.
 
 | PR | Branch | Base | State | Commit | URL |
 | --- | --- | --- | --- | --- | --- |
-| 1: authoritative context and steering | feat/goal-authoritative-context | main | validated locally; publication pending | pending | pending |
+| 1: authoritative context and steering | feat/goal-authoritative-context | main | draft; integrating new main | 0df52f2 | https://github.com/JaviChulvi/ChulkHarness/pull/128 |
 | 2: bounded slices and stagnation | feat/goal-bounded-slices | feat/goal-authoritative-context | pending | pending | pending |
 | 3: local runner, CLI, SDK | feat/goal-local-runner | feat/goal-bounded-slices | pending | pending | pending |
 | 4: hosted durable execution | feat/goal-hosted-execution | feat/goal-local-runner | pending | pending | pending |
@@ -63,6 +63,10 @@ typing tests, and examples together with each affected delivery.
 - Historical migration scripts now preserve the writer transaction instead of
   `executescript` implicitly committing; adversarial rollback and concurrent
   initialization tests pass without hiding duplicate-table errors.
+- PR 1 published and attached. GitHub had no CI run because new main `247c9e7`
+  conflicted with API exports. Integrate it with a follow-up merge commit (no
+  history rewrite), preserve removed surfaces and revalidate the changed owners.
+- Final pre-main-merge wheel clean installation/import/example smoke passed.
 
 ## Pending risks
 

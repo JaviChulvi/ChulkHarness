@@ -30,7 +30,6 @@ class HostedCapability(StrEnum):
     MEMORY = "memory"
     SKILLS = "skills"
     ARTIFACTS = "artifacts"
-    PLUGINS = "plugins"
     CONTENT = "content"
     MEDIA = "media"
     DURABLE_RUNS = "durable_runs"
@@ -46,7 +45,6 @@ _SERVICE_NAMES = (
     "usage",
     "audit",
     "execution",
-    "plugins",
     "content",
     "media",
     "tool_policy",
@@ -61,7 +59,6 @@ _CAPABILITY_SERVICES = {
     HostedCapability.MEMORY: frozenset({"memory"}),
     HostedCapability.SKILLS: frozenset({"skills"}),
     HostedCapability.ARTIFACTS: frozenset({"artifacts"}),
-    HostedCapability.PLUGINS: frozenset({"plugins"}),
     HostedCapability.CONTENT: frozenset({"content"}),
     HostedCapability.MEDIA: frozenset({"media"}),
     HostedCapability.DURABLE_RUNS: frozenset({"runs"}),
@@ -738,47 +735,12 @@ class AsyncUsageService(Protocol):
     async def group(self, group_by: Any, **kwargs: Any) -> list[Any]: ...
 
 
-@runtime_checkable
-class AsyncPluginService(Protocol):
-    profile_id: str
-
-    async def verify_startup(self) -> Any: ...
-
-    async def inspect(self, path: Any) -> Any: ...
-
-    async def register_local(self, path: Any, **kwargs: Any) -> Any: ...
-
-    async def install(self, path: Any, **kwargs: Any) -> Any: ...
-
-    async def plan_update(self, path: Any) -> Any: ...
-
-    async def update(self, path: Any, **kwargs: Any) -> Any: ...
-
-    async def uninstall(self, plugin_name: str, **kwargs: Any) -> Any: ...
-
-    async def rollback(self, plugin_name: str, **kwargs: Any) -> Any: ...
-
-    async def revoke(self, plugin_name: str, **kwargs: Any) -> Any: ...
-
-    async def list(self) -> list[Any]: ...
-
-    async def audit(self) -> Any: ...
-
-    async def load_entry_point(
-        self,
-        plugin_name: str,
-        category: Any,
-        entry_name: str,
-        **kwargs: Any,
-    ) -> Any: ...
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeServices:
     """Complete sync service bundle for a hosted runtime.
 
     Every field is mandatory so hosted construction cannot silently fall back to
-    a local database, directory, trace, artifact, plugin, or execution backend.
+    a local database, directory, trace, artifact, or execution backend.
     """
 
     memory: ServiceBinding[Any]
@@ -789,7 +751,6 @@ class RuntimeServices:
     usage: ServiceBinding[Any]
     audit: ServiceBinding[Any]
     execution: ServiceBinding[Any]
-    plugins: ServiceBinding[Any]
     content: ServiceBinding[Any]
     media: ServiceBinding[Any]
     tool_policy: ServiceBinding[Any]
@@ -815,7 +776,6 @@ class RuntimeServices:
         usage: ServiceBinding[Any] | None = None,
         audit: ServiceBinding[Any] | None = None,
         execution: ServiceBinding[Any] | None = None,
-        plugins: ServiceBinding[Any] | None = None,
         content: ServiceBinding[Any] | None = None,
         media: ServiceBinding[Any] | None = None,
         tool_policy: ServiceBinding[Any] | None = None,
@@ -829,7 +789,7 @@ class RuntimeServices:
             {
                 "memory": memory, "sessions": sessions, "skills": skills,
                 "traces": traces, "artifacts": artifacts, "usage": usage,
-                "audit": audit, "execution": execution, "plugins": plugins,
+                "audit": audit, "execution": execution,
                 "content": content, "media": media, "tool_policy": tool_policy,
                 "runs": runs, "approvals": approvals, "events": events,
             },
@@ -861,7 +821,6 @@ class AsyncRuntimeServices:
     usage: ServiceBinding[Any] | AsyncServiceBinding[Any]
     audit: ServiceBinding[Any] | AsyncServiceBinding[Any]
     execution: ServiceBinding[Any] | AsyncServiceBinding[Any]
-    plugins: ServiceBinding[Any] | AsyncServiceBinding[Any]
     content: ServiceBinding[Any] | AsyncServiceBinding[Any]
     media: ServiceBinding[Any] | AsyncServiceBinding[Any]
     tool_policy: ServiceBinding[Any] | AsyncServiceBinding[Any]
@@ -927,7 +886,6 @@ class ResolvedRuntimeServices:
     usage: Any
     audit: Any
     execution: Any
-    plugins: Any
     content: Any
     media: Any
     tool_policy: Any

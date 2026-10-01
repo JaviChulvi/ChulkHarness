@@ -204,15 +204,6 @@ Acceptance criteria:
 - [x] Execute independent `parallel_safe` read-only tool batches concurrently
   while preserving deterministic event and result ordering.
 
-### US-H2: Publish Immutable Agent Definitions And Governed Skills
-
-- [x] Add immutable agent-definition revisions and resolve every run to one
-  exact published revision.
-- [x] Add host-backed skill publication, evaluation, rollback, and revocation
-  while reusing the existing skill lifecycle owner.
-- [x] Add public builder, validator, capability-diff, and dry-run authoring
-  helpers.
-
 ### US-H3: Make Hosted Execution Durable And Controllable
 
 - [x] Add durable run and step state, leases, optimistic revisions, heartbeat,
@@ -350,10 +341,7 @@ acceptance criteria before implementation.
   and reviewed skill proposals.
 - Subagents, parent/child traces, bounded parallel exploration, background
   tasks, automations, and worktree isolation.
-- Chulk as an MCP server, JSON-RPC/app servers, WebSocket/REST interfaces, trace
-  and conversation UIs, and IDE integration.
-- Plugin manifests, trust review, extension hooks, installation, and migration
-  from other harness formats.
+- Chulk as an MCP server, JSON-RPC/app servers, WebSocket/REST interfaces, and IDE integration.
 - Optional notebook, document, spreadsheet, image, code-interpreter, and
   scheduled-task tooling.
 

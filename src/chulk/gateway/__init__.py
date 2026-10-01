@@ -25,9 +25,7 @@ from chulk.gateway.ledger import (
 )
 from chulk.gateway.hosted import (
     AsyncDurableGatewayRunSubmitter,
-    AsyncPublishedDefinitionGatewayResolver,
     DurableGatewayRunSubmitter,
-    PublishedDefinitionGatewayResolver,
 )
 from chulk.gateway.models import (
     AuthenticationState,
@@ -84,7 +82,6 @@ __all__ = [
     "AsyncGatewayRunSubmitter",
     "AsyncGatewayScopeResolver",
     "AsyncGatewayStore",
-    "AsyncPublishedDefinitionGatewayResolver",
     "DeliveryReceipt",
     "DeliveryReconciler",
     "DeliveryState",
@@ -113,7 +110,6 @@ __all__ = [
     "OutboundEnvelope",
     "OutboxRecord",
     "PairingChallenge",
-    "PublishedDefinitionGatewayResolver",
     "ReactionPart",
     "ReplyPart",
     "SQLiteGatewayLedger",

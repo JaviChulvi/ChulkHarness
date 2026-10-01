@@ -18,8 +18,8 @@ class ChannelLLM(LLMClient):
     def complete(self, messages, *, max_output_tokens=None) -> str:
         return json.dumps({'type': 'final_answer', 'content': f"answer {messages[-1]['content']}"})
 
-def _envelope(text: str, *, event_id: str, conversation_id: str | None=None, adapter: str='discord', account_id: str='primary', destination_id: str='channel-9') -> InboundEnvelope:
-    return InboundEnvelope(event_id=event_id, idempotency_key=f'discord:primary:{event_id}', identity=ChannelIdentity(adapter, account_id, 'user-7'), destination_id=destination_id, parts=(TextPart(text),), scope=ChannelScope.DIRECT, authentication=AuthenticationState.AUTHENTICATED, trust=TrustLevel.TRUSTED, extensions={'conversation_id': conversation_id})
+def _envelope(text: str, *, event_id: str, conversation_id: str | None=None, adapter: str='custom', account_id: str='primary', destination_id: str='channel-9') -> InboundEnvelope:
+    return InboundEnvelope(event_id=event_id, idempotency_key=f'{adapter}:primary:{event_id}', identity=ChannelIdentity(adapter, account_id, 'user-7'), destination_id=destination_id, parts=(TextPart(text),), scope=ChannelScope.DIRECT, authentication=AuthenticationState.AUTHENTICATED, trust=TrustLevel.TRUSTED, extensions={'conversation_id': conversation_id})
 
 def _executor(tmp_path):
     config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})

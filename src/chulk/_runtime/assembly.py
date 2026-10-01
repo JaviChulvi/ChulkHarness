@@ -46,7 +46,6 @@ from chulk.memory import (
     MemoryPolicy,
     SQLiteMemoryStore,
 )
-from chulk.plugins import LocalPluginRegistry
 from chulk.sessions import (
     AsyncExternalTranscriptRecorder,
     AsyncSessionRecorder,
@@ -151,7 +150,6 @@ def assemble_agent(
     learning_review_policy = request.learning_review_policy
     learning_review_quota = request.learning_review_quota
     automatic_learning_approval = request.automatic_learning_approval
-    plugin_registry = request.plugin_registry
     goal_execution = request.goal_execution
     content_store = request.content_store
     media_processors = request.media_processors
@@ -170,7 +168,6 @@ def assemble_agent(
         tool_specs=tool_specs,
         skill_specs=skill_specs,
         execution_backend=execution_backend,
-        plugin_registry=plugin_registry,
         content_store=content_store,
         media_processors=media_processors,
         memory_namespace=memory_namespace,
@@ -191,35 +188,6 @@ def assemble_agent(
         goal_execution.assert_boundary() if goal_execution is not None else None
     )
     _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
-    plugins_enabled = resolved_services is None or resolved_services.is_enabled(
-        "plugins"
-    )
-    selected_plugin_registry = (
-        (
-            resolved_services.plugins
-            if resolved_services is not None and plugins_enabled
-            else plugin_registry
-            or LocalPluginRegistry(
-                config.runtime_dir,
-                profile_id=effective_profile_id,
-            )
-        )
-        if plugins_enabled
-        else None
-    )
-    if selected_plugin_registry is not None:
-        plugin_profile_id = getattr(
-            selected_plugin_registry,
-            "profile_id",
-            effective_profile_id,
-        )
-        if plugin_profile_id != effective_profile_id:
-            raise ValueError(
-                "plugin registry profile does not match the runtime profile"
-            )
-        plugin_audit_report = selected_plugin_registry.verify_startup()
-    else:
-        plugin_audit_report = None
     effective_conversation_metadata = _conversation_metadata(
         conversation_metadata, effective_profile_id
     )
@@ -733,14 +701,6 @@ def assemble_agent(
                 skill_lifecycle=skill_lifecycle,
                 learning_proposals=learning_proposals,
                 learning_reviewer=learning_reviewer,
-                plugin_registry=(
-                    selected_plugin_registry
-                    if selected_plugin_registry is not None
-                    else resolved_services.plugins
-                    if resolved_services is not None
-                    else None
-                ),
-                plugin_audit_report=plugin_audit_report,
                 goal_execution=goal_execution,
                 content_store=selected_content_store,
                 media_processors=selected_media_processors,
@@ -878,24 +838,6 @@ async def assemble_async_hosted_agent(
         )
         _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
 
-        plugins_enabled = resolved.is_enabled("plugins")
-        plugin_registry = resolved.plugins if plugins_enabled else None
-        if plugin_registry is not None:
-            plugin_profile_id = getattr(
-                plugin_registry,
-                "profile_id",
-                effective_profile_id,
-            )
-            if plugin_profile_id != effective_profile_id:
-                raise ValueError(
-                    "plugin registry profile does not match the runtime profile"
-                )
-            plugin_audit_report = await call_async_service(
-                plugin_registry,
-                "verify_startup",
-            )
-        else:
-            plugin_audit_report = None
 
         effective_metadata = _conversation_metadata(
             conversation_metadata, effective_profile_id
@@ -1165,13 +1107,6 @@ async def assemble_async_hosted_agent(
                 learning_reviewer=(
                     resolved.skills.learning_reviewer if skills_enabled else None
                 ),
-                plugin_registry=cast(
-                    LocalPluginRegistry,
-                    plugin_registry
-                    if plugin_registry is not None
-                    else resolved.plugins,
-                ),
-                plugin_audit_report=plugin_audit_report,
                 goal_execution=goal_execution,
                 content_store=(
                     cast(ContentStore, resolved.content)

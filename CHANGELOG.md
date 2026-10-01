@@ -64,6 +64,14 @@ API is still pre-1.0.
 
 ### Removed
 
+- Browser chat, operations dashboard, and evaluation result viewer, including
+  their assets, viewer routes, and `--eval-dashboard` flag. Evaluation execution
+  and JSON, JUnit, and HTML exports remain available through the CLI.
+- Discord adapter, installation extra, and `chulk-discord` entrypoint.
+- Plugin distribution, catalog, lifecycle, SDK methods, and startup wiring.
+- Portable agent and skill publication, compilation, and published-definition
+  gateway resolvers. See `docs/release-policy.md` for migration notes.
+
 - Removed the optional Textual operator TUI, `chulk tui` command, and `tui`
   installation extra. Use the local `chulk` chat or `chulk exec` instead.
 - Removed Textual from the development dependencies.

@@ -67,7 +67,6 @@ resource:
 | `usage` | reservations, usage, cost, and budget accounting |
 | `audit` | host-visible sensitive access and side-effect audit |
 | `execution` | turn-scoped execution sessions |
-| `plugins` | reviewed plugin startup verification |
 | `content` and `media` | typed input content and media processing |
 | `tool_policy` | authorization, credential, effect, and redaction hooks |
 | `runs` | durable run, step, attempt, checkpoint, lease, and effect state |
@@ -90,7 +89,7 @@ work.
 Hosts that do not use every optional subsystem can construct the boundary with
 `RuntimeServices.for_profile(...)` or
 `AsyncRuntimeServices.for_profile(...)`. Core evidence and safety services
-remain mandatory. The profile makes memory, skills, artifacts, plugins,
+remain mandatory. The profile makes memory, skills, artifacts,
 content, media, durable runs, and approvals explicit:
 
 ```python
@@ -189,7 +188,7 @@ binding is synchronous. The native async factory has an explicit typed
 keyword-only signature and rejects unknown options before resolving services.
 
 The async boundary also owns the SDK's service-backed management operations:
-memory and learning proposals, governed skills, plugin lifecycle actions,
+memory and learning proposals, governed skills,
 session and artifact reads, and usage queries/grouping all await their hosted
 services. Built-in memory, session, and artifact `ToolRef` values bind
 async-aware tool callables, so their persistence calls remain on the caller

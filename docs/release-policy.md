@@ -16,7 +16,7 @@ Chulk documents four stability labels:
 The supported top-level names are governed by `chulk.__all__`. They are
 **public-stable** unless explicitly classified as provisional below. Stable
 advanced contracts are exported by `chulk.api`, `chulk.capabilities`,
-`chulk.authoring`, `chulk.errors`, `chulk.events`, `chulk.hosting`,
+`chulk.errors`, `chulk.events`, `chulk.hosting`,
 `chulk.results`, `chulk.runs`, `chulk.approvals`, `chulk.skills`,
 `chulk.resources`, `chulk.tools`, `chulk.testing`, `chulk.evals`, and the
 optional `chulk.postgres` module.
@@ -27,7 +27,7 @@ The `assert_*_contract` functions in `chulk.testing` are public-stable
 compatibility gates for third-party hosted services and gateway stores.
 The hosted sync and async service protocols, including `AsyncSkillService`,
 `AsyncSkillLifecycleStore`, `AsyncLearningProposalService`,
-`AsyncLearningReviewer`, and `AsyncPluginService`, their binding containers,
+`AsyncLearningReviewer`, their binding containers,
 and resource-ownership semantics are public-stable.
 `HostedCapability`, `HostedCapabilityProfile`, `HostedServiceManifest`, and
 `HostedServiceDisabledError` are also public-stable hosted composition
@@ -56,7 +56,7 @@ reporting contracts, and `EvalStore`/`AsyncEvalStore` protocols exported by
 PostgreSQL evaluation stores follow the provisional adapter policy below.
 
 Gateway and scheduling protocols, run-target records, and hosted
-definition/run submitters are public-stable. The SQLite gateway ledger remains
+run submitters are public-stable. The SQLite gateway ledger remains
 a public-provisional reference adapter.
 
 The PostgreSQL factories, forward-only migration entry point, atomic
@@ -80,11 +80,31 @@ values map to explicit `UNKNOWN` states where documented. Additive fields use
 extension mappings. See [SDK](sdk.md), [events](events.md), and
 [tracing](tracing.md).
 
-Portable definition JSON follows `AGENT_DEFINITION_SCHEMA_VERSION`. Readers
-fail closed on unknown fields and future schema versions. Published versions
-are immutable; behavior changes require a new artifact version, and schema
-changes require a documented compatibility reader or migration. See
-[portable authoring](authoring.md#schema-and-migration-policy).
+## Local harness simplification migration
+
+This release intentionally removes the plugin distribution and portable agent
+publication APIs, including `chulk.plugins`, `chulk.authoring`, portable skill
+publication, SDK plugin methods, and the published-definition gateway resolvers.
+Remove plugin bindings from `RuntimeServices` and `AsyncRuntimeServices`; the
+runtime no longer verifies or loads registered plugins at startup. Register
+required callables directly as tools, load procedural instructions as skills,
+or configure MCP servers. Build agents directly with `Agent` or `AsyncAgent`
+instead of compiling or resolving published definitions. Hosts using the
+channel-neutral gateway can still provide their own scope resolver and durable
+run submitter.
+
+The Discord adapter, `discord` installation extra, and `chulk-discord` command
+are removed. Telegram remains the supported built-in channel adapter. The
+browser shells at `/webchat`, `/dashboard`, and `/evals`, the evaluation viewer
+endpoints under `/v1/evals`, and `--eval-dashboard` are removed. Use the terminal
+for interaction and the evaluation CLI for execution, inspection, comparison,
+and JSON, JUnit, or HTML exports. The authenticated control API remains
+available through the `server` extra; it serves no public browser assets.
+
+Existing runtime data is not deleted or migrated by this removal. Shared
+SQLite schemas and their forward-only migrations are unchanged. Retired plugin
+files may be archived manually; installed third-party code must be registered
+explicitly through a remaining extension boundary before it can execute.
 
 Required CI intentionally uses one Ubuntu job on Python 3.11, the minimum
 supported version. That job runs the complete credential-free suite against

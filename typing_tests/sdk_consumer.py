@@ -6,7 +6,6 @@ from typing import assert_never
 
 from chulk import (
     Agent,
-    AgentCompiler,
     AgentConfig,
     Goal,
     GoalModelRequest,
@@ -15,14 +14,11 @@ from chulk import (
     ApprovalStore,
     ApprovalSubmission,
     ApprovalValidation,
-    AgentDefinition,
-    AgentDefinitionRuntime,
     AsyncHostedRuntime,
     AsyncToolCatalogResolver,
     AsyncLearningProposalService,
     AsyncLearningReviewer,
     AsyncPlanStepVerifier,
-    AsyncPluginService,
     AsyncRuntimeServices,
     AsyncServiceBinding,
     AsyncSkillLifecycleService,
@@ -34,8 +30,6 @@ from chulk import (
     ChildRunRecord,
     ChulkError,
     ConfigurationError,
-    CompiledAgentPackage,
-    CompilerRequest,
     ContextReport,
     Cost,
     ExecutionScope,
@@ -73,8 +67,6 @@ from chulk import (
     PlanStepVerifier,
     ParentRunPolicy,
     ParentRunRecord,
-    PluginLifecycleReceipt,
-    PluginUpdatePlan,
     SafetyError,
     Skills,
     Tool,
@@ -104,10 +96,8 @@ from chulk import (
     RunStatus,
     BudgetScope,
     RuntimeProfile,
-    SkillActivationRecord,
     StepDefinition,
     Usage,
-    VersionedReference,
 )
 from chulk.evals import (
     AgentFactory,
@@ -162,8 +152,6 @@ from chulk.postgres import (
 
 
 assert Tool is not None
-assert AgentCompiler is not None
-assert AgentDefinitionRuntime is not None
 assert RuntimeProfile is not None
 assert PostgreSQLRunStore is not None
 assert PostgreSQLApprovalStore is not None
@@ -387,7 +375,6 @@ assert AsyncRuntimeServices is not None
 assert AsyncServiceBinding is not None
 assert AsyncLearningProposalService is not None
 assert AsyncLearningReviewer is not None
-assert AsyncPluginService is not None
 assert AsyncSkillLifecycleService is not None
 assert AsyncSkillLifecycleStore is not None
 assert AsyncSkillService is not None
@@ -483,28 +470,6 @@ def consume_proposal(proposal: MemoryProposal) -> str:
 
 def consume_attempts(call: ToolCall) -> tuple[ToolAttempt, ...]:
     return call.attempts
-
-
-def consume_compiled_package(
-    package: CompiledAgentPackage,
-) -> tuple[AgentDefinition, str, bool]:
-    definition: AgentDefinition = package.definition
-    request_type: type[CompilerRequest] = CompilerRequest
-    _ = request_type
-    return definition, package.skill.digest, package.publishable
-
-
-def consume_skill_activation(
-    activation: SkillActivationRecord,
-) -> tuple[VersionedReference, str]:
-    return activation.reference, activation.activated_by
-
-
-def consume_plugin_lifecycle(
-    receipt: PluginLifecycleReceipt,
-    plan: PluginUpdatePlan,
-) -> tuple[str, bool]:
-    return receipt.action.value, plan.requires_reapproval
 
 
 def consume_eval_contract(
