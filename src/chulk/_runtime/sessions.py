@@ -54,6 +54,7 @@ def create_agent_state(
     conversation_id: str | None,
     *,
     execution_scope: ExecutionScope | None = None,
+    new_conversation_id: str | None = None,
     unresolved_tool_handler: Callable[
         [
             SQLiteSessionStore,
@@ -67,7 +68,7 @@ def create_agent_state(
 ) -> AgentState:
     """Create fresh state or rebuild state for an existing conversation."""
     if conversation_id is None:
-        return AgentState()
+        return AgentState(conversation_id=new_conversation_id) if new_conversation_id else AgentState()
 
     conversation = session_store.get_conversation(conversation_id)
     if execution_scope is not None:

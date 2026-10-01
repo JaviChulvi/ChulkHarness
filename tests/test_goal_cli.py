@@ -54,3 +54,41 @@ def test_main_routes_goal_list_to_selected_profile_store(tmp_path, monkeypatch) 
     assert errors == []
     payload = json.loads(output[0])
     assert payload['goals'][0]['id'] == goal.id
+
+
+def test_goal_run_requires_verifier_before_model_use(tmp_path, monkeypatch):
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
+    service = GoalService(GoalStore(config.store_path))
+    goal = service.create(title='Verify', acceptance_criteria=('Verified',), steps=(GoalStep(id='verify', title='Verify', description='Check', acceptance_criterion_ids=('criterion-1',)),), budget=RunBudget(max_model_calls=10))
+    goal = service.approve(goal.id, expected_revision=goal.revision, approved_by='owner')
+    monkeypatch.setenv('CHULK_PROJECT_ROOT', str(tmp_path))
+    monkeypatch.delenv('CHULK_GOAL_VERIFIER', raising=False)
+    output = []
+    def forbidden(_):
+        raise AssertionError('Missing verifier must stop before model construction')
+    assert main(['goal', 'run', goal.id, '--revision', str(goal.revision), '--json'], llm_client_factory=forbidden, output_func=output.append) == 1
+    assert 'verifier' in json.loads(output[0])['error']
+    assert service.store.get(goal.id) == goal
+
+
+def test_main_runs_goal_foreground_with_project_verifier(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+    from chulk.testing import ScriptedLLMClient
+    from chulk.core.plan_execution import PlanStepVerification
+    module = ModuleType('project_goal_verifier')
+    module.verify = lambda request: PlanStepVerification(True, 'Host checked current criteria')
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    config = load_config({'CHULK_PROJECT_ROOT': str(tmp_path)})
+    service = GoalService(GoalStore(config.store_path))
+    goal = service.create(title='Verify', acceptance_criteria=('Verified',), steps=(GoalStep(id='verify', title='Verify', description='Check', acceptance_criterion_ids=('criterion-1',)),), budget=RunBudget(max_model_calls=20))
+    goal = service.approve(goal.id, expected_revision=goal.revision, approved_by='owner')
+    monkeypatch.setenv('CHULK_PROJECT_ROOT', str(tmp_path))
+    llm = ScriptedLLMClient([
+        {'type': 'plan_step_update', 'step_update': {'step_id': 'verify', 'status': 'completed', 'evidence': 'Checked'}},
+        {'type': 'final_answer', 'content': 'Done'},
+        {'approved': True, 'reason': 'Verified'},
+    ])
+    output = []
+    assert main(['goal', 'run', goal.id, '--revision', str(goal.revision), '--single-slice', '--verifier', 'project_goal_verifier:verify', '--json'], llm_client_factory=lambda _: llm, output_func=output.append) == 0
+    assert json.loads(output[0])['execution']['stop_reason'] == 'completed'

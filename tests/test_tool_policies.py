@@ -241,6 +241,15 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
         def abort_tool(self, checkpoint, error):
             aborted.append(error)
             return checkpoint
+
+        async def begin_tool_async(self, **kwargs):
+            return self.begin_tool(**kwargs)
+
+        async def abort_tool_async(self, checkpoint, error):
+            return self.abort_tool(checkpoint, error)
+
+        async def finish_tool_async(self, checkpoint, result):
+            return self.finish_tool(checkpoint, result)
     registry = ToolRegistry()
     registry.register(cancellable)
     executor = ToolExecutor(registry=registry, permission_policy=ToolPermissionPolicy(), permission_callback=None, trace=lambda _name, _payload=None: None, get_context=lambda _turn: None, goal_execution=Goal(), async_usage_accounting=Usage())

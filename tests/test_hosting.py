@@ -1754,8 +1754,10 @@ async def test_hosted_construction_preserves_goal_validation(tmp_path, native_as
     def assert_boundary():
         boundary_calls.append('boundary')
         return goal
+    async def assert_boundary_async():
+        return assert_boundary()
     metadata = {'profile_id': 'other'} if mismatch == 'metadata' else {}
-    options = dict(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_final()]), tools=[], skills=[], execution_scope=_scope(), goal_execution=SimpleNamespace(assert_boundary=assert_boundary), run_budget=RunBudget() if mismatch == 'budget' else None, usage_dimensions=UsageDimensions(goal_id='other') if mismatch == 'usage' else None, conversation_metadata=metadata)
+    options = dict(config=AgentConfig(project_root=tmp_path), llm=FakeLLM([_final()]), tools=[], skills=[], execution_scope=_scope(), goal_execution=SimpleNamespace(assert_boundary=assert_boundary, assert_boundary_async=assert_boundary_async), run_budget=RunBudget() if mismatch == 'budget' else None, usage_dimensions=UsageDimensions(goal_id='other') if mismatch == 'usage' else None, conversation_metadata=metadata)
     hub = InMemoryServiceHub()
     with pytest.raises(ConfigurationError, match=message):
         if native_async:

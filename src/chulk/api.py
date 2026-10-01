@@ -308,6 +308,7 @@ from chulk.goals import (
     GoalClaim,
     GoalModelRequest,
     GoalSliceLimits,
+    GoalRunner, AsyncGoalRunner, GoalExecutionResult, GoalStopReason, GoalExecutionStore, AsyncGoalExecutionStore,
     GoalCriterion,
     GoalEvent,
     GoalEventCallback,
@@ -652,7 +653,7 @@ ExecutionPolicy ExecutionResult ExecutionSession ExecutionSessionRequest Executi
 ExecutionBackendFactory EnvironmentPolicy EndpointRef ExactCost DockerPolicy DockerExecutionBackend
 DockerUnavailableError FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest
 GitWorktreeBackend GitWorktreePolicy Goal GoalActionCheckpoint
-GoalActionConflictError GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalModelRequest GoalSliceLimits
+GoalActionConflictError GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalModelRequest GoalSliceLimits GoalRunner AsyncGoalRunner GoalExecutionResult GoalStopReason GoalExecutionStore AsyncGoalExecutionStore
 GoalClaim GoalCriterion GoalEvent GoalEventCallback GoalEvidence GoalExecutionContext
 GoalLeaseConflictError GoalNotFoundError GoalRevisionConflictError GoalRisk GoalRetentionPolicy
 GoalService GoalStatus GoalSteering GoalStep GoalStepStatus GoalStore GeneratedMedia GovernedSkill

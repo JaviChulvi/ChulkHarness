@@ -444,7 +444,7 @@ def _add_goal_parser(subparsers: argparse._SubParsersAction) -> None:
 
     for name, help_text in (
         ("approve", "Approve a draft goal."),
-        ("run", "Move an approved goal into running state."),
+        ("run", "Execute an approved goal in the foreground."),
         ("pause", "Pause a goal between actions."),
         ("resume", "Resume a paused or blocked goal."),
         ("cancel", "Request durable goal cancellation."),
@@ -453,6 +453,17 @@ def _add_goal_parser(subparsers: argparse._SubParsersAction) -> None:
         _add_goal_mutation_options(command)
         if name == "approve":
             command.add_argument("--reason")
+        if name == "run":
+            command.add_argument("--single-slice", action="store_true")
+            command.add_argument("--verifier", help="Configured host verifier module:callable")
+
+    budget = commands.add_parser("budget", help="Explicitly replace a goal budget; exhausted work remains paused.")
+    _add_goal_mutation_options(budget)
+    budget.add_argument("--max-model-calls", type=int, required=True)
+    budget.add_argument("--max-tool-calls", type=int)
+    budget.add_argument("--max-tokens", type=int)
+    budget.add_argument("--max-cost")
+    budget.add_argument("--deadline")
 
     steer = commands.add_parser("steer", help="Append operator steering.")
     steer.add_argument("goal_id")

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from chulk.core.actions import PlanStepUpdateAction
 from chulk.core.events import TraceEvent
@@ -12,6 +11,7 @@ from chulk.core.state import AgentState, ObservationRecord, Plan, PlanStep, Tool
 from chulk.core.transitions import FinishToolEffect
 from chulk.memory import ConversationMemory
 from chulk.goals.runtime import GoalExecutionContext
+from chulk.goals.models import Goal
 from chulk.hosting.async_utils import call_async_service
 from chulk.tools.registry import ToolResult
 
@@ -28,6 +28,7 @@ class PlanStepVerificationRequest:
     acceptance_criteria: tuple[str, ...]
     asserted_evidence: str
     recorded_evidence: tuple[str, ...]
+    goal: Goal | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class PlanStepVerificationRequest:
             "acceptance_criteria": list(self.acceptance_criteria),
             "asserted_evidence": self.asserted_evidence,
             "recorded_evidence": list(self.recorded_evidence),
+            **({"goal": self.goal.to_dict()} if self.goal is not None else {}),
         }
 
 
@@ -170,11 +172,15 @@ class PlanExecution:
         if step is None or action.step_id != step.id:
             raise RuntimeError("Validated plan step update lost its active step")
         context = self.goal_execution.verification_context() if self.goal_execution and self.goal_execution.slice_limits else None
+        request = _verification_request(turn, plan, step, action)
+        if self.goal_execution is not None:
+            goal = self.goal_execution.assert_boundary()
+            request = _goal_verification_request(request, goal)
         verification: PlanStepVerification | None = None
         if action.status == "completed":
             if self.verifier is not None:
                 verification = _require_verification(
-                    self.verifier(_verification_request(turn, plan, step, action))
+                    self.verifier(request)
                 )
             elif self.async_verifier is not None:
                 raise RuntimeError(
@@ -197,19 +203,22 @@ class PlanExecution:
         step = plan.active_step()
         if step is None or action.step_id != step.id:
             raise RuntimeError("Validated plan step update lost its active step")
-        context = await call_async_service(self.goal_execution, "verification_context") if self.goal_execution and self.goal_execution.slice_limits else None
+        context = await self.goal_execution.verification_context_async() if self.goal_execution and self.goal_execution.slice_limits else None
         verification: PlanStepVerification | None = None
         if action.status == "completed":
             request = _verification_request(turn, plan, step, action)
+            if self.goal_execution is not None:
+                goal = await self.goal_execution.assert_boundary_async()
+                request = _goal_verification_request(request, goal)
             if self.async_verifier is not None:
                 verification = _require_verification(await self.async_verifier(request))
             elif self.verifier is not None:
                 verification = _require_verification(
-                    await asyncio.to_thread(self.verifier, request)
+                    await call_async_service(self.verifier, "__call__", request)
                 )
         rejection_count = 0
         if context is not None and verification is not None and self.goal_execution is not None:
-            rejection_count = await call_async_service(self.goal_execution, "record_verification", turn,
+            rejection_count = await self.goal_execution.record_verification_async(turn,
                 context=context, passed=verification.passed, feedback=verification.evidence)
         return self._apply_step_result(turn, step, action, verification, rejection_count=rejection_count)
 
@@ -473,3 +482,10 @@ def _require_verification(value: object) -> PlanStepVerification:
     if not isinstance(value, PlanStepVerification):
         raise TypeError("plan step verifier must return PlanStepVerification")
     return value
+
+
+def _goal_verification_request(request: PlanStepVerificationRequest, goal: Goal) -> PlanStepVerificationRequest:
+    step = goal.step(request.step_id)
+    return replace(request, goal=goal, plan_summary=goal.description or goal.title, title=step.title,
+                   description=step.description, acceptance_criteria=tuple(
+                       item.description for item in goal.acceptance_criteria if item.id in step.acceptance_criterion_ids))

@@ -111,3 +111,5 @@ max_model_calls=20, max_seconds=60)` through `GoalExecutionContext.slice_limits`
 All values are positive integers. These cooperative slice limits are separate
 from the persistent `RunBudget` for the whole goal. Unbound turns retain the
 existing tool limit.
+
+`goal run --verifier module:callable` (or `CHULK_GOAL_VERIFIER`) selects a host-owned Python completion verifier. Automatic execution requires a finite goal model-call budget. `--single-slice` bounds a foreground invocation; see [goal execution](goals.md#foreground-coordinator).

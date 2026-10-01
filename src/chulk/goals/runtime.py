@@ -8,16 +8,17 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import inspect
 
 from typing import Any
 
-from chulk.goals.models import Goal, GoalActionCheckpoint, GoalClaim, GoalModelRequest, GoalSliceLimits
-from chulk.goals.store import GoalStore
+from chulk.goals.models import Goal, GoalActionCheckpoint, GoalClaim, GoalModelRequest, GoalSliceLimits, verification_context_digest
+from chulk.goals.protocols import GoalExecutionStore, AsyncGoalExecutionStore
 from chulk.hosting.async_utils import call_async_service
 from chulk.tools.registry import ToolResult
 from chulk.usage import BudgetExceededError, BudgetScope, RunBudget
 from chulk.errors import ConfigurationError
-from chulk.core.state import TurnState
+from chulk.core.state import TurnState, Plan, PlanStep
 
 
 class GoalSliceExhausted(Exception):
@@ -32,11 +33,22 @@ class GoalSliceExhausted(Exception):
 class GoalExecutionContext:
     """Bind one runner claim to one active goal step."""
 
-    store: GoalStore
+    store: GoalExecutionStore | AsyncGoalExecutionStore
     claim: GoalClaim
     step_id: str
     slice_limits: GoalSliceLimits | None = None
     slice_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    automatic: bool = False
+    conversation_id: str | None = None
+    ownership_lost: bool = False
+
+    def _store_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        result = getattr(self.store, method)(*args, **kwargs)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise ConfigurationError("Native async goal stores require AsyncGoalRunner")
+        return result
 
     def slice_budget(self, turn: TurnState) -> RunBudget | None:
         if self.slice_limits is None:
@@ -75,17 +87,26 @@ class GoalExecutionContext:
 
     def assert_boundary(self) -> Goal:
         """Observe pause, cancellation, steering, status, and lease changes."""
-        return self.store.assert_action_boundary(
+        if self.ownership_lost:
+            from chulk.goals.store import GoalLeaseConflictError
+            raise GoalLeaseConflictError("execution claim renewal failed")
+        return self._store_call("assert_action_boundary",
             self.claim,
             step_id=self.step_id,
         )
 
     async def assert_boundary_async(self) -> Goal:
-        return await call_async_service(self, "assert_boundary")
+        if self.ownership_lost:
+            from chulk.goals.store import GoalLeaseConflictError
+            raise GoalLeaseConflictError("execution claim renewal failed")
+        return await call_async_service(self.store, "assert_action_boundary", self.claim, step_id=self.step_id)
 
     def context(self) -> dict[str, Any]:
         goal = self.assert_boundary()
-        incorporated = self.store.incorporated_steering_ids(goal.id)
+        incorporated = self._store_call("incorporated_steering_ids", goal.id)
+        return self._context_payload(goal, incorporated)
+
+    def _context_payload(self, goal: Goal, incorporated: frozenset[str]) -> dict[str, Any]:
         step = goal.step(self.step_id)
         return {
             "goal_id": goal.id, "revision": goal.revision,
@@ -116,13 +137,24 @@ class GoalExecutionContext:
         }
 
     async def context_async(self) -> dict[str, Any]:
-        return await call_async_service(self, "context")
+        goal = await self.assert_boundary_async()
+        incorporated = await call_async_service(self.store, "incorporated_steering_ids", goal.id)
+        return self._context_payload(goal, incorporated)
+
+    def project_plan(self, goal: Goal) -> Plan:
+        """Project only the selected authoritative step into the existing turn loop."""
+        step = goal.step(self.step_id)
+        criteria = [item.description for item in goal.acceptance_criteria if item.id in step.acceptance_criterion_ids]
+        plan = Plan(summary=goal.description or goal.title, steps=[PlanStep(id=step.id, title=step.title,
+                    description=step.description, acceptance_criteria=criteria or [step.description], status="in_progress")])
+        plan.approve()
+        return plan
 
     def begin_model_request(
         self, *, context: dict[str, Any], conversation_id: str, turn_id: str,
         request_index: int, purpose: str,
     ) -> GoalModelRequest:
-        return self.store.begin_model_request(
+        return self._store_call("begin_model_request",
             self.claim, step_id=self.step_id, conversation_id=conversation_id,
             turn_id=turn_id, request_index=request_index, purpose=purpose,
             goal_revision=context["revision"],
@@ -130,13 +162,16 @@ class GoalExecutionContext:
         )
 
     async def begin_model_request_async(self, **kwargs: Any) -> GoalModelRequest:
-        return await call_async_service(self, "begin_model_request", **kwargs)
+        context = kwargs.pop("context")
+        return await call_async_service(self.store, "begin_model_request", self.claim,
+            step_id=self.step_id, goal_revision=context["revision"],
+            steering_ids=tuple(item["id"] for item in context["instructions"]), **kwargs)
 
     def acknowledge_response(self, request_id: str, *, response_ref: str) -> GoalModelRequest:
-        return self.store.acknowledge_model_response(self.claim, request_id, response_ref=response_ref)
+        return self._store_call("acknowledge_model_response", self.claim, request_id, response_ref=response_ref)
 
     async def acknowledge_response_async(self, request_id: str, *, response_ref: str) -> GoalModelRequest:
-        return await call_async_service(self, "acknowledge_response", request_id, response_ref=response_ref)
+        return await call_async_service(self.store, "acknowledge_model_response", self.claim, request_id, response_ref=response_ref)
 
     def begin_tool(
         self,
@@ -146,7 +181,7 @@ class GoalExecutionContext:
         attempt: int,
         tool_name: str,
     ) -> GoalActionCheckpoint:
-        return self.store.begin_action(
+        return self._store_call("begin_action",
             self.claim,
             step_id=self.step_id,
             idempotency_key=(
@@ -156,31 +191,43 @@ class GoalExecutionContext:
             action_ref=tool_name,
         )
 
+    async def begin_tool_async(self, *, turn_id: str, tool_call_index: int, attempt: int, tool_name: str) -> GoalActionCheckpoint:
+        return await call_async_service(self.store, "begin_action", self.claim, step_id=self.step_id,
+            idempotency_key=f"turn:{turn_id}:tool:{tool_call_index}:attempt:{attempt}", action_kind="tool", action_ref=tool_name)
+
     def finish_tool(
         self,
         checkpoint: GoalActionCheckpoint,
         result: ToolResult,
     ) -> GoalActionCheckpoint:
         """Persist the observed outcome without copying raw tool output."""
-        return self.store.finish_action(
+        return self._store_call("finish_action",
             self.claim,
             checkpoint.id,
-            result={
-                "digest": sha256(result.to_observation().encode()).hexdigest(),
-                "success": result.success,
-                "tool_name": result.tool_name,
-                "failure_kind": result.failure_kind,
-                "exit_code": result.exit_code,
-            },
+            result=self._tool_result(result),
             error=result.error if not result.success else None,
         )
+
+    @staticmethod
+    def _tool_result(result: ToolResult) -> dict[str, Any]:
+        return {"digest": sha256(result.to_observation().encode()).hexdigest(),
+                "success": result.success, "tool_name": result.tool_name,
+                "failure_kind": result.failure_kind, "exit_code": result.exit_code}
+
+    async def finish_tool_async(self, checkpoint: GoalActionCheckpoint, result: ToolResult) -> GoalActionCheckpoint:
+        return await call_async_service(self.store, "finish_action", self.claim, checkpoint.id,
+            result=self._tool_result(result), error=result.error if not result.success else None)
+
+    async def abort_tool_async(self, checkpoint: GoalActionCheckpoint, error: BaseException) -> GoalActionCheckpoint:
+        return await call_async_service(self.store, "finish_action", self.claim, checkpoint.id,
+            error=f"{type(error).__name__}: {error}")
 
     def abort_tool(
         self,
         checkpoint: GoalActionCheckpoint,
         error: BaseException,
     ) -> GoalActionCheckpoint:
-        return self.store.finish_action(
+        return self._store_call("finish_action",
             self.claim,
             checkpoint.id,
             error=f"{type(error).__name__}: {error}",
@@ -188,32 +235,57 @@ class GoalExecutionContext:
 
     def verification_context(self) -> dict[str, Any]:
         goal = self.assert_boundary()
-        criteria = {"description": goal.description, "constraints": goal.constraints,
-                    "criteria": [item.to_dict() for item in goal.acceptance_criteria],
-                    "instructions": [item.to_dict() for item in goal.active_steering]}
+        checkpoints = self._store_call("action_checkpoints", goal.id)
+        return self._verification_context(goal, checkpoints)
+
+    async def verification_context_async(self) -> dict[str, Any]:
+        goal = await self.assert_boundary_async()
+        checkpoints = await call_async_service(self.store, "action_checkpoints", goal.id)
+        return self._verification_context(goal, checkpoints)
+
+    def _verification_context(self, goal: Goal, checkpoints: tuple[GoalActionCheckpoint, ...]) -> dict[str, Any]:
         evidence = sorted({
-            str(item.result["digest"]) for item in self.store.action_checkpoints(goal.id)
+            str(item.result["digest"]) for item in checkpoints
             if item.step_id == self.step_id and item.result and "digest" in item.result
         } | {item.summary for item in goal.evidence if item.step_id == self.step_id})
         return {"expected_revision": goal.revision,
-                "context_digest": sha256(json.dumps(criteria, sort_keys=True).encode()).hexdigest(),
+                "context_digest": verification_context_digest(goal),
                 "evidence_digest": sha256(json.dumps(evidence).encode()).hexdigest()}
 
     def record_verification(self, turn: TurnState, *, context: dict[str, Any], passed: bool, feedback: str) -> int:
-        return self.store.record_verification(
-            self.claim, step_id=self.step_id, operation_id=f"{turn.turn_id}:model:{turn.model_request_count}",
+        operation_id = f"{turn.turn_id}:model:{turn.model_request_count}"
+        count = self._store_call("record_verification",
+            self.claim, step_id=self.step_id, operation_id=operation_id,
             passed=passed, feedback=feedback, **context,
         )
+        turn.extension_metadata["goal_verification"] = {"operation_id": operation_id,
+            "passed": passed, "goal_revision": context["expected_revision"], "feedback": feedback}
+        return count
+
+    async def record_verification_async(self, turn: TurnState, *, context: dict[str, Any], passed: bool, feedback: str) -> int:
+        operation_id = f"{turn.turn_id}:model:{turn.model_request_count}"
+        count = await call_async_service(self.store, "record_verification", self.claim,
+            step_id=self.step_id, operation_id=operation_id, passed=passed, feedback=feedback, **context)
+        turn.extension_metadata["goal_verification"] = {"operation_id": operation_id,
+            "passed": passed, "goal_revision": context["expected_revision"], "feedback": feedback}
+        return count
+
+    async def heartbeat_async(self, *, lease_seconds: int = 120) -> GoalClaim:
+        self.claim = await call_async_service(self.store, "heartbeat", self.claim, lease_seconds=lease_seconds)
+        return self.claim
+
+    async def close_async(self) -> bool:
+        return await call_async_service(self.store, "release_claim", self.claim)
 
     def heartbeat(self, *, lease_seconds: int = 120) -> GoalClaim:
-        self.claim = self.store.heartbeat(
+        self.claim = self._store_call("heartbeat",
             self.claim,
             lease_seconds=lease_seconds,
         )
         return self.claim
 
     def close(self) -> bool:
-        return self.store.release_claim(self.claim)
+        return self._store_call("release_claim", self.claim)
 
 
 __all__ = ["GoalExecutionContext"]

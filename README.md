@@ -139,3 +139,5 @@ backups, or local SQLite databases. The implementation roadmap is
 [TODO.md](TODO.md).
 
 ChulkHarness is licensed under the [MIT License](LICENSE).
+
+Approved goals can run through bounded foreground slices with an explicit host verifier: see [long-running goal execution](docs/goals.md#foreground-coordinator) and the [offline runner example](examples/goal_runner.py).

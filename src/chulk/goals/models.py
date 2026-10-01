@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
+import json
 from typing import Any, Mapping
 
 from chulk._serialization import _freeze_mapping, _plain
@@ -984,6 +986,63 @@ def _total_seconds(value: timedelta | None) -> int | None:
     return int(value.total_seconds()) if value is not None else None
 
 
+class GoalStopReason(StrEnum):
+    COMPLETED = "completed"
+    STEP_COMPLETED = "step_completed"
+    YIELDED = "yielded"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    BLOCKED = "blocked"
+    APPROVAL_REQUIRED = "approval_required"
+    LEASE_LOST = "lease_lost"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    RECOVERY_REQUIRED = "recovery_required"
+    REQUIRED_CONTEXT_OVERFLOW = "required_context_overflow"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class GoalExecutionResult:
+    """Inspectable foreground stop, with durable goal state and cumulative usage."""
+
+    goal: Goal
+    stop_reason: GoalStopReason
+    conversation_id: str | None = None
+    turn_id: str | None = None
+    continuation_id: str | None = None
+    usage: Mapping[str, Any] = field(default_factory=dict)
+    content: str = ""
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "stop_reason", GoalStopReason(self.stop_reason))
+        object.__setattr__(self, "usage", _freeze_mapping(self.usage))
+
+    @property
+    def goal_id(self) -> str:
+        return self.goal.id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"goal": self.goal.to_dict(), "goal_id": self.goal_id,
+                "stop_reason": self.stop_reason.value, "conversation_id": self.conversation_id,
+                "turn_id": self.turn_id, "continuation_id": self.continuation_id,
+                "usage": _plain(self.usage), "content": self.content, "detail": self.detail}
+
+
+@dataclass(frozen=True, slots=True)
+class GoalSliceAdmission:
+    """Persisted identities and claim selected in one goal-store transaction."""
+
+    goal: Goal
+    claim: GoalClaim | None
+    step_id: str | None
+    conversation_id: str
+    turn_id: str
+    previous_turn_id: str | None
+    stop_reason: GoalStopReason | None = None
+    new_conversation: bool = False
+
+
 __all__ = [
     "Goal",
     "GoalActionCheckpoint",
@@ -992,6 +1051,8 @@ __all__ = [
     "GoalClaim",
     "GoalModelRequest",
     "GoalSliceLimits",
+    "GoalExecutionResult",
+    "GoalStopReason",
     "GoalCriterion",
     "GoalEvent",
     "GoalEvidence",
@@ -1003,3 +1064,13 @@ __all__ = [
     "GoalStepStatus",
     "goal_from_dict",
 ]
+
+
+def verification_context_digest(goal: Goal) -> str:
+    """Version the authoritative success definition, excluding usage/lifecycle bookkeeping."""
+    payload = {"description": goal.description, "constraints": goal.constraints,
+               "criteria": [item.to_dict() for item in goal.acceptance_criteria],
+               "instructions": [item.to_dict() for item in goal.active_steering],
+               "steps": [{"id": step.id, "description": step.description,
+                          "criterion_ids": step.acceptance_criterion_ids} for step in goal.steps]}
+    return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()

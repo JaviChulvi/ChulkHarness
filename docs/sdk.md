@@ -228,3 +228,5 @@ conversation (or await it on `AsyncAgent`) to resume pending work in a new turn.
 Reopening the conversation preserves continuation. Each call is serialized by
 the same facade gate as `run_result`. Tool permissions are checked again.
 `YIELDED` is an SDK turn status, distinct from durable-run scheduling statuses.
+
+Goal coordination uses `GoalRunner` / `AsyncGoalRunner` with an explicit goal store, host verifier and runtime factory. `GoalExecutionResult` identifies a typed `GoalStopReason` and cumulative usage. See [goal execution](goals.md#foreground-coordinator) and [the offline example](../examples/goal_runner.py).

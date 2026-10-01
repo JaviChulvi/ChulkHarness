@@ -125,3 +125,5 @@ event routing state.
 
 The public event catalog is stable and versioned; internal trace ordering is
 trace-only. See [release policy](release-policy.md) and [tracing](tracing.md).
+
+Foreground goal slices retain `run.yielded` and goal audit events. Verified step/evidence application commits `goal.progress_verified` once; slice completion alone does not produce goal completion.

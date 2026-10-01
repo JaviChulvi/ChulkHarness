@@ -117,3 +117,5 @@ Goal slice continuation adds `GoalSliceLimits`, SDK `RunStatus.YIELDED`,
 retains readers for v1-v3; exhaustive status matches should handle `YIELDED`.
 SQLite migration 23 adds durable verification decisions. Existing snapshots
 without continuation metadata continue to load with their prior semantics.
+
+The goal runner, execution result, stop reasons and explicit sync/async goal-store protocols are public contracts. SQLite migration 24 adds execution/slice and verification-application records without rewriting prior migration history.

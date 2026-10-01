@@ -111,3 +111,5 @@ see [quickstart](../docs/quickstart.md), [providers](../docs/providers.md),
 - `11_software_engineer_preset.py` uses the coding-agent preset.
 - `12_local_provider.py` targets a local OpenAI-compatible provider.
 - `13_per_agent_skills.py` creates a temporary project with a `.chulk/skills/` catalog, scopes selectable skills with `Skills.only(...)`, and pins one always-loaded skill with `Skills.pin(...)`.
+
+- [goal_runner.py](goal_runner.py): offline foreground goal completion with bounded slices and deterministic host verification.

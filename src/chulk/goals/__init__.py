@@ -1,5 +1,10 @@
 """Durable goal models, transitions, persistence, and operator service."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from chulk.goals.runner import GoalRunner as GoalRunner, AsyncGoalRunner as AsyncGoalRunner
+
 from chulk.goals.models import (
     Goal,
     GoalActionCheckpoint,
@@ -8,6 +13,8 @@ from chulk.goals.models import (
     GoalClaim,
     GoalModelRequest,
     GoalSliceLimits,
+    GoalExecutionResult,
+    GoalStopReason,
     GoalCriterion,
     GoalEvent,
     GoalEvidence,
@@ -48,6 +55,12 @@ __all__ = [
     "GoalClaim",
     "GoalModelRequest",
     "GoalSliceLimits",
+    "GoalExecutionResult",
+    "GoalStopReason",
+    "GoalRunner",
+    "AsyncGoalRunner",
+    "GoalExecutionStore",
+    "AsyncGoalExecutionStore",
     "GoalCriterion",
     "GoalEvent",
     "GoalEventCallback",
@@ -69,3 +82,13 @@ __all__ = [
     "SQLiteGoalStore",
     "goal_from_dict",
 ]
+
+
+from chulk.goals.protocols import GoalExecutionStore, AsyncGoalExecutionStore
+
+
+def __getattr__(name: str):
+    if name in {"GoalRunner", "AsyncGoalRunner"}:
+        from chulk.goals import runner
+        return getattr(runner, name)
+    raise AttributeError(name)

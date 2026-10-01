@@ -1,10 +1,11 @@
 # Durable goal context
 
-`GoalService` owns revisioned goal controls and evidence. `GoalService.run()` and
-the current `goal run` CLI command change a goal to `running`; they do not yet
-schedule autonomous execution. A host can start a step, claim its execution and
-pass `goal_execution` to `Agent`, `AsyncAgent`, `HostedRuntime`, or
-`AsyncHostedRuntime`. See [the offline example](../examples/goal_context.py).
+`GoalService` owns revisioned goal controls and evidence. `GoalService.run()`
+remains an audited state transition. `GoalRunner.run()` and the `goal run` CLI
+coordinate foreground execution through bounded turns. `run_slice()` and CLI
+`--single-slice` stop at the next slice or selected-step boundary. See the
+[offline runner example](../examples/goal_runner.py). Hosts may also bind a
+claimed `GoalExecutionContext` directly to an agent.
 
 ## Authoritative context
 
@@ -88,7 +89,7 @@ They allocate a new turn and refresh host tool/context bindings without insertin
 a user instruction. Pending validated actions and reflection outcomes survive
 a yield. Slice exhaustion returns `RunStatus.YIELDED`, empty answer content and
 `run.yielded`; it neither completes nor retries the authoritative goal step.
-This opt-in boundary does not yet make the CLI coordinate automatic execution.
+The foreground runner invokes this same continuation boundary.
 
 A configured host verifier's decisions are persisted by migration 23. Rejection
 counts are keyed by the selected step, authoritative criteria/instructions and
@@ -96,3 +97,56 @@ observed result content. The third rejection without changed evidence blocks
 the goal with `verification_stagnation`. New IDs and model assertions are not
 evidence. Raw result output remains in the owning session/artifact store; goal
 checkpoints retain digests. Ordinary unbound turns retain their current behavior.
+
+
+## Foreground coordinator
+
+```console
+chulk goal run GOAL_ID --revision REVISION --verifier project.verification:verify
+chulk goal run GOAL_ID --revision REVISION --single-slice --verifier project.verification:verify
+```
+
+The project supplies a Python `PlanStepVerifier`; `CHULK_GOAL_VERIFIER` can name
+its importable `module:callable`. This is host configuration, never model input.
+The CLI preserves profile/model selection, tools and permission policy through
+the shared runtime builder. Missing verification or a missing finite global
+model-call budget stops before model construction or dispatch.
+
+`GoalRunner(store, agent_factory=..., verifier=...)` takes an explicit
+`GoalExecutionStore`. `AsyncGoalRunner` supports native `AsyncGoalExecutionStore`
+and `async_verifier`; explicitly synchronous bindings use the cancellation-safe
+service adapter. The factory receives the execution context and the conversation
+ID to reopen (or `None` for first creation). It must bind that exact context and
+use durable session recording and budget accounting. Custom accounting must
+explicitly declare `enforces_goal_budgets = True` and implement cumulative goal
+and slice enforcement; the in-memory demonstration service is insufficient.
+Other hosted agents do not need a goal store.
+
+Admission transactionally claims and starts the first eligible persisted step,
+checking dependencies and selected-step approval. The execution conversation is
+separate from its source and retains source conversation/turn provenance. The
+turn plan projects the selected goal step. The host verifier receives an immutable
+current `goal` snapshot alongside the step request; completion writes require
+its persisted decision, current revision and live claim. A turn ending alone
+cannot complete goal work. Evidence and completion are applied atomically once.
+
+Claims last 120 seconds and renew every 40 seconds during model, tool and verifier
+waits. Losing ownership stops dispatch and fences progress writes. Pause and
+cancellation are observed at admission boundaries; known in-flight results drain
+before release. Approving a step never resumes a user-paused goal.
+
+`GoalExecutionResult` exposes the goal, conversation/turn/continuation identity,
+cumulative usage and `GoalStopReason`. Reasons distinguish completion, a completed
+step, yield, pause, cancellation, approval wait, blocking, budget exhaustion,
+lease loss, required-context overflow and recovery required. `run()` continues
+only yielded slices and completed-step boundaries. `run_slice()` returns both.
+Global exhaustion records the exhausted budget and consumption. Use
+`GoalService.update_budget()` (CLI `goal budget`) to explicitly replace the
+budget, then resume the paused work. Counters and the absolute deadline are
+never reset by a slice, pause or process restart.
+
+Migration 24 persists execution conversations, preallocated slice identities and
+verification application receipts. An interrupted admitted slice currently
+returns `recovery_required`, preventing blind replay; external reconciliation
+and hosted scheduling remain host responsibilities. No hidden daemon is started,
+and returning a foreground result does not durably enqueue background work.

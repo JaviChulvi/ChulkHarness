@@ -191,6 +191,10 @@ def assemble_agent(
     effective_conversation_metadata = _conversation_metadata(
         conversation_metadata, effective_profile_id
     )
+    if goal_snapshot is not None and goal_execution is not None and goal_execution.automatic:
+        effective_conversation_metadata.update({"goal_id": goal_snapshot.id,
+            "source_conversation_id": goal_snapshot.source_conversation_id,
+            "source_turn_id": goal_snapshot.source_turn_id})
     memory_enabled = resolved_services is None or resolved_services.is_enabled("memory")
     memory_store = (
         (
@@ -323,6 +327,7 @@ def assemble_agent(
             session_store,
             conversation_id,
             unresolved_tool_handler=unresolved_tool_handler,
+            new_conversation_id=goal_execution.conversation_id if goal_execution is not None else None,
         )
         trace_logger = JSONLTraceLogger(
             config.traces_dir,
@@ -833,7 +838,7 @@ async def assemble_async_hosted_agent(
             )
         effective_profile_id = profile_id or config.profile_id
         goal_snapshot = (
-            await call_async_service(goal_execution, "assert_boundary")
+            await goal_execution.assert_boundary_async()
             if goal_execution is not None else None
         )
         _validate_goal(goal_snapshot, effective_profile_id, run_budget, usage_dimensions)
@@ -842,6 +847,8 @@ async def assemble_async_hosted_agent(
         effective_metadata = _conversation_metadata(
             conversation_metadata, effective_profile_id
         )
+        if goal_snapshot is not None and goal_execution is not None and goal_execution.automatic:
+            effective_metadata.update({"goal_id": goal_snapshot.id, "source_conversation_id": goal_snapshot.source_conversation_id, "source_turn_id": goal_snapshot.source_turn_id})
         effective_metadata["execution_scope"] = execution_scope.to_dict()
         effective_metadata["execution_scope_key"] = execution_scope.key
 

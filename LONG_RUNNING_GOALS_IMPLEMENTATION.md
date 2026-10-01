@@ -140,3 +140,29 @@ for reconciliation and retry-step must not bypass them. The current stage-2
 turn checkpoints support known slice yields, not arbitrary external-effect crash
 replay. Existing InMemoryUsageService does not enforce slice budgets: automatic
 hosted execution must require a genuine durable usage binding.
+
+
+## Stage 3 execution checkpoint (2026-10-02)
+
+- PR2 published as draft #129, head b46906b, base PR128; attached to this task.
+  Required Linux/PostgreSQL CI passed (run 36933258603).
+- Current branch feat/goal-local-runner adds foreground GoalRunner/AsyncGoalRunner,
+  explicit sync/async store protocols and immutable result/stop types. Shared loop
+  performs selected-step projections, current-goal verification, cumulative usage,
+  pause/cancel draining, claim renewal and fenced progress. Native async bindings
+  are awaited; synchronous verifier/store calls use the draining adapter.
+- Migration24 persists goal execution conversations, slices and applied verification
+  receipts. GoalService.run remains a transition; CLI goal run now coordinates work
+  with project --verifier/CHULK_GOAL_VERIFIER and --single-slice. Budget replacement
+  is explicit via GoalService.update_budget/goal budget and requires resume.
+- 18 runner tests plus 5 CLI tests cover multi-slice/step completion, dependencies,
+  approval/pause, cancellation, lease loss/renewal, native async admission, budget
+  recovery, verification context, final-answer continuation, mandatory overflow,
+  migrations and stale/concurrent writes. Public exports count548; typing/example
+  and documentation updated. Interrupted slices still report recovery_required;
+  effect reconciliation is deliberately the next coherent stage.
+- Full local run:2070 passed/44 skipped/14 failed,81.28% coverage. Ten failures are
+  the documented macOS atomic-publication baseline. Four were outdated hosted
+  GoalContext test doubles missing assert_boundary_async; corrected and retesting.
+  Latest focused runner tests18 pass; Ruff/mypy334 pass. Clean wheel validation
+  running. Must obtain PR3 CI green and finish stage4 before claiming completion.
