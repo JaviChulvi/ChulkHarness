@@ -72,7 +72,8 @@ async def test_runner_respects_dependencies_and_single_slice_boundary(tmp_path, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_path, monkeypatch, asynchronous):
+@pytest.mark.parametrize("outcome", ["yielded", "completed", "rejected_then_completed"])
+async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_path, monkeypatch, asynchronous, outcome):
     from chulk import GoalSliceLimits
     from chulk.tools.registry import ToolRegistry
     from chulk.tracing import ReplayFixture, Trace
@@ -80,6 +81,8 @@ async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_pa
 
     service, goal = _goal(tmp_path)
     calls, traces = [], []
+    completed = outcome != "yielded"
+    verification_calls = []
 
     @Tool
     def inspect_item(index: int) -> str:
@@ -87,10 +90,21 @@ async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_pa
         calls.append(index)
         return f"Evidence {index}"
 
-    llm = ScriptedLLMClient([
+    actions = [
         {"type": "tool_call", "tool_name": "inspect_item", "arguments": {"index": index}}
         for index in range(2)
-    ])
+    ]
+    if completed:
+        completion, answer = _completion()
+        actions = [completion, actions[0], answer]
+        if outcome == "rejected_then_completed":
+            actions.insert(0, completion)
+    llm = ScriptedLLMClient(actions)
+
+    def verifier(_request):
+        verification_calls.append(1)
+        passed = outcome != "rejected_then_completed" or len(verification_calls) > 1
+        return PlanStepVerification(passed, "Verified" if passed else "Recheck the acceptance criteria")
 
     def factory(context, conversation_id):
         agent = (AsyncAgent if asynchronous else Agent)(
@@ -101,11 +115,12 @@ async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_pa
         return agent
 
     runner = (AsyncGoalRunner if asynchronous else GoalRunner)(
-        service.store, agent_factory=factory, verifier=lambda _: PlanStepVerification(True, "Verified"),
+        service.store, agent_factory=factory, verifier=verifier,
         slice_limits=GoalSliceLimits(max_tool_calls=1),
     )
     result = await runner.run_slice(goal.id) if asynchronous else runner.run_slice(goal.id)
-    assert result.stop_reason.value == "yielded"
+    expected_status = "completed" if completed else "yielded"
+    assert result.stop_reason.value == expected_status
     fixture = ReplayFixture.from_trace(Trace.from_jsonl(traces[0]), acknowledge_sensitive_data=True)
 
     def forbidden(*_args, **_kwargs):
@@ -116,9 +131,10 @@ async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_pa
     monkeypatch.setattr(GoalStore, "get", forbidden)
     for report in (execute_replay_fixture(fixture), await execute_replay_fixture_async(fixture)):
         assert report.ok, report.mismatches
-        assert report.actual["result"]["status"] == "yielded"
-        assert report.tool_results_consumed == 1
-    assert calls == [0]
+        assert report.actual["result"]["status"] == expected_status
+        assert report.tool_results_consumed == (0 if completed else 1)
+    assert calls == ([] if completed else [0])
+    assert len(verification_calls) == (2 if outcome == "rejected_then_completed" else int(completed))
 
 
 def _runner(tmp_path, service, responses, *, tools=(), verifier=None, **kwargs):
