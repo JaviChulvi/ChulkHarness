@@ -179,3 +179,6 @@ Bounded goal execution records `turn_checkpointed` snapshots for pending action
 and reflection phases. `turn_yielded` and `turn_finished` persist the stopped
 slice without emitting an assistant answer. Public consumers receive
 `run.yielded`, never `run.completed`, for this outcome.
+Executable replay preserves a recorded slice's yield boundary, including a
+pending tool, retry, reflection, or final-answer request. It consumes only
+recorded results; pending work never invokes the original tool or provider.
