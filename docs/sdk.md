@@ -1,5 +1,9 @@
 # SDK embedding and result contract
 
+Claimed goals add mandatory live context and durable steering receipts to both
+sync and async facades. See [durable goal context](goals.md) for incorporation,
+fulfillment, explicit supersession, and response recovery contracts.
+
 Use `Agent` for synchronous hosts and `AsyncAgent` inside an async event loop.
 Both own their runtime resources; close them explicitly or use `with`/`async
 with`. A closed facade rejects further work. Construction, provider, safety,

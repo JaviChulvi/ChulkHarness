@@ -28,6 +28,7 @@ from chulk.goals.transitions import (
     complete_goal,
     complete_step,
     fail_goal,
+    fulfill_steering,
     pause_goal,
     record_evidence,
     request_cancellation,
@@ -89,6 +90,8 @@ class GoalService:
         steps: tuple[GoalStep, ...],
         budget: RunBudget,
         actor: str = "operator",
+        description: str | None = None,
+        constraints: tuple[str, ...] = (),
         goal_id: str | None = None,
         source_conversation_id: str | None = None,
         source_turn_id: str | None = None,
@@ -105,6 +108,8 @@ class GoalService:
             id=goal_id or uuid4().hex,
             profile_id=self.store.profile_id,
             title=title,
+            description=description,
+            constraints=constraints,
             acceptance_criteria=criteria,
             steps=steps,
             budget=_goal_budget(budget),
@@ -260,12 +265,14 @@ class GoalService:
         expected_revision: int,
         instruction: str,
         created_by: str,
+        supersedes: tuple[str, ...] = (),
     ) -> Goal:
         steering = GoalSteering(
             id=uuid4().hex,
             instruction=instruction,
             created_by=created_by,
             created_at=self._now(),
+            supersedes=supersedes,
         )
         return self._mutate(
             goal_id,
@@ -273,7 +280,19 @@ class GoalService:
             "goal.steered",
             created_by,
             lambda goal: steer_goal(goal, steering),
-            {"steering_id": steering.id, "instruction": steering.instruction},
+            {"steering_id": steering.id, "instruction": steering.instruction,
+             "supersedes": list(steering.supersedes)},
+        )
+
+    def fulfill_steering(
+        self, goal_id: str, steering_id: str, *, expected_revision: int,
+        evidence_ids: tuple[str, ...], verified_by: str,
+    ) -> Goal:
+        """Record a host/operator decision; model incorporation is not fulfillment."""
+        return self._mutate(
+            goal_id, expected_revision, "goal.steering_fulfilled", verified_by,
+            lambda goal: fulfill_steering(goal, steering_id, evidence_ids),
+            {"steering_id": steering_id, "evidence_ids": list(evidence_ids)},
         )
 
     def approve_step(

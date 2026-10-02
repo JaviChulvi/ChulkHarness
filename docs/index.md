@@ -14,6 +14,8 @@ Choose the path that matches what you are doing:
 
 ## Topic guides
 
+- [Durable goal context and steering](goals.md)
+
 - [Quickstart](quickstart.md): install to first deterministic result.
 - [SDK](sdk.md): facades, lifecycle, results, exceptions, and async boundaries.
 - [Agent evaluations](evals.md): datasets, graders, quality gates, and reports.

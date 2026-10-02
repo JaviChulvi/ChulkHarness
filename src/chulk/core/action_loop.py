@@ -123,7 +123,7 @@ async def run_action_loop_async(
         if preparation.outcome != TransitionOutcome.PROCEED:
             raise RuntimeError("Plan preparation must proceed or stop")
 
-        prompt = runtime.model.build_prompt(turn, require_plan=require_plan)
+        prompt = await runtime.model.build_prompt_async(turn, require_plan=require_plan)
         prompt = await runtime.model.compact_prompt_async(
             prompt,
             turn,

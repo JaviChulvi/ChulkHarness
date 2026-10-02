@@ -19,6 +19,7 @@ Run the credential-free scripts from the repository root:
 python examples/00_sdk_quickstart.py
 python examples/repo_review_bot/app.py
 python examples/grounded_assistant/app.py
+python examples/goal_context.py
 python examples/hosted_runtime/hosted_app.py
 python examples/hosted_runtime/parent_child_app.py
 python examples/hosted_runtime/resilience_contract.py

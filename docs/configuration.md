@@ -75,6 +75,10 @@ decisions, completed and blocked work, next actions, and safe evidence hints.
 It is internal runtime state stored with the conversation summary; durable plan
 state remains separate and authoritative.
 
+Claimed goals additionally persist [mandatory goal context](goals.md), separate
+from this bounded historical checkpoint. Description, explicit constraints,
+criteria and active steering are never shortened by summary normalization.
+
 Older raw messages stay in the session store. When exact evidence is needed,
 the agent can deliberately use the read-only `session_search` and `session_read`
 tools; Chulk does not automatically retrieve or inject historical matches.

@@ -1,5 +1,11 @@
 # Hosted runtime embedding
 
+Hosts may pass a claimed `goal_execution` explicitly to either facade. Goal
+context and control checks operate independently of hosted usage services;
+incorporation requires the host session or journal to durably record responses.
+See [durable goal context](goals.md). In-memory reference services are test
+fixtures and do not provide restart durability.
+
 Use `HostedRuntime` or `AsyncHostedRuntime` when an application—not Chulk—owns
 persistence, tenancy, authorization, credentials, audit, and resource
 lifecycle. Hosted mode is explicit and fail-closed: it never fills a missing

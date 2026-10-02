@@ -6,10 +6,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import re
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 from chulk.core.actions import AgentAction, action_json_schema_for
 from chulk.core.async_cleanup import await_cleanup_after_error
-from chulk.core.context import AgentPrompt, ContextBudget
+from chulk.core.context import AgentPrompt, ContextBudget, ContextSection, build_context_report
+from chulk.core.prompts import format_goal_context_for_prompt
 from chulk.core.events import TraceEvent
 from chulk.core.prompt_builder import build_agent_prompt
 from chulk.core.planning import read_only_planning_tool_names
@@ -27,6 +28,8 @@ from chulk.media import ModelRequest, UserInput
 from chulk.skills import SkillRegistry, SkillSelection
 from chulk.tools import Tool, ToolRegistry
 from chulk.streaming import AsyncIncrementalOutputPolicy, AsyncPassThroughOutputPolicy, FinalAnswerChunk, FinalAnswerDeliveryStatus, FinalAnswerPolicyDecision, IncrementalOutputPolicy, OutputPolicyFailureMode, PassThroughOutputPolicy
+if TYPE_CHECKING:
+    from chulk.goals.runtime import GoalExecutionContext
 MAX_SUMMARY_SOURCE_CHARS = 12000
 MAX_SUMMARY_CHARS = 4000
 SUMMARY_COMPACTION_PASSES = 3
@@ -99,6 +102,77 @@ class ModelTransport:
     output_policy: IncrementalOutputPolicy | None = None
     async_output_policy: AsyncIncrementalOutputPolicy | None = None
     output_policy_failure_mode: OutputPolicyFailureMode = OutputPolicyFailureMode.CLOSED
+    goal_execution: GoalExecutionContext | None = None
+    durable_responses: bool = False
+
+    def _begin_goal_request(self, turn: TurnState, context: dict[str, Any] | None, purpose: str) -> dict:
+        if self.goal_execution is None:
+            return {}
+        if not self.durable_responses:
+            raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
+        if context is None:
+            raise RuntimeError("goal context missing at request admission")
+        receipt = self.goal_execution.begin_model_request(
+            context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
+            request_index=turn.model_request_count, purpose=purpose,
+        )
+        turn.extension_metadata['goal_model_request'] = receipt.to_dict()
+        return {'goal_model_request': receipt.to_dict()}
+
+    async def _begin_goal_request_async(self, turn: TurnState, context: dict[str, Any] | None, purpose: str) -> dict:
+        if self.goal_execution is None:
+            return {}
+        if not self.durable_responses:
+            raise ConfigurationError("Goal model execution requires a durable session or journal recorder.")
+        if context is None:
+            raise RuntimeError("goal context missing at request admission")
+        receipt = await self.goal_execution.begin_model_request_async(
+            context=context, conversation_id=self.state.conversation_id, turn_id=turn.turn_id,
+            request_index=turn.model_request_count, purpose=purpose,
+        )
+        turn.extension_metadata['goal_model_request'] = receipt.to_dict()
+        return {'goal_model_request': receipt.to_dict()}
+
+    def _goal_response_reference(self, turn: TurnState, request_index: int) -> str:
+        return f'model-response:{self.state.conversation_id}:{turn.turn_id}:{request_index}'
+
+    def _acknowledge_goal_response(self, turn: TurnState, request_index: int) -> None:
+        receipt = turn.extension_metadata.get('goal_model_request')
+        if self.goal_execution is not None and isinstance(receipt, dict) and receipt['request_index'] == request_index:
+            self.goal_execution.acknowledge_response(
+                receipt['id'], response_ref=self._goal_response_reference(turn, request_index),
+            )
+
+    async def _acknowledge_goal_response_async(self, turn: TurnState, request_index: int) -> None:
+        if self.goal_execution is None:
+            return
+        await self._flush_async()
+        receipt = turn.extension_metadata.get('goal_model_request')
+        if self.goal_execution is not None and isinstance(receipt, dict) and receipt['request_index'] == request_index:
+            await self.goal_execution.acknowledge_response_async(
+                receipt['id'], response_ref=self._goal_response_reference(turn, request_index),
+            )
+
+    def _with_goal_context(self, turn: TurnState, messages: list[dict[str, str]], context: dict[str, Any] | None) -> list[dict[str, str]]:
+        if context is None:
+            return messages
+        mandatory = format_goal_context_for_prompt(context)
+        messages = [dict(message) for message in messages]
+        messages[0]['content'] += '\n' + mandatory
+        self._check_goal_messages(turn, messages, context)
+        return messages
+
+    def _check_goal_messages(self, turn: TurnState, messages: list[dict[str, str]], context: dict[str, Any] | None) -> None:
+        if context is None:
+            return
+        mandatory = format_goal_context_for_prompt(context)
+        report = build_context_report(
+            system_sections=[ContextSection.from_text('goal_context', 'Mandatory goal context', mandatory,
+                                                     metadata={'mandatory': True})],
+            history_messages=messages[1:], omitted_messages=[], budget=self.context_budget,
+            sent_messages=messages,
+        )
+        self._ensure_prompt_within_budget(turn, AgentPrompt(messages, report, goal_context=context))
 
     def set_tool_registry(self, registry: ToolRegistry) -> None:
         """Use the catalog owner's current registry."""
@@ -221,35 +295,42 @@ class ModelTransport:
                 turn.extension_metadata['final_answer_delivery'] = {'status': FinalAnswerDeliveryStatus.FAILED.value, 'public_delta_count': public_sequence, 'provider_completed': False, 'error': 'cancelled' if isinstance(exc, asyncio.CancelledError) else str(exc), 'failure_kind': failure_kind, 'partial_content': ''.join(parts)}
             raise
 
-    def _final_answer_messages(self, turn: TurnState, draft: str) -> list[dict[str, str]]:
-        prompt = self.build_prompt(turn, require_plan=False)
+    def _final_answer_messages(self, turn: TurnState, draft: str, *, goal_context: dict[str, Any] | None = None) -> list[dict[str, str]]:
+        prompt = self.build_prompt(turn, require_plan=False, goal_context=goal_context)
         messages = [dict(message) for message in prompt.messages]
         for message in messages:
             if message.get('role') == 'system':
                 message['content'] = re.sub('<response_protocol>.*?</response_protocol>', '', message.get('content', ''), flags=re.DOTALL).strip()
         instruction = f'Return only the final user-facing answer as plain text. Do not emit JSON, tool calls, action payloads, repair content, or internal reasoning. The validated answer intent was: {draft}'
         messages.append({'role': 'user', 'content': instruction})
+        self._check_goal_messages(turn, messages, goal_context)
         return messages
 
     def _start_final_answer_stream(self, turn: TurnState, draft: str) -> tuple[list[dict[str, str]], int]:
-        messages = self._final_answer_messages(turn, draft)
+        context = self.goal_execution.context() if self.goal_execution is not None else None
+        messages = self._final_answer_messages(turn, draft, goal_context=context)
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        receipt_payload = self._begin_goal_request(turn, context, 'incremental_final_answer')
         self.reserve_accounting(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
         payload = format_model_request_trace(messages, max_prompt_chars=self.trace_max_prompt_chars, request_index=request_index, turn_id=turn.turn_id, loaded_memory_ids=self.state.loaded_memory_ids, loaded_skill_names=self.state.loaded_skill_names, available_tool_names=turn.available_tool_names, context_report={'purpose': 'incremental_final_answer'})
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
+        payload.update(receipt_payload)
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return (messages, request_index)
 
     async def _start_final_answer_stream_async(self, turn: TurnState, draft: str) -> tuple[list[dict[str, str]], int]:
-        messages = self._final_answer_messages(turn, draft)
+        context = await self.goal_execution.context_async() if self.goal_execution is not None else None
+        messages = self._final_answer_messages(turn, draft, goal_context=context)
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        receipt_payload = await self._begin_goal_request_async(turn, context, 'incremental_final_answer')
         await self._reserve_accounting_async(turn, request_index=request_index, messages=messages, purpose='incremental_final_answer')
         payload = format_model_request_trace(messages, max_prompt_chars=self.trace_max_prompt_chars, request_index=request_index, turn_id=turn.turn_id, loaded_memory_ids=self.state.loaded_memory_ids, loaded_skill_names=self.state.loaded_skill_names, available_tool_names=turn.available_tool_names, context_report={'purpose': 'incremental_final_answer'})
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
+        payload.update(receipt_payload)
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         await self._flush_async()
         return (messages, request_index)
@@ -322,6 +403,7 @@ class ModelTransport:
         payload = {'turn_id': turn.turn_id, 'request_index': request_index, 'source': 'incremental_final_answer', 'status': status.value, 'public_delta_count': public_delta_count, 'provider_completed': provider_completed, 'usage': usage_snapshot, 'cost': cost_snapshot, 'error': error}
         self.trace(TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED, payload)
         self.trace(TraceEvent.MODEL_RESPONSE, {**payload, 'content': content})
+        self._acknowledge_goal_response(turn, request_index)
         return FinalAnswerStreamResult(content=content, status=status, public_delta_count=public_delta_count, provider_completed=provider_completed, error=error)
 
     async def _finish_final_answer_stream_async(self, turn: TurnState, request_index: int, content: str, status: FinalAnswerDeliveryStatus, public_delta_count: int, provider_completed: bool, usage: object, cost: object, error: str | None, failure_kind: str | None=None) -> FinalAnswerStreamResult:
@@ -330,17 +412,24 @@ class ModelTransport:
         self.trace(TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED, payload)
         self.trace(TraceEvent.MODEL_RESPONSE, {**payload, 'content': content})
         await self._flush_async()
+        await self._acknowledge_goal_response_async(turn, request_index)
         return FinalAnswerStreamResult(content=content, status=status, public_delta_count=public_delta_count, provider_completed=provider_completed, error=error, failure_kind=failure_kind)
 
-    def build_prompt(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
+    def build_prompt(self, turn: TurnState, *, require_plan: bool, goal_context: dict[str, Any] | None = None) -> AgentPrompt:
         """Build the model input and context report."""
+        if self.goal_execution is not None and goal_context is None:
+            goal_context = self.goal_execution.context()
         native_action_protocol = self._native_tool_calling_enabled()
         action_tools = self._action_tools(require_plan=require_plan)
         planning_tools = self._planning_tool_availability(turn, require_plan=require_plan)
         native_tool_declarations = provider_action_tools(action_tools, planning_tools=planning_tools)
         if native_action_protocol and (not require_plan) and self._hosted_mcp_enabled():
             native_tool_declarations.extend((_safe_hosted_mcp_declaration(server) for server in self.mcp_servers))
-        return build_agent_prompt(system_prompt=self.system_prompt, memory=self.memory, profile_memories=self.get_profile_memories(), relevant_memories=self.get_relevant_memories(), selected_skills=self.get_selected_skills(), tool_registry=self.tool_registry, max_skill_content_chars=self.max_skill_content_chars, max_tool_calls_per_turn=self.max_tool_calls_per_turn, context_sections=turn.context_sections, prompt_profile=turn.prompt_profile, locale=turn.locale, planning_enabled=require_plan or turn.active_plan is not None, active_plan=turn.active_plan, plan_approved=turn.plan_approved, require_plan=require_plan, native_action_protocol=native_action_protocol, native_tool_declarations=native_tool_declarations if native_action_protocol else [], context_budget=self.context_budget, runtime_status=_format_runtime_status(turn, max_tool_calls_per_turn=self.max_tool_calls_per_turn))
+        return build_agent_prompt(system_prompt=self.system_prompt, memory=self.memory, profile_memories=self.get_profile_memories(), relevant_memories=self.get_relevant_memories(), selected_skills=self.get_selected_skills(), tool_registry=self.tool_registry, max_skill_content_chars=self.max_skill_content_chars, max_tool_calls_per_turn=self.max_tool_calls_per_turn, context_sections=turn.context_sections, prompt_profile=turn.prompt_profile, locale=turn.locale, planning_enabled=require_plan or turn.active_plan is not None, active_plan=turn.active_plan, plan_approved=turn.plan_approved, require_plan=require_plan, native_action_protocol=native_action_protocol, native_tool_declarations=native_tool_declarations if native_action_protocol else [], context_budget=self.context_budget, goal_context=goal_context, runtime_status=_format_runtime_status(turn, max_tool_calls_per_turn=self.max_tool_calls_per_turn))
+
+    async def build_prompt_async(self, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
+        context = await self.goal_execution.context_async() if self.goal_execution is not None else None
+        return self.build_prompt(turn, require_plan=require_plan, goal_context=context)
 
     def compact_prompt(self, prompt: AgentPrompt, turn: TurnState, *, require_plan: bool) -> AgentPrompt:
         """Summarize old raw messages that would otherwise be dropped."""
@@ -367,11 +456,13 @@ class ModelTransport:
             if not messages:
                 return current_prompt
             result = await self._summarize_async(messages, turn)
-            current_prompt = self._apply_summary(turn, require_plan=require_plan, pending_messages=pending_messages, omitted_messages=omitted_messages, summary=result.content, checkpoint=result.checkpoint, fallback=result.fallback, error=result.error)
+            current_prompt = self._apply_summary(turn, require_plan=require_plan, pending_messages=pending_messages, omitted_messages=omitted_messages, summary=result.content, checkpoint=result.checkpoint, fallback=result.fallback, error=result.error, goal_context=await self.goal_execution.context_async() if self.goal_execution is not None else None)
         return current_prompt
 
     def request_action(self, turn: TurnState, prompt: AgentPrompt, *, require_plan: bool) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the sync transport."""
+        if self.goal_execution is not None:
+            prompt = self.build_prompt(turn, require_plan=require_plan)
         self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == 'provider_native'
         hosted_mcp_enabled = native_action_protocol and (not require_plan) and self._hosted_mcp_enabled()
@@ -390,6 +481,8 @@ class ModelTransport:
 
     async def request_action_async(self, turn: TurnState, prompt: AgentPrompt, *, require_plan: bool) -> AgentAction | ProtocolFailure:
         """Request and record one validated action over the async transport."""
+        if self.goal_execution is not None:
+            prompt = await self.build_prompt_async(turn, require_plan=require_plan)
         self._ensure_prompt_within_budget(turn, prompt)
         native_action_protocol = prompt.action_transport == 'provider_native'
         hosted_mcp_enabled = native_action_protocol and (not require_plan) and self._hosted_mcp_enabled()
@@ -436,13 +529,13 @@ class ModelTransport:
         await self._record_reflection_response_async(turn, request_index=request_index, attempt=attempt, raw_response=raw_response, response=response)
         return self._parse_reflection(turn, proposed_answer, attempt=attempt, raw_response=raw_response, request_index=request_index)
 
-    def _apply_summary(self, turn: TurnState, *, require_plan: bool, pending_messages: list[dict[str, str]], omitted_messages: list[dict[str, str]], summary: str, checkpoint: dict[str, object], fallback: bool, error: str | None) -> AgentPrompt:
+    def _apply_summary(self, turn: TurnState, *, require_plan: bool, pending_messages: list[dict[str, str]], omitted_messages: list[dict[str, str]], summary: str, checkpoint: dict[str, object], fallback: bool, error: str | None, goal_context: dict[str, Any] | None = None) -> AgentPrompt:
         removed_count = self.memory.remove_messages(omitted_messages)
         summarized_count = len(pending_messages) + removed_count
         self.memory.update_conversation_summary(summary, summarized_message_count=summarized_count, checkpoint=checkpoint)
         self.state.conversation_summary = self.memory.conversation_summary
         self.trace(TraceEvent.CONTEXT_SUMMARY_CREATED, {'turn_id': turn.turn_id, 'summary': self.memory.conversation_summary, 'source_message_count': self.memory.summary_message_count, 'summarized_message_count': summarized_count, 'fallback': fallback, 'error': error, 'checkpoint': checkpoint})
-        return self.build_prompt(turn, require_plan=require_plan)
+        return self.build_prompt(turn, require_plan=require_plan, goal_context=goal_context)
 
     def _summarize(self, messages: list[dict[str, str]], turn: TurnState) -> ContextSummaryResult:
         summary_messages, request_index = self._start_summary(messages, turn)
@@ -473,6 +566,8 @@ class ModelTransport:
         return payload
 
     def _start_summary(self, messages: list[dict[str, str]], turn: TurnState) -> tuple[list[dict[str, str]], int]:
+        if self.goal_execution is not None:
+            self.goal_execution.assert_boundary()
         summary_messages = _context_summary_messages(previous_summary=self.memory.conversation_summary, previous_checkpoint=self.memory.conversation_checkpoint, messages=messages)
         turn.model_request_count += 1
         request_index = turn.model_request_count
@@ -482,6 +577,8 @@ class ModelTransport:
         return (summary_messages, request_index)
 
     async def _start_summary_async(self, messages: list[dict[str, str]], turn: TurnState) -> tuple[list[dict[str, str]], int]:
+        if self.goal_execution is not None:
+            await self.goal_execution.assert_boundary_async()
         summary_messages = _context_summary_messages(previous_summary=self.memory.conversation_summary, previous_checkpoint=self.memory.conversation_checkpoint, messages=messages)
         turn.model_request_count += 1
         request_index = turn.model_request_count
@@ -558,8 +655,10 @@ class ModelTransport:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         turn.model_request_count += 1
+        receipt_payload = self._begin_goal_request(turn, prompt.goal_context, 'agent_action')
         self.reserve_accounting(turn, request_index=turn.model_request_count, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
         payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
+        payload.update(receipt_payload)
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
         return messages
 
@@ -569,9 +668,11 @@ class ModelTransport:
         turn.context_reports.append(context_report)
         self.state.last_context_report = context_report
         turn.model_request_count += 1
+        receipt_payload = await self._begin_goal_request_async(turn, prompt.goal_context, 'agent_action')
         try:
             await self._reserve_accounting_async(turn, request_index=turn.model_request_count, messages=messages, purpose='agent_action', repair_attempts=self.max_json_repair_attempts)
             payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
+            payload.update(receipt_payload)
             self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
             await self._flush_async()
         except BaseException as exc:
@@ -584,8 +685,10 @@ class ModelTransport:
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost)
-        if exc.raw_response:
+        if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
             self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
+        if exc.raw_response is not None:
+            self._acknowledge_goal_response(turn, turn.model_request_count)
         return ProtocolFailure(message=_format_action_protocol_failure(str(exc), exc.raw_response))
 
     async def _record_protocol_failure_async(self, turn: TurnState, exc: LLMActionError) -> ProtocolFailure:
@@ -593,8 +696,10 @@ class ModelTransport:
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost)
-        if exc.raw_response:
+        if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
             self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
+        if exc.raw_response is not None:
+            await self._acknowledge_goal_response_async(turn, turn.model_request_count)
         return ProtocolFailure(message=_format_action_protocol_failure(str(exc), exc.raw_response))
 
     def _prepare_action_result(self, turn: TurnState, result: LLMActionResult) -> object:
@@ -621,13 +726,17 @@ class ModelTransport:
         action = result.action
         fallback_attempts = self._prepare_action_result(turn, result)
         usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=fallback_attempts)
-        return self._publish_action_result(turn, result, action, usage, cost)
+        action = self._publish_action_result(turn, result, action, usage, cost)
+        self._acknowledge_goal_response(turn, turn.model_request_count)
+        return action
 
     async def _record_action_result_async(self, turn: TurnState, result: LLMActionResult) -> AgentAction:
         action = result.action
         fallback_attempts = self._prepare_action_result(turn, result)
         usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=result.usage, cost=result.cost, fallback_attempts=fallback_attempts)
-        return self._publish_action_result(turn, result, action, usage, cost)
+        action = self._publish_action_result(turn, result, action, usage, cost)
+        await self._acknowledge_goal_response_async(turn, turn.model_request_count)
+        return action
 
     def _publish_reflection_request(self, turn: TurnState, proposed_answer: str, messages: list[dict[str, str]], request_index: int, attempt: int) -> None:
         context_report = {'purpose': 'reflection', 'reflection_attempt': attempt, 'proposed_answer_chars': len(proposed_answer)}
@@ -635,14 +744,18 @@ class ModelTransport:
         request_payload = format_model_request_trace(messages, max_prompt_chars=self.trace_max_prompt_chars, request_index=request_index, turn_id=turn.turn_id, loaded_memory_ids=self.state.loaded_memory_ids, loaded_skill_names=self.state.loaded_skill_names, available_tool_names=turn.available_tool_names, context_report=context_report)
         request_payload['purpose'] = 'reflection'
         request_payload['reflection_attempt'] = attempt
+        if self.goal_execution is not None:
+            request_payload['goal_model_request'] = turn.extension_metadata['goal_model_request']
         self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
 
     def _start_reflection(self, proposed_answer: str, turn: TurnState) -> tuple[int, list[dict[str, str]], int]:
         turn.reflection_count += 1
         attempt = turn.reflection_count
-        messages = build_reflection_messages(turn, proposed_answer)
+        context = self.goal_execution.context() if self.goal_execution is not None else None
+        messages = self._with_goal_context(turn, build_reflection_messages(turn, proposed_answer), context)
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        self._begin_goal_request(turn, context, 'reflection')
         self.reserve_accounting(turn, request_index=request_index, messages=messages, purpose='reflection')
         self._publish_reflection_request(turn, proposed_answer, messages, request_index, attempt)
         return (attempt, messages, request_index)
@@ -650,9 +763,11 @@ class ModelTransport:
     async def _start_reflection_async(self, proposed_answer: str, turn: TurnState) -> tuple[int, list[dict[str, str]], int]:
         turn.reflection_count += 1
         attempt = turn.reflection_count
-        messages = build_reflection_messages(turn, proposed_answer)
+        context = await self.goal_execution.context_async() if self.goal_execution is not None else None
+        messages = self._with_goal_context(turn, build_reflection_messages(turn, proposed_answer), context)
         turn.model_request_count += 1
         request_index = turn.model_request_count
+        await self._begin_goal_request_async(turn, context, 'reflection')
         try:
             await self._reserve_accounting_async(turn, request_index=request_index, messages=messages, purpose='reflection')
             self._publish_reflection_request(turn, proposed_answer, messages, request_index, attempt)
@@ -670,12 +785,14 @@ class ModelTransport:
         self._record_model_selection_outcome(turn, fallback_attempts)
         usage, cost = self.record_accounting(turn, request_index=request_index, usage=response.usage, cost=response.cost, fallback_attempts=fallback_attempts, purpose='reflection')
         self._publish_reflection_response(turn, request_index, attempt, raw_response, usage, cost)
+        self._acknowledge_goal_response(turn, request_index)
 
     async def _record_reflection_response_async(self, turn: TurnState, *, request_index: int, attempt: int, raw_response: str, response: LLMResponse) -> None:
         fallback_attempts = getattr(self.llm_client, 'last_attempts', None)
         self._record_model_selection_outcome(turn, fallback_attempts)
         usage, cost = await self._record_accounting_async(turn, request_index=request_index, usage=response.usage, cost=response.cost, fallback_attempts=fallback_attempts, purpose='reflection')
         self._publish_reflection_response(turn, request_index, attempt, raw_response, usage, cost)
+        await self._acknowledge_goal_response_async(turn, request_index)
 
     async def _reserve_accounting_async(self, turn: TurnState, **kwargs: object) -> dict | None:
         callback = self.reserve_accounting_async

@@ -68,6 +68,8 @@ def resume_goal(goal: Goal, *, now: datetime) -> Goal:
 def steer_goal(goal: Goal, steering: GoalSteering) -> Goal:
     if goal.terminal:
         raise InvalidGoalTransitionError("terminal goal cannot be steered")
+    if not set(steering.supersedes) <= {item.id for item in goal.active_steering}:
+        raise InvalidGoalTransitionError("steering can only supersede active instructions")
     return replace(goal, steering=(*goal.steering, steering))
 
 
@@ -77,6 +79,19 @@ def request_cancellation(goal: Goal) -> Goal:
             return goal
         raise InvalidGoalTransitionError("terminal goal cannot be cancelled")
     return replace(goal, cancellation_requested=True)
+
+
+def fulfill_steering(goal: Goal, steering_id: str, evidence_ids: tuple[str, ...]) -> Goal:
+    """Link a host's explicit fulfillment decision to already recorded evidence."""
+    if goal.terminal:
+        raise InvalidGoalTransitionError("terminal goal cannot fulfill steering")
+    if steering_id not in {item.id for item in goal.steering}:
+        raise InvalidGoalTransitionError("steering instruction was not found")
+    if not evidence_ids or not set(evidence_ids) <= {item.id for item in goal.evidence}:
+        raise InvalidGoalTransitionError("steering fulfillment requires recorded evidence")
+    fulfillment = dict(goal.steering_fulfillments)
+    fulfillment[steering_id] = tuple(dict.fromkeys((*fulfillment.get(steering_id, ()), *evidence_ids)))
+    return replace(goal, steering_fulfillments=fulfillment)
 
 
 def cancel_goal(goal: Goal, *, now: datetime) -> Goal:

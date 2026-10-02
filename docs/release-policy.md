@@ -1,5 +1,9 @@
 # Public API and release policy
 
+`GoalModelRequest` is an additive public goal receipt contract. Legacy goal
+snapshots default description to title and constraints to empty. Incorporation
+is distinct from host-recorded fulfillment; see [goal context](goals.md).
+
 Chulk documents four stability labels:
 
 | Label | Contract |
