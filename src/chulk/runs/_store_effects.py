@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from uuid import uuid4
+from collections.abc import Mapping
+from typing import Any
+import hashlib
+import json
 
 from chulk.hosting.scope import ExecutionScope
 from chulk.runs.models import (
@@ -199,6 +203,45 @@ class _RunStoreEffectMixin(_RunStoreBackend):
             event_name="effect.completed",
             result_digest=_required(result_digest, "result digest"),
         )
+
+    def record_effect_result(self, scope: ExecutionScope, claim: RunClaim, effect_id: str,
+                             *, result: Mapping[str, Any]) -> str:
+        """Append an immutable receipt from the dispatched owner, even after lease loss.
+
+        This records facts only; it never authorizes dispatch or advances a run.
+        """
+        payload = json.dumps(dict(result), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        digest = "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            effect = _effect_row(conn, effect_id)
+            run = _run_from_conn(conn, _run_row(conn, str(effect["run_id"])))
+            _assert_scope(scope, run.scope)
+            if str(effect["run_id"]) != claim.run_id or effect["dispatch_token"] != claim.lease_token:
+                raise EffectConflictError("result receipt requires the original dispatch token")
+            existing = conn.execute("SELECT result_digest FROM durable_effect_results WHERE effect_id = ?", (effect_id,)).fetchone()
+            if existing is not None and existing["result_digest"] != digest:
+                raise EffectConflictError("effect result receipt conflicts with stored content")
+            conn.execute("""INSERT INTO durable_effect_results(effect_id, result_json, result_digest, recorded_at)
+                            VALUES (?, ?, ?, ?) ON CONFLICT(effect_id) DO NOTHING""",
+                         (effect_id, payload, digest, _iso(_clock.utc_now())))
+            conn.execute("UPDATE durable_effects SET result_ref = ?, result_digest = ? WHERE id = ?", (f"effect-result:{effect_id}", digest, effect_id))
+        return digest
+
+    def effect_result(self, scope: ExecutionScope, effect_id: str) -> dict[str, Any] | None:
+        """Read and integrity-check a scoped result without invoking the tool."""
+        with self._connect() as conn:
+            effect = _effect_row(conn, effect_id)
+            run = _run_from_conn(conn, _run_row(conn, str(effect["run_id"])))
+            _assert_scope(scope, run.scope)
+            row = conn.execute("SELECT * FROM durable_effect_results WHERE effect_id = ?", (effect_id,)).fetchone()
+        if row is None:
+            return None
+        payload = str(row["result_json"])
+        digest = "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+        if digest != row["result_digest"] or (effect["result_digest"] is not None and digest != effect["result_digest"]):
+            raise EffectConflictError("stored effect result integrity check failed")
+        return dict(json.loads(payload))
 
     def fail_effect(
         self,
@@ -447,7 +490,12 @@ class _RunStoreEffectMixin(_RunStoreBackend):
             effect = _effect_from_row(_effect_row(conn, effect_id))
             if effect.run_id != claim.run_id:
                 raise EffectConflictError("effect does not belong to the claimed run")
+            receipt = conn.execute("SELECT result_digest FROM durable_effect_results WHERE effect_id = ?", (effect_id,)).fetchone()
+            if result_digest is not None and receipt is not None and result_digest != receipt["result_digest"]:
+                raise EffectConflictError("completion digest differs from stored result")
             if effect.status is status:
+                if result_digest is not None and effect.result_digest != result_digest:
+                    raise EffectConflictError("completed effect digest cannot change")
                 return effect
             if effect.status not in expected:
                 raise EffectConflictError(
@@ -458,6 +506,7 @@ class _RunStoreEffectMixin(_RunStoreBackend):
                 """
                 UPDATE durable_effects
                 SET status = ?, result_digest = COALESCE(?, result_digest),
+                    dispatch_token = COALESCE(?, dispatch_token),
                     reconciliation_reason = COALESCE(?, reconciliation_reason),
                     updated_at = ?
                 WHERE id = ?
@@ -465,6 +514,7 @@ class _RunStoreEffectMixin(_RunStoreBackend):
                 (
                     status.value,
                     result_digest,
+                    claim.lease_token if status is EffectStatus.EXECUTING else None,
                     reason,
                     _iso(now),
                     effect_id,

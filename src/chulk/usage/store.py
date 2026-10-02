@@ -64,6 +64,7 @@ class SQLiteUsageStore:
         tool_calls: int = 0,
         tokens: int = 0,
         cost: ExactCost | None = None,
+        reopen_unsent: bool = False,
     ) -> BudgetReservation:
         """Atomically check committed plus held usage and reserve allowance."""
         clean_key = idempotency_key.strip()
@@ -90,7 +91,7 @@ class SQLiteUsageStore:
                 "SELECT * FROM usage_reservations WHERE idempotency_key = ?",
                 (clean_key,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and not (reopen_unsent and existing["state"] == "released" and not existing["dispatched"]):
                 return _row_to_reservation(existing)
             _release_expired_reservations(conn, now)
             committed = _committed_totals(conn, dimensions, budget.scope)
@@ -108,6 +109,15 @@ class SQLiteUsageStore:
                 },
                 now=now,
             )
+            if existing is not None:
+                stored = _row_to_reservation(existing)
+                if (stored.source_event_id, stored.resource_kind, stored.dimensions, stored.reserved_model_calls,
+                    stored.reserved_tool_calls, stored.reserved_tokens, stored.reserved_cost) != (
+                    clean_source_id, resource_kind, dimensions, model_calls, tool_calls, tokens, reserved_cost):
+                    raise ValueError("Released operation identity cannot be reused for different work")
+                conn.execute("UPDATE usage_reservations SET state = 'active', budget_json = ?, updated_at = ?, expires_at = ? WHERE id = ?",
+                    (json.dumps(budget.to_dict(), sort_keys=True), now.isoformat(), expires_at.isoformat(), stored.id))
+                return _row_to_reservation(conn.execute("SELECT * FROM usage_reservations WHERE id = ?", (stored.id,)).fetchone())
             reservation = BudgetReservation(
                 id=str(uuid4()),
                 idempotency_key=clean_key,
@@ -195,7 +205,26 @@ class SQLiteUsageStore:
         assert row is not None
         return _row_to_entry(row)
 
-    def release(self, reservation_id: str) -> BudgetReservation:
+    def release_unsent(self, source_event_id: str) -> bool:
+        """Release every allowance only with durable proof dispatch never began."""
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute("SELECT dispatched, state FROM usage_reservations WHERE source_event_id = ?", (source_event_id,)).fetchall()
+            if not rows or any(row["dispatched"] or row["state"] == "committed" for row in rows):
+                return False
+            conn.execute("UPDATE usage_reservations SET state = 'released' WHERE source_event_id = ? AND state = 'active'", (source_event_id,))
+            return True
+
+    def mark_dispatched(self, reservation_id: str) -> None:
+        """Protect every allowance for this operation until a result is reconciled."""
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT source_event_id FROM usage_reservations WHERE id = ?", (reservation_id,)).fetchone()
+            if row is None:
+                raise KeyError(reservation_id)
+            conn.execute("UPDATE usage_reservations SET dispatched = 1 WHERE source_event_id = ? AND state = ?", (row["source_event_id"], ReservationState.ACTIVE.value))
+
+    def release(self, reservation_id: str, *, confirmed_unsent: bool = False) -> BudgetReservation:
         """Release an active reservation without changing committed usage."""
         now = self.clock()
         with sqlite_connection(self.db_path) as conn:
@@ -204,13 +233,14 @@ class SQLiteUsageStore:
                 """
                 UPDATE usage_reservations
                 SET state = ?, updated_at = ?
-                WHERE id = ? AND state = ?
+                WHERE id = ? AND state = ? AND (dispatched = 0 OR ?)
                 """,
                 (
                     ReservationState.RELEASED.value,
                     now.isoformat(),
                     reservation_id,
                     ReservationState.ACTIVE.value,
+                    int(confirmed_unsent),
                 ),
             )
             row = conn.execute(
@@ -770,7 +800,7 @@ def _release_expired_reservations(
         """
         UPDATE usage_reservations
         SET state = ?, updated_at = ?
-        WHERE state = ? AND expires_at <= ?
+        WHERE state = ? AND expires_at <= ? AND dispatched = 0
         """,
         (
             ReservationState.RELEASED.value,

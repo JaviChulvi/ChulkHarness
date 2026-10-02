@@ -444,6 +444,7 @@ class EffectRecord:
     arguments_digest: str
     status: EffectStatus
     result_digest: str | None = None
+    result_ref: str | None = None
     reconciliation: ReconciliationDecision | None = None
     reconciled_by: str | None = None
     reconciliation_reason: str | None = None
@@ -469,6 +470,7 @@ class EffectRecord:
             )
         object.__setattr__(self, "status", EffectStatus(self.status))
         object.__setattr__(self, "result_digest", _optional(self.result_digest))
+        object.__setattr__(self, "result_ref", _optional(self.result_ref))
         if self.reconciliation is not None:
             object.__setattr__(
                 self,

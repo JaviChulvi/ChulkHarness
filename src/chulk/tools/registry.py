@@ -85,6 +85,7 @@ class ToolExecutionContext(Generic[DepsT]):
     scope: object | None = None
     credentials: Mapping[str, Any] = field(default_factory=dict, repr=False)
     effect_key: str | None = None
+    timeout_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +95,7 @@ class ToolExecutionContext(Generic[DepsT]):
             "has_scope": self.scope is not None,
             "has_credentials": bool(self.credentials),
             "effect_key": self.effect_key,
+            "timeout_seconds": self.timeout_seconds,
         }
 
     def require_deps(self) -> DepsT:
@@ -142,6 +144,20 @@ class ToolResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "resources", tuple(self.resources))
         object.__setattr__(self, "application_events", tuple(self.application_events))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"tool_name": self.tool_name, "success": self.success, "observation": self.observation,
+                "stdout": self.stdout, "stderr": self.stderr, "exit_code": self.exit_code,
+                "error": self.error, "failure_kind": self.failure_kind, "metadata": dict(self.metadata),
+                "value": self.value, "resources": [item.to_dict() for item in self.resources],
+                "application_events": [item.to_dict() for item in self.application_events]}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ToolResult":
+        payload = dict(value)
+        payload["resources"] = tuple(HostResource.from_dict(item) for item in payload.get("resources", ()))
+        payload["application_events"] = tuple(ApplicationEventIntent.from_dict(item) for item in payload.get("application_events", ()))
+        return cls(**payload)
 
     def to_observation(self) -> str:
         """Return the safe observation text shown back to the model."""
@@ -404,6 +420,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         context: ToolExecutionContext | None = None,
+        offload_sync: bool = False,
     ) -> ToolResult:
         try:
             tool = self.get(name)
@@ -426,7 +443,7 @@ class ToolRegistry:
 
         try:
             self._validate_arguments(tool, arguments)
-            raw_result = await self._call_tool_async_with_timeout(tool, arguments, context)
+            raw_result = await self._call_tool_async_with_timeout(tool, arguments, context, offload_sync=offload_sync)
             result = self._validate_output(tool, self._coerce_result(tool, raw_result))
         except ToolValidationError as exc:
             result = ToolResult(
@@ -485,21 +502,23 @@ class ToolRegistry:
         arguments: dict[str, Any],
         context: ToolExecutionContext | None,
     ) -> ToolReturn:
-        if tool.timeout_seconds is None:
+        limits = [value for value in (tool.timeout_seconds, context.timeout_seconds if context else None) if value is not None]
+        timeout_seconds = min(limits) if limits else None
+        if timeout_seconds is None:
             return self._call_tool(tool, arguments, context)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"chulk-{tool.name}")
         future = executor.submit(self._call_tool, tool, arguments, context)
         try:
-            result = future.result(timeout=tool.timeout_seconds)
+            result = future.result(timeout=timeout_seconds)
         except FutureTimeoutError:
             future.cancel()
             return ToolResult(
                 tool_name=tool.name,
                 success=False,
-                observation=f"Tool {tool.name} timed out after {tool.timeout_seconds:g} seconds.",
+                observation=f"Tool {tool.name} timed out after {timeout_seconds:g} seconds.",
                 error=ToolFailureKind.TIMEOUT,
                 failure_kind=ToolFailureKind.TIMEOUT,
-                metadata={"timeout_seconds": tool.timeout_seconds},
+                metadata={"timeout_seconds": timeout_seconds},
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -510,9 +529,12 @@ class ToolRegistry:
         tool: Tool,
         arguments: dict[str, Any],
         context: ToolExecutionContext | None,
+        *, offload_sync: bool = False,
     ) -> ToolReturn:
+        limits = [value for value in (tool.timeout_seconds, context.timeout_seconds if context else None) if value is not None]
+        timeout_seconds = min(limits) if limits else None
         async def execute() -> ToolReturn:
-            if tool.run_in_executor:
+            if tool.run_in_executor or (offload_sync and not inspect.iscoroutinefunction(tool.callable)):
                 result = await asyncio.to_thread(self._call_tool, tool, arguments, context)
             else:
                 result = self._call_tool(tool, arguments, context)
@@ -521,17 +543,17 @@ class ToolRegistry:
             return result
 
         try:
-            if tool.timeout_seconds is None:
+            if timeout_seconds is None:
                 return await execute()
-            return await asyncio.wait_for(execute(), timeout=tool.timeout_seconds)
+            return await asyncio.wait_for(execute(), timeout=timeout_seconds)
         except TimeoutError:
             return ToolResult(
                 tool_name=tool.name,
                 success=False,
-                observation=f"Tool {tool.name} timed out after {tool.timeout_seconds:g} seconds.",
+                observation=f"Tool {tool.name} timed out after {timeout_seconds:g} seconds.",
                 error=ToolFailureKind.TIMEOUT,
                 failure_kind=ToolFailureKind.TIMEOUT,
-                metadata={"timeout_seconds": tool.timeout_seconds},
+                metadata={"timeout_seconds": timeout_seconds},
             )
 
     def _validate_output(self, tool: Tool, result: ToolResult) -> ToolResult:

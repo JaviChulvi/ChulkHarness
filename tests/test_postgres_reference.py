@@ -24,7 +24,7 @@ from chulk.evals import AsyncEvalStore, EvalReport, EvalRunStatus, EvalStore
 from chulk.gateway import AuthenticationState, ChannelIdentity, ChannelScope, DeliveryTarget, GatewayBackpressureError, GatewayRunTarget, InboundEnvelope, OutboundEnvelope, TextPart, TrustLevel
 from chulk.hosting import ExecutionScope
 from chulk.postgres import AsyncPostgreSQLApprovalStore, AsyncPostgreSQLEvalStore, AsyncPostgreSQLGatewayStore, AsyncPostgreSQLRunStore, AsyncPostgreSQLScheduleStore, PostgreSQLApprovalStore, PostgreSQLEvalStore, PostgreSQLGatewayStore, PostgreSQLRunStore, PostgreSQLScheduleStore, PostgreSQLTransactionError, async_ingest_and_submit_run, complete_run_and_enqueue, create_async_postgres_engine, create_postgres_engine, ingest_and_submit_run, upgrade_postgres
-from chulk.runs import EffectConflictError, InvalidRunTransitionError, ParentCompletionStatus, ParentRunPolicy, ReconciliationDecision, RunConflictError, RunLeaseError, RunNotFoundError, RunStore, RunSubmission, SQLiteRunStore, StepDefinition
+from chulk.runs import EffectConflictError, InvalidRunTransitionError, ParentCompletionStatus, ParentRunPolicy, ReconciliationDecision, RunConflictError, RunLeaseError, RunNotFoundError, RunStore, RunStatus, RunSubmission, SQLiteRunStore, StepDefinition
 from chulk.scheduling import AutomationConflictError, AutomationDeliveryState, AutomationNotFoundError
 from chulk.testing import assert_async_durable_execution_contract, assert_async_gateway_store_contract, assert_async_parent_child_run_contract, assert_durable_execution_contract, assert_gateway_store_contract, assert_parent_child_run_contract
 from chulk.usage import BudgetScope, RunBudget
@@ -100,8 +100,8 @@ def test_clean_and_repeated_upgrade(postgres_database: PostgreSQLTestDatabase) -
     with postgres_database.engine.connect() as connection:
         revision = connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one()
         table_count = connection.execute(text('SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema()')).scalar_one()
-    assert revision == '0005'
-    assert table_count == 30
+    assert revision == '0006'
+    assert table_count == 31
 
 def test_upgrade_from_0001_preserves_idempotency_rows(postgres_database: PostgreSQLTestDatabase) -> None:
     schema = f'chulk_upgrade_{uuid4().hex}'
@@ -131,7 +131,7 @@ def test_upgrade_from_0001_preserves_idempotency_rows(postgres_database: Postgre
         with engine.connect() as connection:
             revision = connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one()
             upgraded_tables = set(connection.execute(text('SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()')).scalars())
-        assert revision == '0005'
+        assert revision == '0006'
         assert 'durable_run_parents' in upgraded_tables
         assert 'durable_child_runs' in upgraded_tables
     finally:
@@ -158,7 +158,7 @@ def test_upgrade_from_0004_preserves_evaluation_rows(postgres_database: PostgreS
         assert row['status'] == 'completed'
         assert row['updated_at'] == now
         assert row['suite_fingerprint'] == ''
-        assert revision == '0005'
+        assert revision == '0006'
     finally:
         engine.dispose()
         with admin.begin() as connection:
@@ -1065,3 +1065,35 @@ async def test_async_ingest_and_submit_is_atomic(postgres_database: PostgreSQLTe
         assert {record.id for _ingested, record in results} == {scope.run_id}
     finally:
         await engine.dispose()
+
+
+def test_postgres_goal_effect_receipt_and_continuation(postgres_database, monkeypatch):
+    """Exercise migration 0006 through the same effect owner as local goals."""
+    store = PostgreSQLRunStore(postgres_database.engine)
+    scope = _scope()
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr('chulk.runs._store_clock.utc_now', lambda: now)
+    store.submit(scope, replace(_submission(), metadata={'goal_id': 'goal'}))
+    claim = store.claim(scope, worker_id='first')
+    assert claim is not None
+    attempt = store.start_step(scope, claim, 'agent')
+    effect = store.begin_effect(scope, claim, 'agent', logical_key='operation:stable', tool_name='publish',
+        tool_version='1', schema_version='1', arguments_digest='sha256:arguments')
+    store.mark_effect_started(scope, claim, effect.id)
+    now += timedelta(seconds=121)
+    result = {'tool_name': 'publish', 'success': True, 'observation': 'receipt'}
+    digest = store.record_effect_result(scope, claim, effect.id, result=result)
+    with pytest.raises(RunLeaseError):
+        store.complete_effect(scope, claim, effect.id, result_digest=digest)
+    store.reconcile_expired(scope=scope, now=now)
+    resumed = store.claim(scope, worker_id='second')
+    assert resumed is not None
+    assert store.start_step(scope, resumed, 'agent').id == attempt.id
+    assert store.effect_result(scope, effect.id) == result
+    store.complete_effect(scope, resumed, effect.id, result_digest=digest)
+    store.yield_step(scope, resumed, 'agent', continuation={'turn_id': 'next'})
+    assert store.get(scope, scope.run_id).status is RunStatus.QUEUED
+    with pytest.raises(RunLeaseError):
+        store.assert_claim(scope, resumed)
+    with pytest.raises(RunNotFoundError):
+        store.effect_result(_scope(tenant_id='other', run_id=scope.run_id), effect.id)

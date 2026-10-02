@@ -1847,6 +1847,22 @@ def _migrate_to_goal_execution_slices(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE goal_verifications ADD COLUMN applied_revision INTEGER")
 
 
+
+def _migrate_to_goal_recovery(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE durable_effects ADD COLUMN result_ref TEXT")
+    conn.execute("ALTER TABLE durable_effects ADD COLUMN dispatch_token TEXT")
+    conn.execute("""CREATE TABLE durable_effect_results (
+        effect_id TEXT PRIMARY KEY REFERENCES durable_effects(id) ON DELETE CASCADE,
+        result_json TEXT NOT NULL, result_digest TEXT NOT NULL, recorded_at TEXT NOT NULL
+    )""")
+    conn.execute("ALTER TABLE usage_reservations ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE goal_action_checkpoints ADD COLUMN effect_id TEXT")
+    # Old admitted slices may have dispatched work; never infer they were unsent.
+    conn.execute("ALTER TABLE goal_slices ADD COLUMN started INTEGER NOT NULL DEFAULT 1")
+    conn.execute("ALTER TABLE goal_slices ADD COLUMN previous_turn_id TEXT")
+    conn.execute("ALTER TABLE goal_slices ADD COLUMN new_conversation INTEGER NOT NULL DEFAULT 0")
+
+
 SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
@@ -1888,6 +1904,7 @@ SQLITE_MIGRATIONS = (
     SQLiteMigration(22, "goal-context-receipts", _migrate_to_goal_context_receipts),
     SQLiteMigration(23, "goal-verifications", _migrate_to_goal_verifications),
     SQLiteMigration(24, "goal-execution-slices", _migrate_to_goal_execution_slices),
+    SQLiteMigration(25, "goal-recovery", _migrate_to_goal_recovery),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

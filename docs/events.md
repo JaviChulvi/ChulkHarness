@@ -127,3 +127,8 @@ The public event catalog is stable and versioned; internal trace ordering is
 trace-only. See [release policy](release-policy.md) and [tracing](tracing.md).
 
 Foreground goal slices retain `run.yielded` and goal audit events. Verified step/evidence application commits `goal.progress_verified` once; slice completion alone does not produce goal completion.
+
+Durable goal envelopes also emit `run.yielded` with `RunLifecyclePayload` (`queued`),
+while SDK turn yields use `RunYieldedPayload` and `RunStatus.YIELDED`. These belong to
+different status contracts. Durable event recovery preserves event and idempotency
+IDs; host sinks deduplicate publication after a crash.

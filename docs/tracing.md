@@ -179,3 +179,9 @@ Bounded goal execution records `turn_checkpointed` snapshots for pending action
 and reflection phases. `turn_yielded` and `turn_finished` persist the stopped
 slice without emitting an assistant answer. Public consumers receive
 `run.yielded`, never `run.completed`, for this outcome.
+
+Automatic goal model request/response records carry an atomic recovery turn snapshot.
+Goal action checkpoints link to durable effect IDs. Full redacted tool results live
+in the protected effect-result store; result digests verify their integrity. A result
+receipt from the original dispatch owner may be recorded after lease loss, but that
+receipt does not authorize progress or further dispatch.

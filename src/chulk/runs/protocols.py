@@ -216,6 +216,8 @@ class RunStore(Protocol):
         run_id: str | None = None,
     ) -> RunClaim | None: ...
 
+    def assert_claim(self, scope: ExecutionScope, claim: RunClaim) -> RunRecord: ...
+
     def renew(
         self,
         scope: ExecutionScope,
@@ -230,6 +232,9 @@ class RunStore(Protocol):
         claim: RunClaim,
         step_id: str,
     ) -> AttemptRecord: ...
+
+    def yield_step(self, scope: ExecutionScope, claim: RunClaim, step_id: str,
+                   *, continuation: Mapping[str, Any]) -> RunRecord: ...
 
     def checkpoint(
         self,
@@ -260,6 +265,11 @@ class RunStore(Protocol):
         claim: RunClaim,
         effect_id: str,
     ) -> EffectRecord: ...
+
+    def record_effect_result(self, scope: ExecutionScope, claim: RunClaim, effect_id: str,
+                             *, result: Mapping[str, Any]) -> str: ...
+
+    def effect_result(self, scope: ExecutionScope, effect_id: str) -> dict[str, Any] | None: ...
 
     def complete_effect(
         self,
@@ -403,6 +413,7 @@ class RunStore(Protocol):
         self,
         *,
         now: datetime | None = None,
+        scope: ExecutionScope | None = None,
     ) -> tuple[RunRecord, ...]: ...
 
 
@@ -548,6 +559,8 @@ class AsyncRunStore(Protocol):
         run_id: str | None = None,
     ) -> RunClaim | None: ...
 
+    async def assert_claim(self, scope: ExecutionScope, claim: RunClaim) -> RunRecord: ...
+
     async def renew(
         self,
         scope: ExecutionScope,
@@ -609,6 +622,9 @@ class AsyncRunStore(Protocol):
         step_id: str,
     ) -> AttemptRecord: ...
 
+    async def yield_step(self, scope: ExecutionScope, claim: RunClaim, step_id: str,
+                   *, continuation: Mapping[str, Any]) -> RunRecord: ...
+
     async def checkpoint(
         self,
         scope: ExecutionScope,
@@ -638,6 +654,11 @@ class AsyncRunStore(Protocol):
         claim: RunClaim,
         effect_id: str,
     ) -> EffectRecord: ...
+
+    async def record_effect_result(self, scope: ExecutionScope, claim: RunClaim, effect_id: str,
+                             *, result: Mapping[str, Any]) -> str: ...
+
+    async def effect_result(self, scope: ExecutionScope, effect_id: str) -> dict[str, Any] | None: ...
 
     async def complete_effect(
         self,
@@ -781,6 +802,7 @@ class AsyncRunStore(Protocol):
         self,
         *,
         now: datetime | None = None,
+        scope: ExecutionScope | None = None,
     ) -> tuple[RunRecord, ...]: ...
 
 

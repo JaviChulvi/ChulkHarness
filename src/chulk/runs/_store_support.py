@@ -1006,6 +1006,7 @@ def _effect_from_row(row: sqlite3.Row) -> EffectRecord:
         result_digest=(
             str(row["result_digest"]) if row["result_digest"] is not None else None
         ),
+        result_ref=str(row["result_ref"]) if row["result_ref"] is not None else None,
         reconciliation=(
             ReconciliationDecision(str(row["reconciliation"]))
             if row["reconciliation"] is not None
