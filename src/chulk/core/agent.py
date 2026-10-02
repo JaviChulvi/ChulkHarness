@@ -225,6 +225,7 @@ class Agent:
         self._close_trace_logger = close_trace_logger
         self.resolved_services = components.resolved_services
         self.goal_execution = goal_execution
+        self.goal_recovery_recording = bool(getattr(components.session_store, "supports_goal_recovery", False))
         if goal_execution is not None and goal_execution.slice_limits is not None:
             if usage_accounting is None and components.async_usage_accounting is None:
                 raise ConfigurationError("Goal slices require durable usage accounting")
@@ -357,6 +358,8 @@ class Agent:
             output_policy_failure_mode=self.output_policy_failure_mode,
             goal_execution=self.goal_execution,
             durable_responses=components.session_recorder is not None,
+            mark_dispatched=self._model_accounting.dispatched,
+            mark_dispatched_async=self._model_accounting.dispatched_async,
         )
         self._turn_effects.final_answer_streaming = self.final_answer_streaming
         self._turn_effects.stream_final_answer = (
@@ -618,6 +621,10 @@ class Agent:
         for key in ("goal_pending", "goal_tool_attempts", "goal_verification", "external_content_seen"):
             if key in previous.extension_metadata:
                 turn.extension_metadata[key] = deepcopy(previous.extension_metadata[key])
+        pending = turn.extension_metadata.get("goal_pending")
+        if pending and pending.get("phase") == "tool_started":
+            pending["phase"] = "action"
+            pending.pop("record_index", None)
 
     def continue_goal_slice(self, *, tool_context: ToolExecutionContext | dict | None = None,
                             turn_id: str | None = None) -> str:
@@ -641,6 +648,80 @@ class Agent:
             context_sections=list(previous.context_sections), prompt_profile=previous.prompt_profile,
             locale=previous.locale, tool_context=tool_context, turn_id=turn_id,
         )
+
+    def _goal_recovery_turn(self, turn_id: str) -> TurnState:
+        from chulk.goals.durable import GoalRecoveryRequired
+        if self.goal_execution is None or not self.goal_execution.recovering:
+            raise ConfigurationError("Goal recovery was not admitted")
+        if not self.state.turns or self.state.turns[-1].turn_id != turn_id:
+            raise GoalRecoveryRequired("Interrupted turn checkpoint is unavailable")
+        turn = self.state.turns[-1]
+        self.state.current_turn_id = turn_id
+        self.state.active_plan = turn.active_plan
+        self._cancel_requested.clear()
+        return turn
+
+    @staticmethod
+    def _unknown_goal_request(turn: TurnState) -> dict | None:
+        receipt = turn.extension_metadata.get("goal_request")
+        return receipt if receipt and receipt["request_index"] > turn.extension_metadata.get("goal_response_index", 0) else None
+
+    @staticmethod
+    def _recover_unsent(turn: TurnState, receipt: dict, unsent: bool) -> None:
+        from chulk.goals.durable import GoalRecoveryRequired
+        if not unsent:
+            raise GoalRecoveryRequired("Model request has no durably recorded response; allowance remains reserved")
+        if receipt["purpose"] == "reflection":
+            turn.reflection_count -= 1
+        turn.extension_metadata.pop("goal_request", None)
+
+    def recover_goal_slice(self, *, turn_id: str) -> str:
+        """Resume an admitted interrupted phase using durable model/effect results."""
+        turn = self._goal_recovery_turn(turn_id)
+        assert self.goal_execution is not None
+        self.goal_execution.assert_boundary()
+        receipt = self._unknown_goal_request(turn)
+        if receipt is not None:
+            service = self._model_accounting.usage_accounting
+            unsent = service.recover_unsent_model_request(turn_id=turn.turn_id, request_index=receipt["request_index"]) if service is not None else False
+            self._recover_unsent(turn, receipt, unsent)
+        self.transcripts.revalidate(turn)
+        self.catalog.revalidate(turn)
+        self._model_transport._acknowledge_goal_response(turn, turn.extension_metadata.get("goal_response_index", 0))
+        if turn.status == "completed":
+            return turn.final_answer or ""
+        turn.status = "in_progress"
+        try:
+            return self._run_action_loop(turn, require_plan=False)
+        except BaseException as exc:
+            self._terminalize_exception(turn, exc)
+            raise
+        finally:
+            self.tool_contexts.release(turn)
+
+    async def recover_goal_slice_async(self, *, turn_id: str) -> str:
+        turn = self._goal_recovery_turn(turn_id)
+        assert self.goal_execution is not None
+        await self.goal_execution.assert_boundary_async()
+        receipt = self._unknown_goal_request(turn)
+        if receipt is not None:
+            service = self._model_accounting.async_usage_accounting or self._model_accounting.usage_accounting
+            unsent = await call_async_service(service, "recover_unsent_model_request", turn_id=turn.turn_id, request_index=receipt["request_index"]) if service is not None else False
+            self._recover_unsent(turn, receipt, unsent)
+        await self.transcripts.revalidate_async(turn)
+        await self.catalog.revalidate_async(turn)
+        await self._model_transport._acknowledge_goal_response_async(turn, turn.extension_metadata.get("goal_response_index", 0))
+        if turn.status == "completed":
+            return turn.final_answer or ""
+        turn.status = "in_progress"
+        try:
+            return await self._run_action_loop_async(turn, require_plan=False)
+        except BaseException as exc:
+            self._terminalize_exception(turn, exc)
+            await self.resources.flush_after_error(exc)
+            raise
+        finally:
+            await self.tool_contexts.release_async(turn)
 
     def _run_user_turn(
         self,
@@ -697,6 +778,8 @@ class Agent:
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
+            if self.goal_execution is not None and self.goal_execution.automatic:
+                self.goal_execution.mark_started(turn.turn_id)
             result = self._run_action_loop(turn, require_plan=require_plan)
         except DurableApprovalPaused:
             turn = turn or self._turn_started_after(previous_turn_count)
@@ -769,6 +852,9 @@ class Agent:
             if isinstance(turn_or_response, str):
                 return turn_or_response
             turn = turn_or_response
+            if self.goal_execution is not None and self.goal_execution.automatic:
+                await self.resources.flush()
+                await self.goal_execution.mark_started_async(turn.turn_id)
             result = await self._run_action_loop_async(turn, require_plan=require_plan)
         except DurableApprovalPaused as exc:
             turn = turn or self._turn_started_after(previous_turn_count)
@@ -1558,7 +1644,10 @@ class Agent:
         """Finish an active turn without masking the exception that escaped it."""
         if turn.status not in {"in_progress", "waiting_for_approval"}:
             return
-        if self.goal_execution is not None and self.goal_execution.automatic and isinstance(exc, (GoalLeaseConflictError, BudgetExceededError)):
+        from chulk.runs.errors import RunLeaseError, EffectConflictError
+        from chulk.llm.base import LLMError
+        from chulk.goals.durable import GoalRecoveryRequired
+        if self.goal_execution is not None and self.goal_execution.automatic and isinstance(exc, (GoalLeaseConflictError, BudgetExceededError, RunLeaseError, EffectConflictError, GoalRecoveryRequired, LLMError)):
             self._turn_effects.yield_turn("goal_boundary", turn)
             return
         cancelled = (

@@ -230,3 +230,9 @@ the same facade gate as `run_result`. Tool permissions are checked again.
 `YIELDED` is an SDK turn status, distinct from durable-run scheduling statuses.
 
 Goal coordination uses `GoalRunner` / `AsyncGoalRunner` with an explicit goal store, host verifier and runtime factory. `GoalExecutionResult` identifies a typed `GoalStopReason` and cumulative usage. See [goal execution](goals.md#foreground-coordinator) and [the offline example](../examples/goal_runner.py).
+
+Goal runners accept an explicit `runs` binding, hosted `execution_scope`, and optional
+`event_sink` for durable event recovery. SQLite goals use their existing database's
+run store. See [goal recovery](goals.md#recovery-and-hosted-execution) for session,
+accounting, approval and sync/async contracts. Unknown external outcomes return
+`GoalStopReason.RECOVERY_REQUIRED`; they are never converted into successful completion.

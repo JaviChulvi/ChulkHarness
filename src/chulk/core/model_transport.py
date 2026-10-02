@@ -1,8 +1,11 @@
 """Prompt construction and model transports used by the action loop."""
 from __future__ import annotations
+
+from uuid import uuid4
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from chulk.usage import BudgetExceededError
 from dataclasses import dataclass
 import json
 import re
@@ -104,6 +107,62 @@ class ModelTransport:
     output_policy_failure_mode: OutputPolicyFailureMode = OutputPolicyFailureMode.CLOSED
     goal_execution: GoalExecutionContext | None = None
     durable_responses: bool = False
+    mark_dispatched: Callable[[TurnState, int], None] | None = None
+    mark_dispatched_async: Callable[[TurnState, int], Awaitable[None]] | None = None
+
+    def _trace_request(self, turn: TurnState, payload: dict) -> None:
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            turn.extension_metadata["goal_request"] = {"request_index": payload["request_index"], "purpose": payload.get("purpose", "agent_action")}
+            payload = {**payload, "turn": turn.to_dict()}
+        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+
+    def _trace_response(self, turn: TurnState, payload: dict) -> None:
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            turn.extension_metadata["goal_response_index"] = payload["request_index"]
+            turn.extension_metadata["goal_response"] = {k: v for k, v in payload.items() if k != "turn"}
+            payload = {**payload, "turn": turn.to_dict()}
+        self.trace(TraceEvent.MODEL_RESPONSE, payload)
+
+    def _recovered_response(self, turn: TurnState, purpose: str) -> dict | None:
+        response = turn.extension_metadata.get("goal_response")
+        return response if response and response.get("purpose", response.get("source")) == purpose else None
+
+    def _call_model(self, callback: Callable, *args: Any, **kwargs: Any) -> Any:
+        if self.goal_execution is not None:
+            return self.goal_execution.call_with_deadline(callback, *args, **kwargs)
+        return callback(*args, **kwargs)
+
+    async def _call_model_async(self, callback: Callable, *args: Any, **kwargs: Any) -> Any:
+        if self.goal_execution is not None:
+            return await self.goal_execution.call_with_deadline_async(callback, *args, **kwargs)
+        return await callback(*args, **kwargs)
+
+    def _stream_with_deadline(self, stream: Iterator[LLMStreamChunk]) -> Iterator[LLMStreamChunk]:
+        while True:
+            item = self._call_model(next, stream, None)
+            if item is None:
+                return
+            yield item
+
+    def _provider_boundary(self) -> None:
+        if self.goal_execution is not None:
+            self.goal_execution.remaining_seconds()
+
+    async def _provider_boundary_async(self) -> None:
+        if self.goal_execution is not None:
+            await self.goal_execution.remaining_seconds_async()
+
+    def _dispatch(self, turn: TurnState, request_index: int) -> None:
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            self.goal_execution.assert_boundary()
+            if self.mark_dispatched is not None:
+                self.mark_dispatched(turn, request_index)
+
+    async def _dispatch_async(self, turn: TurnState, request_index: int) -> None:
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            await self.goal_execution.assert_boundary_async()
+            if self.mark_dispatched_async is not None:
+                await self.mark_dispatched_async(turn, request_index)
 
     def _begin_goal_request(self, turn: TurnState, context: dict[str, Any] | None, purpose: str) -> dict:
         if self.goal_execution is None:
@@ -208,6 +267,11 @@ class ModelTransport:
 
     def stream_final_answer(self, draft: str, turn: TurnState) -> FinalAnswerStreamResult:
         """Emit a policy-filtered plain-text answer as provider chunks arrive."""
+        recovered = self._recovered_response(turn, "incremental_final_answer")
+        if recovered is not None:
+            return FinalAnswerStreamResult(content=recovered["content"], status=FinalAnswerDeliveryStatus(recovered["status"]),
+                public_delta_count=recovered["public_delta_count"], provider_completed=recovered["provider_completed"],
+                error=recovered.get("error"), failure_kind=recovered.get("failure_kind"))
         messages, request_index = self._start_final_answer_stream(turn, draft)
         policy = self.output_policy or PassThroughOutputPolicy()
         parts: list[str] = []
@@ -216,10 +280,12 @@ class ModelTransport:
         usage = None
         cost = None
         completed = False
+        finalizing = False
         self.trace(TraceEvent.MODEL_STREAM_STARTED, {'turn_id': turn.turn_id, 'request_index': request_index, 'source': 'incremental_final_answer'})
         try:
-            stream = call_with_supported_kwargs(self.llm_client.stream_final_answer, messages, max_output_tokens=self.max_output_tokens, public_output_committed=lambda: public_sequence > 0, before_fallback=lambda: self._reset_output_policy(policy, turn))
-            for chunk in stream:
+            self._dispatch(turn, request_index)
+            stream = call_with_supported_kwargs(self.llm_client.stream_final_answer, messages, max_output_tokens=self.max_output_tokens, public_output_committed=lambda: public_sequence > 0, before_fallback=lambda: self._reset_output_policy(policy, turn), before_dispatch=self._provider_boundary)
+            for chunk in self._stream_with_deadline(stream):
                 if chunk.usage is not None:
                     usage = chunk.usage
                 if chunk.cost is not None:
@@ -232,17 +298,26 @@ class ModelTransport:
                 decision = self._apply_output_policy(policy, chunk.text, provider_sequence, turn)
                 provider_sequence += 1
                 if decision.blocked:
+                    finalizing = True
                     return self._finish_final_answer_stream(turn, request_index=request_index, content=''.join(parts), status=FinalAnswerDeliveryStatus.BLOCKED, public_delta_count=public_sequence, provider_completed=False, usage=usage, cost=cost, error=decision.reason or 'output policy blocked the answer')
                 public_sequence = self._publish_policy_text(decision.text, turn, request_index, public_sequence, parts)
                 if decision.stop:
+                    finalizing = True
                     return self._finish_final_answer_stream(turn, request_index=request_index, content=''.join(parts), status=FinalAnswerDeliveryStatus.TRUNCATED, public_delta_count=public_sequence, provider_completed=False, usage=usage, cost=cost, error=decision.reason)
             decision = self._complete_output_policy(policy, provider_sequence, turn)
             if decision.blocked:
+                finalizing = True
                 return self._finish_final_answer_stream(turn, request_index=request_index, content=''.join(parts), status=FinalAnswerDeliveryStatus.BLOCKED, public_delta_count=public_sequence, provider_completed=completed, usage=usage, cost=cost, error=decision.reason or 'output policy blocked the answer')
             public_sequence = self._publish_policy_text(decision.text, turn, request_index, public_sequence, parts)
             status = FinalAnswerDeliveryStatus.TRUNCATED if decision.stop else FinalAnswerDeliveryStatus.COMPLETE
+            finalizing = True
             return self._finish_final_answer_stream(turn, request_index=request_index, content=''.join(parts), status=status, public_delta_count=public_sequence, provider_completed=completed, usage=usage, cost=cost, error=decision.reason)
         except BaseException as exc:
+            if finalizing:
+                raise  # Recording failures must not overwrite a known provider result.
+            if isinstance(exc, BudgetExceededError):
+                self.release_accounting(turn, request_index=request_index, reason="deadline")
+                raise
             if parts:
                 return self._finish_final_answer_stream(turn, request_index=request_index, content=''.join(parts), status=FinalAnswerDeliveryStatus.FAILED, public_delta_count=public_sequence, provider_completed=False, usage=usage, cost=cost, error=str(exc))
             self.release_accounting(turn, request_index=request_index, reason='final_answer_stream_failed')
@@ -251,6 +326,11 @@ class ModelTransport:
 
     async def stream_final_answer_async(self, draft: str, turn: TurnState) -> FinalAnswerStreamResult:
         """Native async final-answer stream with no sync iterator adaptation."""
+        recovered = self._recovered_response(turn, "incremental_final_answer")
+        if recovered is not None:
+            return FinalAnswerStreamResult(content=recovered["content"], status=FinalAnswerDeliveryStatus(recovered["status"]),
+                public_delta_count=recovered["public_delta_count"], provider_completed=recovered["provider_completed"],
+                error=recovered.get("error"), failure_kind=recovered.get("failure_kind"))
         messages, request_index = await self._start_final_answer_stream_async(turn, draft)
         policy = self.async_output_policy or AsyncPassThroughOutputPolicy()
         parts: list[str] = []
@@ -259,13 +339,15 @@ class ModelTransport:
         usage = None
         cost = None
         completed = False
+        finalizing = False
         self.trace(TraceEvent.MODEL_STREAM_STARTED, {'turn_id': turn.turn_id, 'request_index': request_index, 'source': 'incremental_final_answer'})
         await self._flush_async()
         try:
-            stream = cast(AsyncIterator[LLMStreamChunk], call_with_supported_kwargs(self.llm_client.astream_final_answer, messages, max_output_tokens=self.max_output_tokens, public_output_committed=lambda: public_sequence > 0, before_fallback=lambda: self._reset_output_policy_async(policy, turn)))
+            await self._dispatch_async(turn, request_index)
+            stream = cast(AsyncIterator[LLMStreamChunk], call_with_supported_kwargs(self.llm_client.astream_final_answer, messages, max_output_tokens=self.max_output_tokens, public_output_committed=lambda: public_sequence > 0, before_fallback=lambda: self._reset_output_policy_async(policy, turn), before_dispatch=self._provider_boundary_async))
             while True:
                 try:
-                    chunk = await _next_stream_chunk(stream, timeout_seconds=self.stream_idle_timeout_seconds)
+                    chunk = await self._call_model_async(_next_stream_chunk, stream, timeout_seconds=self.stream_idle_timeout_seconds)
                 except StopAsyncIteration:
                     break
                 if chunk.usage is not None:
@@ -280,19 +362,28 @@ class ModelTransport:
                 decision = await self._apply_output_policy_async(policy, chunk.text, provider_sequence, turn)
                 provider_sequence += 1
                 if decision.blocked:
+                    finalizing = True
                     return await self._finish_final_answer_stream_async(turn, request_index, ''.join(parts), FinalAnswerDeliveryStatus.BLOCKED, public_sequence, False, usage, cost, decision.reason or 'output policy blocked the answer')
                 public_sequence = self._publish_policy_text(decision.text, turn, request_index, public_sequence, parts)
                 await self._flush_async()
                 if decision.stop:
+                    finalizing = True
                     return await self._finish_final_answer_stream_async(turn, request_index, ''.join(parts), FinalAnswerDeliveryStatus.TRUNCATED, public_sequence, False, usage, cost, decision.reason)
             decision = await self._complete_output_policy_async(policy, provider_sequence, turn)
             if decision.blocked:
+                finalizing = True
                 return await self._finish_final_answer_stream_async(turn, request_index, ''.join(parts), FinalAnswerDeliveryStatus.BLOCKED, public_sequence, completed, usage, cost, decision.reason or 'output policy blocked the answer')
             public_sequence = self._publish_policy_text(decision.text, turn, request_index, public_sequence, parts)
             await self._flush_async()
             status = FinalAnswerDeliveryStatus.TRUNCATED if decision.stop else FinalAnswerDeliveryStatus.COMPLETE
+            finalizing = True
             return await self._finish_final_answer_stream_async(turn, request_index, ''.join(parts), status, public_sequence, completed, usage, cost, decision.reason)
         except BaseException as exc:
+            if finalizing:
+                raise  # Recording failures must not overwrite a known provider result.
+            if isinstance(exc, BudgetExceededError):
+                await self._release_accounting_async(turn, request_index=request_index, reason="deadline")
+                raise
             failure_kind = _stream_failure_kind(exc)
             if parts and (not isinstance(exc, asyncio.CancelledError)):
                 return await self._finish_final_answer_stream_async(turn, request_index, ''.join(parts), FinalAnswerDeliveryStatus.FAILED, public_sequence, False, usage, cost, str(exc), failure_kind)
@@ -302,6 +393,7 @@ class ModelTransport:
             if parts:
                 turn.extension_metadata['final_answer_delivery'] = {'status': FinalAnswerDeliveryStatus.FAILED.value, 'public_delta_count': public_sequence, 'provider_completed': False, 'error': 'cancelled' if isinstance(exc, asyncio.CancelledError) else str(exc), 'failure_kind': failure_kind, 'partial_content': ''.join(parts)}
             raise
+
 
     def _final_answer_messages(self, turn: TurnState, draft: str, *, goal_context: dict[str, Any] | None = None) -> list[dict[str, str]]:
         prompt = self.build_prompt(turn, require_plan=False, goal_context=goal_context)
@@ -325,7 +417,7 @@ class ModelTransport:
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
         payload.update(receipt_payload)
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        self._trace_request(turn, payload)
         return (messages, request_index)
 
     async def _start_final_answer_stream_async(self, turn: TurnState, draft: str) -> tuple[list[dict[str, str]], int]:
@@ -339,7 +431,7 @@ class ModelTransport:
         payload['purpose'] = 'incremental_final_answer'
         payload['action_transport'] = 'plain_text_stream'
         payload.update(receipt_payload)
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        self._trace_request(turn, payload)
         await self._flush_async()
         return (messages, request_index)
 
@@ -410,7 +502,7 @@ class ModelTransport:
         usage_snapshot, cost_snapshot = self.record_accounting(turn, request_index=request_index, usage=usage, cost=cost, fallback_attempts=getattr(self.llm_client, 'last_attempts', None), purpose='incremental_final_answer')
         payload = {'turn_id': turn.turn_id, 'request_index': request_index, 'source': 'incremental_final_answer', 'status': status.value, 'public_delta_count': public_delta_count, 'provider_completed': provider_completed, 'usage': usage_snapshot, 'cost': cost_snapshot, 'error': error}
         self.trace(TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED, payload)
-        self.trace(TraceEvent.MODEL_RESPONSE, {**payload, 'content': content})
+        self._trace_response(turn, {**payload, 'content': content})
         self._acknowledge_goal_response(turn, request_index)
         return FinalAnswerStreamResult(content=content, status=status, public_delta_count=public_delta_count, provider_completed=provider_completed, error=error)
 
@@ -418,7 +510,7 @@ class ModelTransport:
         usage_snapshot, cost_snapshot = await self._record_accounting_async(turn, request_index=request_index, usage=usage, cost=cost, fallback_attempts=getattr(self.llm_client, 'last_attempts', None), purpose='incremental_final_answer')
         payload = {'turn_id': turn.turn_id, 'request_index': request_index, 'source': 'incremental_final_answer', 'status': status.value, 'public_delta_count': public_delta_count, 'provider_completed': provider_completed, 'usage': usage_snapshot, 'cost': cost_snapshot, 'error': error, 'failure_kind': failure_kind}
         self.trace(TraceEvent.MODEL_STREAM_COMPLETED if status in {FinalAnswerDeliveryStatus.COMPLETE, FinalAnswerDeliveryStatus.TRUNCATED} else TraceEvent.MODEL_STREAM_FAILED, payload)
-        self.trace(TraceEvent.MODEL_RESPONSE, {**payload, 'content': content})
+        self._trace_response(turn, {**payload, 'content': content})
         await self._flush_async()
         await self._acknowledge_goal_response_async(turn, request_index)
         return FinalAnswerStreamResult(content=content, status=status, public_delta_count=public_delta_count, provider_completed=provider_completed, error=error, failure_kind=failure_kind)
@@ -446,6 +538,11 @@ class ModelTransport:
             self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
+            if self._recovered_response(turn, "context_summary") and "goal_summary" in turn.extension_metadata:
+                saved = turn.extension_metadata["goal_summary"]
+                pending_messages, omitted_messages = saved["pending"], saved["omitted"]
+            if self.goal_execution is not None and self.goal_execution.automatic:
+                turn.extension_metadata["goal_summary"] = {"pending": pending_messages, "omitted": omitted_messages}
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
@@ -461,6 +558,11 @@ class ModelTransport:
             self._ensure_prompt_within_budget(turn, current_prompt)
             pending_messages = self.memory.pending_summary_messages()
             omitted_messages = current_prompt.omitted_messages
+            if self._recovered_response(turn, "context_summary") and "goal_summary" in turn.extension_metadata:
+                saved = turn.extension_metadata["goal_summary"]
+                pending_messages, omitted_messages = saved["pending"], saved["omitted"]
+            if self.goal_execution is not None and self.goal_execution.automatic:
+                turn.extension_metadata["goal_summary"] = {"pending": pending_messages, "omitted": omitted_messages}
             messages = _dedupe_messages([*pending_messages, *omitted_messages])
             if not messages:
                 return current_prompt
@@ -478,10 +580,13 @@ class ModelTransport:
         hosted_mcp_enabled = native_action_protocol and (not require_plan) and self._hosted_mcp_enabled()
         messages = self._record_model_request(turn, prompt, hosted_mcp_enabled=hosted_mcp_enabled)
         request_kwargs: dict[str, object] = {'max_repair_attempts': self.max_json_repair_attempts, 'action_schema': self._action_schema(turn, require_plan=require_plan), 'tools': self._action_tools(require_plan=require_plan) if native_action_protocol else None, 'planning_tools': self._planning_tool_availability(turn, require_plan=require_plan) if native_action_protocol else None, 'hosted_mcp_servers': self.mcp_servers if hosted_mcp_enabled else None, 'mcp_approval_callback': (lambda request: self.resolve_mcp_approval(request, turn)) if hosted_mcp_enabled else None}
+        if self.goal_execution is not None:
+            request_kwargs["before_dispatch"] = self._provider_boundary
         if self.max_output_tokens is not None:
             request_kwargs['max_output_tokens'] = self.max_output_tokens
         try:
-            result = call_with_supported_kwargs(self.llm_client.complete_action_request, ModelRequest(messages=tuple(messages), user_input=turn.model_input if isinstance(turn.model_input, UserInput) else None, purpose='agent_action'), **request_kwargs)
+            self._dispatch(turn, turn.model_request_count)
+            result = self._call_model(call_with_supported_kwargs, self.llm_client.complete_action_request, ModelRequest(messages=tuple(messages), user_input=turn.model_input if isinstance(turn.model_input, UserInput) else None, purpose='agent_action'), **request_kwargs)
         except LLMActionError as exc:
             return self._record_protocol_failure(turn, exc)
         except BaseException:
@@ -498,10 +603,13 @@ class ModelTransport:
         hosted_mcp_enabled = native_action_protocol and (not require_plan) and self._hosted_mcp_enabled()
         messages = await self._record_model_request_async(turn, prompt, hosted_mcp_enabled=hosted_mcp_enabled)
         request_kwargs: dict[str, object] = {'max_repair_attempts': self.max_json_repair_attempts, 'action_schema': self._action_schema(turn, require_plan=require_plan), 'tools': self._action_tools(require_plan=require_plan) if native_action_protocol else None, 'planning_tools': self._planning_tool_availability(turn, require_plan=require_plan) if native_action_protocol else None, 'hosted_mcp_servers': self.mcp_servers if hosted_mcp_enabled else None, 'mcp_approval_callback': (lambda request: self.resolve_mcp_approval(request, turn)) if hosted_mcp_enabled else None}
+        if self.goal_execution is not None:
+            request_kwargs["before_dispatch"] = self._provider_boundary_async
         if self.max_output_tokens is not None:
             request_kwargs['max_output_tokens'] = self.max_output_tokens
         try:
-            result = await call_async_with_supported_kwargs(self.llm_client.acomplete_action_request, ModelRequest(messages=tuple(messages), user_input=turn.model_input if isinstance(turn.model_input, UserInput) else None, purpose='agent_action'), **request_kwargs)
+            await self._dispatch_async(turn, turn.model_request_count)
+            result = await self._call_model_async(call_async_with_supported_kwargs, self.llm_client.acomplete_action_request, ModelRequest(messages=tuple(messages), user_input=turn.model_input if isinstance(turn.model_input, UserInput) else None, purpose='agent_action'), **request_kwargs)
         except LLMActionError as exc:
             return await self._record_protocol_failure_async(turn, exc)
         except BaseException as exc:
@@ -511,8 +619,13 @@ class ModelTransport:
 
     def reflect(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
         """Review a proposed answer through the sync text transport."""
+        recovered = self._recovered_response(turn, "reflection")
+        if recovered is not None:
+            return self._parse_reflection(turn, proposed_answer, attempt=recovered["reflection_attempt"],
+                raw_response=recovered["content"], request_index=recovered["request_index"])
         attempt, messages, request_index = self._start_reflection(proposed_answer, turn)
         try:
+            self._dispatch(turn, request_index)
             response = self._complete_response(messages)
             raw_response = response.content
         except LLMError as exc:
@@ -526,8 +639,13 @@ class ModelTransport:
 
     async def reflect_async(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
         """Review a proposed answer through the async text transport."""
+        recovered = self._recovered_response(turn, "reflection")
+        if recovered is not None:
+            return self._parse_reflection(turn, proposed_answer, attempt=recovered["reflection_attempt"],
+                raw_response=recovered["content"], request_index=recovered["request_index"])
         attempt, messages, request_index = await self._start_reflection_async(proposed_answer, turn)
         try:
+            await self._dispatch_async(turn, request_index)
             response = await self._complete_response_async(messages)
             raw_response = response.content
         except LLMError as exc:
@@ -540,16 +658,23 @@ class ModelTransport:
         return self._parse_reflection(turn, proposed_answer, attempt=attempt, raw_response=raw_response, request_index=request_index)
 
     def _apply_summary(self, turn: TurnState, *, require_plan: bool, pending_messages: list[dict[str, str]], omitted_messages: list[dict[str, str]], summary: str, checkpoint: dict[str, object], fallback: bool, error: str | None, goal_context: dict[str, Any] | None = None) -> AgentPrompt:
+        turn.extension_metadata.pop("goal_response", None)
+        turn.extension_metadata.pop("goal_summary", None)
         removed_count = self.memory.remove_messages(omitted_messages)
         summarized_count = len(pending_messages) + removed_count
         self.memory.update_conversation_summary(summary, summarized_message_count=summarized_count, checkpoint=checkpoint)
         self.state.conversation_summary = self.memory.conversation_summary
-        self.trace(TraceEvent.CONTEXT_SUMMARY_CREATED, {'turn_id': turn.turn_id, 'summary': self.memory.conversation_summary, 'source_message_count': self.memory.summary_message_count, 'summarized_message_count': summarized_count, 'fallback': fallback, 'error': error, 'checkpoint': checkpoint})
+        self.trace(TraceEvent.CONTEXT_SUMMARY_CREATED, {'turn_id': turn.turn_id, 'summary': self.memory.conversation_summary, 'source_message_count': self.memory.summary_message_count, 'summarized_message_count': summarized_count, 'fallback': fallback, 'error': error, 'checkpoint': checkpoint, **({'turn': turn.to_dict()} if self.goal_execution is not None and self.goal_execution.automatic else {})})
         return self.build_prompt(turn, require_plan=require_plan, goal_context=goal_context)
 
     def _summarize(self, messages: list[dict[str, str]], turn: TurnState) -> ContextSummaryResult:
+        recovered = self._recovered_response(turn, "context_summary")
+        if recovered is not None:
+            turn.extension_metadata.pop("goal_response", None)
+            return self._summary_result(messages, turn, recovered["request_index"], recovered["content"], recovered.get("usage"), recovered.get("cost"))
         summary_messages, request_index = self._start_summary(messages, turn)
         try:
+            self._dispatch(turn, request_index)
             response = self._complete_response(summary_messages)
         except LLMError as exc:
             return self._summary_failure(messages, turn, request_index, exc)
@@ -559,8 +684,13 @@ class ModelTransport:
         return self._finish_summary(messages, turn, request_index, response)
 
     async def _summarize_async(self, messages: list[dict[str, str]], turn: TurnState) -> ContextSummaryResult:
+        recovered = self._recovered_response(turn, "context_summary")
+        if recovered is not None:
+            turn.extension_metadata.pop("goal_response", None)
+            return self._summary_result(messages, turn, recovered["request_index"], recovered["content"], recovered.get("usage"), recovered.get("cost"))
         summary_messages, request_index = await self._start_summary_async(messages, turn)
         try:
+            await self._dispatch_async(turn, request_index)
             response = await self._complete_response_async(summary_messages)
         except LLMError as exc:
             return await self._summary_failure_async(messages, turn, request_index, exc)
@@ -583,7 +713,7 @@ class ModelTransport:
         self._admit_model_request(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
         turn.model_request_count = request_index
         payload = self._summary_request_payload(summary_messages, turn, request_index, len(messages))
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        self._trace_request(turn, payload)
         return (summary_messages, request_index)
 
     async def _start_summary_async(self, messages: list[dict[str, str]], turn: TurnState) -> tuple[list[dict[str, str]], int]:
@@ -595,7 +725,7 @@ class ModelTransport:
             await self._admit_model_request_async(turn, request_index=request_index, messages=summary_messages, purpose='context_summary')
             turn.model_request_count = request_index
             payload = self._summary_request_payload(summary_messages, turn, request_index, len(messages))
-            self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+            self._trace_request(turn, payload)
             await self._flush_async()
         except BaseException as exc:
             await await_cleanup_after_error(self._release_accounting_async(turn, request_index=request_index, reason='context_summary_setup_failed'), exc)
@@ -603,7 +733,7 @@ class ModelTransport:
         return (summary_messages, request_index)
 
     def _summary_failure_result(self, messages: list[dict[str, str]], turn: TurnState, request_index: int, exc: LLMError) -> ContextSummaryResult:
-        self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': request_index, 'content': '', 'purpose': 'context_summary', 'error': str(exc)})
+        self._trace_response(turn, {'turn_id': turn.turn_id, 'request_index': request_index, 'content': '', 'purpose': 'context_summary', 'error': str(exc)})
         checkpoint = _fallback_context_checkpoint(self.memory.conversation_checkpoint, self.memory.conversation_summary, messages)
         return ContextSummaryResult(_render_checkpoint(checkpoint), checkpoint, True, str(exc))
 
@@ -616,7 +746,7 @@ class ModelTransport:
         return self._summary_failure_result(messages, turn, request_index, exc)
 
     def _summary_result(self, messages: list[dict[str, str]], turn: TurnState, request_index: int, raw_summary: str, usage: dict | None, cost: dict | None) -> ContextSummaryResult:
-        self.trace(TraceEvent.MODEL_RESPONSE, format_model_response_trace(turn_id=turn.turn_id, request_index=request_index, content=raw_summary, purpose='context_summary', usage=usage, cost=cost))
+        self._trace_response(turn, format_model_response_trace(turn_id=turn.turn_id, request_index=request_index, content=raw_summary, purpose='context_summary', usage=usage, cost=cost))
         checkpoint = _parse_checkpoint(raw_summary)
         if checkpoint is None:
             fallback = _fallback_context_checkpoint(self.memory.conversation_checkpoint, self.memory.conversation_summary, messages)
@@ -670,7 +800,7 @@ class ModelTransport:
         receipt_payload = self._begin_goal_request(turn, prompt.goal_context, 'agent_action')
         payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
         payload.update(receipt_payload)
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+        self._trace_request(turn, payload)
         return messages
 
     async def _record_model_request_async(self, turn: TurnState, prompt: AgentPrompt, *, hosted_mcp_enabled: bool) -> list[dict[str, str]]:
@@ -685,7 +815,7 @@ class ModelTransport:
             receipt_payload = await self._begin_goal_request_async(turn, prompt.goal_context, 'agent_action')
             payload = self._action_request_payload(turn, prompt, messages, context_report, hosted_mcp_enabled)
             payload.update(receipt_payload)
-            self.trace(TraceEvent.MODEL_REQUEST_STARTED, payload)
+            self._trace_request(turn, payload)
             await self._flush_async()
         except BaseException as exc:
             await await_cleanup_after_error(self._release_accounting_async(turn, request_index=turn.model_request_count, reason='model_request_setup_failed'), exc)
@@ -696,9 +826,11 @@ class ModelTransport:
         self.state.json_repair_attempts += exc.repair_attempts
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            turn.extension_metadata["goal_pending"] = {"phase": "protocol_failure", "message": _format_action_protocol_failure(str(exc), exc.raw_response)}
         usage, cost = self.record_accounting(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost, fallback_attempts=self._accounting_attempts(exc, getattr(self.llm_client, "last_attempts", None)))
         if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
-            self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
+            self._trace_response(turn, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
         if exc.raw_response is not None:
             self._acknowledge_goal_response(turn, turn.model_request_count)
         return ProtocolFailure(message=_format_action_protocol_failure(str(exc), exc.raw_response))
@@ -707,9 +839,11 @@ class ModelTransport:
         self.state.json_repair_attempts += exc.repair_attempts
         self.state.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
         turn.errors.extend((f'JSON repair attempt: {error}' for error in exc.errors))
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            turn.extension_metadata["goal_pending"] = {"phase": "protocol_failure", "message": _format_action_protocol_failure(str(exc), exc.raw_response)}
         usage, cost = await self._record_accounting_async(turn, request_index=turn.model_request_count, usage=exc.usage, cost=exc.cost, fallback_attempts=self._accounting_attempts(exc, getattr(self.llm_client, "last_attempts", None)))
         if exc.raw_response or (self.goal_execution is not None and exc.raw_response is not None):
-            self.trace(TraceEvent.MODEL_RESPONSE, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
+            self._trace_response(turn, {'turn_id': turn.turn_id, 'request_index': turn.model_request_count, 'content': exc.raw_response, 'repair_attempts': exc.repair_attempts, 'repair_errors': exc.errors, 'parse_failed': True, 'usage': usage, 'cost': cost})
         if exc.raw_response is not None:
             await self._acknowledge_goal_response_async(turn, turn.model_request_count)
         return ProtocolFailure(message=_format_action_protocol_failure(str(exc), exc.raw_response))
@@ -737,7 +871,13 @@ class ModelTransport:
         return fallback_attempts
 
     def _publish_action_result(self, turn: TurnState, result: LLMActionResult, action: AgentAction, usage: dict | None, cost: dict | None) -> AgentAction:
-        self.trace(TraceEvent.MODEL_RESPONSE, format_model_response_trace(turn_id=turn.turn_id, request_index=turn.model_request_count, content=result.raw_response, repair_attempts=result.repair_attempts, repair_errors=result.errors, usage=usage, cost=cost, metadata=result.metadata))
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            turn.extension_metadata["goal_response_index"] = turn.model_request_count
+            turn.extension_metadata["goal_pending"] = {"phase": "action", "action": format_action_trace(action), "operation_id": uuid4().hex}
+        payload = format_model_response_trace(turn_id=turn.turn_id, request_index=turn.model_request_count, content=result.raw_response, repair_attempts=result.repair_attempts, repair_errors=result.errors, usage=usage, cost=cost, metadata=result.metadata)
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            payload["turn"] = turn.to_dict()
+        self._trace_response(turn, payload)
         payload = format_action_trace(action)
         payload['request_index'] = turn.model_request_count
         self.trace(TraceEvent.PARSED_ACTION, payload)
@@ -768,7 +908,7 @@ class ModelTransport:
         request_payload['reflection_attempt'] = attempt
         if self.goal_execution is not None:
             request_payload['goal_model_request'] = turn.extension_metadata['goal_model_request']
-        self.trace(TraceEvent.MODEL_REQUEST_STARTED, request_payload)
+        self._trace_request(turn, request_payload)
 
     def _start_reflection(self, proposed_answer: str, turn: TurnState) -> tuple[int, list[dict[str, str]], int]:
         context = self.goal_execution.context() if self.goal_execution is not None else None
@@ -800,7 +940,7 @@ class ModelTransport:
         return (attempt, messages, request_index)
 
     def _publish_reflection_response(self, turn: TurnState, request_index: int, attempt: int, raw_response: str, usage: dict | None, cost: dict | None) -> None:
-        self.trace(TraceEvent.MODEL_RESPONSE, format_model_response_trace(turn_id=turn.turn_id, request_index=request_index, content=raw_response, purpose='reflection', reflection_attempt=attempt, usage=usage, cost=cost))
+        self._trace_response(turn, format_model_response_trace(turn_id=turn.turn_id, request_index=request_index, content=raw_response, purpose='reflection', reflection_attempt=attempt, usage=usage, cost=cost))
 
     def _record_reflection_response(self, turn, *, request_index, attempt, raw_response, response) -> None:
         fallback_attempts = getattr(self.llm_client, 'last_attempts', None)
@@ -901,12 +1041,16 @@ class ModelTransport:
         return client_supports_native_tool_calling(self.llm_client)
 
     def _complete_response(self, messages: list[dict[str, str]]) -> LLMResponse:
-        kwargs = {'max_output_tokens': self.max_output_tokens} if self.max_output_tokens is not None else {}
-        return call_with_supported_kwargs(self.llm_client.complete_response, messages, **kwargs)
+        kwargs: dict[str, Any] = {'max_output_tokens': self.max_output_tokens} if self.max_output_tokens is not None else {}
+        if self.goal_execution is not None:
+            kwargs["before_dispatch"] = self._provider_boundary
+        return self._call_model(call_with_supported_kwargs, self.llm_client.complete_response, messages, **kwargs)
 
     async def _complete_response_async(self, messages: list[dict[str, str]]) -> LLMResponse:
-        kwargs = {'max_output_tokens': self.max_output_tokens} if self.max_output_tokens is not None else {}
-        return await call_async_with_supported_kwargs(self.llm_client.acomplete_response, messages, **kwargs)
+        kwargs: dict[str, Any] = {'max_output_tokens': self.max_output_tokens} if self.max_output_tokens is not None else {}
+        if self.goal_execution is not None:
+            kwargs["before_dispatch"] = self._provider_boundary_async
+        return await self._call_model_async(call_async_with_supported_kwargs, self.llm_client.acomplete_response, messages, **kwargs)
 
     def _hosted_mcp_enabled(self) -> bool:
         return client_supports_hosted_mcp_tools(self.llm_client)

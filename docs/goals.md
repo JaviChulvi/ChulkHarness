@@ -153,7 +153,57 @@ budget is a no-op, and changing a paused goal's budget never resumes it. Counter
 and the absolute deadline are never reset by a slice, pause or process restart.
 
 Migration 24 persists execution conversations, preallocated slice identities and
-verification application receipts. An interrupted admitted slice currently
-returns `recovery_required`, preventing blind replay; external reconciliation
-and hosted scheduling remain host responsibilities. No hidden daemon is started,
-and returning a foreground result does not durably enqueue background work.
+verification application receipts. Migration 25 links goal checkpoints to durable
+effects, stores recoverable effect results and marks dispatched usage reservations.
+No hidden daemon is started. Hosts own durable scheduling, credentials, scope,
+authorization, external reconciliation and process availability.
+
+## Recovery and hosted execution
+
+The runner acquires the goal claim, then the durable-run claim, in that order.
+Both renew during execution and are checked before dispatch. SQLite goals use the
+same database's `SQLiteRunStore` by default. Custom goal stores must supply `runs=`;
+`AsyncGoalRunner` accepts either native `AsyncRunStore` or synchronous bindings.
+Pass an explicit `execution_scope=` for hosted work, and bind the factory's runtime
+to `context.execution_scope`. A durable run is an execution envelope, not another
+independently evolving plan. Goal steps and criteria remain authoritative.
+
+Hosted session stores must declare `supports_goal_recovery = True` and atomically
+store the `turn` snapshot with model requests and responses. Summary persistence
+must atomically apply `metadata.recovery_turn` with the summary. This is a storage
+guarantee, not a flag to enable on an in-memory example. Accounting must implement
+`mark_model_dispatched`, `mark_tool_dispatched` and `recover_unsent_model_request`,
+in addition to cumulative goal/slice reservations. Native async methods are awaited;
+explicit synchronous bindings use the cancellation-safe adapter.
+
+Recovery restores the same interrupted turn, its validated action and execution
+phase. Normal yields allocate a new turn. Stable operation identities survive both.
+A known provider response is reused and its steering receipt acknowledged. An
+unsent request keeps its receipt pending. A recorded reflection is applied before
+checking the limit for another reflection, including feedback that rejects the
+draft. A known tool result is integrity-checked, reauthorized and reconstructed
+without executing the original tool. Verification decisions, observations, evidence and progress are
+idempotent. Terminal goal recovery finishes the durable envelope if a crash occurred
+after the authoritative goal commit. An optional runner `event_sink=` replays pending
+durable public events with stable event/idempotency identities; the host sink must
+deduplicate delivery. Ordinary runtime event publication uses the same durable owner.
+
+A dispatched mutation without a result remains uncertain and returns
+`recovery_required`. `retry-step` cannot bypass an unresolved linked effect. The
+host must reconcile through the run/effect store and supply trustworthy external
+evidence. A digest alone cannot reconstruct a missing result. There is no exactly-once
+promise for external systems that cannot confirm what happened.
+
+Possibly billed model calls retain their reserved allowance across lease expiry,
+TTL expiry and process restarts. Only durably unsent requests can release allowance
+automatically. Provider repairs and fallback attempts recheck ownership before
+calling another provider. Global deadlines remain absolute; model waits, streams
+and tool timeouts are bounded by the remaining deadline. A timeout may leave remote
+work in progress, so its unknown result remains subject to reconciliation.
+
+Durable approval waits release the worker. Resolving approval revalidates scope,
+tool identity, schema, arguments and policy; it does not resume a user-paused goal.
+A yielded durable envelope returns to the worker queue without consuming another
+logical attempt. Hosts use the same runner for local and hosted slices and schedule
+subsequent invocations themselves. Background acceptance requires a separately
+persisted execution request.

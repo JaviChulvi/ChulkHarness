@@ -378,3 +378,12 @@ native tool payloads, and repair attempts remain private. OpenAI Responses and
 OpenAI-compatible Chat Completions use native async iterators. Other providers
 may implement the same protocol; the base client supplies a one-shot async
 compatibility stream, so native incremental support is not mandatory.
+
+For automatic goals, the action transport's optional `before_dispatch` callback
+checks ownership and deadline before each harness-controlled repair or fallback
+attempt. Custom transports that perform their own retries must honor this boundary.
+A timed-out dispatched request retains its allowance when billing/results are unknown.
+
+Automatic goal runners require provider-hosted MCP execution to be disabled. Such
+calls execute outside the durable tool journal and cannot supply recoverable
+operation receipts. Register MCP tools through the harness registry instead.

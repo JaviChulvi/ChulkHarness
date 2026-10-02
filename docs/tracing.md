@@ -186,3 +186,9 @@ For a runner's first slice, replay restores the approved goal-step projection
 from the initial turn snapshot without opening the live goal store.
 It applies recorded host verification decisions through the normal plan loop
 and retains the goal's restriction on tools after verified completion.
+
+Automatic goal model request/response records carry an atomic recovery turn snapshot.
+Goal action checkpoints link to durable effect IDs. Full redacted tool results live
+in the protected effect-result store; result digests verify their integrity. A result
+receipt from the original dispatch owner may be recorded after lease loss, but that
+receipt does not authorize progress or further dispatch.

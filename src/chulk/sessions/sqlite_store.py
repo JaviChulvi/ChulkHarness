@@ -23,6 +23,9 @@ class AmbiguousSessionError(ValueError):
 class SQLiteSessionStore:
     """Durable store for conversations, turns, messages, and tool observations."""
 
+    # Requests/responses and their recovery turn snapshots commit atomically.
+    supports_goal_recovery = True
+
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.fts_enabled = False
@@ -219,6 +222,9 @@ class SQLiteSessionStore:
             conn.execute('BEGIN IMMEDIATE')
             clean_source_message_count = max(0, source_message_count)
             clean_metadata = dict(metadata or {})
+            recovery_turn = clean_metadata.pop("recovery_turn", None)
+            if isinstance(recovery_turn, dict) and _valid_turn_snapshot(recovery_turn, expected_turn_id=str(recovery_turn.get("turn_id"))):
+                _save_turn_snapshot(conn, conversation_id, recovery_turn, now)
             clean_metadata['source_message_ordinal'] = _prompt_source_ordinal(conn, conversation_id, clean_source_message_count)
             conn.execute('\n                INSERT INTO conversation_summaries (\n                    id, conversation_id, content, source_message_count, created_at, updated_at, metadata\n                )\n                VALUES (?, ?, ?, ?, ?, ?, ?)\n                ', (str(uuid4()), conversation_id, clean_content, clean_source_message_count, now, now, json.dumps(clean_metadata, sort_keys=True)))
             _touch_conversation(conn, conversation_id, now)
@@ -259,6 +265,9 @@ class SQLiteSessionStore:
         now = _utc_now()
         with self._connect() as conn:
             conn.execute('\n                INSERT INTO conversation_model_requests (\n                    id, conversation_id, turn_id, request_index, message_count, prompt_char_count,\n                    returned_prompt_char_count, truncated, loaded_memory_ids, loaded_skill_names,\n                    available_tool_names, request_json, created_at\n                )\n                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n                ON CONFLICT(conversation_id, turn_id, request_index) DO UPDATE SET\n                    message_count = excluded.message_count,\n                    prompt_char_count = excluded.prompt_char_count,\n                    returned_prompt_char_count = excluded.returned_prompt_char_count,\n                    truncated = excluded.truncated,\n                    loaded_memory_ids = excluded.loaded_memory_ids,\n                    loaded_skill_names = excluded.loaded_skill_names,\n                    available_tool_names = excluded.available_tool_names,\n                    request_json = excluded.request_json\n                ', (str(uuid4()), conversation_id, turn_id, request_index, int(payload.get('message_count') or 0), int(payload.get('prompt_char_count') or 0), int(payload.get('returned_prompt_char_count') or 0), 1 if payload.get('truncated') else 0, json.dumps(payload.get('loaded_memory_ids') or [], sort_keys=True), json.dumps(payload.get('loaded_skill_names') or [], sort_keys=True), json.dumps(payload.get('available_tool_names') or [], sort_keys=True), json.dumps(payload, sort_keys=True), now))
+            if isinstance(payload.get("turn"), dict) and _valid_turn_snapshot(payload["turn"], expected_turn_id=str(turn_id)):
+                _save_turn_snapshot(conn, conversation_id, payload["turn"], now)
+
 
     def save_model_response(self, conversation_id: str, payload: dict[str, Any]) -> None:
         """Attach a raw model response to the matching request when possible."""
@@ -268,6 +277,9 @@ class SQLiteSessionStore:
             return
         with self._connect() as conn:
             conn.execute('\n                UPDATE conversation_model_requests\n                SET raw_response = ?, usage_json = ?, cost_json = ?, response_created_at = ?\n                WHERE conversation_id = ?\n                  AND ((turn_id = ?) OR (turn_id IS NULL AND ? IS NULL))\n                  AND request_index = ?\n                ', (payload.get('content'), json.dumps(payload.get('usage'), sort_keys=True) if isinstance(payload.get('usage'), dict) else None, json.dumps(payload.get('cost'), sort_keys=True) if isinstance(payload.get('cost'), dict) else None, _utc_now(), conversation_id, turn_id, turn_id, request_index))
+
+            if isinstance(payload.get("turn"), dict) and _valid_turn_snapshot(payload["turn"], expected_turn_id=str(turn_id)):
+                _save_turn_snapshot(conn, conversation_id, payload["turn"], _utc_now())
 
     def load_uncheckpointed_hosted_mcp_requests(self, conversation_id: str, turn_id: str, *, checkpointed_request_count: int) -> list[dict[str, object]]:
         """Return hosted MCP requests newer than the durable turn checkpoint."""

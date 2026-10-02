@@ -361,6 +361,7 @@ class LLMClient:
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -386,12 +387,15 @@ class LLMClient:
         usage_records: list[LLMUsage | None] = []
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
+            if before_dispatch is not None:
+                before_dispatch()
             response_kwargs: dict[str, Any] = {
                 "action_schema": action_schema,
                 "tools": tools,
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
+                "before_dispatch": before_dispatch,
             }
             if max_output_tokens is not None:
                 response_kwargs["max_output_tokens"] = max_output_tokens
@@ -447,6 +451,7 @@ class LLMClient:
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -467,9 +472,13 @@ class LLMClient:
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
+                "before_dispatch": before_dispatch,
             }
             if max_output_tokens is not None:
                 compatibility_kwargs["max_output_tokens"] = max_output_tokens
+            if before_dispatch is not None:
+                await before_dispatch()
+            compatibility_kwargs.pop("before_dispatch", None)
             return await asyncio.to_thread(
                 call_with_supported_kwargs,
                 self.complete_action,
@@ -492,12 +501,15 @@ class LLMClient:
         usage_records: list[LLMUsage | None] = []
         cost_records: list[LLMCost | None] = []
         for attempt in range(max_repair_attempts + 1):
+            if before_dispatch is not None:
+                await before_dispatch()
             response_kwargs: dict[str, Any] = {
                 "action_schema": action_schema,
                 "tools": tools,
                 "planning_tools": planning_tools,
                 "hosted_mcp_servers": hosted_mcp_servers,
                 "mcp_approval_callback": mcp_approval_callback,
+                "before_dispatch": before_dispatch,
             }
             if max_output_tokens is not None:
                 response_kwargs["max_output_tokens"] = max_output_tokens

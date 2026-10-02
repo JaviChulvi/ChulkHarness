@@ -587,3 +587,10 @@ rejected. If recovery finds an uncertain tool effect, both sync and native
 async construction persist the blocked turn before returning; a failed
 recovery checkpoint fails construction instead of exposing an in-memory-only
 terminal state.
+
+Long-running hosted goals use `AsyncGoalRunner` or `GoalRunner` with explicit goal and
+run stores and the host's execution scope. They require durable session recovery and
+cumulative accounting; the in-memory demonstration services do not meet those
+requirements. See [goal recovery contracts](goals.md#recovery-and-hosted-execution).
+PostgreSQL migration 0006 adds recoverable effect results to the existing run/effect
+adapter. This does not require goal storage in unrelated hosted applications.

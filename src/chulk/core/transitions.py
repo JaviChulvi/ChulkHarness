@@ -65,6 +65,7 @@ class ActionLoopSnapshot:
     goal_continuation: bool = False
     max_tool_calls_per_turn: int = 5
     reflection_count: int = 0
+    reflection_response_pending: bool = False
     max_reflection_attempts: int = 0
     active_plan_status: str | None = None
     active_plan_step_title: str | None = None
@@ -351,7 +352,7 @@ def _reduce_final_answer(
             outcome=TransitionOutcome.CONTINUE,
         )
 
-    reflect = (
+    reflect = snapshot.reflection_response_pending or (
         snapshot.max_reflection_attempts > 0
         and snapshot.reflection_count < snapshot.max_reflection_attempts
     )

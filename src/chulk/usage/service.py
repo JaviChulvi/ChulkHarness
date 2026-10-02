@@ -333,6 +333,12 @@ class ModelUsageAccounting:
             )
         return tuple(entries)
 
+    def recover_unsent_model_request(self, *, turn_id: str, request_index: int) -> bool:
+        return self.store.release_unsent(_request_event_id(self.conversation_id, turn_id, request_index))
+
+    def mark_model_dispatched(self, *, turn_id: str, request_index: int) -> None:
+        self.store.mark_dispatched(self._reservation(turn_id, request_index).id)
+
     def release_model_request(
         self,
         *,
@@ -378,6 +384,7 @@ class ModelUsageAccounting:
             budget=self.budget,
             tool_calls=1,
             cost=ExactCost(Decimal(0), pricing_known=True),
+            reopen_unsent=True,
         )
         try:
             constraints = self._reserve_constraints(
@@ -387,6 +394,7 @@ class ModelUsageAccounting:
                 dimensions=self._dimensions(turn_id),
                 tool_calls=1,
                 cost=ExactCost(Decimal(0), pricing_known=True),
+                reopen_unsent=True,
             )
         except Exception:
             self.store.release(reservation.id)
@@ -444,6 +452,10 @@ class ModelUsageAccounting:
             self.store.commit(constraint.id, (entry,))
         self._tool_reservations.pop(key, None)
         return committed
+
+    def mark_tool_dispatched(self, *, turn_id: str, tool_call_index: int, attempt: int) -> None:
+        reservation = self._tool_reservations[(turn_id, tool_call_index, attempt)]
+        self.store.mark_dispatched(reservation.id)
 
     def release_tool_call(
         self,
@@ -584,6 +596,7 @@ class ModelUsageAccounting:
         tokens: int = 0,
         cost: ExactCost,
         slice_budget: RunBudget | None = None,
+        reopen_unsent: bool = False,
     ) -> tuple[BudgetReservation, ...]:
         reservations: list[BudgetReservation] = []
         try:
@@ -606,6 +619,7 @@ class ModelUsageAccounting:
                         tool_calls=tool_calls,
                         tokens=tokens,
                         cost=cost,
+                        reopen_unsent=reopen_unsent,
                     )
                 )
         except Exception:

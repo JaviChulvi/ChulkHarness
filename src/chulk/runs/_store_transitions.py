@@ -29,6 +29,7 @@ from chulk.runs.errors import (
 from chulk.runs._store_support import (
     _RunStoreBackend,
     _active_attempt,
+    _attempt_from_row,
     _assert_scope,
     _decode,
     _effect_from_row,
@@ -56,6 +57,14 @@ from chulk.runs._store_support import (
 
 
 class _RunStoreTransitionMixin(_RunStoreBackend):
+    def assert_claim(self, scope: ExecutionScope, claim: RunClaim) -> RunRecord:
+        """Fence dispatch without changing the lease or revision."""
+        with self._connect() as conn:
+            row = _owned_run(conn, scope, claim, now=_clock.utc_now())
+            if bool(row["cancellation_requested"]):
+                raise RunLeaseError("durable run cancellation requested")
+            return _run_from_conn(conn, row)
+
     def claim(
         self,
         scope: ExecutionScope,
@@ -223,6 +232,16 @@ class _RunStoreTransitionMixin(_RunStoreBackend):
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             _owned_run(conn, scope, claim, now=now)
+            paused = conn.execute("""SELECT attempts.* FROM durable_run_attempts AS attempts
+                                     JOIN durable_run_steps AS steps ON steps.run_id = attempts.run_id AND steps.id = attempts.step_id
+                                     WHERE attempts.run_id = ? AND attempts.step_id = ?
+                                       AND attempts.status = 'paused' AND steps.status = 'running'
+                                     ORDER BY attempts.number DESC LIMIT 1""", (claim.run_id, step_id)).fetchone()
+            if paused is not None:
+                conn.execute("UPDATE durable_run_attempts SET status = 'running', worker_id = ?, lease_token = ? WHERE id = ?",
+                             (claim.worker_id, claim.lease_token, str(paused["id"])))
+                resumed = conn.execute("SELECT * FROM durable_run_attempts WHERE id = ?", (str(paused["id"]),)).fetchone()
+                return _attempt_from_row(resumed)
             if conn.execute(
                 """
                 SELECT 1 FROM durable_run_steps
@@ -305,6 +324,24 @@ class _RunStoreTransitionMixin(_RunStoreBackend):
             lease_token=claim.lease_token,
             started_at=now,
         )
+
+    def yield_step(self, scope: ExecutionScope, claim: RunClaim, step_id: str,
+                   *, continuation: Mapping[str, Any]) -> RunRecord:
+        """Release a worker at a durable boundary without consuming a retry."""
+        now = _clock.utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _owned_run(conn, scope, claim, now=now)
+            attempt = _active_attempt(conn, claim.run_id, step_id)
+            if conn.execute("""SELECT 1 FROM durable_effects WHERE run_id = ?
+                               AND status IN ('executing', 'unknown') AND result_ref IS NULL LIMIT 1""", (claim.run_id,)).fetchone():
+                raise InvalidRunTransitionError("cannot yield while an effect outcome is uncertain")
+            conn.execute("UPDATE durable_run_attempts SET status = 'paused' WHERE id = ?", (str(attempt["id"]),))
+            _set_run_state(conn, claim.run_id, RunStatus.QUEUED, now=now, clear_lease=True,
+                           waiting_reason="continuation")
+            _insert_event(conn, claim.run_id, name="run.yielded", actor=claim.worker_id, step_id=step_id,
+                          payload={"continuation": dict(continuation)}, now=now)
+            return _run_from_conn(conn, _run_row(conn, claim.run_id))
 
     def checkpoint(
         self,
@@ -1186,6 +1223,7 @@ class _RunStoreTransitionMixin(_RunStoreBackend):
         self,
         *,
         now: datetime | None = None,
+        scope: ExecutionScope | None = None,
     ) -> tuple[RunRecord, ...]:
         observed = _observed(now)
         changed: list[RunRecord] = []
@@ -1195,12 +1233,15 @@ class _RunStoreTransitionMixin(_RunStoreBackend):
                 f"""
                 SELECT * FROM durable_runs
                 WHERE status = 'running' AND lease_until < ?
+                {"AND id = ?" if scope is not None else ""}
                 ORDER BY lease_until, id
                 {self._recovery_lock_clause()}
                 """,
-                (_iso(observed),),
+                (_iso(observed), scope.run_id) if scope is not None else (_iso(observed),),
             ).fetchall()
             for row in rows:
+                if scope is not None:
+                    _assert_scope(scope, ExecutionScope.from_dict(_object(row["scope_json"])))
                 run_id = str(row["id"])
                 current = _run_row(conn, run_id)
                 if (
@@ -1223,6 +1264,25 @@ class _RunStoreTransitionMixin(_RunStoreBackend):
                     if active_step is not None
                     else None
                 )
+                # Goal turns have durable phase/result checkpoints. Requeue the
+                # same logical attempt only when every dispatched effect is known.
+                if _object(current["metadata_json"]).get("goal_id"):
+                    uncertain = conn.execute("""
+                        SELECT 1 FROM durable_effects e
+                        LEFT JOIN durable_effect_results r ON r.effect_id = e.id
+                        WHERE e.run_id = ? AND e.status IN ('executing', 'unknown', 'completed')
+                        AND (r.effect_id IS NULL OR e.status = 'unknown') LIMIT 1
+                    """, (run_id,)).fetchone()
+                    if uncertain is None and not bool(current["cancellation_requested"]):
+                        if active_attempt is not None:
+                            conn.execute("UPDATE durable_run_attempts SET status = 'paused' WHERE id = ?",
+                                         (str(active_attempt["id"]),))
+                        _set_run_state(conn, run_id, RunStatus.QUEUED, now=observed,
+                                       clear_lease=True, waiting_reason="continuation")
+                        _insert_event(conn, run_id, name="run.yielded", actor="reconciler",
+                                      payload={"reason": "recoverable_goal_checkpoint"}, now=observed)
+                        changed.append(_run_from_conn(conn, _run_row(conn, run_id)))
+                        continue
                 unsafe_effect = conn.execute(
                     """
                     SELECT * FROM durable_effects

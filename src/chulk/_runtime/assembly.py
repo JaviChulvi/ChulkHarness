@@ -173,6 +173,8 @@ def assemble_agent(
         memory_namespace=memory_namespace,
     )
     hosted_state = service_resolution.hosted_state
+    if services is not None and goal_execution is not None and goal_execution.new_conversation:
+        hosted_state = AgentState(conversation_id=goal_execution.conversation_id)
     resolved_services = service_resolution.services
     conversation_id = service_resolution.conversation_id
     execution_scope = service_resolution.execution_scope
@@ -293,12 +295,14 @@ def assemble_agent(
                 session_store,
                 cast(str, conversation_id),
                 execution_scope=cast(ExecutionScope, execution_scope),
+                goal_recovery=goal_execution.recovering if goal_execution is not None else False,
             )
         else:
             state = hosted_state or create_agent_state(
                 session_store,
                 conversation_id,
                 execution_scope=execution_scope,
+                goal_recovery=goal_execution.recovering if goal_execution is not None else False,
                 unresolved_tool_handler=unresolved_tool_handler,
             )
         trace_logger = resolved_services.traces
@@ -328,6 +332,7 @@ def assemble_agent(
             conversation_id,
             unresolved_tool_handler=unresolved_tool_handler,
             new_conversation_id=goal_execution.conversation_id if goal_execution is not None else None,
+            goal_recovery=goal_execution.recovering if goal_execution is not None else False,
         )
         trace_logger = JSONLTraceLogger(
             config.traces_dir,
@@ -356,6 +361,8 @@ def assemble_agent(
             lifecycle_manager=skill_lifecycle,
             automatic_approval_enabled=automatic_learning_approval,
         )
+    if execution_scope is None and goal_execution is not None:
+        execution_scope = goal_execution.execution_scope
     if execution_scope is None:
         execution_scope = ExecutionScope.local(
             agent_id=f"profile:{effective_profile_id}",
@@ -803,6 +810,8 @@ async def assemble_async_hosted_agent(
             "execution scope conversation_id does not match conversation_id"
         )
     hosted_state: AgentState | None = None
+    if goal_execution is not None and goal_execution.new_conversation:
+        hosted_state = AgentState(conversation_id=goal_execution.conversation_id)
     if requested_conversation_id is None:
         hosted_state = AgentState()
         requested_conversation_id = hosted_state.conversation_id
@@ -890,12 +899,14 @@ async def assemble_async_hosted_agent(
                 session_store,
                 requested_conversation_id,
                 execution_scope=execution_scope,
+                goal_recovery=goal_execution.recovering if goal_execution is not None else False,
             )
         else:
             state = hosted_state or await create_agent_state_async(
                 session_store,
                 load_conversation_id,
                 execution_scope=execution_scope,
+                goal_recovery=goal_execution.recovering if goal_execution is not None else False,
             )
 
         trace_logger = BufferedAsyncTraceSink(resolved.traces)

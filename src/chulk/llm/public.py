@@ -325,18 +325,20 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         return self._try_provider_responses(
             lambda provider: _complete_response(
                 provider, messages, max_output_tokens=max_output_tokens
-            )
+            ), before_dispatch=before_dispatch,
         )
 
     async def acomplete_response(
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         return await self._atry_provider_responses(
@@ -344,13 +346,14 @@ class FallbackChain(LLMClient):
                 provider,
                 messages,
                 max_output_tokens=max_output_tokens,
-            )
+            ), before_dispatch=before_dispatch,
         )
 
     def complete_action(
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -363,6 +366,7 @@ class FallbackChain(LLMClient):
         try:
             result = super().complete_action(
                 messages,
+                before_dispatch=before_dispatch,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 action_schema=action_schema,
@@ -381,6 +385,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -393,6 +398,7 @@ class FallbackChain(LLMClient):
         try:
             result = await super().acomplete_action(
                 messages,
+                before_dispatch=before_dispatch,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 action_schema=action_schema,
@@ -421,6 +427,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_output_tokens: int | None = None,
         public_output_committed: Callable[[], bool] | None = None,
         before_fallback: Callable[[], None] | None = None,
@@ -431,6 +438,7 @@ class FallbackChain(LLMClient):
             final_answer=True,
             public_output_committed=public_output_committed,
             before_fallback=before_fallback,
+            before_dispatch=before_dispatch,
         )
 
     async def astream_complete(
@@ -448,6 +456,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_output_tokens: int | None = None,
         public_output_committed: Callable[[], bool] | None = None,
         before_fallback: Callable[[], Awaitable[None]] | None = None,
@@ -458,6 +467,7 @@ class FallbackChain(LLMClient):
             final_answer=True,
             public_output_committed=public_output_committed,
             before_fallback=before_fallback,
+            before_dispatch=before_dispatch,
         ):
             yield chunk
 
@@ -472,6 +482,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
@@ -493,13 +504,14 @@ class FallbackChain(LLMClient):
                 mcp_approval_callback=mcp_approval_callback
                 if _supports_hosted_mcp(provider)
                 else None,
-            )
+            ), before_dispatch=before_dispatch,
         )
 
     async def _acomplete_action_response_once(
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
         tools: list[object] | None = None,
@@ -521,12 +533,13 @@ class FallbackChain(LLMClient):
                 mcp_approval_callback=mcp_approval_callback
                 if _supports_hosted_mcp(provider)
                 else None,
-            )
+            ), before_dispatch=before_dispatch,
         )
 
     def _try_provider_responses(
         self,
         call: Callable[[LLMClient], ResultT],
+        *, before_dispatch: Callable[[], None] | None = None,
     ) -> ResultT:
         self.last_attempts = []
         self.last_success_provider = None
@@ -547,6 +560,8 @@ class FallbackChain(LLMClient):
                 self._record_attempt(attempt, notify=False)
                 errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
                 continue
+            if before_dispatch is not None:
+                before_dispatch()
             try:
                 response = call(provider)
             except Exception as exc:
@@ -594,6 +609,7 @@ class FallbackChain(LLMClient):
     async def _atry_provider_responses(
         self,
         call: Callable[[LLMClient], Awaitable[ResultT]],
+        *, before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ResultT:
         self.last_attempts = []
         self.last_success_provider = None
@@ -618,6 +634,8 @@ class FallbackChain(LLMClient):
                 self._record_attempt(attempt, notify=False)
                 errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
                 continue
+            if before_dispatch is not None:
+                await before_dispatch()
             try:
                 response = await call(provider)
             except Exception as exc:
@@ -666,6 +684,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_output_tokens: int | None,
         final_answer: bool,
         public_output_committed: Callable[[], bool] | None = None,
@@ -694,6 +713,8 @@ class FallbackChain(LLMClient):
                 self._record_attempt(attempt, notify=False)
                 errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
                 continue
+            if before_dispatch is not None:
+                before_dispatch()
             emitted_chunk = False
             usage: LLMUsage | None = None
             cost: LLMCost | None = None
@@ -781,6 +802,7 @@ class FallbackChain(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_output_tokens: int | None,
         final_answer: bool,
         public_output_committed: Callable[[], bool] | None = None,
@@ -809,6 +831,8 @@ class FallbackChain(LLMClient):
                 self._record_attempt(attempt, notify=False)
                 errors.append(f"{provider_name}/{model or 'unknown'}: circuit open")
                 continue
+            if before_dispatch is not None:
+                await before_dispatch()
             emitted_chunk = False
             usage: LLMUsage | None = None
             cost: LLMCost | None = None

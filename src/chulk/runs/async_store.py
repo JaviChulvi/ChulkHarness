@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+from chulk.hosting.async_utils import call_async_service
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -39,8 +39,7 @@ class AsyncRunStoreAdapter:
         self.store = store
 
     async def call(self, method: str, /, *args: Any, **kwargs: Any) -> Any:
-        target = getattr(self.store, method)
-        return await asyncio.to_thread(target, *args, **kwargs)
+        return await call_async_service(self.store, method, *args, **kwargs)
 
     async def submit(
         self,
@@ -334,6 +333,9 @@ class AsyncRunStoreAdapter:
             run_id=run_id,
         )
 
+    async def assert_claim(self, scope: ExecutionScope, claim: RunClaim) -> RunRecord:
+        return await self.call("assert_claim", scope, claim)
+
     async def renew(
         self,
         scope: ExecutionScope,
@@ -355,6 +357,10 @@ class AsyncRunStoreAdapter:
         step_id: str,
     ) -> AttemptRecord:
         return await self.call("start_step", scope, claim, step_id)
+
+    async def yield_step(self, scope: ExecutionScope, claim: RunClaim, step_id: str,
+                         *, continuation: Mapping[str, Any]) -> RunRecord:
+        return await self.call("yield_step", scope, claim, step_id, continuation=continuation)
 
     async def checkpoint(
         self,
@@ -410,6 +416,13 @@ class AsyncRunStoreAdapter:
             claim,
             effect_id,
         )
+
+    async def record_effect_result(self, scope: ExecutionScope, claim: RunClaim, effect_id: str,
+                                   *, result: Mapping[str, Any]) -> str:
+        return await self.call("record_effect_result", scope, claim, effect_id, result=result)
+
+    async def effect_result(self, scope: ExecutionScope, effect_id: str) -> dict[str, Any] | None:
+        return await self.call("effect_result", scope, effect_id)
 
     async def complete_effect(
         self,
@@ -646,13 +659,14 @@ class AsyncRunStoreAdapter:
         self,
         *,
         now: datetime | None = None,
+        scope: ExecutionScope | None = None,
     ) -> tuple[RunRecord, ...]:
-        return await self.call("reconcile_expired", now=now)
+        return await self.call("reconcile_expired", now=now, scope=scope)
 
     async def close(self) -> None:
         close = getattr(self.store, "close", None)
         if callable(close):
-            await asyncio.to_thread(close)
+            await call_async_service(self.store, "close")
 
 
 class AsyncSQLiteRunStore(AsyncRunStoreAdapter):

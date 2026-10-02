@@ -177,6 +177,12 @@ class GoalStore:
                     expected_revision,
                     current.revision,
                 )
+            if kind == "goal.step_retried":
+                unresolved = conn.execute("""SELECT 1 FROM goal_action_checkpoints
+                    WHERE goal_id = ? AND step_id = ? AND effect_id IS NOT NULL AND result_json IS NULL LIMIT 1""",
+                    (goal_id, (payload or {}).get("step_id"))).fetchone()
+                if unresolved is not None:
+                    raise GoalActionConflictError("Resolve the durable effect and recover its observation before retrying the goal step")
             changed = mutation(current)
             if changed.id != current.id or changed.profile_id != current.profile_id:
                 raise ValueError("goal mutation cannot change goal ownership or identity")
@@ -510,6 +516,7 @@ class GoalStore:
         action_kind: str,
         action_ref: str | None = None,
         now: datetime | None = None,
+        recover_existing: bool = False,
     ) -> GoalActionCheckpoint:
         """Checkpoint intent before a potentially side-effecting action."""
         observed = self._now(now)
@@ -556,6 +563,10 @@ class GoalStore:
                     raise GoalActionConflictError(
                         "goal action idempotency key was reused for different work"
                     )
+                if recover_existing:
+                    conn.execute("UPDATE goal_action_checkpoints SET claim_token = ?, state = CASE WHEN result_json IS NULL THEN 'started' ELSE state END WHERE id = ?",
+                                 (claim.claim_token, stored.id))
+                    return _checkpoint_from_row(conn.execute("SELECT * FROM goal_action_checkpoints WHERE id = ?", (stored.id,)).fetchone())
                 if (
                     stored.state is GoalActionState.STARTED
                     and stored.claim_token != claim.claim_token
@@ -588,6 +599,17 @@ class GoalStore:
                 ),
             )
         return checkpoint
+
+    def link_action_effect(self, claim: GoalClaim, checkpoint_id: str, effect_id: str) -> None:
+        """Attach the existing effect owner's identity before dispatch."""
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_claim_owner(conn, claim, profile_id=self.profile_id, now=self._now())
+            row = conn.execute("SELECT * FROM goal_action_checkpoints WHERE id = ? AND goal_id = ? AND profile_id = ?",
+                               (checkpoint_id, claim.goal_id, self.profile_id)).fetchone()
+            if row is None or row["effect_id"] not in {None, effect_id}:
+                raise GoalActionConflictError("Goal checkpoint effect identity changed")
+            conn.execute("UPDATE goal_action_checkpoints SET effect_id = ? WHERE id = ?", (effect_id, checkpoint_id))
 
     def finish_action(
         self,
@@ -644,6 +666,13 @@ class GoalStore:
             ).fetchone()
         assert updated is not None
         return _checkpoint_from_row(updated)
+
+    def verification(self, claim: GoalClaim, operation_id: str) -> dict[str, Any] | None:
+        with sqlite_connection(self.db_path) as conn:
+            _assert_claim_owner(conn, claim, profile_id=self.profile_id, now=self._now())
+            row = conn.execute("SELECT * FROM goal_verifications WHERE goal_id = ? AND profile_id = ? AND operation_id = ?",
+                               (claim.goal_id, self.profile_id, operation_id)).fetchone()
+            return dict(row) if row is not None else None
 
     def record_verification(
         self, claim: GoalClaim, *, step_id: str, operation_id: str,
@@ -720,11 +749,17 @@ class GoalStore:
             execution = conn.execute("SELECT * FROM goal_executions WHERE goal_id = ?", (goal_id,)).fetchone()
             assert execution is not None
             previous = execution["latest_turn_id"]
+            new_conversation = previous is None
             active = next((item for item in goal.steps if item.status is GoalStepStatus.RUNNING), None)
+            recovering = False
             if active is not None and previous is not None:
-                prior = conn.execute("SELECT state FROM goal_slices WHERE turn_id = ?", (previous,)).fetchone()
-                if prior is not None and prior["state"] == "admitted":
-                    return GoalSliceAdmission(goal, None, active.id, execution["conversation_id"], turn_id, previous, GoalStopReason.RECOVERY_REQUIRED)
+                prior = conn.execute("SELECT * FROM goal_slices WHERE turn_id = ?", (previous,)).fetchone()
+                if prior is not None and prior["state"] in {"admitted", "recovery_required", "approval_required", "paused", "budget_exhausted"}:
+                    recovering = bool(prior["started"])
+                    turn_id = previous
+                    if not recovering:
+                        previous = prior["previous_turn_id"]
+                        new_conversation = bool(prior["new_conversation"])
             selected = active or next((item for item in goal.steps if item.status is GoalStepStatus.READY), None)
             if selected is None:
                 reason = GoalStopReason.COMPLETED if not goal.missing_criterion_ids and all(item.status in {GoalStepStatus.COMPLETED, GoalStepStatus.SKIPPED} for item in goal.steps) else GoalStopReason.BLOCKED
@@ -746,11 +781,23 @@ class GoalStore:
             conn.execute("UPDATE goals SET claim_token = ?, runner_id = ?, lease_until = ? WHERE id = ? AND profile_id = ?",
                          (claim.claim_token, runner_id, claim.lease_until.isoformat(), goal_id, self.profile_id))
             conn.execute("""INSERT INTO goal_slices(turn_id, goal_id, profile_id, step_id, claim_token,
-                            admitted_revision, state, admitted_at) VALUES (?, ?, ?, ?, ?, ?, 'admitted', ?)""",
-                         (turn_id, goal_id, self.profile_id, selected.id, claim.claim_token, goal.revision, now.isoformat()))
+                            admitted_revision, state, admitted_at, started, previous_turn_id, new_conversation)
+                            VALUES (?, ?, ?, ?, ?, ?, 'admitted', ?, 0, ?, ?)
+                            ON CONFLICT(turn_id) DO UPDATE SET claim_token = excluded.claim_token""",
+                         (turn_id, goal_id, self.profile_id, selected.id, claim.claim_token, goal.revision, now.isoformat(), previous, int(new_conversation)))
             conn.execute("UPDATE goal_executions SET latest_turn_id = ?, latest_step_id = ?, stop_reason = NULL WHERE goal_id = ?",
                          (turn_id, selected.id, goal_id))
-            return GoalSliceAdmission(goal, claim, selected.id, execution["conversation_id"], turn_id, previous, new_conversation=execution["latest_turn_id"] is None)
+            return GoalSliceAdmission(goal, claim, selected.id, execution["conversation_id"], turn_id, previous, new_conversation=new_conversation, recovering=recovering)
+
+    def mark_slice_started(self, claim: GoalClaim, turn_id: str) -> None:
+        """Confirm the turn snapshot exists before any operation is admitted."""
+        with sqlite_connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_claim_owner(conn, claim, profile_id=self.profile_id, now=self._now())
+            changed = conn.execute("UPDATE goal_slices SET started = 1 WHERE turn_id = ? AND goal_id = ? AND claim_token = ?",
+                                  (turn_id, claim.goal_id, claim.claim_token))
+            if changed.rowcount != 1:
+                raise GoalLeaseConflictError("slice is not owned by this claim")
 
     def finish_slice(self, claim: GoalClaim, *, turn_id: str, reason: GoalStopReason,
                      usage: Mapping[str, Any], exhausted_budget: Mapping[str, Any] | None = None) -> None:
@@ -765,7 +812,7 @@ class GoalStore:
                          (reason.value, _json(dict(usage)), _json(dict(exhausted_budget)) if exhausted_budget else None,
                           claim.goal_id, self.profile_id, turn_id))
 
-    def apply_verified_step(self, claim: GoalClaim, *, operation_id: str, expected_revision: int) -> Goal:
+    def apply_verified_step(self, claim: GoalClaim, *, operation_id: str, expected_revision: int, usage: Mapping[str, Any] | None = None) -> Goal:
         now = self._now()
         with sqlite_connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -788,6 +835,8 @@ class GoalStore:
                 changed = complete_goal(changed, now=now)
             updated = _commit_execution_goal(conn, current, changed, kind="goal.progress_verified", actor=claim.runner_id, now=now)
             conn.execute("UPDATE goal_verifications SET applied_revision = ? WHERE sequence = ?", (updated.revision, row["sequence"]))
+            if usage is not None:
+                conn.execute("UPDATE goal_executions SET usage_json = ? WHERE goal_id = ? AND profile_id = ?", (_json(dict(usage)), claim.goal_id, self.profile_id))
         return updated
 
     def retention_candidates(
@@ -1182,6 +1231,7 @@ def _checkpoint_from_row(row: sqlite3.Row) -> GoalActionCheckpoint:
         state=GoalActionState(str(row["state"])),
         claim_token=str(row["claim_token"]),
         result=result,
+        effect_id=str(row["effect_id"]) if row["effect_id"] is not None else None,
         error=str(row["error"]) if row["error"] is not None else None,
         created_at=_datetime(str(row["created_at"])),
         updated_at=_datetime(str(row["updated_at"])),

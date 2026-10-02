@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
-import json
 from typing import Any
 
 from chulk.core.signals import DurableApprovalPaused
+from chulk.hosting.async_utils import call_async_service
+from chulk.runs.errors import EffectConflictError
 from chulk.hosting.scope import ExecutionScope
 from chulk.redaction import redact_data
 from chulk.runs.models import (
@@ -33,6 +33,7 @@ from chulk.tools.registry import (
 class DurableEffectToken:
     effect: EffectRecord
     effect_class: ToolEffect
+    recovered_result: ToolResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,9 @@ class DurableEffectCoordinator:
         policy = tool.resolved_policy()
         arguments_digest = schema_digest(arguments)
         logical_key = context.effect_key
+        operation_id = turn.extension_metadata.get("goal_pending", {}).get("operation_id")
+        if logical_key is None and turn.extension_metadata.get("goal_id") and operation_id:
+            logical_key = f"goal:{turn.extension_metadata['goal_id']}:{operation_id}:attempt:{len(turn.extension_metadata.get('goal_tool_attempts', [])) + 1}"
         if logical_key is None:
             if policy.effect is not ToolEffect.READ:
                 raise ValueError(
@@ -97,14 +101,25 @@ class DurableEffectCoordinator:
             arguments_digest=arguments_digest,
         )
         self._publish()
-        if effect.status is EffectStatus.COMPLETED:
-            raise RuntimeError(
-                "logical effect already completed; durable replay is blocked"
-            )
-        return DurableEffectToken(
-            effect=effect,
-            effect_class=policy.effect,
-        )
+        stored = self.runs.effect_result(self.scope, effect.id)
+        recovered = ToolResult.from_dict(stored) if stored is not None else None
+        if recovered is not None and effect.status is EffectStatus.EXECUTING:
+            if recovered.success:
+                effect = self.runs.complete_effect(self.scope, self.claim, effect.id, result_digest=effect.result_digest or "")
+            elif policy.effect is ToolEffect.READ:
+                effect = self.runs.fail_effect(self.scope, self.claim, effect.id, reason=recovered.error or "recovered read failure")
+            else:
+                self.runs.mark_effect_unknown(self.scope, self.claim, effect.id, reason="recovered mutation returned failure")
+                raise EffectConflictError("Mutation outcome requires host reconciliation")
+        if effect.status in {EffectStatus.COMPLETED, EffectStatus.EXECUTING} and recovered is None:
+            raise EffectConflictError("logical effect already dispatched or completed without a recoverable result; reconciliation required")
+        return DurableEffectToken(effect=effect, effect_class=policy.effect, recovered_result=recovered)
+
+    def effect_id(self, token: object) -> str:
+        return _token(token).effect.id
+
+    def recover(self, token: object) -> ToolResult | None:
+        return _token(token).recovered_result
 
     def started(self, token: object) -> None:
         durable = _token(token)
@@ -117,12 +132,13 @@ class DurableEffectCoordinator:
 
     def completed(self, token: object, result: ToolResult) -> None:
         durable = _token(token)
+        digest = self.runs.record_effect_result(self.scope, self.claim, durable.effect.id, result=result.to_dict())
         if result.success:
             self.runs.complete_effect(
                 self.scope,
                 self.claim,
                 durable.effect.id,
-                result_digest=_result_digest(result),
+                result_digest=digest,
             )
             self._publish()
         elif durable.effect_class is ToolEffect.READ:
@@ -178,8 +194,8 @@ class DurableEffectCoordinator:
         context: ToolExecutionContext,
         turn: Any,
     ) -> DurableEffectToken:
-        return await asyncio.to_thread(
-            self.prepare,
+        return await call_async_service(
+            self, "prepare",
             tool=tool,
             arguments=arguments,
             context=context,
@@ -187,21 +203,21 @@ class DurableEffectCoordinator:
         )
 
     async def started_async(self, token: object) -> None:
-        await asyncio.to_thread(self.started, token)
+        await call_async_service(self, "started", token)
 
     async def completed_async(
         self,
         token: object,
         result: ToolResult,
     ) -> None:
-        await asyncio.to_thread(self.completed, token, result)
+        await call_async_service(self, "completed", token, result)
 
     async def failed_async(
         self,
         token: object,
         error: BaseException,
     ) -> None:
-        await asyncio.to_thread(self.failed, token, error)
+        await call_async_service(self, "failed", token, error)
 
 
 class DurableHostedExecutor:
@@ -287,7 +303,10 @@ class DurableHostedExecutor:
         tool_executor.durable_effects = coordinator
         tool_executor.durable_approvals = approvals
         try:
-            result = self.agent.run_result(message)
+            if runtime.goal_execution is not None and runtime.state.turns and runtime.state.turns[-1].status == "yielded":
+                result = self.agent.continue_goal_slice()
+            else:
+                result = self.agent.run_result(message)
         except DurableApprovalPaused as exc:
             current = self.runs.get(scope, created.id)
             if publisher is not None:
@@ -337,6 +356,8 @@ class DurableHostedExecutor:
                     claim,
                     result=_safe_result(result),
                 )
+        elif result_status == "yielded":
+            current = self.runs.yield_step(scope, claim, step_id, continuation={"turn_id": result.turn_id})
         elif result_status == "cancelled":
             current = self.runs.cancel(
                 scope,
@@ -384,6 +405,12 @@ class AsyncDurableEffectCoordinator:
     def prepare(self, **kwargs: Any) -> object:
         raise RuntimeError("async durable effects require the async tool path")
 
+    def effect_id(self, token: object) -> str:
+        return _token(token).effect.id
+
+    def recover(self, token: object) -> ToolResult | None:
+        return _token(token).recovered_result
+
     def started(self, token: object) -> None:
         raise RuntimeError("async durable effects require the async tool path")
 
@@ -405,6 +432,9 @@ class AsyncDurableEffectCoordinator:
         policy = tool.resolved_policy()
         arguments_digest = schema_digest(arguments)
         logical_key = context.effect_key
+        operation_id = turn.extension_metadata.get("goal_pending", {}).get("operation_id")
+        if logical_key is None and turn.extension_metadata.get("goal_id") and operation_id:
+            logical_key = f"goal:{turn.extension_metadata['goal_id']}:{operation_id}:attempt:{len(turn.extension_metadata.get('goal_tool_attempts', [])) + 1}"
         if logical_key is None:
             if policy.effect is not ToolEffect.READ:
                 raise ValueError(
@@ -426,14 +456,19 @@ class AsyncDurableEffectCoordinator:
             arguments_digest=arguments_digest,
         )
         await self._publish()
-        if effect.status is EffectStatus.COMPLETED:
-            raise RuntimeError(
-                "logical effect already completed; durable replay is blocked"
-            )
-        return DurableEffectToken(
-            effect=effect,
-            effect_class=policy.effect,
-        )
+        stored = await self.runs.effect_result(self.scope, effect.id)
+        recovered = ToolResult.from_dict(stored) if stored is not None else None
+        if recovered is not None and effect.status is EffectStatus.EXECUTING:
+            if recovered.success:
+                effect = await self.runs.complete_effect(self.scope, self.claim, effect.id, result_digest=effect.result_digest or "")
+            elif policy.effect is ToolEffect.READ:
+                effect = await self.runs.fail_effect(self.scope, self.claim, effect.id, reason=recovered.error or "recovered read failure")
+            else:
+                await self.runs.mark_effect_unknown(self.scope, self.claim, effect.id, reason="recovered mutation returned failure")
+                raise EffectConflictError("Mutation outcome requires host reconciliation")
+        if effect.status in {EffectStatus.COMPLETED, EffectStatus.EXECUTING} and recovered is None:
+            raise EffectConflictError("logical effect already dispatched or completed without a recoverable result; reconciliation required")
+        return DurableEffectToken(effect=effect, effect_class=policy.effect, recovered_result=recovered)
 
     async def started_async(self, token: object) -> None:
         durable = _token(token)
@@ -450,12 +485,13 @@ class AsyncDurableEffectCoordinator:
         result: ToolResult,
     ) -> None:
         durable = _token(token)
+        digest = await self.runs.record_effect_result(self.scope, self.claim, durable.effect.id, result=result.to_dict())
         if result.success:
             await self.runs.complete_effect(
                 self.scope,
                 self.claim,
                 durable.effect.id,
-                result_digest=_result_digest(result),
+                result_digest=digest,
             )
         elif durable.effect_class is ToolEffect.READ:
             await self.runs.fail_effect(
@@ -591,7 +627,10 @@ class AsyncDurableHostedExecutor:
         tool_executor.durable_effects = coordinator
         tool_executor.durable_approvals = approvals
         try:
-            result = await self.agent.run_result(message)
+            if runtime.goal_execution is not None and runtime.state.turns and runtime.state.turns[-1].status == "yielded":
+                result = await self.agent.continue_goal_slice()
+            else:
+                result = await self.agent.run_result(message)
         except DurableApprovalPaused as exc:
             current = await self.runs.get(scope, created.id)
             if publisher is not None:
@@ -641,6 +680,8 @@ class AsyncDurableHostedExecutor:
                     claim,
                     result=_safe_result(result),
                 )
+        elif result_status == "yielded":
+            current = await self.runs.yield_step(scope, claim, step_id, continuation={"turn_id": result.turn_id})
         elif result_status == "cancelled":
             current = await self.runs.cancel(
                 scope,
@@ -678,21 +719,6 @@ def _scope(agent: Any) -> ExecutionScope:
     if not isinstance(scope, ExecutionScope):
         raise TypeError("durable hosted execution requires an ExecutionScope")
     return scope
-
-
-def _result_digest(result: ToolResult) -> str:
-    return _digest(
-        json.dumps(
-            {
-                "tool_name": result.tool_name,
-                "success": result.success,
-                "failure_kind": result.failure_kind,
-                "exit_code": result.exit_code,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
 
 
 def _safe_result(result: Any) -> dict[str, Any]:

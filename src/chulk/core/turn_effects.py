@@ -117,6 +117,10 @@ class TurnEffects:
             tool_call_count=turn.tool_call_count,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
             reflection_count=turn.reflection_count,
+            reflection_response_pending=(
+                turn.extension_metadata.get("goal_pending", {}).get("phase") == "action"
+                and turn.extension_metadata.get("goal_response", {}).get("purpose") == "reflection"
+            ),
             max_reflection_attempts=self.max_reflection_attempts,
             active_plan_status=plan.status() if plan is not None and turn.plan_approved else None,
             active_plan_step_title=active_step.title if active_step else None,
@@ -477,6 +481,11 @@ class TurnEffects:
         turn: TurnState,
         effect: ExecuteToolEffect,
     ) -> PendingToolExecution:
+        pending = turn.extension_metadata.get("goal_pending", {})
+        if pending.get("phase") == "tool_started":
+            record = turn.tool_calls[int(pending["record_index"])]
+            step = turn.active_plan.active_step() if turn.active_plan is not None else None
+            return PendingToolExecution(effect=effect, record=record, plan_step=step)
         turn.tool_call_count += 1
         plan = turn.active_plan
         step = (
@@ -492,6 +501,8 @@ class TurnEffects:
             plan_step_id=step.id if step else None,
         )
         turn.tool_calls.append(record)
+        if self.goal_continuation and pending:
+            pending.update(phase="tool_started", record_index=len(turn.tool_calls) - 1)
         self.trace(
             TraceEvent.TOOL_CALL_STARTED,
             {
@@ -718,6 +729,8 @@ class TurnEffects:
             )
         self.memory.add_assistant_message(tool_action_context)
         self.memory.add_observation(observation)
+        if self.goal_continuation and "goal_pending" in turn.extension_metadata:
+            turn.extension_metadata["goal_pending"]["phase"] = "operation_complete"
         self.trace(
             TraceEvent.TOOL_OBSERVATION,
             {

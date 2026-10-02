@@ -177,3 +177,25 @@ def test_export_refuses_to_write_a_partial_bounded_result(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match='exceeds max_entries'):
         UsageLedger(db_path, profile_id='work').export(destination, format='json', max_entries=1)
     assert not destination.exists()
+
+
+def test_dispatched_unknown_allowance_survives_expiry_until_explicit_reconciliation(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from chulk.usage import SQLiteUsageStore, UsageDimensions, RunBudget, BudgetScope, ResourceKind, ExactCost, BudgetExceededError
+    from decimal import Decimal
+    now = datetime.now(timezone.utc)
+    path = tmp_path / 'uncertain.sqlite'
+    store = SQLiteUsageStore(path, clock=lambda: now, reservation_ttl=timedelta(seconds=1))
+    dimensions = UsageDimensions(profile_id='default', goal_id='goal', conversation_id='conversation', turn_id='turn')
+    budget = RunBudget(scope=BudgetScope.GOAL, max_model_calls=1)
+    hold = store.reserve(idempotency_key='operation', source_event_id='operation', resource_kind=ResourceKind.MODEL,
+        dimensions=dimensions, budget=budget, model_calls=1, cost=ExactCost(Decimal(0), pricing_known=True))
+    store.mark_dispatched(hold.id)
+    now += timedelta(seconds=10)
+    store = SQLiteUsageStore(path, clock=lambda: now)
+    assert store.release_expired() == 0
+    assert store.release(hold.id).state.value == 'active'
+    with pytest.raises(BudgetExceededError):
+        store.reserve(idempotency_key='next', source_event_id='next', resource_kind=ResourceKind.MODEL,
+            dimensions=dimensions, budget=budget, model_calls=1, cost=ExactCost(Decimal(0), pricing_known=True))
+    assert store.release(hold.id, confirmed_unsent=True).state.value == 'released'

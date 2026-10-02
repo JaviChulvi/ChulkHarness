@@ -1,4 +1,4 @@
-"""Projection and publication of durable transitions as schema-v3 events."""
+"""Projection and publication of durable transitions as public events."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ _RUN_STATUS = {
     "run.resumed": "queued",
     "run.retry_scheduled": "waiting_for_retry",
     "run.requeued": "queued",
+    "run.yielded": "queued",
     "run.steered": "unchanged",
     "run.children_aggregated": "unchanged",
     "run.completed": "completed",

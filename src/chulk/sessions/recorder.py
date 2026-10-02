@@ -293,6 +293,7 @@ def _summary_fields(payload: dict[str, Any], event: str, turn_id: str | None) ->
             "summarized_message_count": int(payload.get("summarized_message_count") or 0),
             "fallback": bool(payload.get("fallback")),
             "checkpoint_v1": _safe_dict(payload.get("checkpoint")),
+            **({"recovery_turn": payload["turn"]} if isinstance(payload.get("turn"), dict) else {}),
         },
     }
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+from chulk.hosting.async_utils import call_async_service
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,8 +22,7 @@ class AsyncApprovalStoreAdapter:
         self.store = store
 
     async def call(self, method: str, /, *args: Any, **kwargs: Any) -> Any:
-        target = getattr(self.store, method)
-        return await asyncio.to_thread(target, *args, **kwargs)
+        return await call_async_service(self.store, method, *args, **kwargs)
 
     async def create(
         self,

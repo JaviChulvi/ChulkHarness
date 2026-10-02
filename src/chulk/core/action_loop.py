@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from chulk.core.action_runtime import ActionLoopPort, AgentTurnCancelled
 from chulk.core.actions import AgentAction, PlanStepUpdateAction, parse_model_response
 from chulk.core.trace_format import format_action_trace
@@ -48,6 +50,11 @@ def _pending_signal(turn: TurnState) -> TransitionSignal | None:
     pending = turn.extension_metadata.get("goal_pending")
     if not pending:
         return None
+    if pending["phase"] == "operation_complete":
+        turn.extension_metadata.pop("goal_pending", None)
+        return None
+    if pending["phase"] == "protocol_failure":
+        return ProtocolFailureSignal(message=pending["message"])
     if pending["phase"] == "reflection_result":
         return ReflectionResultSignal(**pending["result"])
     payload = dict(pending["action"])
@@ -63,7 +70,8 @@ def _checkpoint(runtime: ActionLoopPort, turn: TurnState) -> None:
 
 def _remember_action(runtime: ActionLoopPort, turn: TurnState, result: AgentAction | ProtocolFailure) -> None:
     if runtime.effects.goal_continuation and not isinstance(result, ProtocolFailure):
-        turn.extension_metadata["goal_pending"] = {"phase": "action", "action": format_action_trace(result)}
+        if "goal_pending" not in turn.extension_metadata:
+            turn.extension_metadata["goal_pending"] = {"phase": "action", "action": format_action_trace(result), "operation_id": uuid4().hex}
         _checkpoint(runtime, turn)
 
 

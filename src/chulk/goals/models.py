@@ -601,6 +601,7 @@ class GoalActionCheckpoint:
     updated_at: datetime
     result: Mapping[str, Any] | None = None
     error: str | None = None
+    effect_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name, label in (
@@ -633,6 +634,7 @@ class GoalActionCheckpoint:
             "profile_id": self.profile_id,
             "idempotency_key": self.idempotency_key,
             "action_kind": self.action_kind,
+            "effect_id": self.effect_id,
             "action_ref": self.action_ref,
             "state": self.state.value,
             "claim_token": self.claim_token,
@@ -1041,6 +1043,7 @@ class GoalSliceAdmission:
     previous_turn_id: str | None
     stop_reason: GoalStopReason | None = None
     new_conversation: bool = False
+    recovering: bool = False
 
 
 __all__ = [

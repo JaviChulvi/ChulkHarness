@@ -224,3 +224,14 @@ permits concurrency only when every tool declares both `ToolEffect.READ` and
 `ToolConcurrency.PARALLEL_SAFE`. The presence of one write, unknown effect, or
 serial policy makes the complete batch serial. Returned results always preserve
 the model call order.
+
+`ToolExecutionContext.timeout_seconds` can narrow the configured tool timeout for
+an admitted goal operation. Durable execution stores a redacted, JSON-serializable
+`ToolResult` receipt (including resources and application-event intents) for recovery.
+A mutation returning failure or timing out may have taken effect and requires
+reconciliation; retries cannot establish that it was not executed.
+
+For asynchronous automatic goals, the registry offloads synchronous callables so
+lease renewal and cancellation remain responsive. Ordinary registry calls retain
+their existing `run_in_executor` behavior; hosts may request `offload_sync=True`
+when calling `ToolRegistry.run_async` directly.

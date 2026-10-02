@@ -141,3 +141,48 @@ def test_cancellation_before_during_and_after_uncertain_effects(tmp_path) -> Non
     completed_effect_store.complete_effect(scope, final_claim, final_effect.id, result_digest='sha256:result')
     after_effect = completed_effect_store.cancel(scope, scope.run_id, actor='operator', reason='stop remaining work', claim=final_claim)
     assert after_effect.status is RunStatus.CANCELLED
+
+
+def test_effect_results_survive_reopen_and_original_dispatch_can_record_after_lease_loss(tmp_path):
+    from chulk.runs import EffectConflictError
+    from chulk.tools.registry import ToolResult
+    path = tmp_path / 'state.sqlite'
+    store = SQLiteRunStore(path)
+    scope = _scope()
+    store.submit(scope, _submission())
+    claim = store.claim(scope, worker_id='worker', lease_seconds=1)
+    store.start_step(scope, claim, 'lookup')
+    effect = store.begin_effect(scope, claim, 'lookup', logical_key='operation-uuid', tool_name='lookup',
+                                tool_version='1', schema_version='1', arguments_digest='args')
+    store.mark_effect_started(scope, claim, effect.id)
+    store.reconcile_expired(now=claim.lease_until + timedelta(seconds=1))
+    assert store.get(scope, scope.run_id).status is RunStatus.UNKNOWN
+    result = ToolResult(tool_name='lookup', success=True, observation='Recorded answer', value={'answer': 42})
+    digest = store.record_effect_result(scope, claim, effect.id, result=result.to_dict())
+    reopened = SQLiteRunStore(path)
+    assert ToolResult.from_dict(reopened.effect_result(scope, effect.id)) == result
+    assert reopened.record_effect_result(scope, claim, effect.id, result=result.to_dict()) == digest
+    with pytest.raises(EffectConflictError, match='conflicts'):
+        reopened.record_effect_result(scope, claim, effect.id, result={**result.to_dict(), 'observation': 'Changed'})
+    with pytest.raises((LookupError, ValueError)):
+        reopened.effect_result(_scope(tenant_id='another-tenant'), effect.id)
+    assert reopened.get(scope, scope.run_id).status is RunStatus.UNKNOWN
+
+
+def test_yield_releases_worker_and_resumes_same_logical_attempt(tmp_path):
+    store = SQLiteRunStore(tmp_path / 'state.sqlite')
+    scope = _scope()
+    store.submit(scope, _submission())
+    claim = store.claim(scope, worker_id='worker-a')
+    original = store.start_step(scope, claim, 'lookup')
+    for index in range(4):
+        run = store.yield_step(scope, claim, 'lookup', continuation={'turn_id': f'turn-{index}'})
+        assert run.status is RunStatus.QUEUED
+        with pytest.raises(RunLeaseError):
+            store.checkpoint(scope, claim, 'lookup', kind='stale', payload={})
+        claim = store.claim(scope, worker_id='worker-b')
+        attempt = store.start_step(scope, claim, 'lookup')
+        assert attempt.id == original.id
+        assert attempt.number == 1
+    store.complete_step(scope, claim, 'lookup', result={'verified': True})
+    assert store.complete(scope, claim, result={}).status is RunStatus.COMPLETED
