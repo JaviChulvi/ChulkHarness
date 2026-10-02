@@ -171,9 +171,11 @@ explicit synchronous bindings use the cancellation-safe adapter.
 
 Recovery restores the same interrupted turn, its validated action and execution
 phase. Normal yields allocate a new turn. Stable operation identities survive both.
-A known provider response is reused and its steering receipt acknowledged; a known
-tool result is integrity-checked, reauthorized and reconstructed without executing
-the original tool. Verification decisions, observations, evidence and progress are
+A known provider response is reused and its steering receipt acknowledged. An
+unsent request keeps its receipt pending. A recorded reflection is applied before
+checking the limit for another reflection, including feedback that rejects the
+draft. A known tool result is integrity-checked, reauthorized and reconstructed
+without executing the original tool. Verification decisions, observations, evidence and progress are
 idempotent. Terminal goal recovery finishes the durable envelope if a crash occurred
 after the authoritative goal commit. An optional runner `event_sink=` replays pending
 durable public events with stable event/idempotency identities; the host sink must

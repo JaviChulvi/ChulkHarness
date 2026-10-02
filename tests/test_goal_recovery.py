@@ -316,7 +316,7 @@ async def test_restart_between_admission_and_first_turn_is_safe(tmp_path, monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('asynchronous', [False, True])
-@pytest.mark.parametrize('phase', ['reflection', 'final_answer', 'protocol_failure', 'context_summary'])
+@pytest.mark.parametrize('phase', ['reflection', 'rejected_reflection', 'final_answer', 'protocol_failure', 'context_summary'])
 async def test_known_auxiliary_response_survives_receipt_crash(tmp_path, monkeypatch, asynchronous, phase):
     from chulk import FinalAnswerStreamingMode
     service, goal = _goal(tmp_path)
@@ -324,10 +324,13 @@ async def test_known_auxiliary_response_survives_receipt_crash(tmp_path, monkeyp
     service.store.clock = lambda: now
     monkeypatch.setattr('chulk.runs._store_clock.utc_now', lambda: now)
     script = ['invalid'] if phase == 'protocol_failure' else [*_completion(), {'approved': True, 'reason': 'checked'}, 'Final']
+    if phase == 'rejected_reflection':
+        script = [*_completion(), {'approved': False, 'reason': 'The answer is wrong',
+            'feedback': 'Correct the answer'}, {'type': 'final_answer', 'content': 'Corrected answer'}, 'Final']
     if phase == 'context_summary':
         script.insert(0, {'objective': 'Historical discussion'})
     model = ScriptedLLMClient(script)
-    response_index = {'reflection': 3, 'final_answer': 4, 'protocol_failure': 1, 'context_summary': 1}[phase]
+    response_index = {'reflection': 3, 'rejected_reflection': 3, 'final_answer': 4, 'protocol_failure': 1, 'context_summary': 1}[phase]
     original = SQLiteSessionStore.save_model_response
     tripped = False
     def save(*args, **kwargs):
@@ -364,7 +367,63 @@ async def test_known_auxiliary_response_survives_receipt_crash(tmp_path, monkeyp
     now += timedelta(seconds=121)
     result = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
     assert result.stop_reason.value == ('blocked' if phase == 'protocol_failure' else 'completed'), result.detail
-    assert len(model.call_log) == (1 if phase == 'protocol_failure' else 5 if phase == 'context_summary' else 4)
+    assert len(model.call_log) == (1 if phase == 'protocol_failure' else 5 if phase in {'context_summary', 'rejected_reflection'} else 4)
+    if phase == 'rejected_reflection':
+        assert 'Correct the answer' in str(model.call_log[3])
+        assert 'Corrected answer' in str(model.call_log[4])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('barrier', ['request', 'response'])
+async def test_recovery_acknowledges_only_stored_response(tmp_path, monkeypatch, asynchronous, barrier):
+    from chulk.storage.sqlite import sqlite_connection
+    service, goal = _goal(tmp_path)
+    goal = service.steer(goal.id, expected_revision=goal.revision,
+        instruction='Keep the original scope', created_by='owner')
+    now = datetime.now(timezone.utc)
+    service.store.clock = lambda: now
+    monkeypatch.setattr('chulk.runs._store_clock.utc_now', lambda: now)
+    model = ScriptedLLMClient(_completion())
+    method = 'save_model_request' if barrier == 'request' else 'save_model_response'
+    original = getattr(SQLiteSessionStore, method)
+    tripped = False
+    def save(*args, **kwargs):
+        nonlocal tripped
+        result = original(*args, **kwargs)
+        if not tripped:
+            tripped = True
+            raise ProcessLost()
+        return result
+    monkeypatch.setattr(SQLiteSessionStore, method, save)
+    def factory(context, conversation_id):
+        agent = (AsyncAgent if asynchronous else Agent)(config=AgentConfig(project_root=tmp_path,
+            store_path=service.store.db_path, max_reflection_attempts=0), llm=model, tools=[], skills=[],
+            goal_execution=context, conversation_id=conversation_id)
+        terminalize = agent.runtime._terminalize_exception
+        agent.runtime._terminalize_exception = lambda turn, exc: None if isinstance(exc, ProcessLost) else terminalize(turn, exc)
+        return agent
+    runner = (AsyncGoalRunner if asynchronous else GoalRunner)(service.store, agent_factory=factory,
+        verifier=lambda _: PlanStepVerification(True, 'checked'), clock=lambda: now)
+    with pytest.raises(ProcessLost):
+        if asynchronous:
+            await runner.run(goal.id)
+        else:
+            runner.run(goal.id)
+    assert len(model.call_log) == (0 if barrier == 'request' else 1)
+    assert service.store.incorporated_steering_ids(goal.id) == frozenset()
+    now += timedelta(seconds=121)
+    result = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert result.stop_reason.value == 'completed', result.detail
+    assert len(model.call_log) == 2
+    with sqlite_connection(service.store.db_path) as conn:
+        for receipt in service.store.model_requests(goal.id):
+            response = conn.execute('SELECT raw_response FROM conversation_model_requests WHERE turn_id = ? AND request_index = ?',
+                (receipt.turn_id, receipt.request_index)).fetchone()
+            assert bool(receipt.response_ref) == (response['raw_response'] is not None)
+    first = next(item for item in service.store.model_requests(goal.id) if item.request_index == 1)
+    assert (first.incorporated_at is not None) is (barrier == 'response')
+    assert service.store.incorporated_steering_ids(goal.id) == {goal.steering[0].id}
 
 
 @pytest.mark.asyncio

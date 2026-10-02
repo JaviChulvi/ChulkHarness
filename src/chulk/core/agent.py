@@ -687,7 +687,7 @@ class Agent:
             self._recover_unsent(turn, receipt, unsent)
         self.transcripts.revalidate(turn)
         self.catalog.revalidate(turn)
-        self._model_transport._acknowledge_goal_response(turn, turn.model_request_count)
+        self._model_transport._acknowledge_goal_response(turn, turn.extension_metadata.get("goal_response_index", 0))
         if turn.status == "completed":
             return turn.final_answer or ""
         turn.status = "in_progress"
@@ -710,7 +710,7 @@ class Agent:
             self._recover_unsent(turn, receipt, unsent)
         await self.transcripts.revalidate_async(turn)
         await self.catalog.revalidate_async(turn)
-        await self._model_transport._acknowledge_goal_response_async(turn, turn.model_request_count)
+        await self._model_transport._acknowledge_goal_response_async(turn, turn.extension_metadata.get("goal_response_index", 0))
         if turn.status == "completed":
             return turn.final_answer or ""
         turn.status = "in_progress"

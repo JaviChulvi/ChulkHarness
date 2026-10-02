@@ -117,6 +117,10 @@ class TurnEffects:
             tool_call_count=turn.tool_call_count,
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
             reflection_count=turn.reflection_count,
+            reflection_response_pending=(
+                turn.extension_metadata.get("goal_pending", {}).get("phase") == "action"
+                and turn.extension_metadata.get("goal_response", {}).get("purpose") == "reflection"
+            ),
             max_reflection_attempts=self.max_reflection_attempts,
             active_plan_status=plan.status() if plan is not None and turn.plan_approved else None,
             active_plan_step_title=active_step.title if active_step else None,
