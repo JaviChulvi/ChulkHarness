@@ -57,3 +57,5 @@ with `ConfigurationError`, before any provider or tool dispatch. A slice limit
 that can admit the operation on the next turn returns `RunStatus.YIELDED` rather
 than an error. Global goal limits continue to raise `BudgetExceededError` with
 the exhausted dimension and recorded consumption.
+
+Automatic goal admission raises `ConfigurationError` when the host verifier, finite model-call budget or durable recording/accounting is missing. Admitted execution reports typed `GoalStopReason` values, including `required_context_overflow`, `budget_exhausted`, `lease_lost` and `recovery_required`; inspect `GoalExecutionResult.detail` and cumulative usage.

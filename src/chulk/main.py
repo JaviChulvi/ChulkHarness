@@ -37,6 +37,7 @@ from chulk.cli.sessions import run_session_command
 from chulk.cli.parser import build_parser
 from chulk.config import Config, LLMFallbackProviderConfig, load_cli_config
 from chulk.core import Agent
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.errors import ChulkError
 from chulk.llm import (
     AnthropicProvider,
@@ -185,6 +186,7 @@ def create_cli_agent(
     runtime_metadata: dict | None = None,
     run_budget: RunBudget | None = None,
     usage_channel: str = "cli",
+    goal_execution: GoalExecutionContext | None = None,
 ) -> Agent:
     """Create the default CLI coding-agent runtime."""
     preset = software_engineer()
@@ -209,6 +211,7 @@ def create_cli_agent(
         return create_agent(
             AgentAssemblyRequest(
                 config=config,
+            goal_execution=goal_execution,
                 llm_client_factory=llm_client_factory,
             conversation_id=conversation_id,
             tool_specs=preset.tools,
@@ -229,6 +232,7 @@ def create_cli_agent(
     return create_agent(
         AgentAssemblyRequest(
             config=config,
+            goal_execution=goal_execution,
         conversation_id=conversation_id,
         llm_client=create_cli_llm(config),
         tool_specs=preset.tools,
@@ -296,6 +300,7 @@ def create_selected_cli_agent(
     requested_profile_id: str | None = None,
     conversation_id: str | None = None,
     channel: str = "cli",
+    goal_execution: GoalExecutionContext | None = None,
 ) -> tuple[Agent, Config, ResolvedModelRuntime]:
     """Build a CLI agent from the current constrained model selection."""
     selected_config, runtime, chain = resolve_cli_model(
@@ -322,6 +327,7 @@ def create_selected_cli_agent(
         runtime_metadata={"model_selection": runtime.selection.to_dict()},
         run_budget=_model_run_budget(service, runtime),
         usage_channel=channel,
+        goal_execution=goal_execution,
     )
     return agent, selected_config, runtime
 
@@ -714,8 +720,17 @@ def main(
             from chulk.cli.goals import run_goal_command
             from chulk.goals import GoalService, GoalStore
 
+            def goal_agent_factory(context, conversation_id):
+                goal_models = ModelProfileService(ModelProfileStore(base_config.runtime_dir / "control.sqlite", base_config=base_config), ModelProfileValidator(base_config))
+                return create_selected_cli_agent(base_config, config, profile, goal_models, llm_client_factory,
+                    requested_profile_id=getattr(args, "model_profile", None), conversation_id=conversation_id,
+                    goal_execution=context)[0]
+
             return run_goal_command(
                 args.goal_command,
+                agent_factory=goal_agent_factory,
+                verifier_reference=getattr(args, "verifier", None),
+                single_slice=bool(getattr(args, "single_slice", False)),
                 service=GoalService(
                     GoalStore(
                         config.store_path,

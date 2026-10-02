@@ -35,6 +35,12 @@ class GoalExecutionPort(Protocol):
     def abort_tool(self, checkpoint: GoalActionCheckpoint, error: BaseException) -> GoalActionCheckpoint:
         ...
 
+    async def begin_tool_async(self, **kwargs: Any) -> GoalActionCheckpoint: ...
+
+    async def finish_tool_async(self, checkpoint: GoalActionCheckpoint, result: ToolResult) -> GoalActionCheckpoint: ...
+
+    async def abort_tool_async(self, checkpoint: GoalActionCheckpoint, error: BaseException) -> GoalActionCheckpoint: ...
+
 class DurableEffectPort(Protocol):
     """Durable effect boundary invoked immediately around one tool call."""
 
@@ -192,7 +198,7 @@ class ToolExecutor:
             started_at = utc_now()
             await self._reserve_tool_attempt_async(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
             try:
-                goal_checkpoint = await call_async_service(self, "_begin_goal_tool", turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
+                goal_checkpoint = await self.goal_execution.begin_tool_async(turn_id=turn.turn_id, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number) if self.goal_execution is not None else None
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
                 raise
@@ -230,10 +236,12 @@ class ToolExecutor:
                 result = await self._redacted_result_async(tool, arguments, result)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
-                await call_async_service(self, "_abort_goal_tool", goal_checkpoint, exc)
+                if self.goal_execution is not None and goal_checkpoint is not None:
+                    await self.goal_execution.abort_tool_async(goal_checkpoint, exc)
                 raise
             try:
-                await call_async_service(self, "_finish_goal_tool", goal_checkpoint, result)
+                if self.goal_execution is not None and goal_checkpoint is not None:
+                    await self.goal_execution.finish_tool_async(goal_checkpoint, result)
                 await self._commit_tool_attempt_async(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number, result=result)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)

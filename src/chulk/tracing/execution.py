@@ -12,7 +12,7 @@ from chulk.core.action_loop import run_action_loop, run_action_loop_async
 from chulk.core.action_runtime import ActionLoopRuntime
 from chulk.core.events import TraceEvent
 from chulk.core.model_transport import ModelTransport
-from chulk.core.plan_execution import PlanExecution
+from chulk.core.plan_execution import PlanExecution, PlanStepVerification, PlanStepVerificationRequest, PlanStepVerifier
 from chulk.core.reflection import ReflectionResult
 from chulk.core.state import AgentState, TurnState
 from chulk.core.tool_execution import ToolExecutor
@@ -20,6 +20,7 @@ from chulk.core.turn_effects import TurnEffects
 from chulk.goals.runtime import GoalSliceExhausted
 from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory
+from chulk.sessions.sqlite_store import _plan_from_dict
 from chulk.tools.registry import ToolFailureKind, ToolResult
 from chulk.tracing.fixtures import (
     RecordedToolResult,
@@ -506,6 +507,19 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
         user_message=_user_message(fixture),
         available_tool_names=list(state.available_tool_names),
     )
+    goal_step_id = None
+    for event in fixture.expected.events:
+        if event.get("type") == TraceEvent.TURN_STARTED:
+            payload = event.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("turn"), dict):
+                initial_turn = payload["turn"]
+                turn.active_plan = _plan_from_dict(initial_turn.get("active_plan"))
+                turn.plan_approved = bool(initial_turn.get("plan_approved"))
+                goal_step_id = initial_turn.get("extension_metadata", {}).get("goal_step_id")
+                if turn.active_plan is not None and len(turn.active_plan.steps) == 1 and isinstance(goal_step_id, str):
+                    turn.active_plan.steps[0].id = goal_step_id
+                state.active_plan = turn.active_plan
+            break
     state.current_turn_id = turn.turn_id
     state.turns.append(turn)
     events: list[dict[str, Any]] = []
@@ -519,7 +533,7 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
             }
         )
 
-    plan = PlanExecution(state=state, memory=memory, trace=trace)
+    plan = PlanExecution(state=state, memory=memory, trace=trace, verifier=_recorded_verifier(fixture))
     effects = _ReplayTurnEffects(
         state=state,
         memory=memory,
@@ -538,7 +552,7 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
         max_observation_chars=12_000,
         max_tool_stdout_chars=8_000,
         max_tool_stderr_chars=4_000,
-        goal_continuation=_yield_dimension(fixture) is not None,
+        goal_continuation=isinstance(goal_step_id, str) or _yield_dimension(fixture) is not None,
         yield_before_answer=_yield_dimension(fixture),
     )
     model = _ScriptedModelTransport(fixture, trace=trace)
@@ -838,6 +852,30 @@ def _expected_finished_turn(fixture: ReplayFixture) -> dict[str, Any]:
         if isinstance(payload, dict) and isinstance(payload.get("turn"), dict):
             return dict(payload["turn"])
     return {}
+
+
+def _recorded_verifier(fixture: ReplayFixture) -> PlanStepVerifier | None:
+    decisions: list[PlanStepVerification] = []
+    for event in fixture.expected.events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event.get("type") == TraceEvent.PLAN_STEP_COMPLETED:
+            for evidence in payload.get("step", {}).get("evidence", []):
+                if evidence.get("tool_name") == "plan_step_verifier":
+                    decisions.append(PlanStepVerification(True, evidence["content"]))
+        elif event.get("type") == TraceEvent.TOOL_OBSERVATION and payload.get("tool_name") == "plan_step_verification":
+            decisions.append(PlanStepVerification(**payload["output_metadata"]["verification"]))
+    if not decisions:
+        return None
+
+    def verify(request: PlanStepVerificationRequest) -> PlanStepVerification:
+        del request
+        if not decisions:
+            raise ReplayExecutionError("Replay verification decision script is exhausted")
+        return decisions.pop(0)
+
+    return verify
 
 
 def _yield_dimension(fixture: ReplayFixture) -> str | None:

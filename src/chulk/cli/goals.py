@@ -6,6 +6,11 @@ from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import importlib
+import os
+from typing import Any
+
+from chulk.goals.runner import GoalRunner, AgentFactory
 
 from chulk.cli.entrypoints import EXIT_OK, EXIT_RUNTIME_ERROR, json_text
 from chulk.core.state import TurnState
@@ -18,6 +23,9 @@ def run_goal_command(
     command: str,
     *,
     service: GoalService,
+    agent_factory: AgentFactory | None = None,
+    verifier_reference: str | None = None,
+    single_slice: bool = False,
     session_store: SQLiteSessionStore,
     goal_id: str | None = None,
     conversation_id: str | None = None,
@@ -105,11 +113,22 @@ def run_goal_command(
                 reason=reason,
             )
         elif command == "run":
-            goal = service.run(
-                clean_goal_id,
-                expected_revision=revision,
-                actor=actor,
-            )
+            reference = verifier_reference or os.environ.get("CHULK_GOAL_VERIFIER")
+            if not reference or agent_factory is None:
+                raise ValueError("goal run requires a configured host verifier (--verifier module:callable or CHULK_GOAL_VERIFIER)")
+            verifier = load_goal_verifier(reference)
+            current = service.store.get(clean_goal_id)
+            if current.revision != revision:
+                from chulk.goals import GoalRevisionConflictError
+                raise GoalRevisionConflictError(clean_goal_id, revision, current.revision)
+            runner = GoalRunner(service.store, agent_factory=agent_factory, verifier=verifier)
+            result = runner.run_slice(clean_goal_id) if single_slice else runner.run(clean_goal_id)
+            payload = {"ok": True, "action": command, "execution": result.to_dict(), "goal": result.goal.to_dict()}
+            return _emit(payload, _format_goal(result.goal) + f"\n  stopped    {result.stop_reason.value}", json_output, output_func)
+        elif command == "budget":
+            goal = service.update_budget(clean_goal_id, expected_revision=revision, actor=actor,
+                budget=_budget(max_model_calls=max_model_calls, max_tool_calls=max_tool_calls,
+                    max_tokens=max_tokens, max_cost=max_cost, deadline=deadline))
         elif command == "pause":
             goal = service.pause(
                 clean_goal_id,
@@ -297,3 +316,14 @@ def _format_goal(goal) -> str:
 
 
 __all__ = ["run_goal_command"]
+
+
+def load_goal_verifier(reference: str) -> Any:
+    """Load a host-selected verifier; goal/model text cannot choose this binding."""
+    module, separator, name = reference.rpartition(":")
+    if not separator or not module or not name:
+        raise ValueError("goal verifier must use module:callable")
+    value = getattr(importlib.import_module(module), name)
+    if not callable(value):
+        raise ValueError("goal verifier must be callable")
+    return value

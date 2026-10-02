@@ -17,6 +17,8 @@ from chulk.goals.models import (
     GoalRisk,
     GoalSteering,
     GoalStep,
+    GoalStatus,
+    GoalStepStatus,
 )
 from chulk.goals.runtime import GoalExecutionContext
 from chulk.goals.store import GoalStore
@@ -239,6 +241,25 @@ class GoalService:
             actor,
             lambda goal: start_goal(goal, now=self._now()),
         )
+
+    def update_budget(self, goal_id: str, *, expected_revision: int, budget: RunBudget, actor: str) -> Goal:
+        """Replace an objective budget, pausing active work until accounting reopens."""
+        execution = self.store.execution_state(goal_id)
+        def update(goal: Goal) -> Goal:
+            if goal.terminal:
+                raise ValueError("terminal goal budgets cannot be changed")
+            normalized = replace(budget, scope=BudgetScope.GOAL)
+            if normalized == goal.budget:
+                return goal
+            exhausted = execution is not None and execution["exhausted_budget_json"] is not None
+            steps = tuple(replace(step, status=GoalStepStatus.RUNNING, blocked_reason=None)
+                          if exhausted and execution is not None and step.status is GoalStepStatus.BLOCKED and step.id == execution["latest_step_id"]
+                          else step for step in goal.steps)
+            return replace(goal, budget=normalized, steps=steps,
+                           status=GoalStatus.PAUSED if exhausted or goal.status is GoalStatus.RUNNING else goal.status,
+                           last_error=None if exhausted else goal.last_error)
+        return self._mutate(goal_id, expected_revision, "goal.budget_changed", actor, update,
+                            {"budget": budget.to_dict()})
 
     def pause(self, goal_id: str, *, expected_revision: int, actor: str) -> Goal:
         return self._mutate(

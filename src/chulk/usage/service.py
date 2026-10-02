@@ -49,6 +49,8 @@ class MediaUsageReservation:
 class ModelUsageAccounting:
     """Reserve before model calls and commit normalized results afterwards."""
 
+    enforces_goal_budgets = True
+
     def __init__(
         self,
         store: SQLiteUsageStore,

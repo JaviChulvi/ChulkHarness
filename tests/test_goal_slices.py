@@ -263,8 +263,8 @@ def test_verification_migration_rolls_back_and_reopens(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
         assert conn.execute("SELECT name FROM sqlite_schema WHERE name='goal_verifications'").fetchone() is None
-    assert initialize_sqlite_database(path).to_version == 23
-    assert initialize_sqlite_database(path).from_version == 23
+    assert initialize_sqlite_database(path).to_version == SQLITE_MIGRATIONS[-1].version
+    assert initialize_sqlite_database(path).from_version == SQLITE_MIGRATIONS[-1].version
 
 
 def test_global_call_budget_survives_reopen(tmp_path):

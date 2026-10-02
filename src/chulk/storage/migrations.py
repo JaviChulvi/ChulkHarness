@@ -1830,6 +1830,23 @@ def _migrate_to_goal_verifications(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX idx_goal_verifications_step ON goal_verifications(goal_id, step_id, sequence)")
 
 
+def _migrate_to_goal_execution_slices(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE goal_executions (
+        goal_id TEXT PRIMARY KEY REFERENCES goals(id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL, conversation_id TEXT NOT NULL UNIQUE,
+        latest_turn_id TEXT, latest_step_id TEXT, stop_reason TEXT,
+        usage_json TEXT NOT NULL DEFAULT '{}', exhausted_budget_json TEXT
+    )""")
+    conn.execute("""CREATE TABLE goal_slices (
+        turn_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+        profile_id TEXT NOT NULL, step_id TEXT NOT NULL, claim_token TEXT NOT NULL,
+        admitted_revision INTEGER NOT NULL, state TEXT NOT NULL,
+        admitted_at TEXT NOT NULL, finished_at TEXT
+    )""")
+    conn.execute("ALTER TABLE goal_verifications ADD COLUMN goal_revision INTEGER NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE goal_verifications ADD COLUMN applied_revision INTEGER")
+
+
 SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
@@ -1870,6 +1887,7 @@ SQLITE_MIGRATIONS = (
     ),
     SQLiteMigration(22, "goal-context-receipts", _migrate_to_goal_context_receipts),
     SQLiteMigration(23, "goal-verifications", _migrate_to_goal_verifications),
+    SQLiteMigration(24, "goal-execution-slices", _migrate_to_goal_execution_slices),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

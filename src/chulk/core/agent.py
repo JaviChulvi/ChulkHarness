@@ -27,6 +27,8 @@ from chulk.core.prompts import BASE_SYSTEM_PROMPT
 from chulk.core.state import AgentState, TurnState
 from chulk.core.signals import DurableApprovalPaused
 from chulk.errors import ConfigurationError
+from chulk.goals.store import GoalLeaseConflictError
+from chulk.usage import BudgetExceededError
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
 from chulk.llm.lifecycle import aclose_resources, close_resources
@@ -577,6 +579,18 @@ class Agent:
             raise ValueError("user_message cannot be empty")
         return await self._run_user_turn_async(clean_message, require_plan=True)
 
+    def start_goal_step(self, *, turn_id: str) -> str:
+        if self.goal_execution is None or not self.goal_execution.automatic:
+            raise ConfigurationError("Automatic goal execution is not configured")
+        goal = self.goal_execution.assert_boundary()
+        return self._run_user_turn(goal.description, require_plan=False, turn_id=turn_id)
+
+    async def start_goal_step_async(self, *, turn_id: str) -> str:
+        if self.goal_execution is None or not self.goal_execution.automatic:
+            raise ConfigurationError("Automatic goal execution is not configured")
+        goal = await self.goal_execution.assert_boundary_async()
+        return await self._run_user_turn_async(goal.description, require_plan=False, turn_id=turn_id)
+
     def _continuation_source(self) -> TurnState:
         if self.goal_execution is None or self.goal_execution.slice_limits is None:
             raise ConfigurationError("Goal continuation is not enabled")
@@ -601,7 +615,7 @@ class Agent:
                 "tool_name": failure.tool_name, "fingerprint": failure.fingerprint,
                 "failure_kind": failure.failure_kind, "count": failure.count,
             }
-        for key in ("goal_pending", "goal_tool_attempts", "external_content_seen"):
+        for key in ("goal_pending", "goal_tool_attempts", "goal_verification", "external_content_seen"):
             if key in previous.extension_metadata:
                 turn.extension_metadata[key] = deepcopy(previous.extension_metadata[key])
 
@@ -798,7 +812,7 @@ class Agent:
     ) -> TurnState | str:
         """Create a turn while awaiting hosted memory, skills, and execution."""
 
-        blocked = self._new_turn_block_message() if continuation is None else None
+        blocked = self._new_turn_block_message() if continuation is None and not (self.goal_execution and self.goal_execution.automatic) else None
         if blocked is not None:
             return blocked
 
@@ -827,6 +841,14 @@ class Agent:
         )
         if continuation is not None:
             self._copy_continuation(continuation, turn)
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            goal = await self.goal_execution.assert_boundary_async()
+            if continuation is None:
+                turn.active_plan = self.goal_execution.project_plan(goal)
+                turn.plan_approved = True
+            self.state.active_plan = turn.active_plan
+            turn.extension_metadata["goal_id"] = goal.id
+            turn.extension_metadata["goal_step_id"] = self.goal_execution.step_id
         turn.model_input = model_input
         await self.tool_contexts.prepare_async(turn, execution_context)
         self.state.current_turn_id = turn.turn_id
@@ -877,7 +899,7 @@ class Agent:
                 },
             )
 
-        if continuation is not None:
+        if continuation is not None or (self.goal_execution is not None and self.goal_execution.automatic and len(self.state.turns) > 1):
             await self.memory_context.restore_async(turn)
             await self.skill_context.restore_async(turn)
             await self.resources.flush()
@@ -913,7 +935,7 @@ class Agent:
         continuation: TurnState | None = None,
     ) -> TurnState | str:
         """Create and trace a user turn before model/tool execution."""
-        blocked = self._new_turn_block_message() if continuation is None else None
+        blocked = self._new_turn_block_message() if continuation is None and not (self.goal_execution and self.goal_execution.automatic) else None
         if blocked is not None:
             return blocked
 
@@ -942,6 +964,14 @@ class Agent:
         )
         if continuation is not None:
             self._copy_continuation(continuation, turn)
+        if self.goal_execution is not None and self.goal_execution.automatic:
+            goal = self.goal_execution.assert_boundary()
+            if continuation is None:
+                turn.active_plan = self.goal_execution.project_plan(goal)
+                turn.plan_approved = True
+            self.state.active_plan = turn.active_plan
+            turn.extension_metadata["goal_id"] = goal.id
+            turn.extension_metadata["goal_step_id"] = self.goal_execution.step_id
         turn.model_input = model_input
         self.tool_contexts.prepare(turn, execution_context)
         self.state.current_turn_id = turn.turn_id
@@ -992,7 +1022,7 @@ class Agent:
                 },
             )
 
-        if continuation is not None:
+        if continuation is not None or (self.goal_execution is not None and self.goal_execution.automatic and len(self.state.turns) > 1):
             self.memory_context.restore(turn)
             self.skill_context.restore(turn)
             return turn
@@ -1527,6 +1557,9 @@ class Agent:
     def _terminalize_exception(self, turn: TurnState, exc: BaseException) -> None:
         """Finish an active turn without masking the exception that escaped it."""
         if turn.status not in {"in_progress", "waiting_for_approval"}:
+            return
+        if self.goal_execution is not None and self.goal_execution.automatic and isinstance(exc, (GoalLeaseConflictError, BudgetExceededError)):
+            self._turn_effects.yield_turn("goal_boundary", turn)
             return
         cancelled = (
             isinstance(exc, (asyncio.CancelledError, AgentTurnCancelled))

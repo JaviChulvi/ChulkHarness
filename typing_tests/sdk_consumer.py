@@ -9,6 +9,7 @@ from chulk import (
     AgentConfig,
     Goal,
     GoalModelRequest,
+    GoalRunner, AsyncGoalRunner, GoalExecutionStore, AsyncGoalExecutionStore, GoalExecutionResult, GoalStopReason,
     GoalService,
     GoalSteering,
     ApprovalStore,
@@ -575,3 +576,17 @@ def goal_context_contract(service: GoalService, goal: Goal) -> tuple[str, tuple[
     assert all(item.id for item in active)
     receipts: tuple[GoalModelRequest, ...] = service.store.model_requests(goal.id)
     return str(goal.description), goal.constraints, receipts[0] if receipts else None
+
+
+# Goal coordination is available without an Agent-owned goal database.
+def goal_execution_contracts(store: "GoalExecutionStore", runner: "GoalRunner") -> "GoalExecutionResult":
+    result = runner.run_slice("goal-id")
+    _reason: GoalStopReason = result.stop_reason
+    _goal: Goal = store.get(result.goal_id)
+    return result
+
+
+async def async_goal_execution_contracts(store: "AsyncGoalExecutionStore", runner: "AsyncGoalRunner") -> "GoalExecutionResult":
+    result = await runner.run("goal-id")
+    _goal: Goal = await store.get(result.goal_id)
+    return result
