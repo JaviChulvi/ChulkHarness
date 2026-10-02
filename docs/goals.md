@@ -129,11 +129,15 @@ turn plan projects the selected goal step. The host verifier receives an immutab
 current `goal` snapshot alongside the step request; completion writes require
 its persisted decision, current revision and live claim. A turn ending alone
 cannot complete goal work. Evidence and completion are applied atomically once.
+Once the projected plan passes verification, the loop accepts answer generation
+and reflection only. Further tool requests receive feedback without dispatch;
+a repeated request blocks the goal instead of changing an already verified result.
 
 Claims last 120 seconds and renew every 40 seconds during model, tool and verifier
 waits. Losing ownership stops dispatch and fences progress writes. Pause and
 cancellation are observed at admission boundaries; known in-flight results drain
-before release. Approving a step never resumes a user-paused goal.
+before release. Resuming paused work requires the earlier claim to be released or
+expired. Approving a step never resumes a user-paused goal.
 
 `GoalExecutionResult` exposes the goal, conversation/turn/continuation identity,
 cumulative usage and `GoalStopReason`. Reasons distinguish completion, a completed
@@ -142,8 +146,11 @@ lease loss, required-context overflow and recovery required. `run()` continues
 only yielded slices and completed-step boundaries. `run_slice()` returns both.
 Global exhaustion records the exhausted budget and consumption. Use
 `GoalService.update_budget()` (CLI `goal budget`) to explicitly replace the
-budget, then resume the paused work. Counters and the absolute deadline are
-never reset by a slice, pause or process restart.
+budget. Changing a running goal's budget pauses it at the next admission boundary;
+the current execution must drain and release its claim before `resume` or `run`
+can reactivate it. Resuming then builds accounting with the new limits. An unchanged
+budget is a no-op, and changing a paused goal's budget never resumes it. Counters
+and the absolute deadline are never reset by a slice, pause or process restart.
 
 Migration 24 persists execution conversations, preallocated slice identities and
 verification application receipts. An interrupted admitted slice currently

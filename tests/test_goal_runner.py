@@ -317,6 +317,109 @@ def test_verification_survives_yield_before_final_answer(tmp_path):
     assert final.goal.steps[0].attempt == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("repeated", [False, True])
+async def test_verified_goal_rejects_later_tools_across_slices(tmp_path, asynchronous, repeated):
+    from chulk import GoalSliceLimits
+    service, goal = _goal(tmp_path)
+    calls = []
+    verified = []
+
+    @Tool
+    def invalidate_result() -> str:
+        """Change the previously verified result."""
+        calls.append("invalidated")
+        return "Result is now invalid"
+
+    tool_action = {"type": "tool_call", "tool_name": "invalidate_result", "arguments": {}}
+    completion, answer = _completion()
+    llm = ScriptedLLMClient([completion, tool_action, tool_action if repeated else answer])
+
+    def factory(context, conversation_id):
+        return (AsyncAgent if asynchronous else Agent)(
+            config=AgentConfig(project_root=tmp_path, store_path=service.store.db_path, max_reflection_attempts=0),
+            llm=llm, tools=[invalidate_result], skills=[], goal_execution=context, conversation_id=conversation_id,
+        )
+
+    def verifier(request):
+        verified.append(request)
+        return PlanStepVerification(not calls, "Current result verified")
+
+    runner = (AsyncGoalRunner if asynchronous else GoalRunner)(
+        service.store, agent_factory=factory, verifier=verifier, slice_limits=GoalSliceLimits(max_model_calls=3),
+    )
+    first = await runner.run_slice(goal.id) if asynchronous else runner.run_slice(goal.id)
+    assert first.stop_reason.value == "yielded"
+    result = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert result.stop_reason.value == ("blocked" if repeated else "completed")
+    assert len(verified) == 1
+    assert calls == []
+    assert result.usage["tool_calls"] == 0
+    assert result.goal.steps[0].attempt == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_changed_budget_pauses_and_drains_before_resuming(tmp_path, asynchronous):
+    from chulk.goals import GoalLeaseConflictError
+    service, goal = _goal(tmp_path)
+
+    @Tool
+    def lower_budget() -> str:
+        """Record a result while the operator changes the budget."""
+        current = service.store.get(goal.id)
+        paused = service.update_budget(goal.id, expected_revision=current.revision,
+                                       budget=RunBudget(max_model_calls=1), actor="owner")
+        assert paused.status.value == "paused"
+        for restart in (service.run, service.resume):
+            with pytest.raises(GoalLeaseConflictError, match="drain"):
+                restart(goal.id, expected_revision=paused.revision, actor="owner")
+        return "Known result before budget change"
+
+    llm = ScriptedLLMClient([{"type": "tool_call", "tool_name": "lower_budget", "arguments": {}}, *_completion()])
+
+    def factory(context, conversation_id):
+        return (AsyncAgent if asynchronous else Agent)(
+            config=AgentConfig(project_root=tmp_path, store_path=service.store.db_path, max_reflection_attempts=0),
+            llm=llm, tools=[lower_budget], skills=[], goal_execution=context, conversation_id=conversation_id,
+        )
+
+    runner = (AsyncGoalRunner if asynchronous else GoalRunner)(
+        service.store, agent_factory=factory, verifier=lambda _: PlanStepVerification(True, "Verified"),
+    )
+    paused = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert paused.stop_reason.value == "paused"
+    assert paused.usage["model_calls"] == 1
+    assert len(llm.call_log) == 1
+    assert service.store.action_checkpoints(goal.id)[0].result is not None
+    service.resume(goal.id, expected_revision=paused.goal.revision, actor="owner")
+    exhausted = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert exhausted.stop_reason.value == "budget_exhausted"
+    assert len(llm.call_log) == 1
+    updated = service.update_budget(goal.id, expected_revision=exhausted.goal.revision,
+                                    budget=RunBudget(max_model_calls=10), actor="owner")
+    service.resume(goal.id, expected_revision=updated.revision, actor="owner")
+    completed = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert completed.stop_reason.value == "completed"
+    assert completed.usage["model_calls"] == 3
+    assert completed.usage["tool_calls"] == 1
+    assert completed.goal.steps[0].attempt == 1
+
+
+def test_budget_noop_and_paused_update_preserve_operator_state(tmp_path):
+    service, goal = _goal(tmp_path)
+    running = service.run(goal.id, expected_revision=goal.revision, actor="owner")
+    unchanged = service.update_budget(goal.id, expected_revision=running.revision,
+                                      budget=running.budget, actor="owner")
+    assert unchanged == running
+    paused = service.pause(goal.id, expected_revision=unchanged.revision, actor="owner")
+    changed = service.update_budget(goal.id, expected_revision=paused.revision,
+                                    budget=RunBudget(max_model_calls=10), actor="owner")
+    assert changed.status.value == "paused"
+    assert changed.approvals == paused.approvals
+
+
 def test_runner_reports_required_context_overflow_without_provider_calls(tmp_path):
     from dataclasses import replace
     from chulk.core.context import ContextBudget
