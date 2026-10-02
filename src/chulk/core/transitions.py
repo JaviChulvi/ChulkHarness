@@ -371,6 +371,16 @@ def _reduce_tool_call(
     snapshot: ActionLoopSnapshot,
     action: ToolCallAction,
 ) -> ActionTransition:
+    if snapshot.goal_continuation and snapshot.active_plan_approved and snapshot.active_plan_status == "completed":
+        if snapshot.plan_execution_feedback_count >= 1:
+            return _stop_with_failure("Goal execution failed because the model requested tools after verified completion.")
+        return ActionTransition(
+            effect=RequestPlanExecutionFeedbackEffect(feedback=(
+                "Goal execution feedback: the approved work is already verified complete. "
+                "Do not call more tools or change the verified result. Return final_answer."
+            )),
+            outcome=TransitionOutcome.CONTINUE,
+        )
     phase: Literal["planning", "execution"] = (
         "planning" if snapshot.require_plan else "execution"
     )

@@ -117,8 +117,12 @@ def test_pause_and_steering_are_observed_between_active_step_actions(tmp_path) -
     assert goal.status is GoalStatus.PAUSED
     with pytest.raises(GoalLeaseConflictError, match='not running'):
         service.store.assert_action_boundary(claim, step_id='implement', now=NOW)
+    with pytest.raises(GoalLeaseConflictError, match='drain'):
+        service.resume(goal.id, expected_revision=goal.revision, actor='owner')
+    assert service.store.release_claim(claim)
     goal = service.resume(goal.id, expected_revision=goal.revision, actor='owner')
     assert goal.status is GoalStatus.RUNNING
+    claim = service.store.claim(goal.id, runner_id='runner', expected_revision=goal.revision, now=NOW)
     assert service.store.assert_action_boundary(claim, step_id='implement', now=NOW).status is GoalStatus.RUNNING
 
 def test_expired_action_is_uncertain_after_restart_and_not_replayed(tmp_path) -> None:

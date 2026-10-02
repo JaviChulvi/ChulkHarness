@@ -243,7 +243,7 @@ class GoalService:
         )
 
     def update_budget(self, goal_id: str, *, expected_revision: int, budget: RunBudget, actor: str) -> Goal:
-        """Explicitly replace an objective budget; exhausted work remains paused."""
+        """Replace an objective budget, pausing active work until accounting reopens."""
         execution = self.store.execution_state(goal_id)
         def update(goal: Goal) -> Goal:
             if goal.terminal:
@@ -256,7 +256,7 @@ class GoalService:
                           if exhausted and execution is not None and step.status is GoalStepStatus.BLOCKED and step.id == execution["latest_step_id"]
                           else step for step in goal.steps)
             return replace(goal, budget=normalized, steps=steps,
-                           status=GoalStatus.PAUSED if exhausted else goal.status,
+                           status=GoalStatus.PAUSED if exhausted or goal.status is GoalStatus.RUNNING else goal.status,
                            last_error=None if exhausted else goal.last_error)
         return self._mutate(goal_id, expected_revision, "goal.budget_changed", actor, update,
                             {"budget": budget.to_dict()})

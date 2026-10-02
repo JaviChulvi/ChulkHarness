@@ -17,6 +17,7 @@ from chulk.core.reflection import ReflectionResult
 from chulk.core.state import AgentState, TurnState
 from chulk.core.tool_execution import ToolExecutor
 from chulk.core.turn_effects import TurnEffects
+from chulk.goals.runtime import GoalSliceExhausted
 from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory
 from chulk.tools.registry import ToolFailureKind, ToolResult
@@ -56,6 +57,7 @@ _CORE_EVENT_TYPES = frozenset(
         TraceEvent.REFLECTION_REVISION_REQUESTED,
         TraceEvent.FINAL_ANSWER,
         TraceEvent.TURN_FAILED,
+        TraceEvent.TURN_YIELDED,
         TraceEvent.TURN_FINISHED,
     }
 )
@@ -144,6 +146,7 @@ class _ScriptedModelTransport:
             if event.get("type") == TraceEvent.LLM_FALLBACK_ATTEMPTS
         ]
         self._fallback_index = 0
+        self._yield_dimension = _yield_dimension(fixture)
 
     @property
     def consumed(self) -> int:
@@ -205,6 +208,8 @@ class _ScriptedModelTransport:
     ):
         del prompt, require_plan
         if self._action_index >= len(self._actions):
+            if self._yield_dimension is not None:
+                raise GoalSliceExhausted(self._yield_dimension)
             raise ReplayExecutionError("Replay model action script is exhausted")
         record = self._actions[self._action_index]
         self._action_index += 1
@@ -237,6 +242,8 @@ class _ScriptedModelTransport:
 
     def reflect(self, proposed_answer: str, turn: TurnState) -> ReflectionResult:
         if self._reflection_index >= len(self._reflection_records):
+            if self._yield_dimension is not None:
+                raise GoalSliceExhausted(self._yield_dimension)
             raise ReplayExecutionError("Replay reflection script is exhausted")
         payload = self._reflection_records[self._reflection_index]
         self._reflection_index += 1
@@ -319,6 +326,17 @@ class _ScriptedToolExecutor:
         self._transport_index = 0
         self._permissions: list[dict[str, Any]] = []
         self._cancellation_expected = cancellation_expected
+        self._yield_dimension = _yield_dimension(fixture)
+
+    def admit(self, tool_name: str, turn: TurnState) -> None:
+        del tool_name, turn
+        if (self._index == len(self._results)
+                and self._transport_index == len(self._transport_groups)
+                and self._yield_dimension is not None):
+            raise GoalSliceExhausted(self._yield_dimension)
+
+    async def admit_async(self, tool_name: str, turn: TurnState) -> None:
+        self.admit(tool_name, turn)
 
     @property
     def consumed(self) -> int:
@@ -363,6 +381,8 @@ class _ScriptedToolExecutor:
         if self._index >= len(self._results):
             if self._cancellation_expected:
                 raise _ReplayCancelled()
+            if self._yield_dimension is not None:
+                raise GoalSliceExhausted(self._yield_dimension)
             raise ReplayExecutionError("Replay tool result script is exhausted")
         record = self._results[self._index]
         self._index += 1
@@ -410,7 +430,15 @@ class _ScriptedToolExecutor:
                 )
 
 
+@dataclass
 class _ReplayTurnEffects(TurnEffects):
+    yield_before_answer: str | None = None
+
+    def complete_answer(self, content: str, turn: TurnState) -> str:
+        if self.yield_before_answer is not None:
+            raise GoalSliceExhausted(self.yield_before_answer)
+        return super().complete_answer(content, turn)
+
     def _format_observation(
         self,
         requested_tool_name: str,
@@ -506,10 +534,12 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
             if record.phase == "planning"
         ),
         max_tool_calls_per_turn=_max_tool_calls(fixture),
-        max_reflection_attempts=len(_reflection_records(fixture)),
+        max_reflection_attempts=len(_reflection_records(fixture)) + int(_yield_dimension(fixture) is not None),
         max_observation_chars=12_000,
         max_tool_stdout_chars=8_000,
         max_tool_stderr_chars=4_000,
+        goal_continuation=_yield_dimension(fixture) is not None,
+        yield_before_answer=_yield_dimension(fixture),
     )
     model = _ScriptedModelTransport(fixture, trace=trace)
     cancellation_expected = fixture.expected.result.get("status") == "cancelled"
@@ -725,6 +755,12 @@ def _report(
             }
         ),
     }
+    if _yield_dimension(fixture) is not None:
+        for projection, turn in ((actual, runtime.turn.to_dict()), (expected, expected_turn)):
+            pending = turn.get("extension_metadata", {}).get("goal_pending") or {}
+            projection["continuation"] = {
+                key: pending[key] for key in ("phase", "action", "result") if key in pending
+            }
     actual_normalized = normalize_replay_value(actual)
     expected_normalized = normalize_replay_value(expected)
     comparisons = {
@@ -802,6 +838,16 @@ def _expected_finished_turn(fixture: ReplayFixture) -> dict[str, Any]:
         if isinstance(payload, dict) and isinstance(payload.get("turn"), dict):
             return dict(payload["turn"])
     return {}
+
+
+def _yield_dimension(fixture: ReplayFixture) -> str | None:
+    for event in reversed(fixture.expected.events):
+        if event.get("type") == TraceEvent.TURN_YIELDED:
+            payload = event.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("dimension"), str):
+                return payload["dimension"]
+            raise ReplayExecutionError("Recorded yield is missing its exhausted dimension")
+    return None
 
 
 def _user_message(fixture: ReplayFixture) -> str:

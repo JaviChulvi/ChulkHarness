@@ -190,6 +190,13 @@ class GoalStore:
                 raise ValueError("goal mutation cannot assign its own revision")
             if changed == current:
                 return current
+            lease_until = _optional_datetime(row["lease_until"])
+            if (
+                current.status is not GoalStatus.RUNNING
+                and changed.status is GoalStatus.RUNNING
+                and lease_until is not None and lease_until >= now
+            ):
+                raise GoalLeaseConflictError("wait for the current goal execution to drain before resuming")
             updated = changed.with_revision(current.revision + 1, now=now)
             cursor = conn.execute(
                 """
