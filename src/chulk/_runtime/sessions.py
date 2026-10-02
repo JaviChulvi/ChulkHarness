@@ -55,6 +55,7 @@ def create_agent_state(
     *,
     execution_scope: ExecutionScope | None = None,
     new_conversation_id: str | None = None,
+    goal_recovery: bool = False,
     unresolved_tool_handler: Callable[
         [
             SQLiteSessionStore,
@@ -93,7 +94,7 @@ def create_agent_state(
         conversation.id,
         latest_turn,
     )
-    if latest_turn.status == "in_progress":
+    if latest_turn.status == "in_progress" and not goal_recovery:
         hosted_requests = session_store.load_uncheckpointed_hosted_mcp_requests(
             conversation.id,
             latest_turn.turn_id,
@@ -134,6 +135,7 @@ def create_external_agent_state(
     conversation_id: str,
     *,
     execution_scope: ExecutionScope,
+    goal_recovery: bool = False,
 ) -> AgentState:
     """Restore recovery-only state without loading a business transcript."""
     persisted_scope = journal.load_scope(conversation_id)
@@ -141,7 +143,7 @@ def create_external_agent_state(
         execution_scope.assert_resumable(persisted_scope)
     state = AgentState(conversation_id=conversation_id)
     state.turns = list(journal.load_turns(conversation_id))
-    if _restore_external_latest_turn(state):
+    if _restore_external_latest_turn(state, goal_recovery=goal_recovery):
         journal.save_turn_snapshot(
             state.conversation_id,
             state.turns[-1].to_dict(),
@@ -154,6 +156,7 @@ async def create_external_agent_state_async(
     conversation_id: str,
     *,
     execution_scope: ExecutionScope,
+    goal_recovery: bool = False,
 ) -> AgentState:
     """Await recovery-only state without adapting journal calls to threads."""
     persisted_scope = await call_async_service(
@@ -167,7 +170,7 @@ async def create_external_agent_state_async(
     state.turns = list(
         await call_async_service(journal, "load_turns", conversation_id)
     )
-    if _restore_external_latest_turn(state):
+    if _restore_external_latest_turn(state, goal_recovery=goal_recovery):
         await call_async_service(
             journal,
             "save_turn_snapshot",
@@ -179,12 +182,13 @@ async def create_external_agent_state_async(
 
 def _restore_external_latest_turn(
     state: AgentState,
+    *, goal_recovery: bool = False,
 ) -> bool:
     if not state.turns:
         return False
     latest_turn = state.turns[-1]
     recovered = False
-    if latest_turn.status == "in_progress":
+    if latest_turn.status == "in_progress" and not goal_recovery:
         unresolved = [
             record
             for record in latest_turn.tool_calls
@@ -206,6 +210,7 @@ async def create_agent_state_async(
     conversation_id: str | None,
     *,
     execution_scope: ExecutionScope,
+    goal_recovery: bool = False,
 ) -> AgentState:
     """Restore hosted state exclusively through awaited session operations."""
     if conversation_id is None:
@@ -290,7 +295,7 @@ async def create_agent_state_async(
                 metadata={"recovery": "blocked_plan_checkpoint"},
             )
 
-    if latest_turn.status == "in_progress":
+    if latest_turn.status == "in_progress" and not goal_recovery:
         hosted_requests = await call_async_service(
             session_store,
             "load_uncheckpointed_hosted_mcp_requests",

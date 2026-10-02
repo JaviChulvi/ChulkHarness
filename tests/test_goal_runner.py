@@ -191,7 +191,8 @@ def test_claim_expiry_during_tool_cannot_dispatch_or_commit_progress(tmp_path):
     assert result.goal.steps[0].status.value == "running"
     assert not result.goal.evidence
     assert calls == [1]
-    assert runner.run(goal.id).stop_reason.value == "recovery_required"
+    # The durable-run claim is still live even though the goal clock advanced.
+    assert runner.run(goal.id).stop_reason.value == "lease_lost"
 
 
 def test_concurrent_claim_and_stale_progress_are_rejected(tmp_path):

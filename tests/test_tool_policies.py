@@ -225,6 +225,10 @@ async def test_async_tool_cleanup_preserves_cancellation_and_aborts_goal():
             raise RuntimeError('tool release failed')
 
     class Goal:
+        automatic = False
+        async def assert_boundary_async(self):
+            return None
+
 
         def slice_budget(self, _turn):
             return None
@@ -275,6 +279,9 @@ async def test_async_durable_effect_cleanup_preserves_cancellation():
         raise AssertionError('unreachable')
 
     class DurableEffects:
+
+        def recover(self, token):
+            return None
 
         async def prepare_async(self, **_kwargs):
             return 'effect-1'

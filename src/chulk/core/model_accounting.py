@@ -182,6 +182,15 @@ class ModelAccounting:
             raise
         return self._record_reservation(turn, request_index, reservation)
 
+    def dispatched(self, turn: TurnState, request_index: int) -> None:
+        if self.usage_accounting is not None:
+            self.usage_accounting.mark_model_dispatched(turn_id=turn.turn_id, request_index=request_index)
+
+    async def dispatched_async(self, turn: TurnState, request_index: int) -> None:
+        service = self.async_usage_accounting or self.usage_accounting
+        if service is not None:
+            await call_async_service(service, "mark_model_dispatched", turn_id=turn.turn_id, request_index=request_index)
+
     def release(
         self,
         turn: TurnState,
@@ -195,6 +204,8 @@ class ModelAccounting:
             turn_id=turn.turn_id,
             request_index=request_index,
         )
+        if reservation is not None and str(reservation.state) == "active":
+            return None
         return self._record_release(turn, request_index, reason, reservation)
 
     async def release_async(
@@ -218,6 +229,8 @@ class ModelAccounting:
             turn_id=turn.turn_id,
             request_index=request_index,
         )
+        if reservation is not None and str(reservation.state) == "active":
+            return None
         return self._record_release(turn, request_index, reason, reservation)
 
     def _record_report(

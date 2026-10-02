@@ -113,4 +113,5 @@ class ToolContextRuntime:
             scope=default.scope if default is not None else None,
             credentials=default.credentials if default is not None else {},
             effect_key=default.effect_key if default is not None else None,
+            timeout_seconds=default.timeout_seconds if default is not None else None,
         )

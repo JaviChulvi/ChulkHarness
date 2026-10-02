@@ -177,10 +177,14 @@ class PlanExecution:
             goal = self.goal_execution.assert_boundary()
             request = _goal_verification_request(request, goal)
         verification: PlanStepVerification | None = None
+        recorded = self.goal_execution.recorded_verification(turn, context) if self.goal_execution and context is not None else None
         if action.status == "completed":
-            if self.verifier is not None:
+            if recorded is not None:
+                verification = PlanStepVerification(bool(recorded["passed"]), str(recorded["feedback"]))
+            elif self.verifier is not None:
                 verification = _require_verification(
-                    self.verifier(request)
+                    self.goal_execution.call_with_deadline(self.verifier, request) if self.goal_execution is not None
+                    else self.verifier(request)
                 )
             elif self.async_verifier is not None:
                 raise RuntimeError(
@@ -205,16 +209,21 @@ class PlanExecution:
             raise RuntimeError("Validated plan step update lost its active step")
         context = await self.goal_execution.verification_context_async() if self.goal_execution and self.goal_execution.slice_limits else None
         verification: PlanStepVerification | None = None
+        recorded = await self.goal_execution.recorded_verification_async(turn, context) if self.goal_execution and context is not None else None
         if action.status == "completed":
             request = _verification_request(turn, plan, step, action)
             if self.goal_execution is not None:
                 goal = await self.goal_execution.assert_boundary_async()
                 request = _goal_verification_request(request, goal)
-            if self.async_verifier is not None:
-                verification = _require_verification(await self.async_verifier(request))
+            if recorded is not None:
+                verification = PlanStepVerification(bool(recorded["passed"]), str(recorded["feedback"]))
+            elif self.async_verifier is not None:
+                verification = _require_verification(await self.goal_execution.call_with_deadline_async(self.async_verifier, request)
+                    if self.goal_execution is not None else await self.async_verifier(request))
             elif self.verifier is not None:
                 verification = _require_verification(
-                    await call_async_service(self.verifier, "__call__", request)
+                    await self.goal_execution.call_with_deadline_async(call_async_service, self.verifier, "__call__", request)
+                    if self.goal_execution is not None else await call_async_service(self.verifier, "__call__", request)
                 )
         rejection_count = 0
         if context is not None and verification is not None and self.goal_execution is not None:
@@ -260,6 +269,8 @@ class PlanExecution:
                     metadata={"external_verification": True},
                 )
             step.mark("completed")
+            if self.goal_execution is not None and self.goal_execution.automatic:
+                turn.extension_metadata["goal_pending"] = {"phase": "operation_complete"}
             self._trace_step(turn, step, TraceEvent.PLAN_STEP_COMPLETED)
             return None
         step.block(action.reason or action.evidence)

@@ -10,7 +10,7 @@ from chulk.capabilities import ToolRetryPolicy
 from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
-from chulk.goals.models import GoalActionCheckpoint
+from chulk.goals.models import GoalActionCheckpoint, Goal
 from chulk.usage import RunBudget
 from chulk.hosting import ExecutionScope
 from chulk.hosting.async_utils import call_async_service
@@ -21,12 +21,19 @@ from chulk.tools.policy import DataClassification, ToolAuthorization, ToolConcur
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
 
 class GoalExecutionPort(Protocol):
+    automatic: bool
+    def remaining_seconds(self, goal: Goal | None = None) -> float | None: ...
+    async def remaining_seconds_async(self) -> float | None: ...
+    def assert_boundary(self) -> Goal: ...
+    async def assert_boundary_async(self) -> Goal: ...
+    def link_tool(self, checkpoint: GoalActionCheckpoint, effect_id: str) -> None: ...
+    async def link_tool_async(self, checkpoint: GoalActionCheckpoint, effect_id: str) -> None: ...
 
     def slice_budget(self, turn: TurnState) -> RunBudget | None: ...
 
     def on_budget_exhausted(self, error: BudgetExceededError) -> None: ...
 
-    def begin_tool(self, *, turn_id: str, tool_call_index: int, attempt: int, tool_name: str) -> GoalActionCheckpoint:
+    def begin_tool(self, *, turn_id: str, tool_call_index: int, attempt: int, tool_name: str, operation_id: str | None = None) -> GoalActionCheckpoint:
         ...
 
     def finish_tool(self, checkpoint: GoalActionCheckpoint, result: ToolResult) -> GoalActionCheckpoint:
@@ -45,6 +52,11 @@ class DurableEffectPort(Protocol):
     """Durable effect boundary invoked immediately around one tool call."""
 
     def prepare(self, *, tool: Any, arguments: Mapping[str, object], context: ToolExecutionContext, turn: TurnState) -> object:
+        ...
+
+    def effect_id(self, token: object) -> str: ...
+
+    def recover(self, token: object) -> ToolResult | None:
         ...
 
     def started(self, token: object) -> None:
@@ -115,12 +127,12 @@ class ToolExecutor:
         """Admit the first pending attempt before creating its execution record."""
         attempts = turn.extension_metadata.get("goal_tool_attempts", [])
         self._reserve_tool_attempt(turn, tool_name=tool_name,
-            tool_call_index=turn.tool_call_count + 1, attempt=len(attempts) + 1)
+            tool_call_index=turn.tool_call_count if turn.extension_metadata.get("goal_pending", {}).get("phase") == "tool_started" else turn.tool_call_count + 1, attempt=len(attempts) + 1)
 
     async def admit_async(self, tool_name: str, turn: TurnState) -> None:
         attempts = turn.extension_metadata.get("goal_tool_attempts", [])
         await self._reserve_tool_attempt_async(turn, tool_name=tool_name,
-            tool_call_index=turn.tool_call_count + 1, attempt=len(attempts) + 1)
+            tool_call_index=turn.tool_call_count if turn.extension_metadata.get("goal_pending", {}).get("phase") == "tool_started" else turn.tool_call_count + 1, attempt=len(attempts) + 1)
 
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
@@ -143,6 +155,7 @@ class ToolExecutor:
                 context: ToolExecutionContext | None = None
                 durable_token: object | None = None
                 deferred_credentials = False
+                executed = False
                 if result is None and self.durable_approvals is not None:
                     context = self._approval_context(tool, arguments, turn)
                     deferred_credentials = True
@@ -155,19 +168,32 @@ class ToolExecutor:
                         context = self._credentialed_context(tool, arguments, context)
                     if self.durable_effects is not None and durable_token is None:
                         durable_token = self.durable_effects.prepare(tool=tool, arguments=arguments, context=context, turn=turn)
-                    if self.durable_effects is not None and durable_token is not None:
-                        self.durable_effects.started(durable_token)
-                    try:
-                        result = self.registry.run(tool_name, arguments, context=context)
-                        if context.effect_key is not None:
-                            result = replace(result, metadata={**result.metadata, 'effect_key': context.effect_key})
-                    except BaseException as exc:
+                    if self.goal_execution is not None and goal_checkpoint is not None and self.durable_effects is not None and durable_token is not None:
+                        self.goal_execution.link_tool(goal_checkpoint, self.durable_effects.effect_id(durable_token))
+                    recovered = self.durable_effects.recover(durable_token) if self.durable_effects is not None and durable_token is not None else None
+                    if recovered is not None:
+                        result = recovered
+                    else:
+                        if self.goal_execution is not None:
+                            goal = self.goal_execution.assert_boundary()
+                            if self.goal_execution.automatic:
+                                context = replace(context, timeout_seconds=self.goal_execution.remaining_seconds(goal))
                         if self.durable_effects is not None and durable_token is not None:
-                            self.durable_effects.failed(durable_token, exc)
-                        raise
-                    if self.durable_effects is not None and durable_token is not None:
-                        self.durable_effects.completed(durable_token, result)
+                            if self.goal_execution is not None and self.goal_execution.automatic and self.usage_accounting is not None:
+                                self.usage_accounting.mark_tool_dispatched(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt_number)
+                            self.durable_effects.started(durable_token)
+                        try:
+                            result = self.registry.run(tool_name, arguments, context=context)
+                            if context.effect_key is not None:
+                                result = replace(result, metadata={**result.metadata, 'effect_key': context.effect_key})
+                            executed = True
+                        except BaseException as exc:
+                            if self.durable_effects is not None and durable_token is not None:
+                                self.durable_effects.failed(durable_token, exc)
+                            raise
                 result = self._redacted_result(tool, arguments, result)
+                if executed and self.durable_effects is not None and durable_token is not None:
+                    self.durable_effects.completed(durable_token, result)
             except BaseException as exc:
                 self._release_tool_attempt(turn, tool_call_index=tool_call_index, attempt=attempt_number)
                 self._abort_goal_tool(goal_checkpoint, exc)
@@ -198,7 +224,7 @@ class ToolExecutor:
             started_at = utc_now()
             await self._reserve_tool_attempt_async(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
             try:
-                goal_checkpoint = await self.goal_execution.begin_tool_async(turn_id=turn.turn_id, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number) if self.goal_execution is not None else None
+                goal_checkpoint = await self.goal_execution.begin_tool_async(turn_id=turn.turn_id, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number, operation_id=turn.extension_metadata.get("goal_pending", {}).get("operation_id")) if self.goal_execution is not None else None
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
                 raise
@@ -207,6 +233,7 @@ class ToolExecutor:
                 context = None
                 durable_token: object | None = None
                 deferred_credentials = False
+                executed = False
                 if result is None and self.durable_approvals is not None:
                     context = await self._approval_context_async(tool, arguments, turn)
                     deferred_credentials = True
@@ -219,21 +246,38 @@ class ToolExecutor:
                         context = await self._credentialed_context_async(tool, arguments, context)
                     if self.durable_effects is not None and durable_token is None:
                         durable_token = await self.durable_effects.prepare_async(tool=tool, arguments=arguments, context=context, turn=turn)
-                    if self.durable_effects is not None and durable_token is not None:
-                        await self.durable_effects.started_async(durable_token)
-                    try:
-                        if self.flush_async is not None:
-                            await self.flush_async()
-                        result = await self.registry.run_async(tool_name, arguments, context=context)
-                        if context.effect_key is not None:
-                            result = replace(result, metadata={**result.metadata, 'effect_key': context.effect_key})
-                    except BaseException as exc:
+                    if self.goal_execution is not None and goal_checkpoint is not None and self.durable_effects is not None and durable_token is not None:
+                        await self.goal_execution.link_tool_async(goal_checkpoint, self.durable_effects.effect_id(durable_token))
+                    recovered = self.durable_effects.recover(durable_token) if self.durable_effects is not None and durable_token is not None else None
+                    if recovered is not None:
+                        result = recovered
+                    else:
+                        if self.goal_execution is not None:
+                            await self.goal_execution.assert_boundary_async()
+                            if self.goal_execution.automatic:
+                                context = replace(context, timeout_seconds=await self.goal_execution.remaining_seconds_async())
                         if self.durable_effects is not None and durable_token is not None:
-                            await await_cleanup_after_error(self.durable_effects.failed_async(durable_token, exc), exc)
-                        raise
-                    if self.durable_effects is not None and durable_token is not None:
-                        await self.durable_effects.completed_async(durable_token, result)
+                            accounting = self.async_usage_accounting or self.usage_accounting
+                            if self.goal_execution is not None and self.goal_execution.automatic and accounting is not None:
+                                await call_async_service(accounting, "mark_tool_dispatched", turn_id=turn.turn_id, tool_call_index=call_index, attempt=attempt_number)
+                            await self.durable_effects.started_async(durable_token)
+                        try:
+                            if self.flush_async is not None:
+                                await self.flush_async()
+                            if self.goal_execution is not None and self.goal_execution.automatic:
+                                result = await self.registry.run_async(tool_name, arguments, context=context, offload_sync=True)
+                            else:
+                                result = await self.registry.run_async(tool_name, arguments, context=context)
+                            if context.effect_key is not None:
+                                result = replace(result, metadata={**result.metadata, 'effect_key': context.effect_key})
+                            executed = True
+                        except BaseException as exc:
+                            if self.durable_effects is not None and durable_token is not None:
+                                await await_cleanup_after_error(self.durable_effects.failed_async(durable_token, exc), exc)
+                            raise
                 result = await self._redacted_result_async(tool, arguments, result)
+                if executed and self.durable_effects is not None and durable_token is not None:
+                    await self.durable_effects.completed_async(durable_token, result)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
                 if self.goal_execution is not None and goal_checkpoint is not None:
@@ -476,7 +520,7 @@ class ToolExecutor:
     def _begin_goal_tool(self, turn: TurnState, *, tool_name: str, tool_call_index: int, attempt: int) -> GoalActionCheckpoint | None:
         if self.goal_execution is None:
             return None
-        return self.goal_execution.begin_tool(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name)
+        return self.goal_execution.begin_tool(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name, operation_id=turn.extension_metadata.get("goal_pending", {}).get("operation_id"))
 
     def _finish_goal_tool(self, checkpoint: GoalActionCheckpoint | None, result: ToolResult) -> None:
         if self.goal_execution is not None and checkpoint is not None:
@@ -510,7 +554,7 @@ class ToolExecutor:
         if self.usage_accounting is None:
             return
         reservation = self.usage_accounting.release_tool_call(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt)
-        if reservation is not None:
+        if reservation is not None and reservation.state.value != "active":
             self.trace(TraceEvent.BUDGET_RELEASED, {'turn_id': turn.turn_id, 'tool_call_index': tool_call_index, 'attempt': attempt, 'resource_kind': 'tool', 'reservation_id': reservation.id, 'reason': 'tool_result_unavailable'})
 
     async def _reserve_tool_attempt_async(self, turn: TurnState, *, tool_name: str, tool_call_index: int, attempt: int) -> None:
@@ -543,7 +587,7 @@ class ToolExecutor:
             await asyncio.to_thread(self._release_tool_attempt, turn, tool_call_index=tool_call_index, attempt=attempt)
             return
         reservation = await call_async_service(service, 'release_tool_call', turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt)
-        if reservation is not None:
+        if reservation is not None and reservation.state.value != "active":
             self.trace(TraceEvent.BUDGET_RELEASED, {'turn_id': turn.turn_id, 'tool_call_index': tool_call_index, 'attempt': attempt, 'resource_kind': 'tool', 'reservation_id': reservation.id, 'reason': 'tool_result_unavailable'})
 
     async def _get_context_async(self, turn: TurnState) -> ToolExecutionContext:

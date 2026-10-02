@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +14,7 @@ from chulk.llm import (
     LLMResponse,
     LLMStreamChunk,
 )
+from chulk.llm.base import call_with_supported_kwargs, call_async_with_supported_kwargs
 from chulk.llm.lifecycle import aclose_resources, close_resources
 from chulk.llm.tools import PlanningToolAvailability
 
@@ -62,11 +63,12 @@ class RefreshingLLMClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> LLMResponse:
         with self._lease() as client:
-            return client.complete_response(
+            return call_with_supported_kwargs(client.complete_response,
                 messages,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=max_output_tokens, before_dispatch=before_dispatch,
             )
 
     async def acomplete_response(
@@ -74,11 +76,12 @@ class RefreshingLLMClient(LLMClient):
         messages: list[dict[str, str]],
         *,
         max_output_tokens: int | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         async with self._alease() as client:
-            return await client.acomplete_response(
+            return await call_async_with_supported_kwargs(client.acomplete_response,
                 messages,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=max_output_tokens, before_dispatch=before_dispatch,
             )
 
     def stream_complete(
@@ -93,10 +96,32 @@ class RefreshingLLMClient(LLMClient):
                 max_output_tokens=max_output_tokens,
             )
 
+    def stream_final_answer(self, messages: list[dict[str, str]], *,
+                            max_output_tokens: int | None = None,
+                            public_output_committed: Callable[[], bool] | None = None,
+                            before_fallback: Callable[[], None] | None = None,
+                            before_dispatch: Callable[[], None] | None = None) -> Iterator[LLMStreamChunk]:
+        with self._lease() as client:
+            yield from call_with_supported_kwargs(client.stream_final_answer, messages,
+                max_output_tokens=max_output_tokens, public_output_committed=public_output_committed,
+                before_fallback=before_fallback, before_dispatch=before_dispatch)
+
+    async def astream_final_answer(self, messages: list[dict[str, str]], *,
+                                  max_output_tokens: int | None = None,
+                                  public_output_committed: Callable[[], bool] | None = None,
+                                  before_fallback: Callable[[], Awaitable[None]] | None = None,
+                                  before_dispatch: Callable[[], Awaitable[None]] | None = None) -> AsyncIterator[LLMStreamChunk]:
+        async with self._alease() as client:
+            async for chunk in call_with_supported_kwargs(client.astream_final_answer, messages,
+                max_output_tokens=max_output_tokens, public_output_committed=public_output_committed,
+                before_fallback=before_fallback, before_dispatch=before_dispatch):
+                yield chunk
+
     def complete_action(
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], None] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -106,8 +131,9 @@ class RefreshingLLMClient(LLMClient):
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
         with self._lease() as client:
-            return client.complete_action(
+            return call_with_supported_kwargs(client.complete_action,
                 messages,
+                before_dispatch=before_dispatch,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 action_schema=action_schema,
@@ -121,6 +147,7 @@ class RefreshingLLMClient(LLMClient):
         self,
         messages: list[dict[str, str]],
         *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
         max_repair_attempts: int = 2,
         max_output_tokens: int | None = None,
         action_schema: dict[str, Any] | None = None,
@@ -130,8 +157,9 @@ class RefreshingLLMClient(LLMClient):
         mcp_approval_callback: Callable[[dict[str, Any]], bool] | None = None,
     ) -> LLMActionResult:
         async with self._alease() as client:
-            return await client.acomplete_action(
+            return await call_async_with_supported_kwargs(client.acomplete_action,
                 messages,
+                before_dispatch=before_dispatch,
                 max_repair_attempts=max_repair_attempts,
                 max_output_tokens=max_output_tokens,
                 action_schema=action_schema,
