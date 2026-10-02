@@ -57,7 +57,12 @@ class GoalRunBinding:
         return cls(runs, scope, claim, DurableEffectCoordinator(runs, scope=scope, claim=claim, step_id="goal"))
 
     def assert_boundary(self) -> None:
-        self.runs.assert_claim(self.scope, self.claim)
+        try:
+            self.runs.assert_claim(self.scope, self.claim)
+        except RunLeaseError:
+            if self.runs.get(self.scope, self.scope.run_id).status is RunStatus.UNKNOWN:
+                raise GoalRecoveryRequired("Durable effect outcome requires host reconciliation") from None
+            raise
 
     def heartbeat(self, *, lease_seconds: int) -> None:
         self.claim = self.runs.renew(self.scope, self.claim, lease_seconds=lease_seconds)
@@ -116,7 +121,12 @@ class AsyncGoalRunBinding:
         return cls(runs, scope, claim, AsyncDurableEffectCoordinator(runs, scope=scope, claim=claim, step_id="goal"))
 
     async def assert_boundary(self) -> None:
-        await self.runs.assert_claim(self.scope, self.claim)
+        try:
+            await self.runs.assert_claim(self.scope, self.claim)
+        except RunLeaseError:
+            if (await self.runs.get(self.scope, self.scope.run_id)).status is RunStatus.UNKNOWN:
+                raise GoalRecoveryRequired("Durable effect outcome requires host reconciliation") from None
+            raise
 
     async def heartbeat(self, *, lease_seconds: int) -> None:
         self.claim = await self.runs.renew(self.scope, self.claim, lease_seconds=lease_seconds)

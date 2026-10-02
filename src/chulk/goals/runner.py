@@ -100,7 +100,7 @@ class GoalRunner:
                     goal_id=goal_id, worker_id=self.runner_id, lease_seconds=self.lease_seconds)
             except (GoalRecoveryRequired, GoalApprovalRequired, RunLeaseError) as exc:
                 reason = _binding_stop(exc)
-                return _result(admission.goal, admission, reason, {}, str(exc))
+                return _result(admission.goal, admission, reason, json.loads(previous["usage_json"]) if previous else {}, str(exc))
             with self._renew(context):
                 agent = self.agent_factory(context, None if admission.new_conversation else admission.conversation_id)
                 self._validate_agent(agent, context)
@@ -194,6 +194,11 @@ class GoalRunner:
         goal = self.store.get(admission.goal.id)
         if context.ownership_lost:
             error = GoalLeaseConflictError("execution claim renewal failed")
+        elif context.durable is not None and (error is None or isinstance(error, RunLeaseError)):
+            try:
+                context.durable.assert_boundary()
+            except (RunLeaseError, GoalRecoveryRequired) as exc:
+                error = exc
         reason, detail = _outcome(goal, _runtime(agent).state.turns[-1], error)
         if reason is GoalStopReason.LEASE_LOST:
             return _result(goal, admission, reason, usage, detail)
@@ -287,7 +292,7 @@ class AsyncGoalRunner(GoalRunner):
                     context.durable = await call_async_service(GoalRunBinding, "open", runs, context.execution_scope,
                         goal_id=goal_id, worker_id=self.runner_id, lease_seconds=self.lease_seconds)
             except (GoalRecoveryRequired, GoalApprovalRequired, RunLeaseError) as exc:
-                return _result(admission.goal, admission, _binding_stop(exc), {}, str(exc))
+                return _result(admission.goal, admission, _binding_stop(exc), json.loads(previous["usage_json"]) if previous else {}, str(exc))
             async with self._renew_async(context):
                 agent = await call_async_service(self.agent_factory, "__call__", context,
                                                  None if admission.new_conversation else admission.conversation_id)
@@ -326,6 +331,11 @@ class AsyncGoalRunner(GoalRunner):
         goal = await call_async_service(self.store, "get", admission.goal.id)
         if context.ownership_lost:
             error = GoalLeaseConflictError("execution claim renewal failed")
+        elif context.durable is not None and (error is None or isinstance(error, RunLeaseError)):
+            try:
+                await call_async_service(context.durable, "assert_boundary")
+            except (RunLeaseError, GoalRecoveryRequired) as exc:
+                error = exc
         reason, detail = _outcome(goal, _runtime(agent).state.turns[-1], error)
         if reason is GoalStopReason.LEASE_LOST:
             return _result(goal, admission, reason, usage, detail)

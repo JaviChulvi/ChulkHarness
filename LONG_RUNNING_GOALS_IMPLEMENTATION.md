@@ -11,7 +11,7 @@ the original analysis checkout and unrelated user changes are untouched.
 | Authoritative context and steering | feat/goal-authoritative-context | main | [#128](https://github.com/JaviChulvi/ChulkHarness/pull/128) | Full Linux/PostgreSQL CI passed at 598fce5, run 36930051500 |
 | Bounded slices and stagnation | feat/goal-bounded-slices | feat/goal-authoritative-context | [#129](https://github.com/JaviChulvi/ChulkHarness/pull/129) | Full Linux/PostgreSQL CI passed at b46906b, run 36933258603 |
 | Foreground CLI and SDK runner | feat/goal-local-runner | feat/goal-bounded-slices | [#130](https://github.com/JaviChulvi/ChulkHarness/pull/130) | Full Linux/PostgreSQL CI passed at 613f106, run 36935301936 |
-| Durable recovery and hosted execution | feat/goal-hosted-execution | feat/goal-local-runner | Ready to publish | Final local checks passed apart from documented macOS baseline |
+| Durable recovery and hosted execution | feat/goal-hosted-execution | feat/goal-local-runner | [#131](https://github.com/JaviChulvi/ChulkHarness/pull/131) | Required CI on PR; local evidence below |
 
 ## Ownership and contracts
 
@@ -66,9 +66,9 @@ stage passed all required Linux/PostgreSQL CI checks.
 
 Ruff, Linux-platform mypy (336 source files), compileall, docs (20 topics),
 quickstart, review bot, goal-runner example and deterministic evaluation (2/2)
-passed. Clean-wheel installation/import/example smoke passed. A final rebuild
-includes the last model-profile forwarding fix. Required PR CI must still verify
-the final head, including PostgreSQL migration 0006 and shared adapter coverage.
+passed. Clean-wheel installation/import/example smoke passed. The final rebuild
+includes the last model-profile forwarding fix. Required PR CI is authoritative for Linux and PostgreSQL migration 0006 and
+shared adapter coverage.
 
 Stage 4 consists of a persistence/effect/accounting commit and a goal recovery,
 coordination, provider-boundary and regression-test commit. All publication uses

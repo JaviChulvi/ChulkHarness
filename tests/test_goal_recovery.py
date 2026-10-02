@@ -13,11 +13,11 @@ from chulk.usage import RunBudget
 from chulk.sessions.sqlite_store import SQLiteSessionStore
 
 
-def _goal(tmp_path):
+def _goal(tmp_path, *, max_attempts=1):
     store = GoalStore(tmp_path / "state.sqlite")
     service = GoalService(store)
     goal = service.create(title="Recover work", acceptance_criteria=("Verified",),
-        steps=(GoalStep(id="step-0", title="Work", description="Inspect and verify", acceptance_criterion_ids=("criterion-1",)),),
+        steps=(GoalStep(id="step-0", title="Work", description="Inspect and verify", max_attempts=max_attempts, acceptance_criterion_ids=("criterion-1",)),),
         budget=RunBudget(max_model_calls=100))
     return service, service.approve(goal.id, expected_revision=goal.revision, approved_by="owner")
 
@@ -502,3 +502,36 @@ async def test_refreshed_fallback_rechecks_ownership_before_next_provider(asynch
             list(client.stream_final_answer(messages, before_dispatch=boundary))
     assert dispatched == [1]
     assert secondary.call_log == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('asynchronous', [False, True])
+async def test_uncertain_mutation_cannot_be_bypassed_by_retry_step(tmp_path, asynchronous):
+    from chulk.tools.registry import Tool as RegisteredTool, ToolResult
+    from chulk import ToolEffect, ToolPolicy
+    service, goal = _goal(tmp_path, max_attempts=2)
+    calls = []
+    def uncertain(_):
+        calls.append(1)
+        return ToolResult('publish', False, 'Remote outcome unavailable', error='connection lost')
+    tool = RegisteredTool(name='publish', description='Publish output',
+        args_schema={'type': 'object', 'properties': {}}, callable=uncertain,
+        permission_level='write', policy=ToolPolicy(effect=ToolEffect.EXTERNAL_WRITE))
+    model = ScriptedLLMClient([{'type': 'tool_call', 'tool_name': 'publish', 'arguments': {}}, *_completion()])
+    runner = (AsyncGoalRunner if asynchronous else GoalRunner)(service.store,
+        agent_factory=lambda context, conversation_id: (AsyncAgent if asynchronous else Agent)(
+            config=AgentConfig(project_root=tmp_path, store_path=service.store.db_path,
+                permission_profile='workspace-write', max_reflection_attempts=0),
+            llm=model, tools=[tool], skills=[], goal_execution=context, conversation_id=conversation_id),
+        verifier=lambda _: PlanStepVerification(True, 'checked'))
+    result = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert result.stop_reason.value == 'recovery_required', result.detail
+    assert calls == [1]
+    prior_usage = result.usage
+    blocked = service.block_step(goal.id, 'step-0', expected_revision=result.goal.revision, actor='owner', reason='uncertain')
+    service.retry_step(goal.id, 'step-0', expected_revision=blocked.revision, actor='owner')
+    result = await runner.run(goal.id) if asynchronous else runner.run(goal.id)
+    assert result.stop_reason.value == 'recovery_required', result.detail
+    assert calls == [1]
+    assert len(model.call_log) == 1
+    assert result.usage == prior_usage
