@@ -214,6 +214,7 @@ from chulk.events import (
     ResourceAvailablePayload,
     ReconciliationPayload,
     RunCompletedPayload,
+    RunYieldedPayload,
     RunFailedPayload,
     RunLifecyclePayload,
     RunStartedPayload,
@@ -306,6 +307,7 @@ from chulk.goals import (
     GoalCancellationPropagator,
     GoalClaim,
     GoalModelRequest,
+    GoalSliceLimits,
     GoalCriterion,
     GoalEvent,
     GoalEventCallback,
@@ -650,7 +652,7 @@ ExecutionPolicy ExecutionResult ExecutionSession ExecutionSessionRequest Executi
 ExecutionBackendFactory EnvironmentPolicy EndpointRef ExactCost DockerPolicy DockerExecutionBackend
 DockerUnavailableError FileAccess FileListRequest FileReadRequest FileSearchRequest FileWriteRequest
 GitWorktreeBackend GitWorktreePolicy Goal GoalActionCheckpoint
-GoalActionConflictError GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalModelRequest
+GoalActionConflictError GoalActionState GoalApproval GoalCancellationPropagator GoalChangedPayload GoalModelRequest GoalSliceLimits
 GoalClaim GoalCriterion GoalEvent GoalEventCallback GoalEvidence GoalExecutionContext
 GoalLeaseConflictError GoalNotFoundError GoalRevisionConflictError GoalRisk GoalRetentionPolicy
 GoalService GoalStatus GoalSteering GoalStep GoalStepStatus GoalStore GeneratedMedia GovernedSkill
@@ -678,7 +680,7 @@ AsyncIncrementalOutputPolicy PassThroughOutputPolicy AsyncPassThroughOutputPolic
 OutputPolicyFailureMode ResourcePolicy ResourceKind ReservationState ResolvedProfileRuntime
 ResolvedModelCandidate ResolvedModelRuntime RunResult RunBudget RuntimeChildAgentFactory
 ProviderError ResourcesLoadedPayload ResourceAvailablePayload ResourcePersistence HostResource
-RunCompletedPayload RunFailedPayload RunStartedPayload SerializedEventPayload RunStatus SafetyError
+RunCompletedPayload RunYieldedPayload RunFailedPayload RunStartedPayload SerializedEventPayload RunStatus SafetyError
 SecretPolicy SessionHit SessionMessage SessionSearchPage SessionSearchService SessionWindow
 ShellExecutionDecision ShellExecutionPolicy ShellExecutionRequest SQLiteProfileStore SQLiteGoalStore
 SQLiteUsageStore StoredAgentProfile ReactionPart ReplyPart RetentionPolicy TextPart TextInputPart

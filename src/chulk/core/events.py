@@ -222,4 +222,6 @@ class TraceEvent:
     REFLECTION_FAILED = "reflection_failed"
     FINAL_ANSWER = "final_answer"
     TURN_FAILED = "turn_failed"
+    TURN_CHECKPOINTED = "turn_checkpointed"
+    TURN_YIELDED = "turn_yielded"
     TURN_FINISHED = "turn_finished"

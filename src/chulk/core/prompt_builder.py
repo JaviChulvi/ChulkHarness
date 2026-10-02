@@ -277,7 +277,7 @@ def build_agent_prompt(
             (
                 "tool_rules",
                 "Tool-call rules",
-                format_tool_call_rules(max_tool_calls_per_turn),
+                format_tool_call_rules(max_tool_calls_per_turn, goal_continuation=bool(goal_context and goal_context.get("slice_limits"))),
                 {"max_tool_calls_per_turn": max_tool_calls_per_turn},
             )
         )

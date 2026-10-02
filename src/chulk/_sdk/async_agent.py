@@ -88,6 +88,9 @@ class AsyncAgent(AsyncAgentHandle):
             serialized=True,
         )
 
+    async def continue_goal_slice(self, **kwargs: Any) -> RunResult:
+        return await self._invoke_async("continue_goal_slice", lambda: AsyncAgentHandle.continue_goal_slice(self, **kwargs), serialized=True)
+
     async def run_input(self, user_input: UserInput, **kwargs: Any) -> str:
         options = self._agent._run_options(kwargs)
         result = await self._invoke_async(
@@ -359,7 +362,7 @@ class AsyncAgent(AsyncAgentHandle):
             nonlocal attempted_turn_id, last_event_id
             if event.name == EventName.RUN_STARTED.value:
                 attempted_turn_id = event.turn_id
-            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
+            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_YIELDED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
                 last_event_id = event.event_id
             if caller_on_event is not None:

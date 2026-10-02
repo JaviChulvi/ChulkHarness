@@ -115,6 +115,13 @@ class AgentHandle:
             )
         return run_result_from_runtime(self.runtime, content)
 
+    def continue_goal_slice(self, *, on_event: EventCallback | None = None,
+                            tool_context: ToolExecutionContext | dict | None = None) -> RunResult:
+        self._ensure_open()
+        with self._events.callbacks(on_delta=None, on_event=on_event):
+            content = self.runtime.continue_goal_slice(tool_context=tool_context)
+        return run_result_from_runtime(self.runtime, content)
+
     def run_input(
         self,
         user_input: UserInput,
@@ -353,6 +360,13 @@ class AsyncAgentHandle:
                 extension_metadata=extension_metadata,
                 tool_context=tool_context,
             )
+        return run_result_from_runtime(self.runtime, content)
+
+    async def continue_goal_slice(self, *, on_event: EventCallback | None = None,
+                                  tool_context: ToolExecutionContext | dict | None = None) -> RunResult:
+        self.handle._ensure_open()
+        with self.handle._events.callbacks(on_delta=None, on_event=on_event):
+            content = await self.runtime.continue_goal_slice_async(tool_context=tool_context)
         return run_result_from_runtime(self.runtime, content)
 
     async def run_input(

@@ -433,6 +433,9 @@ class TurnState:
 
     def non_retryable_tool_failure_sequence(self) -> ToolFailureSequence | None:
         """Return the current unchanged non-retryable failure sequence, if any."""
+        prior = self.extension_metadata.get("goal_failure_guard")
+        if not self.tool_calls and isinstance(prior, dict):
+            return ToolFailureSequence(**prior)
         sequence: ToolFailureSequence | None = None
         for record in reversed(self.tool_calls):
             if (

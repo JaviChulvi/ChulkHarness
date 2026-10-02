@@ -1814,6 +1814,22 @@ def _migrate_to_goal_context_receipts(conn: sqlite3.Connection) -> None:
                      (json.dumps(snapshot, sort_keys=True), row["id"]))
 
 
+def _migrate_to_goal_verifications(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE goal_verifications (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL, step_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+            context_digest TEXT NOT NULL, evidence_digest TEXT NOT NULL,
+            passed INTEGER NOT NULL CHECK (passed IN (0, 1)), feedback TEXT NOT NULL,
+            rejection_count INTEGER NOT NULL CHECK (rejection_count >= 0),
+            created_at TEXT NOT NULL,
+            UNIQUE (goal_id, operation_id)
+        )
+    """)
+    conn.execute("CREATE INDEX idx_goal_verifications_step ON goal_verifications(goal_id, step_id, sequence)")
+
+
 SQLITE_MIGRATIONS = (
     SQLiteMigration(1, "shared-memory-and-session-schema", _migrate_to_shared_schema),
     SQLiteMigration(2, "unique-message-ordinals", _migrate_to_unique_message_ordinals),
@@ -1853,6 +1869,7 @@ SQLITE_MIGRATIONS = (
         _migrate_to_resumable_agent_evaluations,
     ),
     SQLiteMigration(22, "goal-context-receipts", _migrate_to_goal_context_receipts),
+    SQLiteMigration(23, "goal-verifications", _migrate_to_goal_verifications),
 )
 SQLITE_SCHEMA_VERSION = SQLITE_MIGRATIONS[-1].version
 

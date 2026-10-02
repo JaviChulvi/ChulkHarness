@@ -240,7 +240,7 @@ class SessionRecorder:
             self.store.update_conversation_status(self.conversation_id, status)
             return
 
-        if event_type == TraceEvent.TURN_FINISHED:
+        if event_type in {TraceEvent.TURN_FINISHED, TraceEvent.TURN_CHECKPOINTED}:
             turn = payload.get("turn")
             if isinstance(turn, dict):
                 self.store.save_turn_snapshot(self.conversation_id, turn)

@@ -105,3 +105,9 @@ Run `chulk --show-config` to inspect resolved non-secret settings. API keys are
 reported only as set or not set. Provider base URLs keep their scheme, host,
 port, and path, but Chulk removes user information, query parameters, and
 fragments before printing them.
+
+Goal-bound continuation accepts `GoalSliceLimits(max_tool_calls=5,
+max_model_calls=20, max_seconds=60)` through `GoalExecutionContext.slice_limits`.
+All values are positive integers. These cooperative slice limits are separate
+from the persistent `RunBudget` for the whole goal. Unbound turns retain the
+existing tool limit.

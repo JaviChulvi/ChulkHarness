@@ -24,7 +24,7 @@ from chulk.storage import (
     SQLiteMigration, SQLiteMigrationError, UnsupportedSQLiteSchemaVersionError,
     initialize_sqlite_database, sqlite_connection,
 )
-from chulk.storage.migrations import SQLITE_MIGRATIONS
+from chulk.storage.migrations import SQLITE_MIGRATIONS, SQLITE_SCHEMA_VERSION
 from chulk.testing import ScriptedLLMClient
 from chulk.usage import RunBudget
 
@@ -272,12 +272,12 @@ def test_v21_upgrade_backfills_only_goal_state_and_reopens(tmp_path):
                       json.dumps(snapshot), NOW.isoformat(), NOW.isoformat()))
     report = initialize_sqlite_database(path)
     assert report.from_version == 21
-    assert report.to_version == 22
+    assert report.to_version == SQLITE_SCHEMA_VERSION
     assert report.backup_path is not None
     assert GoalStore(path).get(snapshot["id"]).description == snapshot["title"]
     assert GoalStore(path).get(snapshot["id"]).constraints == ()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SQLITE_SCHEMA_VERSION
 
 
 def test_successive_compactions_preserve_all_mandatory_state(tmp_path):
@@ -390,7 +390,7 @@ def test_context_migration_failure_rolls_back_and_future_schema_is_rejected(tmp_
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'goal_model_requests'").fetchone() is None
-    assert initialize_sqlite_database(path).to_version == 22
+    assert initialize_sqlite_database(path).to_version == SQLITE_SCHEMA_VERSION
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA user_version = 999")
     with pytest.raises(UnsupportedSQLiteSchemaVersionError):
@@ -410,7 +410,7 @@ def test_historical_goal_script_preserves_writer_transaction_and_rolls_back(tmp_
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'goals'").fetchone() is None
-    assert initialize_sqlite_database(path).to_version == 22
+    assert initialize_sqlite_database(path).to_version == SQLITE_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio

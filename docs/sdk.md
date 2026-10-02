@@ -219,3 +219,12 @@ progress, durable outbox ownership, and ambiguous delivery reconciliation.
 See [events](events.md) for generator cleanup and ordering,
 [configuration](configuration.md) for runtime ownership, and the
 [release policy](release-policy.md) before importing advanced modules.
+
+### Continuing bounded goal work
+
+Goal-bound agents can opt into immutable `GoalSliceLimits`. A result with
+`RunStatus.YIELDED` has no final answer; call `continue_goal_slice()` on the same
+conversation (or await it on `AsyncAgent`) to resume pending work in a new turn.
+Reopening the conversation preserves continuation. Each call is serialized by
+the same facade gate as `run_result`. Tool permissions are checked again.
+`YIELDED` is an SDK turn status, distinct from durable-run scheduling statuses.

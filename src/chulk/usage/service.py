@@ -99,6 +99,7 @@ class ModelUsageAccounting:
         messages: list[dict[str, str]],
         purpose: str,
         repair_attempts: int = 0,
+        slice_budget: RunBudget | None = None,
     ) -> BudgetReservation:
         """Hold a conservative allowance for every provider that may be tried."""
         key = (turn_id, request_index)
@@ -138,6 +139,7 @@ class ModelUsageAccounting:
         )
         try:
             constraints = self._reserve_constraints(
+                slice_budget=slice_budget,
                 source_event_id=source_event_id,
                 resource_kind=ResourceKind.MODEL,
                 dimensions=self._dimensions(turn_id),
@@ -286,7 +288,7 @@ class ModelUsageAccounting:
                             if attempt_meter is not None
                             else None
                         ),
-                        model_calls=1,
+                        model_calls=_attempt_model_calls(attempt),
                         metadata={
                             "request_event_id": reservation.source_event_id,
                             "attempt": index,
@@ -351,6 +353,7 @@ class ModelUsageAccounting:
         tool_call_index: int,
         attempt: int,
         tool_name: str,
+        slice_budget: RunBudget | None = None,
     ) -> BudgetReservation:
         """Reserve one concrete tool attempt before permission or execution."""
         key = (turn_id, tool_call_index, attempt)
@@ -376,6 +379,7 @@ class ModelUsageAccounting:
         )
         try:
             constraints = self._reserve_constraints(
+                slice_budget=slice_budget,
                 source_event_id=source_event_id,
                 resource_kind=ResourceKind.TOOL,
                 dimensions=self._dimensions(turn_id),
@@ -577,10 +581,16 @@ class ModelUsageAccounting:
         tool_calls: int = 0,
         tokens: int = 0,
         cost: ExactCost,
+        slice_budget: RunBudget | None = None,
     ) -> tuple[BudgetReservation, ...]:
         reservations: list[BudgetReservation] = []
         try:
-            for budget in self.additional_budgets:
+            budgets = self.additional_budgets
+            if slice_budget is not None:
+                if any(item.scope == slice_budget.scope for item in (self.budget, *budgets)):
+                    raise ValueError("slice budget requires an unused turn budget scope")
+                budgets = (*budgets, slice_budget)
+            for budget in budgets:
                 reservations.append(
                     self.store.reserve(
                         idempotency_key=(
@@ -803,6 +813,15 @@ def _attempt_cost(attempt: object) -> LLMCost | None:
     return None
 
 
+def _attempt_model_calls(attempt: object) -> int:
+    value = _attempt_value(attempt, "model_calls")
+    if value is None:
+        return 1
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("provider attempt model_calls must be a positive integer")
+    return value
+
+
 def _checkpoint_attempt(
     client: LLMClient,
     attempt: object,
@@ -817,6 +836,7 @@ def _checkpoint_attempt(
         "provider": _optional_text(_attempt_value(attempt, "provider")),
         "model": _optional_text(_attempt_value(attempt, "model")),
         "success": bool(_attempt_value(attempt, "success")),
+        "model_calls": _attempt_model_calls(attempt),
         "error_code": _optional_text(_attempt_value(attempt, "error_code")),
         "model_profile_id": model_profile_id,
         "credential_ref": meter.credential_ref if meter is not None else None,

@@ -195,13 +195,17 @@ def format_system_instructions_for_prompt(system_prompt: str) -> str:
     )
 
 
-def format_tool_call_rules(max_tool_calls_per_turn: int) -> str:
+def format_tool_call_rules(max_tool_calls_per_turn: int, *, goal_continuation: bool = False) -> str:
     """Format per-turn tool-call limits and recovery guidance."""
     return "\n".join(
         [
             "<tool_call_rules>",
             f"<max_tool_calls_per_turn>{max_tool_calls_per_turn}</max_tool_calls_per_turn>",
             (
+                "<rule>Request the next necessary action. The harness enforces slice limits, "
+                "checkpoints pending work and yields to another turn. A slice limit is not "
+                "evidence of step or goal completion.</rule>"
+                if goal_continuation else
                 "<rule>Tool-call limit: you may request at most "
                 f"{max_tool_calls_per_turn} tool calls for this user turn.</rule>"
             ),

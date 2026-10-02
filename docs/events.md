@@ -15,10 +15,10 @@ with Agent(config=config, llm=client) as agent:
             print(event.payload.result.content)
 ```
 
-`AgentEvent` schema v3 contains `event_id`, `name`, an ISO-8601 `timestamp`,
+`AgentEvent` schema v4 contains `event_id`, `name`, an ISO-8601 `timestamp`,
 `conversation_id`, optional turn/run/step IDs, an `ExecutionScope`,
 correlation, causation, source-event and idempotency IDs, a typed `payload`,
-and read-only `extensions`. Readers continue to accept schema v1 and v2;
+and read-only `extensions`. Readers continue to accept schema v1, v2, and v3;
 legacy envelopes receive a deterministic `legacy_...` event ID. Dotted
 lowercase names are the compatibility-stable catalog:
 
@@ -39,6 +39,7 @@ lowercase names are the compatibility-stable catalog:
 | `application.event` | `ApplicationEventPayload` | A tool-produced, schema-validated application event is available. |
 | `plan.created` | `PlanPayload` | Plan mode created an approval-gated plan. |
 | `plan.approved` | `PlanPayload` | A pending plan was approved. |
+| `run.yielded` | `RunYieldedPayload` | A bounded goal slice stopped with durable continuation. |
 | `run.completed` | `RunCompletedPayload` | The terminal structured result is available. |
 | `run.failed` | `RunFailedPayload` | The run failed before a normal result. |
 | durable `run.*` transitions | `RunLifecyclePayload` | Queue, pause, resume, retry, cancellation, unknown, and dead-letter state. |
@@ -68,7 +69,7 @@ content remains available to the model without appearing in the event.
 
 Use `agent.run_events(...)` for a synchronous iterator and
 `async_agent.run_events_async(...)` for an async iterator. Events retain
-execution order and end with exactly one `run.completed` or `run.failed` event.
+execution order and end with exactly one `run.completed`, `run.yielded`, or `run.failed` event.
 The completion payload contains the same `RunResult` contract returned by
 `run_result(...)`. See [SDK result contract](sdk.md) for its finite statuses,
 immutable nested records, and serialization rules. Model response events also
@@ -85,7 +86,7 @@ delivery outcome in `RunResult.final_answer_delivery`. Structured action bytes,
 tool-call arguments, and repair responses never enter this event.
 
 Durable transitions are first committed to `RunStore` as append-only
-`RunEvent` records. `RunEventPublisher` projects them to schema-v3 envelopes
+`RunEvent` records. `RunEventPublisher` projects them to schema-v4 envelopes
 using the durable event ID and sequence, chaining each event to its predecessor.
 Application sinks can therefore deduplicate and reconstruct deterministically.
 `AsyncRunEventPublisher` awaits async sinks directly. Hosted gateway events use

@@ -11,6 +11,7 @@ from chulk.core.async_cleanup import await_cleanup_after_error
 from chulk.core.events import TraceEvent
 from chulk.core.state import TurnState, utc_now
 from chulk.goals.models import GoalActionCheckpoint
+from chulk.usage import RunBudget
 from chulk.hosting import ExecutionScope
 from chulk.hosting.async_utils import call_async_service
 from chulk.tools import ToolRegistry
@@ -20,6 +21,10 @@ from chulk.tools.policy import DataClassification, ToolAuthorization, ToolConcur
 from chulk.usage import BudgetExceededError, ModelUsageAccounting
 
 class GoalExecutionPort(Protocol):
+
+    def slice_budget(self, turn: TurnState) -> RunBudget | None: ...
+
+    def on_budget_exhausted(self, error: BudgetExceededError) -> None: ...
 
     def begin_tool(self, *, turn_id: str, tool_call_index: int, attempt: int, tool_name: str) -> GoalActionCheckpoint:
         ...
@@ -96,15 +101,30 @@ class ToolExecutor:
     def set_permission_callback(self, callback: Callable[[PermissionRequest, PermissionDecisionRecord], PermissionDecision | bool] | None) -> None:
         self.permission_callback = callback
 
+    def _slice_options(self, turn: TurnState) -> dict[str, Any]:
+        budget = self.goal_execution.slice_budget(turn) if self.goal_execution else None
+        return {"slice_budget": budget} if budget is not None else {}
+
+    def admit(self, tool_name: str, turn: TurnState) -> None:
+        """Admit the first pending attempt before creating its execution record."""
+        attempts = turn.extension_metadata.get("goal_tool_attempts", [])
+        self._reserve_tool_attempt(turn, tool_name=tool_name,
+            tool_call_index=turn.tool_call_count + 1, attempt=len(attempts) + 1)
+
+    async def admit_async(self, tool_name: str, turn: TurnState) -> None:
+        attempts = turn.extension_metadata.get("goal_tool_attempts", [])
+        await self._reserve_tool_attempt_async(turn, tool_name=tool_name,
+            tool_call_index=turn.tool_call_count + 1, attempt=len(attempts) + 1)
+
     def execute(self, tool_name: str, arguments: dict, turn: TurnState) -> ToolResult:
         """Execute a tool through the blocking transport and retry policy."""
         tool = self._registered_tool(tool_name)
         tool_call_index = turn.tool_call_count
         retry_policy = getattr(tool, 'retry_policy', None)
         max_attempts, non_idempotent_guard = _attempt_policy(tool, retry_policy)
-        attempts: list[dict] = []
+        attempts: list[dict] = list(turn.extension_metadata.get("goal_tool_attempts", []))
         result: ToolResult | None = None
-        for attempt_number in range(1, max_attempts + 1):
+        for attempt_number in range(len(attempts) + 1, max_attempts + 1):
             started_at = utc_now()
             self._reserve_tool_attempt(turn, tool_name=tool_name, tool_call_index=tool_call_index, attempt=attempt_number)
             try:
@@ -166,13 +186,13 @@ class ToolExecutor:
         call_index = turn.tool_call_count if tool_call_index is None else tool_call_index
         retry_policy = getattr(tool, 'retry_policy', None)
         max_attempts, non_idempotent_guard = _attempt_policy(tool, retry_policy)
-        attempts: list[dict] = []
+        attempts: list[dict] = list(turn.extension_metadata.get("goal_tool_attempts", []))
         result: ToolResult | None = None
-        for attempt_number in range(1, max_attempts + 1):
+        for attempt_number in range(len(attempts) + 1, max_attempts + 1):
             started_at = utc_now()
             await self._reserve_tool_attempt_async(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
             try:
-                goal_checkpoint = self._begin_goal_tool(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
+                goal_checkpoint = await call_async_service(self, "_begin_goal_tool", turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
                 raise
@@ -210,10 +230,10 @@ class ToolExecutor:
                 result = await self._redacted_result_async(tool, arguments, result)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
-                self._abort_goal_tool(goal_checkpoint, exc)
+                await call_async_service(self, "_abort_goal_tool", goal_checkpoint, exc)
                 raise
             try:
-                self._finish_goal_tool(goal_checkpoint, result)
+                await call_async_service(self, "_finish_goal_tool", goal_checkpoint, result)
                 await self._commit_tool_attempt_async(turn, tool_name=tool_name, tool_call_index=call_index, attempt=attempt_number, result=result)
             except BaseException as exc:
                 await await_cleanup_after_error(self._release_tool_attempt_async(turn, tool_call_index=call_index, attempt=attempt_number), exc)
@@ -245,6 +265,8 @@ class ToolExecutor:
         retry = _should_retry(result, retry_policy, attempt_number, max_attempts)
         record = _attempt_payload(attempt_number, started_at, result, retry=retry, non_idempotent_guard=non_idempotent_guard)
         attempts.append(record)
+        if self.goal_execution is not None:
+            turn.extension_metadata["goal_tool_attempts"] = list(attempts) if retry else []
         self.trace(TraceEvent.TOOL_CALL_ATTEMPT, {'turn_id': turn.turn_id, 'tool_name': tool_name, **record})
         return retry
 
@@ -460,8 +482,10 @@ class ToolExecutor:
         if self.usage_accounting is None:
             return
         try:
-            reservation = self.usage_accounting.reserve_tool_call(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name)
+            reservation = self.usage_accounting.reserve_tool_call(turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name, **self._slice_options(turn))
         except BudgetExceededError as exc:
+            if self.goal_execution is not None:
+                self.goal_execution.on_budget_exhausted(exc)
             payload = {'turn_id': turn.turn_id, 'tool_name': tool_name, 'tool_call_index': tool_call_index, 'attempt': attempt, 'resource_kind': 'tool', 'scope': exc.scope.value, 'dimension': exc.dimension, 'limit': exc.limit, 'committed': exc.committed, 'reserved': exc.reserved, 'requested': exc.requested, 'message': str(exc)}
             turn.extension_metadata['budget_exhausted'] = payload
             self.trace(TraceEvent.BUDGET_EXHAUSTED, payload)
@@ -487,8 +511,10 @@ class ToolExecutor:
             await asyncio.to_thread(self._reserve_tool_attempt, turn, tool_name=tool_name, tool_call_index=tool_call_index, attempt=attempt)
             return
         try:
-            reservation = await call_async_service(service, 'reserve_tool_call', turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name)
+            reservation = await call_async_service(service, 'reserve_tool_call', turn_id=turn.turn_id, tool_call_index=tool_call_index, attempt=attempt, tool_name=tool_name, **self._slice_options(turn))
         except BudgetExceededError as exc:
+            if self.goal_execution is not None:
+                self.goal_execution.on_budget_exhausted(exc)
             payload = {'turn_id': turn.turn_id, 'tool_name': tool_name, 'tool_call_index': tool_call_index, 'attempt': attempt, 'resource_kind': 'tool', 'scope': exc.scope.value, 'dimension': exc.dimension, 'limit': exc.limit, 'committed': exc.committed, 'reserved': exc.reserved, 'requested': exc.requested, 'message': str(exc)}
             turn.extension_metadata['budget_exhausted'] = payload
             self.trace(TraceEvent.BUDGET_EXHAUSTED, payload)

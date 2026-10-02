@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from chulk.goals.runtime import GoalExecutionContext
 from chulk.core.events import TraceEvent
 from chulk.core.state import AgentState, TurnState
 from chulk.hosting.async_utils import call_async_service
@@ -29,11 +30,17 @@ class ModelAccounting:
         trace: Callable[[str, dict], None],
         usage_accounting: ModelUsageAccounting | None,
         async_usage_accounting: object | None = None,
+        goal_execution: GoalExecutionContext | None = None,
     ) -> None:
+        self.goal_execution = goal_execution
         self.state = state
         self.trace = trace
         self.usage_accounting = usage_accounting
         self.async_usage_accounting = async_usage_accounting
+
+    def _slice_options(self, turn: TurnState) -> dict[str, Any]:
+        budget = self.goal_execution.slice_budget(turn) if self.goal_execution else None
+        return {"slice_budget": budget} if budget is not None else {}
 
     def record(
         self,
@@ -129,8 +136,11 @@ class ModelAccounting:
                 messages=messages,
                 purpose=purpose,
                 repair_attempts=repair_attempts,
+                **self._slice_options(turn),
             )
         except BudgetExceededError as exc:
+            if self.goal_execution is not None:
+                self.goal_execution.on_budget_exhausted(exc)
             self._record_exhausted(turn, request_index, exc)
             raise
         return self._record_reservation(turn, request_index, reservation)
@@ -163,8 +173,11 @@ class ModelAccounting:
                 messages=messages,
                 purpose=purpose,
                 repair_attempts=repair_attempts,
+                **self._slice_options(turn),
             )
         except BudgetExceededError as exc:
+            if self.goal_execution is not None:
+                self.goal_execution.on_budget_exhausted(exc)
             self._record_exhausted(turn, request_index, exc)
             raise
         return self._record_reservation(turn, request_index, reservation)

@@ -17,8 +17,8 @@ from chulk.results import Cost, Plan, RunResult, Usage, freeze_mapping, plain_da
 from chulk.resources import HostResource
 
 
-EVENT_SCHEMA_VERSION = 3
-SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3)
+EVENT_SCHEMA_VERSION = 4
+SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
 
 class EventName(str, Enum):
@@ -89,6 +89,7 @@ class EventName(str, Enum):
     AUTOMATION_JOB_STATE_CHANGED = "automation.job.state.changed"
     AUTOMATION_RUN_STATE_CHANGED = "automation.run.state.changed"
     AUTOMATION_TRIGGER_RECEIVED = "automation.trigger.received"
+    RUN_YIELDED = "run.yielded"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
 
@@ -297,6 +298,11 @@ class RunCompletedPayload(ExtensiblePayload):
 
 
 @dataclass(frozen=True)
+class RunYieldedPayload(ExtensiblePayload):
+    result: RunResult
+
+
+@dataclass(frozen=True)
 class RunFailedPayload(ExtensiblePayload):
     error: Mapping[str, Any]
 
@@ -338,6 +344,7 @@ EventPayload: TypeAlias = (
     | ApprovalLifecyclePayload
     | ReconciliationPayload
     | DeliveryPayload
+    | RunYieldedPayload
     | RunCompletedPayload
     | RunFailedPayload
     | SerializedEventPayload
@@ -425,7 +432,7 @@ class AgentEvent:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AgentEvent:
-        """Read schema-v1 through schema-v3 envelopes without runtime code."""
+        """Read schema-v1 through schema-v4 envelopes without runtime code."""
         schema_version = value.get("schema_version", 1)
         if isinstance(schema_version, bool) or not isinstance(schema_version, int):
             raise ValueError("event schema_version must be an integer")
@@ -519,6 +526,7 @@ __all__ = [
     "ResourcesLoadedPayload",
     "ResourceAvailablePayload",
     "ReconciliationPayload",
+    "RunYieldedPayload",
     "RunCompletedPayload",
     "RunFailedPayload",
     "RunLifecyclePayload",
