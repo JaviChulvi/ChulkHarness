@@ -74,6 +74,50 @@ def test_tool_fixture_uses_recorded_observation_without_real_execution(tmp_path:
     observation = report.actual['result']['content']
     assert observation == 'Found alpha.'
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['tool', 'model', 'reflection', 'retry', 'final_stream'])
+async def test_yielded_slice_replays_without_dispatching_pending_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str) -> None:
+    from chulk import Agent as SDKAgent, AgentConfig, GoalSliceLimits, FinalAnswerStreamingMode
+    from tests.test_goal_context import _execution
+
+    _, execution = _execution(tmp_path)
+    execution.slice_limits = GoalSliceLimits(max_tool_calls=1, max_model_calls=1 if boundary in {'model', 'reflection'} else 20)
+    if boundary == 'final_stream':
+        execution.slice_limits = GoalSliceLimits(max_model_calls=2)
+    calls = []
+    def recorded(_arguments):
+        calls.append(1)
+        return ToolResult(tool_name='lookup', success=boundary != 'retry', observation='Recorded evidence',
+                          failure_kind=ToolFailureKind.ENVIRONMENT if boundary == 'retry' else None)
+    actions = ([{'type': 'final_answer', 'content': 'Pending reflection'}] if boundary == 'reflection'
+               else [_tool_action(), _tool_action()])
+    if boundary == 'final_stream':
+        actions = [{'type': 'final_answer', 'content': 'Draft'}, {'approved': True, 'reason': 'Checked'}]
+    registry = _tool_registry(recorded, retry_policy=ToolRetryPolicy(max_attempts=2) if boundary == 'retry' else None)
+    with SDKAgent(config=AgentConfig(project_root=tmp_path / 'runtime', max_reflection_attempts=int(boundary in {'reflection', 'final_stream'})),
+                  llm=ScriptedLLMClient(actions), tools=registry.list_tools(), skills=[], goal_execution=execution,
+                  final_answer_streaming=FinalAnswerStreamingMode.INCREMENTAL if boundary == 'final_stream' else FinalAnswerStreamingMode.VALIDATED) as agent:
+        agent.runtime._model_transport.max_json_repair_attempts = 0
+        assert agent.run_result('Inspect evidence').status.value == 'yielded'
+        fixture = ReplayFixture.from_trace(Trace.from_jsonl(agent.trace_path), acknowledge_sensitive_data=True)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('replay dispatched an original external operation')
+    monkeypatch.setattr(ToolRegistry, 'run', forbidden)
+    monkeypatch.setattr(ToolRegistry, 'run_async', forbidden)
+    monkeypatch.setattr(subprocess, 'run', forbidden)
+    monkeypatch.setattr(socket, 'create_connection', forbidden)
+    reports = [execute_replay_fixture(fixture), await execute_replay_fixture_async(fixture)]
+    for report in reports:
+        assert report.ok, report.mismatches
+        assert report.actual['result']['status'] == 'yielded'
+        assert report.actual['events'].count('turn_yielded') == 1
+    assert len(calls) == (0 if boundary in {'reflection', 'final_stream'} else 1)
+    if boundary == 'tool':
+        from dataclasses import replace
+        changed = replace(fixture.model_actions[-1], action={'type': 'final_answer', 'content': 'Changed pending work'})
+        tampered = replace(fixture, model_actions=(*fixture.model_actions[:-1], changed))
+        assert 'continuation' in execute_replay_fixture(tampered).mismatches
+
 def test_retry_fixture_replays_final_transport_result_and_attempt_evidence(tmp_path: Path) -> None:
     attempts = 0
 

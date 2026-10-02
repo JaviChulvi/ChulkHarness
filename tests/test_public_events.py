@@ -5,10 +5,12 @@ import json
 import threading
 import time
 import pytest
-from chulk import EVENT_SCHEMA_VERSION, Agent, AgentConfig, AgentEvent, AsyncAgent, EventName, LearningProposalChangedPayload, RunCompletedPayload, RunFailedPayload, RunStartedPayload, Tools, Skills
+from chulk import EVENT_SCHEMA_VERSION, Agent, AgentConfig, AgentEvent, AsyncAgent, EventName, GoalSliceLimits, LearningProposalChangedPayload, RunCompletedPayload, RunFailedPayload, RunStartedPayload, RunYieldedPayload, Tools, Skills
 from chulk._sdk.event_channel import RunEventChannel
 from chulk._sdk.events import project_event
 from chulk.llm import LLMCapabilities, LLMClient
+from chulk.testing import ScriptedLLMClient
+from tests.test_goal_context import _execution
 
 class StreamingLLM(LLMClient):
     capabilities = LLMCapabilities(supports_streaming=True)
@@ -111,6 +113,42 @@ def test_callback_and_generator_receive_public_events_without_terminal_duplicati
     assert sum((event.name == EventName.RUN_COMPLETED.value for event in generated)) == 1
     assert sum((event.name == EventName.RUN_COMPLETED.value for event in run_callbacks)) == 1
     assert ''.join(deltas) == 'done'
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('asynchronous', [False, True])
+async def test_goal_slice_iterator_and_callbacks_emit_one_terminal_yield(tmp_path, asynchronous):
+    _, execution = _execution(tmp_path)
+    execution.slice_limits = GoalSliceLimits(max_tool_calls=1)
+    constructor_events: list[AgentEvent] = []
+    run_callbacks: list[AgentEvent] = []
+    llm = ScriptedLLMClient([
+        {'type': 'tool_call', 'tool_name': 'calculator', 'arguments': {'expression': '2 + 2'}},
+        {'type': 'tool_call', 'tool_name': 'calculator', 'arguments': {'expression': '3 + 3'}},
+    ])
+    facade = (AsyncAgent if asynchronous else Agent)(
+        config=AgentConfig(project_root=tmp_path / 'runtime', max_reflection_attempts=0),
+        llm=llm, tools=[Tools.calculator], skills=[], goal_execution=execution,
+        on_event=constructor_events.append,
+    )
+    try:
+        if asynchronous:
+            generated = [event async for event in facade.run_events_async('Calculate', on_event=run_callbacks.append)]
+        else:
+            generated = list(facade.run_events('Calculate', on_event=run_callbacks.append))
+        terminal_names = {EventName.RUN_COMPLETED.value, EventName.RUN_YIELDED.value, EventName.RUN_FAILED.value}
+        for events in (generated, constructor_events, run_callbacks):
+            assert [event.name for event in events if event.name in terminal_names] == [EventName.RUN_YIELDED.value]
+            assert events[-1].name == EventName.RUN_YIELDED.value
+            assert isinstance(events[-1].payload, RunYieldedPayload)
+            assert events[-1].payload.result.status == 'yielded'
+        assert [event.name for event in generated] == [event.name for event in run_callbacks]
+        assert generated[-1].causation_id == generated[-2].event_id
+        assert sum(event.name == EventName.TOOL_CALL_COMPLETED.value for event in generated) == 1
+    finally:
+        if asynchronous:
+            await facade.close()
+        else:
+            facade.close()
 
 def test_generator_failure_is_reported_in_band(tmp_path):
     facade = _agent(tmp_path)

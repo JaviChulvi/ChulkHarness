@@ -362,7 +362,7 @@ class AsyncAgent(AsyncAgentHandle):
             nonlocal attempted_turn_id, last_event_id
             if event.name == EventName.RUN_STARTED.value:
                 attempted_turn_id = event.turn_id
-            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_FAILED.value}:
+            if event.name not in {EventName.RUN_COMPLETED.value, EventName.RUN_YIELDED.value, EventName.RUN_FAILED.value}:
                 channel.publish(event)
                 last_event_id = event.event_id
             if caller_on_event is not None:
