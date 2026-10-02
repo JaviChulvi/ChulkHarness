@@ -182,6 +182,8 @@ slice without emitting an assistant answer. Public consumers receive
 Executable replay preserves a recorded slice's yield boundary, including a
 pending tool, retry, reflection, or final-answer request. It consumes only
 recorded results; pending work never invokes the original tool or provider.
+For a runner's first slice, replay restores the approved goal-step projection
+from the initial turn snapshot without opening the live goal store.
 
 Automatic goal model request/response records carry an atomic recovery turn snapshot.
 Goal action checkpoints link to durable effect IDs. Full redacted tool results live

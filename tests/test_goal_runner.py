@@ -70,6 +70,57 @@ async def test_runner_respects_dependencies_and_single_slice_boundary(tmp_path, 
     assert [s.attempt for s in second.goal.steps] == [1, 1]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_runner_slice_replays_projected_plan_without_original_tools(tmp_path, monkeypatch, asynchronous):
+    from chulk import GoalSliceLimits
+    from chulk.tools.registry import ToolRegistry
+    from chulk.tracing import ReplayFixture, Trace
+    from chulk.tracing.execution import execute_replay_fixture, execute_replay_fixture_async
+
+    service, goal = _goal(tmp_path)
+    calls, traces = [], []
+
+    @Tool
+    def inspect_item(index: int) -> str:
+        """Inspect one result."""
+        calls.append(index)
+        return f"Evidence {index}"
+
+    llm = ScriptedLLMClient([
+        {"type": "tool_call", "tool_name": "inspect_item", "arguments": {"index": index}}
+        for index in range(2)
+    ])
+
+    def factory(context, conversation_id):
+        agent = (AsyncAgent if asynchronous else Agent)(
+            config=AgentConfig(project_root=tmp_path, store_path=service.store.db_path, max_reflection_attempts=0),
+            llm=llm, tools=[inspect_item], skills=[], goal_execution=context, conversation_id=conversation_id,
+        )
+        traces.append(agent.trace_path)
+        return agent
+
+    runner = (AsyncGoalRunner if asynchronous else GoalRunner)(
+        service.store, agent_factory=factory, verifier=lambda _: PlanStepVerification(True, "Verified"),
+        slice_limits=GoalSliceLimits(max_tool_calls=1),
+    )
+    result = await runner.run_slice(goal.id) if asynchronous else runner.run_slice(goal.id)
+    assert result.stop_reason.value == "yielded"
+    fixture = ReplayFixture.from_trace(Trace.from_jsonl(traces[0]), acknowledge_sensitive_data=True)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Replay must not invoke original tools or access the goal store")
+
+    monkeypatch.setattr(ToolRegistry, "run", forbidden)
+    monkeypatch.setattr(ToolRegistry, "run_async", forbidden)
+    monkeypatch.setattr(GoalStore, "get", forbidden)
+    for report in (execute_replay_fixture(fixture), await execute_replay_fixture_async(fixture)):
+        assert report.ok, report.mismatches
+        assert report.actual["result"]["status"] == "yielded"
+        assert report.tool_results_consumed == 1
+    assert calls == [0]
+
+
 def _runner(tmp_path, service, responses, *, tools=(), verifier=None, **kwargs):
     llm = ScriptedLLMClient(responses)
     def factory(context, conversation_id):

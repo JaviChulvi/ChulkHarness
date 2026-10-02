@@ -20,6 +20,7 @@ from chulk.core.turn_effects import TurnEffects
 from chulk.goals.runtime import GoalSliceExhausted
 from chulk.llm import LLMClient
 from chulk.memory import ConversationMemory
+from chulk.sessions.sqlite_store import _plan_from_dict
 from chulk.tools.registry import ToolFailureKind, ToolResult
 from chulk.tracing.fixtures import (
     RecordedToolResult,
@@ -506,6 +507,18 @@ def _build_runtime(fixture: ReplayFixture) -> _ReplayRuntime:
         user_message=_user_message(fixture),
         available_tool_names=list(state.available_tool_names),
     )
+    for event in fixture.expected.events:
+        if event.get("type") == TraceEvent.TURN_STARTED:
+            payload = event.get("payload")
+            if isinstance(payload, dict) and isinstance(payload.get("turn"), dict):
+                initial_turn = payload["turn"]
+                turn.active_plan = _plan_from_dict(initial_turn.get("active_plan"))
+                turn.plan_approved = bool(initial_turn.get("plan_approved"))
+                goal_step_id = initial_turn.get("extension_metadata", {}).get("goal_step_id")
+                if turn.active_plan is not None and len(turn.active_plan.steps) == 1 and isinstance(goal_step_id, str):
+                    turn.active_plan.steps[0].id = goal_step_id
+                state.active_plan = turn.active_plan
+            break
     state.current_turn_id = turn.turn_id
     state.turns.append(turn)
     events: list[dict[str, Any]] = []
